@@ -1123,6 +1123,15 @@ pub extern "C" fn _start() -> ! {
         }
     };
 
+    // ── Undo coalescing ─────────────────────────────────────────────
+    //
+    // Commit is always immediate (crash safety). Snapshots are debounced:
+    // rapid keystrokes within COALESCE_MS produce one undo step, not one
+    // per character. The snapshot fires when a typing pause is detected.
+    const COALESCE_MS: u64 = 500;
+    let mut snapshot_pending = false;
+    let mut last_edit_ms: u64 = 0;
+
     loop {
         let timer_active = state().timer_active;
         let timer_handle = state().timer_handle;
@@ -1163,6 +1172,15 @@ pub extern "C" fn _start() -> ! {
             } else {
                 remaining_ms.saturating_mul(1_000_000)
             }
+        };
+        // If a snapshot is pending, wake up in time to fire it.
+        let timeout_ns = if snapshot_pending {
+            let snap_deadline_ms = last_edit_ms + COALESCE_MS;
+            let snap_remaining_ms = snap_deadline_ms.saturating_sub(now_ms);
+            let snap_ns = snap_remaining_ms.saturating_mul(1_000_000).max(1_000_000);
+            timeout_ns.min(snap_ns)
+        } else {
+            timeout_ns
         };
         let _ = match (timer_active, has_input2) {
             (true, true) => sys::wait(
@@ -1538,64 +1556,86 @@ pub extern "C" fn _start() -> ! {
 
         // ── Persist + snapshot / undo / redo ────────────────────────────
         //
-        // Operation boundary: all editor messages drained. Three mutually
-        // exclusive paths:
+        // Commit is always immediate (crash safety). Snapshots are debounced:
+        // rapid keystrokes within COALESCE_MS produce one undo step instead
+        // of one per character. The snapshot fires when a typing pause is
+        // detected, or immediately when undo/redo is requested (flush).
         //
-        // 1. text_changed (editing) → commit to disk, then snapshot for undo.
-        // 2. undo_requested → restore previous snapshot, reload content.
-        // 3. redo_requested → restore next snapshot, reload content.
-        //
-        // Editing and undo/redo can't happen in the same frame (different
-        // key events), so the branches are exclusive.
+        // Helper: take a snapshot and push it onto the undo stack.
+        // Defined as a macro to avoid borrow conflicts with `fs_ch`.
+        macro_rules! take_snapshot {
+            () => {{
+                let file_id = state().doc_file_id;
+                let snap_payload = DocSnapshot {
+                    file_count: 1,
+                    _pad: 0,
+                    file_ids: [file_id, 0, 0, 0, 0, 0],
+                };
+                // SAFETY: DocSnapshot is repr(C) and fits in 60-byte payload.
+                let snap_msg =
+                    unsafe { ipc::Message::from_payload(MSG_DOC_SNAPSHOT, &snap_payload) };
+                fs_ch.send(&snap_msg);
+                let _ = sys::channel_signal(FS_HANDLE);
+
+                let mut reply = ipc::Message::new(0);
+                if fs_ch.recv_blocking(FS_HANDLE.0, &mut reply)
+                    && reply.msg_type == MSG_DOC_SNAPSHOT_RESULT
+                {
+                    if let Some(protocol::document::Message::DocSnapshotResult(result)) =
+                        protocol::document::decode(reply.msg_type, &reply.payload)
+                    {
+                        if result.status == 0 {
+                            let mut discarded = [0u64; MAX_UNDO];
+                            let n = undo_state.push(result.snapshot_id, &mut discarded);
+                            for &snap in &discarded[..n] {
+                                let del = DocDeleteSnapshot { snapshot_id: snap };
+                                // SAFETY: DocDeleteSnapshot is repr(C), fits in 60 bytes.
+                                let del_msg = unsafe {
+                                    ipc::Message::from_payload(MSG_DOC_DELETE_SNAPSHOT, &del)
+                                };
+                                fs_ch.send(&del_msg);
+                            }
+                            if n > 0 {
+                                let _ = sys::channel_signal(FS_HANDLE);
+                            }
+                        }
+                    }
+                }
+            }};
+        }
+
         if text_changed {
             let file_id = state().doc_file_id;
 
-            // Commit current content to disk.
+            // Commit current content to disk (always immediate, fire-and-forget).
             let commit_payload = DocCommit { file_id };
             // SAFETY: DocCommit is repr(C) and fits in 60-byte payload.
             let commit_msg = unsafe { ipc::Message::from_payload(MSG_DOC_COMMIT, &commit_payload) };
             fs_ch.send(&commit_msg);
-
-            // Snapshot for undo history (same IPC batch — document service
-            // processes commit first, then snapshot, both in one wake cycle).
-            let snap_payload = DocSnapshot {
-                file_count: 1,
-                _pad: 0,
-                file_ids: [file_id, 0, 0, 0, 0, 0],
-            };
-            // SAFETY: DocSnapshot is repr(C) and fits in 60-byte payload.
-            let snap_msg = unsafe { ipc::Message::from_payload(MSG_DOC_SNAPSHOT, &snap_payload) };
-            fs_ch.send(&snap_msg);
             let _ = sys::channel_signal(FS_HANDLE);
 
-            // Block for snapshot result (synchronous RPC — COW snapshot is
-            // O(1), so this is bounded by IPC round-trip latency).
-            let mut reply = ipc::Message::new(0);
-            if fs_ch.recv_blocking(FS_HANDLE.0, &mut reply)
-                && reply.msg_type == MSG_DOC_SNAPSHOT_RESULT
-            {
-                if let Some(protocol::document::Message::DocSnapshotResult(result)) =
-                    protocol::document::decode(reply.msg_type, &reply.payload)
-                {
-                    if result.status == 0 {
-                        let mut discarded = [0u64; MAX_UNDO];
-                        let n = undo_state.push(result.snapshot_id, &mut discarded);
-                        // Delete orphaned snapshots (fire-and-forget).
-                        for &snap in &discarded[..n] {
-                            let del = DocDeleteSnapshot { snapshot_id: snap };
-                            // SAFETY: DocDeleteSnapshot is repr(C), fits in 60 bytes.
-                            let del_msg = unsafe {
-                                ipc::Message::from_payload(MSG_DOC_DELETE_SNAPSHOT, &del)
-                            };
-                            fs_ch.send(&del_msg);
-                        }
-                        if n > 0 {
-                            let _ = sys::channel_signal(FS_HANDLE);
-                        }
-                    }
-                }
-            }
-        } else if undo_requested {
+            // Mark snapshot as pending — it will fire after a typing pause.
+            snapshot_pending = true;
+            last_edit_ms = now_ms;
+        }
+
+        // Flush pending snapshot on typing pause (coalesce window elapsed).
+        if snapshot_pending
+            && !text_changed
+            && now_ms.saturating_sub(last_edit_ms) >= COALESCE_MS
+        {
+            take_snapshot!();
+            snapshot_pending = false;
+        }
+
+        // Flush pending snapshot immediately before undo/redo so the
+        // current editing burst is undoable as a single step.
+        if snapshot_pending && (undo_requested || redo_requested) {
+            take_snapshot!();
+            snapshot_pending = false;
+        }
+
+        if undo_requested {
             if let Some(snap_id) = undo_state.undo() {
                 // Restore the snapshot.
                 let restore_payload = DocRestore {

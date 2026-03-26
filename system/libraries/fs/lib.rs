@@ -125,10 +125,6 @@ pub enum FsError {
     NotFound(u64),
 }
 
-pub(crate) fn now_nanos() -> u64 {
-    0
-}
-
 impl core::fmt::Display for FsError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {

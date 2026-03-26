@@ -22,7 +22,6 @@ use crate::{
     alloc_mod::Allocator,
     block::BlockDevice,
     inode::{Inode, InodeExtent, INLINE_CAPACITY},
-    now_nanos,
     snapshot::{self, FileSnapshot, Snapshot},
     superblock::Superblock,
     FsError, BLOCK_SIZE,
@@ -43,6 +42,9 @@ pub struct Filesystem<D: BlockDevice> {
     next_snapshot_id: u64,
     /// Blocks used by the persisted snapshot store (for deferred freeing).
     snap_store_blocks: Vec<u32>,
+    /// Clock source for inode timestamps (nanos since UNIX epoch).
+    /// Defaults to `|| 0`; callers with a real clock use `set_time_source`.
+    time_fn: fn() -> u64,
 }
 
 struct DeferredFree {
@@ -55,7 +57,7 @@ struct DeferredFree {
 impl<D: BlockDevice> Filesystem<D> {
     /// Format a new filesystem on `device`.
     pub fn format(mut device: D) -> Result<Self, FsError> {
-        let mut sb = Superblock::format(&mut device)?;
+        let mut sb = Superblock::format(&mut device, 0)?;
         let mut alloc = Allocator::new(sb.total_blocks);
 
         let (first_block, table_blocks) =
@@ -66,7 +68,7 @@ impl<D: BlockDevice> Filesystem<D> {
         sb.root_free_list = free_block;
         sb.used_blocks = sb.total_blocks - alloc.free_blocks();
         device.flush()?;
-        sb.commit(&mut device)?;
+        sb.commit(&mut device, 0)?;
 
         Ok(Self {
             device,
@@ -79,6 +81,7 @@ impl<D: BlockDevice> Filesystem<D> {
             snapshots: BTreeMap::new(),
             next_snapshot_id: 1,
             snap_store_blocks: Vec::new(),
+            time_fn: || 0,
         })
     }
 
@@ -108,7 +111,15 @@ impl<D: BlockDevice> Filesystem<D> {
             snapshots,
             next_snapshot_id,
             snap_store_blocks,
+            time_fn: || 0,
         })
+    }
+
+    /// Set the clock source for inode timestamps. The function should
+    /// return nanoseconds since the UNIX epoch. Call after format/mount,
+    /// before any file operations.
+    pub fn set_time_source(&mut self, f: fn() -> u64) {
+        self.time_fn = f;
     }
 
     /// Create a new empty file. Returns its FileId.
@@ -116,7 +127,7 @@ impl<D: BlockDevice> Filesystem<D> {
         let file_id = self.superblock.next_file_id;
         self.superblock.next_file_id += 1;
 
-        let now = now_nanos();
+        let now = (self.time_fn)();
         let inode = Inode::create(&mut self.device, &mut self.allocator, file_id, now)?;
         self.inodes.insert(file_id, inode);
         self.dirty.insert(file_id);
@@ -164,7 +175,7 @@ impl<D: BlockDevice> Filesystem<D> {
         let is_inline = self.get(file_id)?.is_inline();
 
         if is_inline && end <= INLINE_CAPACITY as u64 {
-            let now = now_nanos();
+            let now = (self.time_fn)();
             let inode = self.get_mut(file_id)?;
             inode.write_inline(offset, data)?;
             inode.modified = now;
@@ -208,7 +219,7 @@ impl<D: BlockDevice> Filesystem<D> {
         }
 
         // Update inode.
-        let now = now_nanos();
+        let now = (self.time_fn)();
         let inode = self.get_mut(file_id)?;
         if inode.is_inline() {
             inode.transition_to_extents();
@@ -230,7 +241,7 @@ impl<D: BlockDevice> Filesystem<D> {
         let inode = self.get(file_id)?;
 
         if inode.is_inline() {
-            let now = now_nanos();
+            let now = (self.time_fn)();
             let inode = self.get_mut(file_id)?;
             inode.truncate(new_size)?;
             inode.modified = now;
@@ -250,7 +261,7 @@ impl<D: BlockDevice> Filesystem<D> {
                     txg: next_txg,
                 });
             }
-            let now = now_nanos();
+            let now = (self.time_fn)();
             let inode = self.get_mut(file_id)?;
             inode.transition_to_inline();
             inode.modified = now;
@@ -259,7 +270,7 @@ impl<D: BlockDevice> Filesystem<D> {
         }
 
         // Non-zero truncate of extent-based: update size only.
-        let now = now_nanos();
+        let now = (self.time_fn)();
         let inode = self.get_mut(file_id)?;
         inode.size = new_size;
         inode.modified = now;
@@ -377,7 +388,7 @@ impl<D: BlockDevice> Filesystem<D> {
         self.device.flush()?;
 
         // 8. Superblock commit (second flush).
-        self.superblock.commit(&mut self.device)?;
+        self.superblock.commit(&mut self.device, (self.time_fn)())?;
 
         Ok(())
     }
@@ -448,7 +459,7 @@ impl<D: BlockDevice> Filesystem<D> {
             }
 
             // Restore the file's state.
-            let now = now_nanos();
+            let now = (self.time_fn)();
             let inode = self.get_mut(file_id)?;
             if file_snap.was_inline {
                 inode.transition_to_inline();

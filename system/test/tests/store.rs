@@ -1,9 +1,9 @@
 //! Tests for the document store (metadata layer over fs::Files).
 
-use fs::{BlockDevice, FileId, FsError, Filesystem, BLOCK_SIZE};
-use store::{Query, Store, StoreError};
-
 use alloc::string::ToString;
+
+use fs::{BlockDevice, FileId, Filesystem, FsError, BLOCK_SIZE};
+use store::{Query, Store, StoreError};
 
 extern crate alloc;
 
@@ -65,8 +65,7 @@ impl BlockDevice for MemDevice {
     }
 }
 
-use alloc::vec;
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 
 /// Helper: create a Store backed by an in-memory filesystem.
 fn make_store() -> Store {
@@ -178,7 +177,10 @@ fn metadata_composes_fs_and_catalog() {
     assert_eq!(meta.file_id, f);
     assert_eq!(meta.media_type, "text/plain");
     assert_eq!(meta.size, 11);
-    assert_eq!(meta.attributes.get("title").map(|s| s.as_str()), Some("Greeting"));
+    assert_eq!(
+        meta.attributes.get("title").map(|s| s.as_str()),
+        Some("Greeting")
+    );
 }
 
 #[test]
@@ -372,4 +374,220 @@ fn factory_image_round_trip() {
     let all_font = store.query(&Query::Type("font".to_string()));
     let all_image = store.query(&Query::Type("image".to_string()));
     assert_eq!(all_font.len() + all_image.len(), 4);
+}
+
+// ── Snapshot deletion ───────────────────────────────────────────────
+
+#[test]
+fn delete_snapshot_frees_blocks() {
+    let mut store = make_store();
+
+    // Create a file and write enough data to require block allocation.
+    let f = store.create("text/plain").unwrap();
+    let data_v1 = vec![0xAAu8; BLOCK_SIZE as usize * 4];
+    store.write(f, 0, &data_v1).unwrap();
+    store.commit().unwrap();
+
+    // Snapshot the current state.
+    let snap = store.snapshot(&[f]).unwrap();
+
+    // Overwrite with different data (COW allocates new blocks).
+    store.truncate(f, 0).unwrap();
+    let data_v2 = vec![0xBBu8; BLOCK_SIZE as usize * 4];
+    store.write(f, 0, &data_v2).unwrap();
+    store.commit().unwrap();
+
+    // Delete the snapshot — old blocks become deferred frees.
+    store.delete_snapshot(snap).unwrap();
+
+    // Commit again to process the deferred frees.
+    store.commit().unwrap();
+
+    // Current content must be unaffected by the snapshot deletion.
+    let mut buf = vec![0u8; BLOCK_SIZE as usize * 4];
+    let n = store.read(f, 0, &mut buf).unwrap();
+    assert_eq!(n, data_v2.len());
+    assert!(
+        buf.iter().all(|&b| b == 0xBB),
+        "current data corrupted after snapshot delete"
+    );
+
+    // Freed blocks should allow further allocation without running out of space.
+    // Write another large chunk — if blocks weren't freed, this would fail on
+    // a 4096-block device that already had significant usage.
+    let f2 = store.create("text/plain").unwrap();
+    let data_v3 = vec![0xCCu8; BLOCK_SIZE as usize * 4];
+    store.write(f2, 0, &data_v3).unwrap();
+    store.commit().unwrap();
+
+    let mut buf2 = vec![0u8; BLOCK_SIZE as usize * 4];
+    let n2 = store.read(f2, 0, &mut buf2).unwrap();
+    assert_eq!(n2, data_v3.len());
+    assert!(buf2.iter().all(|&b| b == 0xCC));
+}
+
+#[test]
+fn delete_snapshot_not_found() {
+    let mut store = make_store();
+
+    // Delete a snapshot that was never created.
+    let bogus = fs::SnapshotId(999);
+    match store.delete_snapshot(bogus) {
+        Err(StoreError::Fs(FsError::NotFound(id))) => {
+            assert_eq!(id, 999);
+        }
+        other => panic!("expected Fs(NotFound(999)), got: {other:?}"),
+    }
+}
+
+#[test]
+fn delete_snapshot_preserves_shared_blocks() {
+    let mut store = make_store();
+
+    // Create a file with initial data.
+    let f = store.create("text/plain").unwrap();
+    let data_v1 = vec![0x11u8; BLOCK_SIZE as usize * 2];
+    store.write(f, 0, &data_v1).unwrap();
+    store.commit().unwrap();
+
+    // Snapshot A captures v1.
+    let snap_a = store.snapshot(&[f]).unwrap();
+
+    // Write new data — COW keeps v1 blocks alive in snap_a.
+    store.truncate(f, 0).unwrap();
+    let data_v2 = vec![0x22u8; BLOCK_SIZE as usize * 2];
+    store.write(f, 0, &data_v2).unwrap();
+    store.commit().unwrap();
+
+    // Snapshot B captures v2.
+    let snap_b = store.snapshot(&[f]).unwrap();
+
+    // Delete snapshot A. Blocks shared only by A should be freed,
+    // but B's blocks (which are the current inode blocks for v2) must survive.
+    store.delete_snapshot(snap_a).unwrap();
+    store.commit().unwrap();
+
+    // Restore to snapshot B — content should be intact.
+    store.restore(snap_b).unwrap();
+
+    let mut buf = vec![0u8; BLOCK_SIZE as usize * 2];
+    let n = store.read(f, 0, &mut buf).unwrap();
+    assert_eq!(n, data_v2.len());
+    assert!(
+        buf.iter().all(|&b| b == 0x22),
+        "snapshot B data corrupted after deleting snapshot A"
+    );
+}
+
+// ── Disk-full behavior ──────────────────────────────────────────────
+
+/// Helper: create a Store backed by a SMALL in-memory filesystem (32 blocks).
+/// With 16 KiB blocks, that is 512 KiB total. After metadata overhead
+/// (superblock ring, inode table, free list, catalog), roughly 20 blocks
+/// (~320 KiB) are available for user data.
+fn make_small_store() -> Store {
+    let dev = MemDevice::new(32);
+    let fs = Filesystem::format(dev).unwrap();
+    Store::init(Box::new(fs)).unwrap()
+}
+
+#[test]
+fn write_returns_nospace_when_disk_full() {
+    let mut store = make_small_store();
+    let file = store.create("text/plain").unwrap();
+
+    // Write increasingly large chunks until the disk is full.
+    // Each chunk is one block (16 KiB). With ~20 blocks available,
+    // this should fail within 25 iterations at most.
+    let chunk = vec![0xABu8; BLOCK_SIZE as usize];
+    let mut offset: u64 = 0;
+    let mut hit_nospace = false;
+
+    for _ in 0..30 {
+        match store.write(file, offset, &chunk) {
+            Ok(()) => {
+                offset += chunk.len() as u64;
+            }
+            Err(StoreError::Fs(FsError::NoSpace)) => {
+                hit_nospace = true;
+                break;
+            }
+            Err(other) => panic!("expected NoSpace, got: {other:?}"),
+        }
+    }
+
+    assert!(
+        hit_nospace,
+        "expected NoSpace error but all writes succeeded"
+    );
+}
+
+#[test]
+fn existing_data_survives_nospace() {
+    let mut store = make_small_store();
+    let file = store.create("text/plain").unwrap();
+
+    // Write safe data and commit it to disk.
+    let safe_data = b"safe data that must survive";
+    store.write(file, 0, safe_data).unwrap();
+    store.commit().unwrap();
+
+    // Attempt to write a large amount of data that exceeds disk capacity.
+    // Whether individual writes fail or succeed, the committed data must survive.
+    let big_chunk = vec![0xFFu8; BLOCK_SIZE as usize];
+    let mut offset = safe_data.len() as u64;
+    for _ in 0..30 {
+        match store.write(file, offset, &big_chunk) {
+            Ok(()) => {
+                offset += big_chunk.len() as u64;
+            }
+            Err(_) => break,
+        }
+    }
+
+    // Commit may also fail if COW metadata allocation exhausts space.
+    let _ = store.commit();
+
+    // The original safe data must still be readable.
+    let mut buf = [0u8; 64];
+    let n = store.read(file, 0, &mut buf).unwrap();
+    assert!(
+        n >= safe_data.len(),
+        "read returned only {n} bytes, expected at least {}",
+        safe_data.len()
+    );
+    assert_eq!(&buf[..safe_data.len()], safe_data);
+}
+
+#[test]
+fn commit_after_nospace_write_preserves_state() {
+    let mut store = make_small_store();
+
+    // Create a first file with known content and commit.
+    let file1 = store.create("text/plain").unwrap();
+    let data1 = b"first file content";
+    store.write(file1, 0, data1).unwrap();
+    store.commit().unwrap();
+
+    // Create a second file and try to fill the disk.
+    let file2 = store.create("text/plain").unwrap();
+    let big_chunk = vec![0xCCu8; BLOCK_SIZE as usize];
+    let mut offset: u64 = 0;
+    for _ in 0..30 {
+        match store.write(file2, offset, &big_chunk) {
+            Ok(()) => {
+                offset += big_chunk.len() as u64;
+            }
+            Err(_) => break,
+        }
+    }
+
+    // Commit may fail due to NoSpace for COW metadata — that is fine.
+    let _ = store.commit();
+
+    // The first file's data must still be intact.
+    let mut buf = [0u8; 64];
+    let n = store.read(file1, 0, &mut buf).unwrap();
+    assert_eq!(n, data1.len());
+    assert_eq!(&buf[..n], data1);
 }

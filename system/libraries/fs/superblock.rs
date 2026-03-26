@@ -12,7 +12,7 @@
 
 use alloc::vec;
 
-use crate::{block::BlockDevice, crc32::crc32, now_nanos, FsError, BLOCK_SIZE};
+use crate::{block::BlockDevice, crc32::crc32, FsError, BLOCK_SIZE};
 
 /// Number of slots in the superblock ring.
 pub const RING_SIZE: u32 = 16;
@@ -79,7 +79,7 @@ impl Superblock {
     /// Writes the disk header and an initial superblock entry (txg=1).
     /// All existing data on the device is lost. Device must have at
     /// least `DATA_START` (17) blocks.
-    pub fn format(device: &mut impl BlockDevice) -> Result<Self, FsError> {
+    pub fn format(device: &mut impl BlockDevice, now: u64) -> Result<Self, FsError> {
         let total = device.block_count();
         if total < DATA_START {
             return Err(FsError::DeviceTooSmall {
@@ -107,7 +107,7 @@ impl Superblock {
         // Initial superblock entry.
         let sb = Self {
             txg: 1,
-            timestamp: now_nanos(),
+            timestamp: now,
             next_file_id: 1,
             root_inode_table: 0,
             root_free_list: 0,
@@ -170,9 +170,9 @@ impl Superblock {
     /// The caller must write and flush all data/metadata blocks BEFORE
     /// calling this (first flush in the two-flush protocol). This method
     /// performs the second flush.
-    pub fn commit(&mut self, device: &mut impl BlockDevice) -> Result<(), FsError> {
+    pub fn commit(&mut self, device: &mut impl BlockDevice, now: u64) -> Result<(), FsError> {
         self.txg += 1;
-        self.timestamp = now_nanos();
+        self.timestamp = now;
         device.write_block(ring_block(self.txg), &self.encode())?;
         device.flush()
     }

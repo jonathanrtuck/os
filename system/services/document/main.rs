@@ -31,6 +31,21 @@ const PAGE_SIZE: usize = system_config::PAGE_SIZE as usize;
 
 const SECTOR_SIZE: usize = 512;
 
+/// Counter frequency in Hz, set once at boot for timestamp computation.
+static COUNTER_FREQ: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Clock source for fs library timestamps (nanos since boot).
+/// Uses the ARM generic timer (CNTVCT_EL0 / CNTFRQ_EL0).
+fn clock_nanos() -> u64 {
+    let freq = COUNTER_FREQ.load(core::sync::atomic::Ordering::Relaxed);
+    if freq == 0 {
+        return 0;
+    }
+    let count = sys::counter();
+    // nanos = count * 1_000_000_000 / freq. Use 128-bit to avoid overflow.
+    ((count as u128 * 1_000_000_000) / freq as u128) as u64
+}
+
 // virtio-blk request types.
 const VIRTIO_BLK_T_IN: u32 = 0;
 const VIRTIO_BLK_T_OUT: u32 = 1;
@@ -280,6 +295,9 @@ pub extern "C" fn _start() -> ! {
                 == u64::from_le_bytes(*b"docOScow")
     };
 
+    // Initialize the counter frequency for inode timestamps.
+    COUNTER_FREQ.store(sys::counter_freq(), core::sync::atomic::Ordering::Relaxed);
+
     let (filesystem, needs_store_init) = if has_filesystem {
         sys::print(b"     mounting existing filesystem...\n");
         match fs::Filesystem::mount(blk) {
@@ -302,6 +320,8 @@ pub extern "C" fn _start() -> ! {
         }
     };
 
+    let mut filesystem = filesystem;
+    filesystem.set_time_source(clock_nanos);
     let fs_box: Box<dyn fs::Files> = Box::new(filesystem);
 
     let mut store = if needs_store_init {
