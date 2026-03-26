@@ -10,11 +10,11 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ### What was built
 
-| Step | What                                                                                                                                                                                        |
-| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| B1   | virtio-blk driver rewrite: `BlkDevice` struct with `read_block`/`write_block`/`flush`, `VIRTIO_BLK_F_FLUSH` feature negotiation, self-test (read/write/verify cycle)                       |
-| B2   | Hypervisor file-backed virtio-blk backend: `VirtioBlock.swift`, `--drive` flag, `F_FULLFSYNC` on flush for crash consistency on macOS                                                       |
-| B3   | Filesystem service port to bare-metal: `no_std` fs library at `system/libraries/fs/`, `VirtioBlockDevice` with `RefCell` for interior mutability, filesystem service at `system/services/filesystem/` |
+| Step | What                                                                                                                                                                                                   |
+| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| B1   | virtio-blk driver rewrite: `BlkDevice` struct with `read_block`/`write_block`/`flush`, `VIRTIO_BLK_F_FLUSH` feature negotiation, self-test (read/write/verify cycle)                                   |
+| B2   | Hypervisor file-backed virtio-blk backend: `VirtioBlock.swift`, `--drive` flag, `F_FULLFSYNC` on flush for crash consistency on macOS                                                                  |
+| B3   | Filesystem service port to bare-metal: `no_std` fs library at `system/libraries/fs/`, `VirtioBlockDevice` with `RefCell` for interior mutability, filesystem service at `system/services/filesystem/`  |
 | B4   | Core integration via IPC: `protocol::blkfs` boundary, core sends `MSG_FS_COMMIT` at operation boundaries (after draining pending editor messages), doc buffer shared read-only with filesystem service |
 
 ### Design decisions that emerged
