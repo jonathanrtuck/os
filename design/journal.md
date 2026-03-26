@@ -4,6 +4,62 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Filesystem Host Prototype — Phase A Complete (2026-03-25)
+
+**Status: COMPLETE** — 4,312 lines of Rust, 133 tests, zero warnings. All 7 steps (A1–A7) implemented.
+
+### What was built
+
+A complete COW filesystem running as a regular Rust binary on macOS. All layers from raw blocks to the `Files` trait:
+
+| Step | Module             | What                                                                                                                                                                          |
+| ---- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A1   | `block.rs`         | `BlockDevice` trait + File/Memory/Logging implementations. Logging device records writes with flush epochs for crash testing.                                                 |
+| A2   | `superblock.rs`    | 16-slot ring at disk start. CRC32 per entry. Highest valid txg wins on mount. Format/mount/commit.                                                                            |
+| A3   | `alloc.rs`         | Sorted free-extent list with coalescing. First-fit allocation. Persisted as single COW block. Self-allocating (turtles solved). Proptest: random alloc/free sequences.        |
+| A4   | `inode.rs`         | One 16 KiB block per inode. 64-byte header + 16×12-byte extent list + 16128-byte inline data region. u48 birth_txg on extents.                                                |
+| A5   | `filesystem.rs`    | COW write path (entire-file COW for extent-based). Two-flush commit protocol. 2-generation deferred block reuse. Inode table as single COW block.                             |
+| A6   | `snapshot.rs` + fs | Multi-file snapshots. Linked-block persistence. Birth-time deletion (O(n²) reference check, Model D optimization deferred to stress testing). Shared block safety on restore. |
+| A7   | `lib.rs` + fs      | `Files` trait with `FileId`/`SnapshotId` newtypes. Object-safe (`dyn Files` works). Full lifecycle tested through trait.                                                      |
+
+### Design decisions that held
+
+All tentative decisions from the design session survived implementation without modification:
+
+- Flat namespace (FileId → inode block)
+- 16 KiB blocks + inline data
+- Pure COW crash consistency
+- Superblock ring (16 entries)
+- Sorted free-extent list allocator
+- Per-file snapshot chains with multi-file grouping
+- `Files` trait with explicit `commit()`
+
+### Design decisions that emerged during implementation
+
+- **COW-entire-file** for extent-based writes. O(file_size) per write instead of O(delta). Acceptable for document workloads (files < 1 MiB). Keeps extent lists compact (one entry per write generation). Per-block COW is a future optimization.
+- **Inode table as a single COW block.** Maps FileId → inode block. Max 1365 entries per 16 KiB block. Sufficient for a personal OS.
+- **Snapshot store as linked blocks.** Serialized blob across a chain of blocks with next-pointers. Grows as snapshot data accumulates. One block suffices for typical use.
+- **Deferred free timing:** blocks freed at txg D reusable when `D <= current_txg - 1` at commit start. Verified: 2-generation gap between free and reuse.
+
+### What's next: Phase B (bare-metal integration)
+
+| Step | What                                                            |
+| ---- | --------------------------------------------------------------- |
+| B1   | virtio-blk driver: add write + flush (currently read-only)      |
+| B2   | Hypervisor: file-backed virtio-blk backend with `F_FULLFSYNC`   |
+| B3   | Filesystem service: port host prototype to bare-metal userspace |
+| B4   | Core integration: `Files` via IPC, `commit()` at `endOperation` |
+
+### Deferred to stress testing (build plan layer 3+)
+
+- Birth-time optimization for snapshot deletion (currently O(n²) reference check)
+- Crash consistency tests via `LoggingBlockDevice` replay
+- proptest-state-machine model-based tests for full filesystem
+- Per-block COW optimization
+- Leaked block recovery after crash (fsck scan)
+
+---
+
 ## Codebase QoL Backlog (2026-03-25)
 
 **Status: BACKLOG** — not blocking; revisit when touching adjacent code.
@@ -55,7 +111,7 @@ Lessons learned during implementation:
 
 ## Filesystem Design — Layer Map and Key Decisions (2026-03-25)
 
-**Status: IN PROGRESS** — layer map established, all layers designed, ready for host prototype.
+**Status: Phase A COMPLETE** — host prototype implemented and tested. 4,312 lines, 133 tests. Phase B (bare-metal integration) next.
 
 ### Context
 
