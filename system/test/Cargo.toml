@@ -17,3 +17,5 @@ fonts = { path = "../libraries/fonts" }
 render = { path = "../libraries/render" }
 animation = { path = "../libraries/animation" }
 layout = { path = "../libraries/layout" }
+fs = { path = "../libraries/fs" }
+store = { path = "../libraries/store" }

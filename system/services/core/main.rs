@@ -54,6 +54,11 @@ use protocol::{
     core_config::{
         self, CoreConfig, FrameRateMsg, MSG_CORE_CONFIG, MSG_FRAME_RATE, MSG_SCENE_UPDATED,
     },
+    document::{
+        DocCommit, DocCreate, DocCreateResult, DocQuery, DocQueryResult, DocRead, DocReadDone,
+        MSG_DOC_COMMIT, MSG_DOC_CREATE, MSG_DOC_CREATE_RESULT, MSG_DOC_QUERY,
+        MSG_DOC_QUERY_RESULT, MSG_DOC_READ, MSG_DOC_READ_DONE,
+    },
     edit::{
         self, CursorMove, SelectionUpdate, WriteDelete, WriteDeleteRange, WriteInsert,
         MSG_CURSOR_MOVE, MSG_SELECTION_UPDATE, MSG_SET_CURSOR, MSG_WRITE_DELETE,
@@ -122,6 +127,8 @@ pub(crate) struct CoreState {
     pub(crate) cursor_pos: usize,
     pub(crate) doc_buf: *mut u8,
     pub(crate) doc_capacity: usize,
+    /// FileId of the active text document in the store.
+    pub(crate) doc_file_id: u64,
     pub(crate) doc_len: usize,
     pub(crate) font_data_ptr: *const u8,
     pub(crate) font_data_len: usize,
@@ -210,6 +217,7 @@ impl CoreState {
             cursor_pos: 0,
             doc_buf: core::ptr::null_mut(),
             doc_capacity: 0,
+            doc_file_id: 0,
             doc_len: 0,
             font_data_ptr: core::ptr::null(),
             font_data_len: 0,
@@ -776,6 +784,120 @@ pub extern "C" fn _start() -> ! {
             0,
         )
     };
+    // ── Query or create the active text document ──────────────────────
+    //
+    // Ask the document service for existing text/plain files. If one exists,
+    // load its content into the doc buffer. If none, create one on demand.
+    // Use recv_blocking for synchronous RPC (never single wait+try_recv).
+    {
+        let fs_handle = FS_HANDLE.0 as u8;
+        let media = b"text/plain";
+        let mut reply = ipc::Message::new(0);
+
+        // Send query: media type exact match for "text/plain".
+        let mut query_payload = DocQuery {
+            query_type: 0,
+            data_len: media.len() as u32,
+            data: [0u8; 48],
+        };
+        query_payload.data[..media.len()].copy_from_slice(media);
+        // SAFETY: DocQuery is repr(C) and fits in 60-byte payload.
+        let query_msg =
+            unsafe { ipc::Message::from_payload(MSG_DOC_QUERY, &query_payload) };
+        fs_ch.send(&query_msg);
+        let _ = sys::channel_signal(FS_HANDLE);
+
+        let doc_file_id = if fs_ch.recv_blocking(fs_handle, &mut reply)
+            && reply.msg_type == MSG_DOC_QUERY_RESULT
+        {
+            if let Some(protocol::document::Message::DocQueryResult(result)) =
+                protocol::document::decode(reply.msg_type, &reply.payload)
+            {
+                if result.count > 0 {
+                    result.file_ids[0]
+                } else {
+                    0
+                }
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
+        if doc_file_id != 0 {
+            // Existing document found — read its content into the doc buffer.
+            sys::print(b"     loading existing text document\n");
+            let s = state();
+            let read_payload = DocRead {
+                file_id: doc_file_id,
+                // target_va=0 signals the document service to write into the
+                // shared doc buffer (doc_va + DOC_HEADER_SIZE) rather than an
+                // arbitrary VA. Core and the document service have different
+                // VAs for the same physical page.
+                target_va: 0,
+                capacity: s.doc_capacity as u32,
+                _pad: 0,
+            };
+            // SAFETY: DocRead is repr(C) and fits in 60-byte payload.
+            let read_msg =
+                unsafe { ipc::Message::from_payload(MSG_DOC_READ, &read_payload) };
+            fs_ch.send(&read_msg);
+            let _ = sys::channel_signal(FS_HANDLE);
+
+            if fs_ch.recv_blocking(fs_handle, &mut reply)
+                && reply.msg_type == MSG_DOC_READ_DONE
+            {
+                if let Some(protocol::document::Message::DocReadDone(done)) =
+                    protocol::document::decode(reply.msg_type, &reply.payload)
+                {
+                    if done.status == 0 && done.len > 0 {
+                        let s = state();
+                        s.doc_len = done.len as usize;
+                        s.doc_file_id = doc_file_id;
+                        documents::doc_write_header();
+                        sys::print(b"     document content loaded\n");
+                    } else {
+                        state().doc_file_id = doc_file_id;
+                    }
+                } else {
+                    state().doc_file_id = doc_file_id;
+                }
+            } else {
+                state().doc_file_id = doc_file_id;
+            }
+        } else {
+            // No text document exists — create one.
+            sys::print(b"     creating new text document\n");
+            let mut create_payload = DocCreate {
+                media_type_len: media.len() as u32,
+                _pad: 0,
+                media_type: [0u8; 52],
+            };
+            create_payload.media_type[..media.len()].copy_from_slice(media);
+            // SAFETY: DocCreate is repr(C) and fits in 60-byte payload.
+            let create_msg =
+                unsafe { ipc::Message::from_payload(MSG_DOC_CREATE, &create_payload) };
+            fs_ch.send(&create_msg);
+            let _ = sys::channel_signal(FS_HANDLE);
+
+            if fs_ch.recv_blocking(fs_handle, &mut reply)
+                && reply.msg_type == MSG_DOC_CREATE_RESULT
+            {
+                if let Some(protocol::document::Message::DocCreateResult(result)) =
+                    protocol::document::decode(reply.msg_type, &reply.payload)
+                {
+                    if result.status == 0 {
+                        state().doc_file_id = result.file_id;
+                        sys::print(b"     text document created\n");
+                    } else {
+                        sys::print(b"     warning: document create failed\n");
+                    }
+                }
+            }
+        }
+    }
+
     let has_input2 = match sys::wait(&[INPUT2_HANDLE.0], 0) {
         Ok(_) => true,
         Err(sys::SyscallError::WouldBlock) => true,
@@ -784,7 +906,13 @@ pub extern "C" fn _start() -> ! {
     let input2_ch = if has_input2 {
         sys::print(b"     tablet input channel detected\n");
         // SAFETY: same invariant as channel_shm_va(1..3) from_base above.
-        Some(unsafe { ipc::Channel::from_base(protocol::channel_shm_va(5), ipc::PAGE_SIZE, 1) })
+        Some(unsafe {
+            ipc::Channel::from_base(
+                protocol::channel_shm_va(INPUT2_HANDLE.0 as usize),
+                ipc::PAGE_SIZE,
+                1,
+            )
+        })
     } else {
         None
     };
@@ -1270,12 +1398,17 @@ pub extern "C" fn _start() -> ! {
             }
         }
 
-        // Persist to filesystem after text changes (operation boundary).
+        // Persist to document store after text changes (operation boundary).
         // All pending editor messages have been drained — this is the natural
-        // batch point. The filesystem service reads the doc buffer directly
+        // batch point. The document service reads the doc buffer directly
         // from shared memory and writes + commits to disk.
         if text_changed {
-            let commit_msg = ipc::Message::new(protocol::blkfs::MSG_FS_COMMIT);
+            let commit_payload = DocCommit {
+                file_id: state().doc_file_id,
+            };
+            // SAFETY: DocCommit is repr(C) and fits in 60-byte payload.
+            let commit_msg =
+                unsafe { ipc::Message::from_payload(MSG_DOC_COMMIT, &commit_payload) };
             fs_ch.send(&commit_msg);
             let _ = sys::channel_signal(FS_HANDLE);
         }

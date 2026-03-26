@@ -26,8 +26,8 @@ use crate::block::BlockDevice;
 use crate::inode::InodeExtent;
 use crate::{FsError, BLOCK_SIZE};
 
-const BLOB_HEADER: usize = 8; // next_block (4) + chunk_len (4)
-const BLOB_DATA_CAP: usize = BLOCK_SIZE as usize - BLOB_HEADER;
+pub(crate) const BLOB_HEADER: usize = 8; // next_block (4) + chunk_len (4)
+pub(crate) const BLOB_DATA_CAP: usize = BLOCK_SIZE as usize - BLOB_HEADER;
 
 /// Saved state of a single file within a snapshot.
 #[derive(Debug, Clone)]

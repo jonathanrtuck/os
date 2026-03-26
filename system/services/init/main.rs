@@ -173,7 +173,10 @@ fn setup_render_pipeline(
     content_region: Option<(u64, u32)>, // (content_pa, content_size) — Content Region
     file_store: Option<(u64, u32, u32)>, // (file_store_pa, png_offset, png_len) — File Store
     rtc_pa: u64,                        // PL031 RTC physical address (0 = not found)
-    fs_info: Option<(sys::ProcessHandle, sys::ChannelHandle, usize, u64, u32)>, // filesystem service
+    fs_info: Option<(sys::ProcessHandle, sys::ChannelHandle, usize, u64, u32)>, // document service
+    doc_buf: (u64, usize),                    // (doc_pa, doc_va) — pre-allocated document buffer
+    fs_started: bool, // true if document service was started during font loading
+    doc_core_ch: Option<sys::ChannelHandle>, // pre-created core↔doc channel endpoint A
     next_channel: &mut usize,
 ) -> (sys::ProcessHandle, sys::ProcessHandle) {
     sys::print(b"     setting up ");
@@ -201,15 +204,8 @@ fn setup_render_pipeline(
 
     let scene_page_count = scene_alloc_bytes as u64 / 4096;
 
-    // Document buffer (1 page).
-    let mut doc_pa: u64 = 0;
-    let doc_va = sys::dma_alloc(0, &mut doc_pa).unwrap_or_else(|_| {
-        sys::print(b"init: dma_alloc (doc buffer) failed\n");
-        sys::exit();
-    });
-
-    // SAFETY: doc_va is a 1-page DMA region just allocated above; zeroing 4096 bytes is within bounds.
-    unsafe { core::ptr::write_bytes(doc_va as *mut u8, 0, 4096) };
+    // Document buffer (pre-allocated by _start before font loading).
+    let (doc_pa, doc_va) = doc_buf;
 
     sys::print(b"     document buffer: 4 KiB shared\n");
 
@@ -765,7 +761,73 @@ fn setup_render_pipeline(
         None
     };
 
-    // Additional input device channels → core handle 5+.
+    // -----------------------------------------------------------------------
+    // Phase 10: Core ↔ Document service channel.
+    //
+    // Core handle layout addition:
+    //   handle 5 = core ↔ document service
+    //   handle 6+ = additional input devices (shifted from 5+)
+    // -----------------------------------------------------------------------
+    if let Some((fs_proc, fs_ch, fs_ch_idx, fs_pa, fs_irq)) = fs_info {
+        sys::print(b"     creating core\xE2\x86\x94document channel\n");
+
+        if fs_started {
+            // Document service already running (started during font loading).
+            // Core↔doc channel was pre-created; endpoint B already sent to doc.
+            // Only send endpoint A to core (which is still unstarted).
+            if let Some(ch_a) = doc_core_ch {
+                sys::handle_send(core_proc, ch_a.0).unwrap_or_else(|_| {
+                    sys::print(b"init: handle_send (core-doc A) failed\n");
+                    sys::exit();
+                });
+            }
+        } else {
+            // Document service not yet started — share memory and send config.
+            let fs_doc_va =
+                sys::memory_share(fs_proc, doc_pa, DOC_BUF_PAGES, false).unwrap_or_else(|_| {
+                    sys::print(b"init: memory_share (doc) failed\n");
+                    sys::exit();
+                });
+
+            let fs_ch_obj = init_channel(fs_ch_idx);
+            let doc_config = protocol::document::DocConfig {
+                mmio_pa: fs_pa,
+                irq: fs_irq,
+                _pad: 0,
+                doc_va: fs_doc_va as u64,
+                doc_capacity: DOC_BUF_CAPACITY,
+                _pad2: 0,
+                content_va: 0,
+                content_size: 0,
+                _pad3: 0,
+            };
+            let doc_msg = unsafe {
+                ipc::Message::from_payload(protocol::document::MSG_DOC_CONFIG, &doc_config)
+            };
+            fs_ch_obj.send(&doc_msg);
+
+            // Create core ↔ document service channel.
+            let (cf_a, cf_b) = sys::channel_create().unwrap_or_else(|_| {
+                sys::print(b"init: channel_create (core-doc) failed\n");
+                sys::exit();
+            });
+            *next_channel += 1;
+
+            // Endpoint A → core (handle 5 = FS_HANDLE in core).
+            sys::handle_send(core_proc, cf_a.0).unwrap_or_else(|_| {
+                sys::print(b"init: handle_send (core-doc A) failed\n");
+                sys::exit();
+            });
+            // Endpoint B → document service (handle 1 in doc's table).
+            sys::handle_send(fs_proc, cf_b.0).unwrap_or_else(|_| {
+                sys::print(b"init: handle_send (core-doc B) failed\n");
+                sys::exit();
+            });
+        }
+    }
+
+    // Additional input device channels → core handle 6+.
+    // Must come AFTER Phase 10 so that handle 5 = document service.
     for i in 1..input_devices.len() {
         let (input_proc_handle, input_ch_idx, input_pa, input_irq) = input_devices[i];
 
@@ -813,67 +875,11 @@ fn setup_render_pipeline(
     }
 
     // -----------------------------------------------------------------------
-    // Phase 10: Core ↔ Filesystem channel.
-    //
-    // Core handle layout addition:
-    //   handle 5 = core ↔ filesystem service
-    //   handle 6+ = additional input devices (shifted from 5+)
-    // -----------------------------------------------------------------------
-    if let Some((fs_proc, _fs_ch, fs_ch_idx, fs_pa, fs_irq)) = fs_info {
-        sys::print(b"     creating core\xE2\x86\x94filesystem channel\n");
-
-        // Share document buffer with filesystem service (read-only).
-        let fs_doc_va =
-            sys::memory_share(fs_proc, doc_pa, DOC_BUF_PAGES, true).unwrap_or_else(|_| {
-                sys::print(b"init: memory_share (fs doc) failed\n");
-                sys::exit();
-            });
-
-        // Send device config to filesystem service (init channel).
-        let fs_ch_obj = init_channel(fs_ch_idx);
-        let dev_config = DeviceConfig {
-            mmio_pa: fs_pa,
-            irq: fs_irq,
-            _pad: 0,
-        };
-        let dev_msg = unsafe { ipc::Message::from_payload(MSG_DEVICE_CONFIG, &dev_config) };
-        fs_ch_obj.send(&dev_msg);
-
-        // Send filesystem config (doc buffer VA).
-        let fs_config = protocol::blkfs::FsConfig {
-            doc_va: fs_doc_va as u64,
-            doc_capacity: DOC_BUF_CAPACITY,
-            _pad: 0,
-        };
-        let fs_cfg_msg =
-            unsafe { ipc::Message::from_payload(protocol::blkfs::MSG_FS_CONFIG, &fs_config) };
-        fs_ch_obj.send(&fs_cfg_msg);
-
-        // Create core ↔ filesystem channel.
-        let (cf_a, cf_b) = sys::channel_create().unwrap_or_else(|_| {
-            sys::print(b"init: channel_create (core-fs) failed\n");
-            sys::exit();
-        });
-        *next_channel += 1;
-
-        // Endpoint A → core (handle 5 = FS_HANDLE in core).
-        sys::handle_send(core_proc, cf_a.0).unwrap_or_else(|_| {
-            sys::print(b"init: handle_send (core-fs A) failed\n");
-            sys::exit();
-        });
-        // Endpoint B → filesystem service (handle 1 in fs's table).
-        sys::handle_send(fs_proc, cf_b.0).unwrap_or_else(|_| {
-            sys::print(b"init: handle_send (core-fs B) failed\n");
-            sys::exit();
-        });
-    }
-
-    // -----------------------------------------------------------------------
     // Phase 11: Start processes.
-    // Input drivers first, then decoder, then filesystem, then editor, then core.
+    // Input drivers first, then decoder, then document service, then editor, then core.
     // Render service is already running (started in Phase 4).
     // Decoder must start before core (core sends decode request at boot).
-    // Filesystem must start before core (core may send commit at boot).
+    // Document service must start before core (core may send commit at boot).
     // -----------------------------------------------------------------------
     if let Some(dec_proc) = decoder_proc {
         sys::print(b"     starting png-decode\n");
@@ -882,9 +888,11 @@ fn setup_render_pipeline(
     }
 
     if let Some((fs_proc, _, _, _, _)) = fs_info {
-        sys::print(b"     starting filesystem\n");
-        start_process(fs_proc, b"filesystem");
-        sys::yield_now();
+        if !fs_started {
+            sys::print(b"     starting document service\n");
+            start_process(fs_proc, b"document");
+            sys::yield_now();
+        }
     }
 
     for &(input_proc_handle, _, _, _) in input_devices {
@@ -990,7 +998,7 @@ pub extern "C" fn _start() -> ! {
         [(sys::ProcessHandle(0), 0, 0, 0); MAX_INPUT_DEVICES];
     let mut input_count: usize = 0;
     let mut p9: Option<(sys::ProcessHandle, sys::ChannelHandle, usize, u64, u32)> = None; // (proc, ch, ch_idx, pa, irq)
-    let mut fs_dev: Option<(sys::ProcessHandle, sys::ChannelHandle, usize, u64, u32)> = None; // filesystem service
+    let mut fs_dev: Option<(sys::ProcessHandle, sys::ChannelHandle, usize, u64, u32)> = None; // document service
     let mut rtc_pa: u64 = 0; // PL031 RTC physical address (0 = not found)
                              // Phase 1: Spawn a driver for each device in the manifest.
     let actual = if device_count > 8 { 8 } else { device_count };
@@ -1042,7 +1050,7 @@ pub extern "C" fn _start() -> ! {
         };
 
         let elf: &[u8] = match dev_id {
-            VIRTIO_DEVICE_BLK => FILESYSTEM_ELF,
+            VIRTIO_DEVICE_BLK => DOCUMENT_ELF,
             VIRTIO_DEVICE_CONSOLE => VIRTIO_CONSOLE_ELF,
             VIRTIO_DEVICE_GPU => {
                 if use_virgl {
@@ -1120,7 +1128,7 @@ pub extern "C" fn _start() -> ! {
                 p9 = Some((proc_h, ch_h, channel_idx, dev_pa, dev_irq));
             }
             VIRTIO_DEVICE_BLK => {
-                // Defer filesystem startup — needs doc buffer sharing before start.
+                // Defer document service startup — needs doc buffer sharing before start.
                 fs_dev = Some((proc_h, ch_h, channel_idx, dev_pa, dev_irq));
             }
             _ => {
@@ -1143,18 +1151,32 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
-    // Phase 1.5: Read font files from host via 9p driver (must complete before compositor).
+    // Phase 1.5: Font loading and Content Region setup.
     // Two memory regions:
     //   Content Region (4 MiB): header + registry + font data (shared with core + render)
     //   File Store (1 MiB): raw file bytes (shared with core only, NOT render)
+    //
+    // Document buffer: 1 page shared with core (rw) and document service (ro).
+    // Allocated here so it can be shared before the document service starts.
     let content_region_info: Option<(u64, u32)>; // (content_pa, content_size)
     let file_store_info: Option<(u64, u32, u32)>; // (file_store_pa, png_offset, png_len)
+    let mut fs_started = false;
+    let mut doc_core_ch_a: Option<sys::ChannelHandle> = None; // core-end of pre-created core↔doc channel
 
-    if let Some((p9_proc, p9_ch, p9_ch_idx, p9_pa, p9_irq)) = p9 {
-        sys::print(b"     loading fonts from host filesystem\n");
+    // Allocate document buffer (1 page). Needed by both core and document service.
+    let mut doc_pa: u64 = 0;
+    let doc_va = sys::dma_alloc(0, &mut doc_pa).unwrap_or_else(|_| {
+        sys::print(b"init: dma_alloc (doc buffer) failed\n");
+        sys::exit();
+    });
+    // SAFETY: doc_va is a 1-page DMA region just allocated; zeroing 4096 bytes is within bounds.
+    unsafe { core::ptr::write_bytes(doc_va as *mut u8, 0, 4096) };
+
+    if let Some((fs_proc, fs_ch, fs_ch_idx, fs_pa, fs_irq)) = fs_dev {
+        // ── Native font loading from document service ────────────────────
+        sys::print(b"     loading fonts from native filesystem\n");
 
         // Allocate Content Region (4 MiB = order 10 = 1024 pages).
-        // Holds: header + registry + font TTF data + space for decoded images.
         let content_order: u32 = 10;
         let content_page_count: u64 = 1u64 << content_order;
         let mut content_pa: u64 = 0;
@@ -1168,18 +1190,406 @@ pub extern "C" fn _start() -> ! {
         unsafe { core::ptr::write_bytes(content_va as *mut u8, 0, content_capacity as usize) };
 
         // Allocate File Store (1 MiB = order 8 = 256 pages).
-        // Holds raw PNG bytes (core reads for decoding).
         let fs_order: u32 = 8;
         let fs_page_count: u64 = 1u64 << fs_order;
-        let mut fs_pa: u64 = 0;
-        let fs_va = sys::dma_alloc(fs_order, &mut fs_pa).unwrap_or_else(|_| {
+        let mut store_pa: u64 = 0;
+        let _store_va = sys::dma_alloc(fs_order, &mut store_pa).unwrap_or_else(|_| {
             sys::print(b"init: dma_alloc (file store) failed\n");
             sys::exit();
         });
         let fs_capacity: u32 = (fs_page_count as u32) * 4096; // 1 MiB
 
-        // SAFETY: fs_va..+fs_capacity is the DMA region just allocated; zeroing is within bounds.
-        unsafe { core::ptr::write_bytes(fs_va as *mut u8, 0, fs_capacity as usize) };
+        // SAFETY: store_va..+fs_capacity is the DMA region just allocated; zeroing is within bounds.
+        unsafe { core::ptr::write_bytes(_store_va as *mut u8, 0, fs_capacity as usize) };
+
+        // Share Content Region with document service (read-write, for writing font data).
+        let doc_content_va =
+            sys::memory_share(fs_proc, content_pa, content_page_count, false).unwrap_or_else(
+                |_| {
+                    sys::print(b"init: memory_share (doc content) failed\n");
+                    sys::exit();
+                },
+            );
+
+        // Share File Store with document service (read-write, for writing PNG data).
+        let doc_fs_va =
+            sys::memory_share(fs_proc, store_pa, fs_page_count, false).unwrap_or_else(|_| {
+                sys::print(b"init: memory_share (doc file store) failed\n");
+                sys::exit();
+            });
+
+        // Share document buffer with document service (read-write).
+        // The document service reads from it on commit and writes to it
+        // when loading document content at boot (MSG_DOC_READ with target_va=0).
+        let fs_doc_va =
+            sys::memory_share(fs_proc, doc_pa, DOC_BUF_PAGES, false).unwrap_or_else(|_| {
+                sys::print(b"init: memory_share (doc buf) failed\n");
+                sys::exit();
+            });
+
+        // Pre-create core ↔ document service channel. Endpoint B is sent to
+        // the document service BEFORE it starts (handle_send requires unstarted
+        // processes). Endpoint A is saved and sent to core later in Phase 10.
+        let (doc_core_a, doc_core_b) = sys::channel_create().unwrap_or_else(|_| {
+            sys::print(b"init: channel_create (core-doc early) failed\n");
+            sys::exit();
+        });
+        next_channel += 1;
+
+        // Endpoint B → document service (handle 1 in doc's table).
+        sys::handle_send(fs_proc, doc_core_b.0).unwrap_or_else(|_| {
+            sys::print(b"init: handle_send (doc core-ch B) failed\n");
+            sys::exit();
+        });
+
+        // Send config to document service via init channel.
+        let fs_ch_obj = init_channel(fs_ch_idx);
+        let doc_config = protocol::document::DocConfig {
+            mmio_pa: fs_pa,
+            irq: fs_irq,
+            _pad: 0,
+            doc_va: fs_doc_va as u64,
+            doc_capacity: DOC_BUF_CAPACITY,
+            _pad2: 0,
+            content_va: doc_content_va as u64,
+            content_size: content_capacity,
+            _pad3: 0,
+        };
+        let doc_msg = unsafe {
+            ipc::Message::from_payload(protocol::document::MSG_DOC_CONFIG, &doc_config)
+        };
+        fs_ch_obj.send(&doc_msg);
+
+        // Start document service.
+        sys::print(b"     starting document service\n");
+        start_process(fs_proc, b"document");
+        sys::yield_now();
+
+        // Wait for MSG_DOC_READY.
+        sys::print(b"     waiting for document service ready\n");
+        {
+            let mut ready = false;
+            let mut retries = 0u32;
+            let mut msg = ipc::Message::new(0);
+
+            loop {
+                match sys::wait(&[fs_ch.0], BOOT_TIMEOUT_NS) {
+                    Ok(_) => {
+                        while fs_ch_obj.try_recv(&mut msg) {
+                            if msg.msg_type == protocol::document::MSG_DOC_READY {
+                                ready = true;
+                                break;
+                            }
+                        }
+                        if ready {
+                            break;
+                        }
+                    }
+                    Err(sys::SyscallError::WouldBlock) => {
+                        retries += 1;
+                        sys::print(b"init: timeout waiting for doc ready (retry)\n");
+                        if retries >= 3 {
+                            sys::print(b"init: document service not ready, fallback\n");
+                            break;
+                        }
+                    }
+                    _ => break,
+                }
+            }
+
+            if !ready {
+                sys::print(b"init: document service failed to start\n");
+                content_region_info = None;
+                file_store_info = None;
+                // fs_started stays false — setup_render_pipeline will not
+                // try to talk to an unresponsive service.
+            } else {
+                sys::print(b"     document service ready\n");
+                fs_started = true;
+                doc_core_ch_a = Some(doc_core_a);
+
+                // ── Query and load fonts from the native store ───────────
+
+                // Helper: send a query and wait for the result.
+                // Returns the first matching file ID, or 0 on failure.
+                let query_attr = |ch_obj: &ipc::Channel,
+                                  ch_handle: sys::ChannelHandle,
+                                  key: &[u8],
+                                  value: &[u8]|
+                 -> u64 {
+                    let mut q = protocol::document::DocQuery {
+                        query_type: 2, // attribute query
+                        data_len: 0,
+                        data: [0u8; 48],
+                    };
+                    // Encode "key\0value" into data.
+                    let total_len = key.len() + 1 + value.len();
+                    assert!(total_len <= 48, "query data too long");
+                    q.data[..key.len()].copy_from_slice(key);
+                    q.data[key.len()] = 0;
+                    q.data[key.len() + 1..key.len() + 1 + value.len()].copy_from_slice(value);
+                    q.data_len = total_len as u32;
+
+                    let msg = unsafe {
+                        ipc::Message::from_payload(protocol::document::MSG_DOC_QUERY, &q)
+                    };
+                    ch_obj.send(&msg);
+                    let _ = sys::channel_signal(ch_handle);
+
+                    let mut resp = ipc::Message::new(0);
+                    let mut retries = 0u32;
+
+                    loop {
+                        match sys::wait(&[ch_handle.0], FONT_READ_TIMEOUT_NS) {
+                            Ok(_) => {
+                                if ch_obj.try_recv(&mut resp)
+                                    && resp.msg_type
+                                        == protocol::document::MSG_DOC_QUERY_RESULT
+                                {
+                                    if let Some(protocol::document::Message::DocQueryResult(
+                                        result,
+                                    )) = protocol::document::decode(
+                                        resp.msg_type,
+                                        &resp.payload,
+                                    ) {
+                                        if result.count > 0 {
+                                            return result.file_ids[0];
+                                        }
+                                    }
+                                    return 0;
+                                }
+                            }
+                            Err(sys::SyscallError::WouldBlock) => {
+                                retries += 1;
+                                if retries >= 3 {
+                                    return 0;
+                                }
+                            }
+                            _ => return 0,
+                        }
+                    }
+                };
+
+                // Helper: send a read request and wait for the response.
+                // Returns the number of bytes read, or 0 on failure.
+                let doc_read = |ch_obj: &ipc::Channel,
+                                ch_handle: sys::ChannelHandle,
+                                file_id: u64,
+                                target_va: u64,
+                                capacity: u32|
+                 -> u32 {
+                    let r = protocol::document::DocRead {
+                        file_id,
+                        target_va,
+                        capacity,
+                        _pad: 0,
+                    };
+                    let msg = unsafe {
+                        ipc::Message::from_payload(protocol::document::MSG_DOC_READ, &r)
+                    };
+                    ch_obj.send(&msg);
+                    let _ = sys::channel_signal(ch_handle);
+
+                    let mut resp = ipc::Message::new(0);
+                    let mut retries = 0u32;
+
+                    loop {
+                        match sys::wait(&[ch_handle.0], FONT_READ_TIMEOUT_NS) {
+                            Ok(_) => {
+                                if ch_obj.try_recv(&mut resp)
+                                    && resp.msg_type == protocol::document::MSG_DOC_READ_DONE
+                                {
+                                    if let Some(protocol::document::Message::DocReadDone(
+                                        done,
+                                    )) = protocol::document::decode(
+                                        resp.msg_type,
+                                        &resp.payload,
+                                    ) {
+                                        if done.status == 0 {
+                                            return done.len;
+                                        }
+                                    }
+                                    return 0;
+                                }
+                            }
+                            Err(sys::SyscallError::WouldBlock) => {
+                                retries += 1;
+                                if retries >= 3 {
+                                    return 0;
+                                }
+                            }
+                            _ => return 0,
+                        }
+                    }
+                };
+
+                let data_start = protocol::content::CONTENT_HEADER_SIZE as u32;
+                let mut data_cursor = data_start;
+                let mut entry_count: u32 = 0;
+
+                // Font loading table: (attribute name, content_id, log label).
+                let fonts: [(&[u8], u32, &[u8]); 3] = [
+                    (
+                        b"JetBrains Mono",
+                        protocol::content::CONTENT_ID_FONT_MONO,
+                        b"mono",
+                    ),
+                    (
+                        b"Inter",
+                        protocol::content::CONTENT_ID_FONT_SANS,
+                        b"sans",
+                    ),
+                    (
+                        b"Source Serif 4",
+                        protocol::content::CONTENT_ID_FONT_SERIF,
+                        b"serif",
+                    ),
+                ];
+
+                let mut mono_ok = false;
+
+                for (font_name, content_id, label) in &fonts {
+                    sys::print(b"     loading font: ");
+                    sys::print(label);
+                    sys::print(b"\n");
+
+                    let file_id = query_attr(&fs_ch_obj, fs_ch, b"name", font_name);
+                    if file_id == 0 {
+                        sys::print(b"     font not found: ");
+                        sys::print(label);
+                        sys::print(b"\n");
+                        continue;
+                    }
+
+                    let target_va = doc_content_va as u64 + data_cursor as u64;
+                    let capacity = content_capacity - data_cursor;
+                    let len = doc_read(&fs_ch_obj, fs_ch, file_id, target_va, capacity);
+
+                    if len > 0 {
+                        sys::print(b"     ");
+                        sys::print(label);
+                        sys::print(b" font loaded: ");
+                        let mut buf = [0u8; 16];
+                        let n = sys::format_u32(len, &mut buf);
+                        sys::print(&buf[..n]);
+                        sys::print(b" bytes\n");
+
+                        // SAFETY: content_va is a valid DMA allocation; header fits within
+                        // CONTENT_HEADER_SIZE.
+                        let header = unsafe {
+                            &mut *(content_va as *mut protocol::content::ContentRegionHeader)
+                        };
+                        header.entries[entry_count as usize] = protocol::content::ContentEntry {
+                            content_id: *content_id,
+                            offset: data_cursor,
+                            length: len,
+                            class: protocol::content::ContentClass::Font as u8,
+                            _pad: [0; 3],
+                            width: 0,
+                            height: 0,
+                            generation: 0,
+                        };
+                        entry_count += 1;
+                        data_cursor += len;
+
+                        if *content_id == protocol::content::CONTENT_ID_FONT_MONO {
+                            mono_ok = true;
+                        }
+                    } else {
+                        sys::print(b"     ");
+                        sys::print(label);
+                        sys::print(b" font read failed\n");
+                    }
+                }
+
+                // Write Content Region header.
+                // SAFETY: content_va is a valid DMA allocation; header struct fits within
+                // CONTENT_HEADER_SIZE.
+                let header = unsafe {
+                    &mut *(content_va as *mut protocol::content::ContentRegionHeader)
+                };
+                header.magic = protocol::content::CONTENT_REGION_MAGIC;
+                header.version = protocol::content::CONTENT_REGION_VERSION;
+                header.entry_count = entry_count;
+                header.max_entries = protocol::content::MAX_CONTENT_ENTRIES as u32;
+                header.data_offset = data_start;
+                header.next_alloc = data_cursor;
+
+                sys::print(b"     content region header written\n");
+
+                // Load test.png into File Store via document service.
+                sys::print(b"     loading test.png\n");
+                let png_file_id = query_attr(&fs_ch_obj, fs_ch, b"name", b"test");
+                let png_len = if png_file_id != 0 {
+                    doc_read(&fs_ch_obj, fs_ch, png_file_id, doc_fs_va as u64, fs_capacity)
+                } else {
+                    0
+                };
+
+                if png_len > 0 {
+                    let mut buf = [0u8; 40];
+                    let prefix = b"     png loaded: ";
+                    buf[..prefix.len()].copy_from_slice(prefix);
+                    let mut pos = prefix.len();
+                    pos += sys::format_u32(png_len, &mut buf[pos..]);
+                    let suffix = b" bytes\n";
+                    buf[pos..pos + suffix.len()].copy_from_slice(suffix);
+                    pos += suffix.len();
+                    sys::print(&buf[..pos]);
+                } else {
+                    sys::print(b"     png read failed\n");
+                }
+
+                // Signal end of boot-query phase. The document service can now
+                // safely access handle 1 (core channel), which was sent via
+                // handle_send before the service started.
+                let boot_done_msg =
+                    ipc::Message::new(protocol::document::MSG_DOC_BOOT_DONE);
+                fs_ch_obj.send(&boot_done_msg);
+                let _ = sys::channel_signal(fs_ch);
+
+                if mono_ok {
+                    content_region_info = Some((content_pa, content_capacity));
+                } else {
+                    content_region_info = None;
+                }
+
+                if png_len > 0 {
+                    file_store_info = Some((store_pa, 0u32, png_len));
+                } else {
+                    file_store_info = None;
+                }
+            }
+        }
+    } else if let Some((p9_proc, p9_ch, p9_ch_idx, p9_pa, p9_irq)) = p9 {
+        // ── Fallback: load fonts from host via 9p driver ─────────────────
+        sys::print(b"     loading fonts from host filesystem (9p fallback)\n");
+
+        // Allocate Content Region (4 MiB = order 10 = 1024 pages).
+        let content_order: u32 = 10;
+        let content_page_count: u64 = 1u64 << content_order;
+        let mut content_pa: u64 = 0;
+        let content_va = sys::dma_alloc(content_order, &mut content_pa).unwrap_or_else(|_| {
+            sys::print(b"init: dma_alloc (content region) failed\n");
+            sys::exit();
+        });
+        let content_capacity: u32 = (content_page_count as u32) * 4096;
+
+        // SAFETY: content_va..+content_capacity is the DMA region just allocated; zeroing is within bounds.
+        unsafe { core::ptr::write_bytes(content_va as *mut u8, 0, content_capacity as usize) };
+
+        // Allocate File Store (1 MiB = order 8 = 256 pages).
+        let fs_order: u32 = 8;
+        let fs_page_count: u64 = 1u64 << fs_order;
+        let mut store_pa: u64 = 0;
+        let _store_va = sys::dma_alloc(fs_order, &mut store_pa).unwrap_or_else(|_| {
+            sys::print(b"init: dma_alloc (file store) failed\n");
+            sys::exit();
+        });
+        let fs_capacity: u32 = (fs_page_count as u32) * 4096;
+
+        // SAFETY: store_va..+fs_capacity is the DMA region just allocated; zeroing is within bounds.
+        unsafe { core::ptr::write_bytes(_store_va as *mut u8, 0, fs_capacity as usize) };
 
         // Share Content Region with 9p driver (read-write, for writing font data).
         let p9_content_va = sys::memory_share(p9_proc, content_pa, content_page_count, false)
@@ -1190,7 +1600,7 @@ pub extern "C" fn _start() -> ! {
 
         // Share File Store with 9p driver (read-write, for writing PNG data).
         let p9_fs_va =
-            sys::memory_share(p9_proc, fs_pa, fs_page_count, false).unwrap_or_else(|_| {
+            sys::memory_share(p9_proc, store_pa, fs_page_count, false).unwrap_or_else(|_| {
                 sys::print(b"init: memory_share (9p file store) failed\n");
                 sys::exit();
             });
@@ -1204,16 +1614,13 @@ pub extern "C" fn _start() -> ! {
         };
         // SAFETY: same as DeviceConfig from_payload above.
         let cfg_msg = unsafe { ipc::Message::from_payload(MSG_DEVICE_CONFIG, &dev_config) };
-
         p9_ch_obj.send(&cfg_msg);
 
         // Start 9p driver.
         sys::print(b"     starting 9p driver\n");
-
         start_process(p9_proc, b"9p");
 
         // Helper: send a file read request and wait for the response.
-        // Returns the number of bytes read, or 0 on failure.
         let read_file = |ch_obj: &ipc::Channel,
                          ch_handle: sys::ChannelHandle,
                          target_va: u64,
@@ -1224,49 +1631,40 @@ pub extern "C" fn _start() -> ! {
 
             // SAFETY: payload is 60 bytes; writes at offsets 0..8 (u64), 8..12 (u32), 12..16 (u32),
             // 16..60 (filename) stay within bounds. Unaligned writes used because payload is [u8].
-            // copy_nonoverlapping: src (filename) and dst (payload+16) do not overlap; len asserted <= 44.
             unsafe {
                 let p = req_msg.payload.as_mut_ptr();
-
                 core::ptr::write_unaligned(p as *mut u64, target_va);
                 core::ptr::write_unaligned(p.add(8) as *mut u32, capacity);
-                core::ptr::write_unaligned(p.add(12) as *mut u32, 0); // _pad
-
-                // Zero-fill filename area first.
+                core::ptr::write_unaligned(p.add(12) as *mut u32, 0);
                 core::ptr::write_bytes(p.add(16), 0, 44);
                 assert!(filename.len() <= 44, "filename too long for IPC payload");
                 core::ptr::copy_nonoverlapping(filename.as_ptr(), p.add(16), filename.len());
             }
 
             ch_obj.send(&req_msg);
-
             let _ = sys::channel_signal(ch_handle);
             let mut resp_msg = ipc::Message::new(0);
             let mut got_response = false;
+            let mut retries = 0u32;
 
-            {
-                let mut retries = 0u32;
-
-                loop {
-                    match sys::wait(&[ch_handle.0], FONT_READ_TIMEOUT_NS) {
-                        Ok(_) => {
-                            if ch_obj.try_recv(&mut resp_msg)
-                                && resp_msg.msg_type == MSG_FS_READ_RESPONSE
-                            {
-                                got_response = true;
-                                break;
-                            }
+            loop {
+                match sys::wait(&[ch_handle.0], FONT_READ_TIMEOUT_NS) {
+                    Ok(_) => {
+                        if ch_obj.try_recv(&mut resp_msg)
+                            && resp_msg.msg_type == MSG_FS_READ_RESPONSE
+                        {
+                            got_response = true;
+                            break;
                         }
-                        Err(sys::SyscallError::WouldBlock) => {
-                            retries += 1;
-                            sys::print(b"init: timeout waiting for font read (retry)\n");
-                            if retries >= 3 {
-                                sys::print(b"init: font read timed out, using bitmap fallback\n");
-                                break;
-                            }
-                        }
-                        _ => break,
                     }
+                    Err(sys::SyscallError::WouldBlock) => {
+                        retries += 1;
+                        sys::print(b"init: timeout waiting for font read (retry)\n");
+                        if retries >= 3 {
+                            break;
+                        }
+                    }
+                    _ => break,
                 }
             }
 
@@ -1274,14 +1672,13 @@ pub extern "C" fn _start() -> ! {
                 return 0;
             }
 
-            // SAFETY: payload is 60 bytes; reads at offsets 0..4 (len) and 4..8 (status) are in bounds.
-            // Unaligned reads used because payload is [u8]. msg_type verified as MSG_FS_READ_RESPONSE.
+            // SAFETY: payload is 60 bytes; reads at offsets 0..4 and 4..8 are in bounds.
             let (len, status) = unsafe {
                 let p = resp_msg.payload.as_ptr();
-                let len = core::ptr::read_unaligned(p as *const u32);
-                let status = core::ptr::read_unaligned(p.add(4) as *const u32);
-
-                (len, status)
+                (
+                    core::ptr::read_unaligned(p as *const u32),
+                    core::ptr::read_unaligned(p.add(4) as *const u32),
+                )
             };
 
             if status == 0 && len > 0 {
@@ -1291,135 +1688,77 @@ pub extern "C" fn _start() -> ! {
             }
         };
 
-        // Data area starts after the Content Region header.
         let data_start = protocol::content::CONTENT_HEADER_SIZE as u32;
         let mut data_cursor = data_start;
         let mut entry_count: u32 = 0;
 
-        // Load fonts into Content Region data area (after CONTENT_HEADER_SIZE).
-        // The 9p driver writes directly into the Content Region at the specified VA.
-        // Font target VA = 9p's mapping of Content Region + data_cursor offset.
+        // Load 3 fonts via 9p.
+        let fonts_9p: [(&[u8], u32, &[u8]); 3] = [
+            (
+                b"jetbrains-mono.ttf",
+                protocol::content::CONTENT_ID_FONT_MONO,
+                b"mono",
+            ),
+            (
+                b"inter.ttf",
+                protocol::content::CONTENT_ID_FONT_SANS,
+                b"sans",
+            ),
+            (
+                b"source-serif-4.ttf",
+                protocol::content::CONTENT_ID_FONT_SERIF,
+                b"serif",
+            ),
+        ];
 
-        // Load JetBrains Mono (monospace editor font).
-        sys::print(b"     loading jetbrains-mono.ttf\n");
+        let mut mono_len_9p: u32 = 0;
 
-        let mono_target_va = p9_content_va as u64 + data_cursor as u64;
-        let mono_capacity = content_capacity - data_cursor;
-        let mono_len = read_file(
-            &p9_ch_obj,
-            p9_ch,
-            mono_target_va,
-            mono_capacity,
-            b"jetbrains-mono.ttf",
-        );
+        for (filename, content_id, label) in &fonts_9p {
+            sys::print(b"     loading ");
+            sys::print(filename);
+            sys::print(b"\n");
 
-        if mono_len > 0 {
-            sys::print(b"     mono font loaded: ");
-            let mut buf = [0u8; 16];
-            let n = sys::format_u32(mono_len, &mut buf);
-            sys::print(&buf[..n]);
-            sys::print(b" bytes\n");
+            let target_va = p9_content_va as u64 + data_cursor as u64;
+            let capacity = content_capacity - data_cursor;
+            let len = read_file(&p9_ch_obj, p9_ch, target_va, capacity, filename);
 
-            // Write registry entry for mono font at init's VA of the Content Region.
-            // SAFETY: content_va is a valid DMA allocation; header fits within CONTENT_HEADER_SIZE.
-            let header =
-                unsafe { &mut *(content_va as *mut protocol::content::ContentRegionHeader) };
-            header.entries[entry_count as usize] = protocol::content::ContentEntry {
-                content_id: protocol::content::CONTENT_ID_FONT_MONO,
-                offset: data_cursor,
-                length: mono_len,
-                class: protocol::content::ContentClass::Font as u8,
-                _pad: [0; 3],
-                width: 0,
-                height: 0,
-                generation: 0,
-            };
-            entry_count += 1;
-            data_cursor += mono_len;
-        } else {
-            sys::print(b"     mono font read failed\n");
-        }
+            if len > 0 {
+                sys::print(b"     ");
+                sys::print(label);
+                sys::print(b" font loaded: ");
+                let mut buf = [0u8; 16];
+                let n = sys::format_u32(len, &mut buf);
+                sys::print(&buf[..n]);
+                sys::print(b" bytes\n");
 
-        // Load Inter (sans-serif chrome font).
-        sys::print(b"     loading inter.ttf\n");
+                // SAFETY: content_va is a valid DMA allocation; header fits within CONTENT_HEADER_SIZE.
+                let header = unsafe {
+                    &mut *(content_va as *mut protocol::content::ContentRegionHeader)
+                };
+                header.entries[entry_count as usize] = protocol::content::ContentEntry {
+                    content_id: *content_id,
+                    offset: data_cursor,
+                    length: len,
+                    class: protocol::content::ContentClass::Font as u8,
+                    _pad: [0; 3],
+                    width: 0,
+                    height: 0,
+                    generation: 0,
+                };
+                entry_count += 1;
+                data_cursor += len;
 
-        let sans_target_va = p9_content_va as u64 + data_cursor as u64;
-        let sans_capacity = content_capacity - data_cursor;
-        let sans_len = read_file(
-            &p9_ch_obj,
-            p9_ch,
-            sans_target_va,
-            sans_capacity,
-            b"inter.ttf",
-        );
-
-        if sans_len > 0 {
-            sys::print(b"     sans font loaded: ");
-            let mut buf = [0u8; 16];
-            let n = sys::format_u32(sans_len, &mut buf);
-            sys::print(&buf[..n]);
-            sys::print(b" bytes\n");
-
-            // SAFETY: content_va is a valid DMA allocation; header is within bounds.
-            let header =
-                unsafe { &mut *(content_va as *mut protocol::content::ContentRegionHeader) };
-            header.entries[entry_count as usize] = protocol::content::ContentEntry {
-                content_id: protocol::content::CONTENT_ID_FONT_SANS,
-                offset: data_cursor,
-                length: sans_len,
-                class: protocol::content::ContentClass::Font as u8,
-                _pad: [0; 3],
-                width: 0,
-                height: 0,
-                generation: 0,
-            };
-            entry_count += 1;
-            data_cursor += sans_len;
-        } else {
-            sys::print(b"     sans font read failed\n");
-        }
-
-        // Load Source Serif 4 (serif body font).
-        sys::print(b"     loading source-serif-4.ttf\n");
-
-        let serif_target_va = p9_content_va as u64 + data_cursor as u64;
-        let serif_capacity = content_capacity - data_cursor;
-        let serif_len = read_file(
-            &p9_ch_obj,
-            p9_ch,
-            serif_target_va,
-            serif_capacity,
-            b"source-serif-4.ttf",
-        );
-
-        if serif_len > 0 {
-            sys::print(b"     serif font loaded: ");
-            let mut buf = [0u8; 16];
-            let n = sys::format_u32(serif_len, &mut buf);
-            sys::print(&buf[..n]);
-            sys::print(b" bytes\n");
-
-            // SAFETY: content_va is a valid DMA allocation; header is within bounds.
-            let header =
-                unsafe { &mut *(content_va as *mut protocol::content::ContentRegionHeader) };
-            header.entries[entry_count as usize] = protocol::content::ContentEntry {
-                content_id: protocol::content::CONTENT_ID_FONT_SERIF,
-                offset: data_cursor,
-                length: serif_len,
-                class: protocol::content::ContentClass::Font as u8,
-                _pad: [0; 3],
-                width: 0,
-                height: 0,
-                generation: 0,
-            };
-            entry_count += 1;
-            data_cursor += serif_len;
-        } else {
-            sys::print(b"     serif font read failed\n");
+                if *content_id == protocol::content::CONTENT_ID_FONT_MONO {
+                    mono_len_9p = len;
+                }
+            } else {
+                sys::print(b"     ");
+                sys::print(label);
+                sys::print(b" font read failed\n");
+            }
         }
 
         // Write Content Region header.
-        // SAFETY: content_va is a valid DMA allocation; header struct fits within CONTENT_HEADER_SIZE.
         let header = unsafe { &mut *(content_va as *mut protocol::content::ContentRegionHeader) };
         header.magic = protocol::content::CONTENT_REGION_MAGIC;
         header.version = protocol::content::CONTENT_REGION_VERSION;
@@ -1430,42 +1769,33 @@ pub extern "C" fn _start() -> ! {
 
         sys::print(b"     content region header written\n");
 
-        // Load PNG into File Store (separate from Content Region).
+        // Load PNG into File Store.
         sys::print(b"     loading test.png\n");
-
-        let png_offset_in_fs: u32 = 0;
-        let png_target_va = p9_fs_va as u64;
-        let png_len = read_file(&p9_ch_obj, p9_ch, png_target_va, fs_capacity, b"test.png");
+        let png_len =
+            read_file(&p9_ch_obj, p9_ch, p9_fs_va as u64, fs_capacity, b"test.png");
 
         if png_len > 0 {
             let mut buf = [0u8; 40];
             let prefix = b"     png loaded: ";
-
             buf[..prefix.len()].copy_from_slice(prefix);
-
             let mut pos = prefix.len();
-
             pos += sys::format_u32(png_len, &mut buf[pos..]);
-
             let suffix = b" bytes\n";
-
             buf[pos..pos + suffix.len()].copy_from_slice(suffix);
-
             pos += suffix.len();
-
             sys::print(&buf[..pos]);
         } else {
             sys::print(b"     png read failed\n");
         }
 
-        if mono_len > 0 {
+        if mono_len_9p > 0 {
             content_region_info = Some((content_pa, content_capacity));
         } else {
             content_region_info = None;
         }
 
         if png_len > 0 {
-            file_store_info = Some((fs_pa, png_offset_in_fs, png_len));
+            file_store_info = Some((store_pa, 0u32, png_len));
         } else {
             file_store_info = None;
         }
@@ -1498,6 +1828,9 @@ pub extern "C" fn _start() -> ! {
             file_store_info,
             rtc_pa,
             fs_dev,
+            (doc_pa, doc_va),
+            fs_started,
+            doc_core_ch_a,
             &mut next_channel,
         );
 
@@ -1525,11 +1858,22 @@ pub extern "C" fn _start() -> ! {
             }
         }
 
-        // Register 9p driver (if spawned).
-        if let Some((p9_proc, _, _, _, _)) = p9 {
+        // Register 9p driver (only if started, i.e. not using native fs).
+        if !fs_started {
+            if let Some((p9_proc, _, _, _, _)) = p9 {
+                if child_count < child_handles.len() {
+                    child_handles[child_count] = p9_proc.0;
+                    child_names[child_count] = b"9p";
+                    child_count += 1;
+                }
+            }
+        }
+
+        // Register document service (if started).
+        if let Some((fs_proc, _, _, _, _)) = fs_dev {
             if child_count < child_handles.len() {
-                child_handles[child_count] = p9_proc.0;
-                child_names[child_count] = b"9p";
+                child_handles[child_count] = fs_proc.0;
+                child_names[child_count] = b"document";
                 child_count += 1;
             }
         }

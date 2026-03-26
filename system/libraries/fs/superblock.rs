@@ -46,7 +46,8 @@ const ENT_FREE: usize = 36; //     u32, root_free_list block
 const ENT_SNAPS: usize = 40; //    u32, root_snapshot_index block
 const ENT_TOTAL: usize = 44; //    u32, total_blocks
 const ENT_USED: usize = 48; //     u32, used_blocks
-const ENT_CKSUM: usize = 52; //    u32, CRC32 of bytes 0..52
+const ENT_ROOT_FILE: usize = 52; // u64, root file id (0 = none)
+const ENT_CKSUM: usize = 60; //    u32, CRC32 of bytes 0..60
 
 /// Live filesystem state, loaded from the superblock ring on mount.
 ///
@@ -71,6 +72,8 @@ pub struct Superblock {
     pub total_blocks: u32,
     /// Blocks currently in use.
     pub used_blocks: u32,
+    /// Root file ID (0 = none). Persists across commits.
+    pub root_file: Option<u64>,
 }
 
 impl Superblock {
@@ -114,6 +117,7 @@ impl Superblock {
             root_snapshot_index: 0,
             total_blocks: total,
             used_blocks: DATA_START,
+            root_file: None,
         };
         device.write_block(ring_block(sb.txg), &sb.encode())?;
         device.flush()?;
@@ -187,12 +191,14 @@ impl Superblock {
         put_u32(&mut buf, ENT_SNAPS, self.root_snapshot_index);
         put_u32(&mut buf, ENT_TOTAL, self.total_blocks);
         put_u32(&mut buf, ENT_USED, self.used_blocks);
+        put_u64(&mut buf, ENT_ROOT_FILE, self.root_file.unwrap_or(0));
         let cksum = crc32(&buf[..ENT_CKSUM]);
         put_u32(&mut buf, ENT_CKSUM, cksum);
         buf
     }
 
     fn decode(buf: &[u8]) -> Self {
+        let raw_root = get_u64(buf, ENT_ROOT_FILE);
         Self {
             txg: get_u64(buf, ENT_TXG),
             timestamp: get_u64(buf, ENT_TS),
@@ -202,6 +208,7 @@ impl Superblock {
             root_snapshot_index: get_u32(buf, ENT_SNAPS),
             total_blocks: get_u32(buf, ENT_TOTAL),
             used_blocks: get_u32(buf, ENT_USED),
+            root_file: if raw_root == 0 { None } else { Some(raw_root) },
         }
     }
 }

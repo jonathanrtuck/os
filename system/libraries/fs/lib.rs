@@ -88,6 +88,12 @@ pub trait Files {
     fn list_snapshots(&self, file: FileId) -> Result<Vec<SnapshotId>, FsError>;
     /// File metadata.
     fn metadata(&self, file: FileId) -> Result<FileMetadata, FsError>;
+    /// List all file IDs in the filesystem.
+    fn list_files(&self) -> Result<Vec<FileId>, FsError>;
+    /// Set the root file. The file must exist.
+    fn set_root(&mut self, file: FileId) -> Result<(), FsError>;
+    /// Get the root file, if one has been set.
+    fn root(&self) -> Option<FileId>;
     /// Commit all pending changes. Two-flush protocol.
     fn commit(&mut self) -> Result<(), FsError>;
 }

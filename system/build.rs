@@ -38,7 +38,7 @@ struct CargoLibOutput {
 
 /// ELFs that init embeds (must be a subset of PROGRAMS names).
 const INIT_EMBEDDED: &[(&str, &str)] = &[
-    ("filesystem", "FILESYSTEM_ELF"),
+    ("document", "DOCUMENT_ELF"),
     ("virtio-blk", "VIRTIO_BLK_ELF"),
     ("virtio-console", "VIRTIO_CONSOLE_ELF"),
     ("virtio-input", "VIRTIO_INPUT_ELF"),
@@ -57,7 +57,7 @@ const INIT_EMBEDDED: &[(&str, &str)] = &[
 /// ORDER MATTERS: fuzz-helper must be before fuzz (fuzz embeds it).
 const PROGRAMS: &[(&str, &str, bool, bool)] = &[
     ("echo", "user/echo", false, false),
-    ("filesystem", "services/filesystem", true, false),
+    ("document", "services/document", true, false),
     ("virtio-blk", "services/drivers/virtio-blk", true, false),
     (
         "virtio-console",
@@ -168,6 +168,17 @@ fn main() {
 
     rustc_rlib(&rustc, &fs_src, &fs_rlib, "fs", &[]);
 
+    let store_src = manifest_dir.join("libraries/store/lib.rs");
+    let store_rlib = out_dir.join("libstore.rlib");
+
+    rustc_rlib(
+        &rustc,
+        &store_src,
+        &store_rlib,
+        "store",
+        &[("fs", &fs_rlib)],
+    );
+
     // Step 1b: Build Cargo-managed libraries (libraries with external deps).
     // These use `cargo build` to resolve dependency graphs, then we link the
     // resulting rlibs alongside hand-compiled libraries.
@@ -233,8 +244,9 @@ fn main() {
             externs.push(("animation", animation_rlib.clone()));
             externs.push(("layout", layout_rlib.clone()));
         }
-        if name == "filesystem" {
+        if name == "document" {
             externs.push(("fs", fs_rlib.clone()));
+            externs.push(("store", store_rlib.clone()));
         }
 
         // Fuzz embeds fuzz-helper (generate embedded RS, same pattern as init).
@@ -338,6 +350,11 @@ fn main() {
     }
     println!("cargo:rerun-if-changed={}", ipc_src.display());
     println!("cargo:rerun-if-changed={}", fs_src.display());
+    println!("cargo:rerun-if-changed={}", store_src.display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest_dir.join("libraries/store/serialize.rs").display()
+    );
     for fs_mod in &[
         "block.rs",
         "crc32.rs",

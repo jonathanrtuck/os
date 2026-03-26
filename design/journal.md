@@ -4,6 +4,115 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## v0.4 Document Store Design (2026-03-26)
+
+**Status: IN PROGRESS** — Architecture designed, implementation not started.
+
+### Sprint scope
+
+v0.4 completes "The Document Store" — after this sprint, every piece of persistent content in the OS has identity (FileId), type (media type), metadata (queryable), and history (snapshots). Five work items, foundation-up:
+
+1. **Phase C:** Metadata in fs library + store library + mount-on-reboot (~2 days)
+2. **Phase D:** Factory disk image builder + richer IPC protocol (~2 days)
+3. **Phase E:** Replace 9p boot path — fonts from native fs (~1 day)
+4. **Phase F:** Multi-document persistence in core (~1.5 days)
+5. **Phase G:** Undo/redo via snapshots wired to core (~1.5 days)
+
+### Two-library architecture
+
+The persistence layer is two separate libraries with a clean boundary:
+
+```text
+┌───────────────────────────────────────────────┐
+│  Store  (libraries/store/)                    │  ← Public API. Metadata layer.
+│  - create(mimetype) → FileId                  │
+│  - set/get attributes (string key-value)      │
+│  - query(filter) → Vec<FileId>                │
+│  - read/write content (delegates to fs)       │
+│  - snapshot/restore (delegates to fs)         │
+│  - commit (writes catalog + delegates to fs)  │
+│  Uses Box<dyn Files> — no generic parameter.  │
+├───────────────────────────────────────────────┤
+│  FS  (libraries/fs/)                          │  ← Generic COW filesystem.
+│  - BlockDevice trait, COW, inodes, allocator  │
+│  - Snapshots, crash consistency               │
+│  - Stores bytes. Knows nothing about content. │
+│  Reusable by anyone, not document-specific.   │
+└───────────────────────────────────────────────┘
+```
+
+**Why separate:** The fs library is generic infrastructure (useful to anyone). The store library adds document-centric semantics specific to this OS. Each can be swapped independently. The store library uses `Box<dyn Files>` (trait object) so it never sees `BlockDevice` or `Filesystem<D>` — the generic parameter is fully contained in the fs library and the filesystem service.
+
+**Consumers:** Only the filesystem service touches the store library directly. Core and everything above talk to the filesystem service via IPC. The factory disk image builder uses the same store library on the host.
+
+### Catalog design
+
+A single **catalog file** stored in the filesystem holds all metadata for all documents. The catalog is "just a file" — the fs library doesn't know it's special.
+
+- **Discovery:** `Files` trait gains `set_root(FileId)` and `root() -> Option<FileId>`. The store calls `set_root(catalog_id)` during init. On open, `root()` returns the catalog FileId in O(1). This is a generic filesystem concept (like root inode in ext4), not document-specific.
+- **Schema:** Each entry stores `file_id` (u64), `media_type` (string, mandatory), and optional key-value attributes (string→string). Size/created/modified come from the fs library's `FileMetadata` — no duplication.
+- **Serialization:** Variable-length entries, sequentially packed. Loaded entirely into `BTreeMap<FileId, CatalogEntry>` at mount. Written entirely on commit. Same pattern as inode table and snapshot store.
+- **Snapshots include the catalog.** When the store creates a snapshot, it transparently includes the catalog file. Restoring a snapshot restores metadata in sync with content.
+
+### Files trait additions
+
+```rust
+fn list_files(&self) -> Result<Vec<FileId>, FsError>;     // needed for queries
+fn set_root(&mut self, file: FileId) -> Result<(), FsError>;  // catalog discovery
+fn root(&self) -> Option<FileId>;                           // catalog discovery
+```
+
+### Query model
+
+```rust
+pub enum Query {
+    MediaType(String),                         // exact: "font/ttf"
+    Type(String),                              // category: "font" matches font/*
+    Attribute { key: String, value: String },   // exact key=value
+    And(Vec<Query>),
+    Or(Vec<Query>),
+}
+```
+
+Uses standard MIME terminology: **type** = top-level category (font, image, text), **subtype** = specific format (ttf, png, plain), **media type** = full string (font/ttf).
+
+### Inode table scaling
+
+The inode table (FileId → inode block mapping) moves from single-block to **linked-block chain** (same pattern as snapshot store). Removes the 1365-file hard limit.
+
+**Accepted tradeoff:** The entire inode table is loaded into memory at mount and rewritten on commit. This is O(n) in file count — acceptable at personal-OS scale (hundreds to low thousands of files). A COW B-tree would be needed for general-purpose scale. The `Files` trait boundary allows internals to be replaced without changing consumers. This tradeoff will be documented in the fs library.
+
+### "Everything is a file" — reframed
+
+Original premise: "everything is a file" (Unix-style). Revised: **"all persistent content with a media type is a file."** The litmus test: does it have a media type and does it persist? If yes, it belongs in the filesystem. If no (scene graph, IPC channels, process state), it doesn't.
+
+This keeps the filesystem meaningful as the persistent content store without forcing runtime state through it for philosophical purity.
+
+### Factory disk image
+
+A build-time host tool creates a pre-populated disk image using `Store<Filesystem<FileBackedDevice>>`. Contents: system fonts (font/ttf), test image (image/png), catalog with metadata. The guest boots, mounts, queries for fonts by type. No "first boot" special path. 9p becomes unnecessary for boot (may survive as a dev/import tool or be removed).
+
+### Design decisions
+
+- **No file paths.** Files have FileId + metadata. Users find files by query, not by path. There are no paths in this system — not even as metadata.
+- **Media type is mandatory at creation.** `store.create("font/ttf")` — you cannot create a file without declaring its type.
+- **Preparation required for any fs swap.** Swapping the underlying filesystem always requires building a catalog. The `set_root`/`root` addition is trivially implementable on any fs.
+- **Foundation-up sequencing.** Build fs changes → store library → IPC protocol → factory image → boot sequence → multi-document → undo/redo. No layer-switching.
+
+### Services as translation layers (architectural insight)
+
+Every service in this OS is a **translation layer** between core and a subsystem that core shouldn't know about. The render service translates scene graph → GPU commands. The document service translates document operations → disk I/O. The input service translates hardware events → IPC messages. Core never touches hardware or low-level primitives.
+
+This framing clarifies: "leaf node" is relative to your system boundary. The render service is a leaf of our OS, but from a wider view it's just another translator between software and hardware (and the monitor is a translator between hardware and the user's eyes). It's translation layers all the way down — our boundary is just where we stop being responsible.
+
+This also explains why the IPC protocol for v0.4 stays minimal scaffolding: core's architecture hasn't been deliberately designed yet. Investing in a rich document-management IPC protocol now would design core by accident, encoding premature UX assumptions in plumbing.
+
+### Full spec
+
+See `design/v04-document-store.md` for the complete design spec covering all phases (C–G), the two-library architecture, catalog schema, store API, query model, factory image builder, and boot sequence changes.
+
+---
+
 ## Filesystem Bare-Metal Integration — Phase B Complete (2026-03-26)
 
 **Status: COMPLETE** — All 4 steps (B1–B4) implemented. COW filesystem running as a bare-metal userspace service, persisting document edits to disk.

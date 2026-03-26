@@ -21,9 +21,6 @@ use crate::snapshot::{self, FileSnapshot, Snapshot};
 use crate::superblock::Superblock;
 use crate::{now_nanos, FsError, BLOCK_SIZE};
 
-/// Maximum entries in the inode table block.
-const MAX_TABLE_ENTRIES: usize = (BLOCK_SIZE as usize - 4) / 12; // 1365
-
 /// A COW filesystem with per-file snapshots.
 pub struct Filesystem<D: BlockDevice> {
     device: D,
@@ -32,7 +29,8 @@ pub struct Filesystem<D: BlockDevice> {
     inodes: BTreeMap<u64, Inode>,
     dirty: BTreeSet<u64>,
     deferred: Vec<DeferredFree>,
-    inode_table_block: u32,
+    /// Blocks occupied by the current on-disk inode table chain.
+    inode_table_blocks: Vec<u32>,
     // Snapshot state
     snapshots: BTreeMap<u64, Snapshot>,
     next_snapshot_id: u64,
@@ -53,10 +51,11 @@ impl<D: BlockDevice> Filesystem<D> {
         let mut sb = Superblock::format(&mut device)?;
         let mut alloc = Allocator::new(sb.total_blocks);
 
-        let table_block = write_inode_table(&mut device, &mut alloc, &BTreeMap::new())?;
+        let (first_block, table_blocks) =
+            write_inode_table(&mut device, &mut alloc, &BTreeMap::new())?;
         let free_block = alloc.persist(&mut device)?;
 
-        sb.root_inode_table = table_block;
+        sb.root_inode_table = first_block;
         sb.root_free_list = free_block;
         sb.used_blocks = sb.total_blocks - alloc.free_blocks();
         device.flush()?;
@@ -69,7 +68,7 @@ impl<D: BlockDevice> Filesystem<D> {
             inodes: BTreeMap::new(),
             dirty: BTreeSet::new(),
             deferred: Vec::new(),
-            inode_table_block: table_block,
+            inode_table_blocks: table_blocks,
             snapshots: BTreeMap::new(),
             next_snapshot_id: 1,
             snap_store_blocks: Vec::new(),
@@ -80,7 +79,7 @@ impl<D: BlockDevice> Filesystem<D> {
     pub fn mount(device: D) -> Result<Self, FsError> {
         let sb = Superblock::mount(&device)?;
         let alloc = Allocator::load(&device, sb.root_free_list)?;
-        let (inodes, table_block) = load_all_inodes(&device, sb.root_inode_table)?;
+        let (inodes, table_blocks) = load_all_inodes(&device, sb.root_inode_table)?;
 
         // Load snapshot store.
         let (snapshots, next_snapshot_id, snap_store_blocks) =
@@ -99,7 +98,7 @@ impl<D: BlockDevice> Filesystem<D> {
             inodes,
             dirty: BTreeSet::new(),
             deferred: Vec::new(),
-            inode_table_block: table_block,
+            inode_table_blocks: table_blocks,
             snapshots,
             next_snapshot_id,
             snap_store_blocks,
@@ -311,13 +310,16 @@ impl<D: BlockDevice> Filesystem<D> {
             .iter()
             .map(|(&id, inode)| (id, inode.inode_block()))
             .collect();
-        let new_table = write_inode_table(&mut self.device, &mut self.allocator, &table)?;
-        self.deferred.push(DeferredFree {
-            start: self.inode_table_block,
-            count: 1,
-            txg: next_txg,
-        });
-        self.inode_table_block = new_table;
+        let (new_first, new_table_blocks) =
+            write_inode_table(&mut self.device, &mut self.allocator, &table)?;
+        for &b in &self.inode_table_blocks {
+            self.deferred.push(DeferredFree {
+                start: b,
+                count: 1,
+                txg: next_txg,
+            });
+        }
+        self.inode_table_blocks = new_table_blocks;
 
         // 4. Persist snapshot store.
         let new_snap_index = if !self.snapshots.is_empty() {
@@ -357,7 +359,7 @@ impl<D: BlockDevice> Filesystem<D> {
         let new_free = self.allocator.persist(&mut self.device)?;
 
         // 6. Update superblock pointers.
-        self.superblock.root_inode_table = new_table;
+        self.superblock.root_inode_table = new_first;
         self.superblock.root_free_list = new_free;
         self.superblock.root_snapshot_index = new_snap_index;
         self.superblock.used_blocks = self.superblock.total_blocks - self.allocator.free_blocks();
@@ -537,6 +539,25 @@ impl<D: BlockDevice> Filesystem<D> {
         })
     }
 
+    /// List all file IDs.
+    pub fn list_files(&self) -> Vec<crate::FileId> {
+        self.inodes.keys().map(|&id| crate::FileId(id)).collect()
+    }
+
+    /// Set the root file. The file must exist.
+    pub fn set_root(&mut self, file_id: u64) -> Result<(), FsError> {
+        if !self.inodes.contains_key(&file_id) {
+            return Err(FsError::NotFound(file_id));
+        }
+        self.superblock.root_file = Some(file_id);
+        Ok(())
+    }
+
+    /// Get the root file, if one has been set.
+    pub fn root(&self) -> Option<crate::FileId> {
+        self.superblock.root_file.map(crate::FileId)
+    }
+
     fn get(&self, file_id: u64) -> Result<&Inode, FsError> {
         self.inodes.get(&file_id).ok_or(FsError::NotFound(file_id))
     }
@@ -607,6 +628,18 @@ impl<D: BlockDevice> crate::Files for Filesystem<D> {
 
     fn metadata(&self, file: crate::FileId) -> Result<crate::FileMetadata, FsError> {
         self.file_metadata(file.0)
+    }
+
+    fn list_files(&self) -> Result<Vec<crate::FileId>, FsError> {
+        Ok(Filesystem::list_files(self))
+    }
+
+    fn set_root(&mut self, file: crate::FileId) -> Result<(), FsError> {
+        Filesystem::set_root(self, file.0)
+    }
+
+    fn root(&self) -> Option<crate::FileId> {
+        Filesystem::root(self)
     }
 
     fn commit(&mut self) -> Result<(), FsError> {
@@ -685,21 +718,14 @@ fn blocks_for(byte_count: usize) -> u32 {
 
 // ── Inode table I/O ────────────────────────────────────────────────
 // Format: [entry_count: u32] [file_id: u64, block: u32] × N
+// Stored as a linked-block chain via snapshot::write_blob/read_blob.
 
 fn write_inode_table<D: BlockDevice>(
     device: &mut D,
     allocator: &mut Allocator,
     table: &BTreeMap<u64, u32>,
-) -> Result<u32, FsError> {
-    if table.len() > MAX_TABLE_ENTRIES {
-        return Err(FsError::Corrupt(format!(
-            "inode table has {} entries, max {MAX_TABLE_ENTRIES}",
-            table.len()
-        )));
-    }
-    let block = allocator.alloc(1).ok_or(FsError::NoSpace)?;
-    let mut buf = vec![0u8; BLOCK_SIZE as usize];
-
+) -> Result<(u32, Vec<u32>), FsError> {
+    let mut buf = vec![0u8; 4 + table.len() * 12];
     buf[0..4].copy_from_slice(&(table.len() as u32).to_le_bytes());
     let mut off = 4;
     for (&file_id, &inode_block) in table {
@@ -707,30 +733,34 @@ fn write_inode_table<D: BlockDevice>(
         buf[off + 8..off + 12].copy_from_slice(&inode_block.to_le_bytes());
         off += 12;
     }
-
-    device.write_block(block, &buf)?;
-    Ok(block)
+    snapshot::write_blob(device, allocator, &buf)
 }
 
 fn load_all_inodes<D: BlockDevice>(
     device: &D,
-    table_block: u32,
-) -> Result<(BTreeMap<u64, Inode>, u32), FsError> {
-    let mut buf = vec![0u8; BLOCK_SIZE as usize];
-    device.read_block(table_block, &mut buf)?;
-
-    let count = u32::from_le_bytes(buf[0..4].try_into().unwrap()) as usize;
-    if count > MAX_TABLE_ENTRIES {
+    first_block: u32,
+) -> Result<(BTreeMap<u64, Inode>, Vec<u32>), FsError> {
+    let (data, block_list) = snapshot::read_blob(device, first_block)?;
+    if data.len() < 4 {
         return Err(FsError::Corrupt(format!(
-            "inode table has {count} entries, max {MAX_TABLE_ENTRIES}"
+            "inode table too small: {} bytes",
+            data.len()
+        )));
+    }
+    let count = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
+    let expected_len = 4 + count * 12;
+    if data.len() < expected_len {
+        return Err(FsError::Corrupt(format!(
+            "inode table truncated: {count} entries need {expected_len} bytes, got {}",
+            data.len()
         )));
     }
 
     let mut inodes = BTreeMap::new();
     let mut off = 4;
     for _ in 0..count {
-        let file_id = u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
-        let inode_block = u32::from_le_bytes(buf[off + 8..off + 12].try_into().unwrap());
+        let file_id = u64::from_le_bytes(data[off..off + 8].try_into().unwrap());
+        let inode_block = u32::from_le_bytes(data[off + 8..off + 12].try_into().unwrap());
         off += 12;
 
         let inode = Inode::load(device, inode_block)?;
@@ -738,5 +768,5 @@ fn load_all_inodes<D: BlockDevice>(
         inodes.insert(file_id, inode);
     }
 
-    Ok((inodes, table_block))
+    Ok((inodes, block_list))
 }

@@ -688,6 +688,11 @@ pub mod metal;
 /// Content Region shared memory layout (font data, decoded images).
 pub mod content;
 
+// ── document: document service protocol ──────────────────────────────
+
+/// Document service protocol (init/core <-> document service).
+pub mod document;
+
 // ── decode: generic decoder service protocol ────────────────────────
 
 /// Decode protocol for content decoder services (PNG, JPEG, etc.).

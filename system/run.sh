@@ -12,12 +12,17 @@ KERNEL="${1:?usage: run.sh <kernel-binary>}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-DISK_IMG="${SCRIPT_DIR}/test.img"
+DISK_IMG="${SCRIPT_DIR}/disk.img"
 
-# Create test disk if it doesn't exist (shared by hypervisor and QEMU paths).
+# Build factory disk image if it doesn't exist.
 if [ ! -f "$DISK_IMG" ]; then
-    dd if=/dev/zero of="$DISK_IMG" bs=1M count=1 2>/dev/null
-    echo -n "HELLO VIRTIO BLK" | dd of="$DISK_IMG" bs=1 count=16 conv=notrunc 2>/dev/null
+    MKDISK="$(cd "${SCRIPT_DIR}/../tools/mkdisk" && cargo build --release --message-format=short 2>&1 | tail -1)"
+    MKDISK_BIN="${SCRIPT_DIR}/../tools/mkdisk/target/release/mkdisk"
+    if [ ! -x "$MKDISK_BIN" ]; then
+        echo "error: failed to build mkdisk" >&2
+        exit 1
+    fi
+    "$MKDISK_BIN" "$DISK_IMG" "${SCRIPT_DIR}/share"
 fi
 
 # Default: native hypervisor with Metal GPU passthrough.
@@ -30,7 +35,13 @@ if [ "${QEMU:-0}" != "1" ]; then
         echo "       or set QEMU=1 to use QEMU instead" >&2
         exit 1
     fi
-    exec "$HYPERVISOR" "$KERNEL" --share "${SCRIPT_DIR}/share" --drive "$DISK_IMG"
+    # Native boot: disk image only, no 9p host share needed.
+    # Pass --share for development use (e.g. SHARE=1 ./run.sh kernel).
+    if [ "${SHARE:-0}" = "1" ]; then
+        exec "$HYPERVISOR" "$KERNEL" --share "${SCRIPT_DIR}/share" --drive "$DISK_IMG"
+    else
+        exec "$HYPERVISOR" "$KERNEL" --drive "$DISK_IMG"
+    fi
 fi
 DTB_FILE="${SCRIPT_DIR}/virt.dtb"
 
