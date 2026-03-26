@@ -15,6 +15,7 @@ extern crate alloc;
 
 use alloc::vec;
 use core::cell::RefCell;
+
 use protocol::device::MSG_DEVICE_CONFIG;
 
 mod system_config {
@@ -92,10 +93,8 @@ impl IoState {
         unsafe { *buf_ptr.add(status_offset) = 0xFF };
 
         if data_bytes == 0 {
-            self.vq.push_chain(&[
-                (header_pa, 16, false),
-                (status_pa, 1, true),
-            ]);
+            self.vq
+                .push_chain(&[(header_pa, 16, false), (status_pa, 1, true)]);
         } else {
             let data_pa = self.buf_pa + DATA_OFFSET as u64;
             let data_writable = req_type == VIRTIO_BLK_T_IN;
@@ -152,11 +151,7 @@ impl fs::BlockDevice for VirtioBlockDevice {
         // Copy caller's data into DMA buffer.
         // SAFETY: data area has space for fs::BLOCK_SIZE bytes.
         unsafe {
-            core::ptr::copy_nonoverlapping(
-                data.as_ptr(),
-                io.data_ptr(),
-                fs::BLOCK_SIZE as usize,
-            );
+            core::ptr::copy_nonoverlapping(data.as_ptr(), io.data_ptr(), fs::BLOCK_SIZE as usize);
         }
 
         let status = io.submit(VIRTIO_BLK_T_OUT, sector, fs::BLOCK_SIZE);
@@ -335,7 +330,13 @@ pub extern "C" fn _start() -> ! {
     unsafe { core::ptr::write_bytes(vq_va as *mut u8, 0, vq_pages * PAGE_SIZE) };
 
     let vq = virtio::Virtqueue::new(queue_size, vq_va, vq_pa);
-    device.setup_queue(VIRTQ_REQUEST, queue_size, vq.desc_pa(), vq.avail_pa(), vq.used_pa());
+    device.setup_queue(
+        VIRTQ_REQUEST,
+        queue_size,
+        vq.desc_pa(),
+        vq.avail_pa(),
+        vq.used_pa(),
+    );
     device.driver_ok();
 
     // Allocate DMA buffer (2 pages for block-sized operations).
@@ -432,9 +433,8 @@ pub extern "C" fn _start() -> ! {
     // ── IPC loop: handle commit requests from core ──────────────────
 
     // Core channel: handle 1 (sent by init via handle_send).
-    let core_ch = unsafe {
-        ipc::Channel::from_base(protocol::channel_shm_va(1), ipc::PAGE_SIZE, 1)
-    };
+    let core_ch =
+        unsafe { ipc::Channel::from_base(protocol::channel_shm_va(1), ipc::PAGE_SIZE, 1) };
 
     loop {
         // Wait for signal on the core channel (handle 1).
@@ -444,9 +444,8 @@ pub extern "C" fn _start() -> ! {
             if msg.msg_type == protocol::blkfs::MSG_FS_COMMIT {
                 // Read document content from shared buffer.
                 // Header layout: [0..8) = content_len (u64), [8..16) = cursor_pos, [16..64) = reserved, [64..) = content
-                let content_len = unsafe {
-                    core::ptr::read_volatile(doc_va as *const u64) as usize
-                };
+                let content_len =
+                    unsafe { core::ptr::read_volatile(doc_va as *const u64) as usize };
 
                 let actual_len = if content_len > doc_capacity {
                     doc_capacity
@@ -456,9 +455,8 @@ pub extern "C" fn _start() -> ! {
 
                 // SAFETY: doc_va + 64 points to content area in shared memory,
                 // mapped read-only by init. actual_len is bounded by doc_capacity.
-                let content = unsafe {
-                    core::slice::from_raw_parts((doc_va + 64) as *const u8, actual_len)
-                };
+                let content =
+                    unsafe { core::slice::from_raw_parts((doc_va + 64) as *const u8, actual_len) };
 
                 // Write to filesystem and commit.
                 let _ = filesystem.write(file_id, 0, content);

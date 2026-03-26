@@ -19,9 +19,7 @@
 
 use alloc::{format, vec, vec::Vec};
 
-use crate::alloc_mod::Allocator;
-use crate::block::BlockDevice;
-use crate::{FsError, BLOCK_SIZE};
+use crate::{alloc_mod::Allocator, block::BlockDevice, FsError, BLOCK_SIZE};
 
 // ── Layout constants ───────────────────────────────────────────────
 
@@ -50,7 +48,7 @@ const H_SNAP_CT: usize = 38;
 const H_INDIRECT: usize = 40;
 #[allow(dead_code)] // reserved for A6
 const H_SNAP_BLK: usize = 44;
-                                      // 48..64: reserved (zeros)
+// 48..64: reserved (zeros)
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -219,7 +217,10 @@ impl Inode {
     /// Fails with `NoSpace` if the result would exceed `INLINE_CAPACITY`.
     /// Does NOT update `modified` — caller sets timestamps.
     pub fn write_inline(&mut self, offset: u64, data: &[u8]) -> Result<(), FsError> {
-        debug_assert!(self.is_inline(), "write_inline called on extent-based inode");
+        debug_assert!(
+            self.is_inline(),
+            "write_inline called on extent-based inode"
+        );
         if data.is_empty() {
             return Ok(());
         }

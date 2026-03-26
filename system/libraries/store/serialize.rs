@@ -44,10 +44,7 @@ pub fn encode_catalog(magic: u32, catalog: &BTreeMap<u64, CatalogEntry>) -> Vec<
 }
 
 /// Decode binary catalog data.
-pub fn decode_catalog(
-    magic: u32,
-    data: &[u8],
-) -> Result<BTreeMap<u64, CatalogEntry>, StoreError> {
+pub fn decode_catalog(magic: u32, data: &[u8]) -> Result<BTreeMap<u64, CatalogEntry>, StoreError> {
     let mut pos = 0;
 
     let read_u16 = |pos: &mut usize, data: &[u8]| -> Result<u16, StoreError> {

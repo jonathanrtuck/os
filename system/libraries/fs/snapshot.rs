@@ -21,10 +21,7 @@
 
 use alloc::{collections::BTreeMap, string::String, vec, vec::Vec};
 
-use crate::alloc_mod::Allocator;
-use crate::block::BlockDevice;
-use crate::inode::InodeExtent;
-use crate::{FsError, BLOCK_SIZE};
+use crate::{alloc_mod::Allocator, block::BlockDevice, inode::InodeExtent, FsError, BLOCK_SIZE};
 
 pub(crate) const BLOB_HEADER: usize = 8; // next_block (4) + chunk_len (4)
 pub(crate) const BLOB_DATA_CAP: usize = BLOCK_SIZE as usize - BLOB_HEADER;
@@ -125,9 +122,7 @@ pub fn deserialize(data: &[u8]) -> Result<(BTreeMap<u64, Snapshot>, u64), FsErro
                     let count = read_u16(data, &mut pos)?;
                     // 6 bytes for birth_txg
                     if pos + 6 > data.len() {
-                        return Err(FsError::Corrupt(String::from(
-                            "snapshot extent truncated",
-                        )));
+                        return Err(FsError::Corrupt(String::from("snapshot extent truncated")));
                     }
                     let mut bytes = [0u8; 8];
                     bytes[..6].copy_from_slice(&data[pos..pos + 6]);

@@ -174,8 +174,8 @@ fn setup_render_pipeline(
     file_store: Option<(u64, u32, u32)>, // (file_store_pa, png_offset, png_len) — File Store
     rtc_pa: u64,                        // PL031 RTC physical address (0 = not found)
     fs_info: Option<(sys::ProcessHandle, sys::ChannelHandle, usize, u64, u32)>, // document service
-    doc_buf: (u64, usize),                    // (doc_pa, doc_va) — pre-allocated document buffer
-    fs_started: bool, // true if document service was started during font loading
+    doc_buf: (u64, usize),              // (doc_pa, doc_va) — pre-allocated document buffer
+    fs_started: bool,                   // true if document service was started during font loading
     doc_core_ch: Option<sys::ChannelHandle>, // pre-created core↔doc channel endpoint A
     next_channel: &mut usize,
 ) -> (sys::ProcessHandle, sys::ProcessHandle) {
@@ -783,8 +783,8 @@ fn setup_render_pipeline(
             }
         } else {
             // Document service not yet started — share memory and send config.
-            let fs_doc_va =
-                sys::memory_share(fs_proc, doc_pa, DOC_BUF_PAGES, false).unwrap_or_else(|_| {
+            let fs_doc_va = sys::memory_share(fs_proc, doc_pa, DOC_BUF_PAGES, false)
+                .unwrap_or_else(|_| {
                     sys::print(b"init: memory_share (doc) failed\n");
                     sys::exit();
                 });
@@ -1203,13 +1203,11 @@ pub extern "C" fn _start() -> ! {
         unsafe { core::ptr::write_bytes(_store_va as *mut u8, 0, fs_capacity as usize) };
 
         // Share Content Region with document service (read-write, for writing font data).
-        let doc_content_va =
-            sys::memory_share(fs_proc, content_pa, content_page_count, false).unwrap_or_else(
-                |_| {
-                    sys::print(b"init: memory_share (doc content) failed\n");
-                    sys::exit();
-                },
-            );
+        let doc_content_va = sys::memory_share(fs_proc, content_pa, content_page_count, false)
+            .unwrap_or_else(|_| {
+                sys::print(b"init: memory_share (doc content) failed\n");
+                sys::exit();
+            });
 
         // Share File Store with document service (read-write, for writing PNG data).
         let doc_fs_va =
@@ -1255,9 +1253,8 @@ pub extern "C" fn _start() -> ! {
             content_size: content_capacity,
             _pad3: 0,
         };
-        let doc_msg = unsafe {
-            ipc::Message::from_payload(protocol::document::MSG_DOC_CONFIG, &doc_config)
-        };
+        let doc_msg =
+            unsafe { ipc::Message::from_payload(protocol::document::MSG_DOC_CONFIG, &doc_config) };
         fs_ch_obj.send(&doc_msg);
 
         // Start document service.
@@ -1343,15 +1340,12 @@ pub extern "C" fn _start() -> ! {
                         match sys::wait(&[ch_handle.0], FONT_READ_TIMEOUT_NS) {
                             Ok(_) => {
                                 if ch_obj.try_recv(&mut resp)
-                                    && resp.msg_type
-                                        == protocol::document::MSG_DOC_QUERY_RESULT
+                                    && resp.msg_type == protocol::document::MSG_DOC_QUERY_RESULT
                                 {
                                     if let Some(protocol::document::Message::DocQueryResult(
                                         result,
-                                    )) = protocol::document::decode(
-                                        resp.msg_type,
-                                        &resp.payload,
-                                    ) {
+                                    )) = protocol::document::decode(resp.msg_type, &resp.payload)
+                                    {
                                         if result.count > 0 {
                                             return result.file_ids[0];
                                         }
@@ -1384,9 +1378,8 @@ pub extern "C" fn _start() -> ! {
                         capacity,
                         _pad: 0,
                     };
-                    let msg = unsafe {
-                        ipc::Message::from_payload(protocol::document::MSG_DOC_READ, &r)
-                    };
+                    let msg =
+                        unsafe { ipc::Message::from_payload(protocol::document::MSG_DOC_READ, &r) };
                     ch_obj.send(&msg);
                     let _ = sys::channel_signal(ch_handle);
 
@@ -1399,12 +1392,9 @@ pub extern "C" fn _start() -> ! {
                                 if ch_obj.try_recv(&mut resp)
                                     && resp.msg_type == protocol::document::MSG_DOC_READ_DONE
                                 {
-                                    if let Some(protocol::document::Message::DocReadDone(
-                                        done,
-                                    )) = protocol::document::decode(
-                                        resp.msg_type,
-                                        &resp.payload,
-                                    ) {
+                                    if let Some(protocol::document::Message::DocReadDone(done)) =
+                                        protocol::document::decode(resp.msg_type, &resp.payload)
+                                    {
                                         if done.status == 0 {
                                             return done.len;
                                         }
@@ -1434,11 +1424,7 @@ pub extern "C" fn _start() -> ! {
                         protocol::content::CONTENT_ID_FONT_MONO,
                         b"mono",
                     ),
-                    (
-                        b"Inter",
-                        protocol::content::CONTENT_ID_FONT_SANS,
-                        b"sans",
-                    ),
+                    (b"Inter", protocol::content::CONTENT_ID_FONT_SANS, b"sans"),
                     (
                         b"Source Serif 4",
                         protocol::content::CONTENT_ID_FONT_SERIF,
@@ -1505,9 +1491,8 @@ pub extern "C" fn _start() -> ! {
                 // Write Content Region header.
                 // SAFETY: content_va is a valid DMA allocation; header struct fits within
                 // CONTENT_HEADER_SIZE.
-                let header = unsafe {
-                    &mut *(content_va as *mut protocol::content::ContentRegionHeader)
-                };
+                let header =
+                    unsafe { &mut *(content_va as *mut protocol::content::ContentRegionHeader) };
                 header.magic = protocol::content::CONTENT_REGION_MAGIC;
                 header.version = protocol::content::CONTENT_REGION_VERSION;
                 header.entry_count = entry_count;
@@ -1521,7 +1506,13 @@ pub extern "C" fn _start() -> ! {
                 sys::print(b"     loading test.png\n");
                 let png_file_id = query_attr(&fs_ch_obj, fs_ch, b"name", b"test");
                 let png_len = if png_file_id != 0 {
-                    doc_read(&fs_ch_obj, fs_ch, png_file_id, doc_fs_va as u64, fs_capacity)
+                    doc_read(
+                        &fs_ch_obj,
+                        fs_ch,
+                        png_file_id,
+                        doc_fs_va as u64,
+                        fs_capacity,
+                    )
                 } else {
                     0
                 };
@@ -1543,8 +1534,7 @@ pub extern "C" fn _start() -> ! {
                 // Signal end of boot-query phase. The document service can now
                 // safely access handle 1 (core channel), which was sent via
                 // handle_send before the service started.
-                let boot_done_msg =
-                    ipc::Message::new(protocol::document::MSG_DOC_BOOT_DONE);
+                let boot_done_msg = ipc::Message::new(protocol::document::MSG_DOC_BOOT_DONE);
                 fs_ch_obj.send(&boot_done_msg);
                 let _ = sys::channel_signal(fs_ch);
 
@@ -1732,9 +1722,8 @@ pub extern "C" fn _start() -> ! {
                 sys::print(b" bytes\n");
 
                 // SAFETY: content_va is a valid DMA allocation; header fits within CONTENT_HEADER_SIZE.
-                let header = unsafe {
-                    &mut *(content_va as *mut protocol::content::ContentRegionHeader)
-                };
+                let header =
+                    unsafe { &mut *(content_va as *mut protocol::content::ContentRegionHeader) };
                 header.entries[entry_count as usize] = protocol::content::ContentEntry {
                     content_id: *content_id,
                     offset: data_cursor,
@@ -1771,8 +1760,7 @@ pub extern "C" fn _start() -> ! {
 
         // Load PNG into File Store.
         sys::print(b"     loading test.png\n");
-        let png_len =
-            read_file(&p9_ch_obj, p9_ch, p9_fs_va as u64, fs_capacity, b"test.png");
+        let png_len = read_file(&p9_ch_obj, p9_ch, p9_fs_va as u64, fs_capacity, b"test.png");
 
         if png_len > 0 {
             let mut buf = [0u8; 40];

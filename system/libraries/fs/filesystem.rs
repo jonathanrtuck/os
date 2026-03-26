@@ -12,14 +12,21 @@
 //! workloads (files < 1 MiB). Optimized per-block COW is a future
 //! enhancement.
 
-use alloc::{collections::BTreeMap, collections::BTreeSet, format, vec, vec::Vec};
+use alloc::{
+    collections::{BTreeMap, BTreeSet},
+    format, vec,
+    vec::Vec,
+};
 
-use crate::alloc_mod::Allocator;
-use crate::block::BlockDevice;
-use crate::inode::{Inode, InodeExtent, INLINE_CAPACITY};
-use crate::snapshot::{self, FileSnapshot, Snapshot};
-use crate::superblock::Superblock;
-use crate::{now_nanos, FsError, BLOCK_SIZE};
+use crate::{
+    alloc_mod::Allocator,
+    block::BlockDevice,
+    inode::{Inode, InodeExtent, INLINE_CAPACITY},
+    now_nanos,
+    snapshot::{self, FileSnapshot, Snapshot},
+    superblock::Superblock,
+    FsError, BLOCK_SIZE,
+};
 
 /// A COW filesystem with per-file snapshots.
 pub struct Filesystem<D: BlockDevice> {
@@ -82,14 +89,13 @@ impl<D: BlockDevice> Filesystem<D> {
         let (inodes, table_blocks) = load_all_inodes(&device, sb.root_inode_table)?;
 
         // Load snapshot store.
-        let (snapshots, next_snapshot_id, snap_store_blocks) =
-            if sb.root_snapshot_index != 0 {
-                let (data, blocks) = snapshot::read_blob(&device, sb.root_snapshot_index)?;
-                let (snaps, next_id) = snapshot::deserialize(&data)?;
-                (snaps, next_id, blocks)
-            } else {
-                (BTreeMap::new(), 1, Vec::new())
-            };
+        let (snapshots, next_snapshot_id, snap_store_blocks) = if sb.root_snapshot_index != 0 {
+            let (data, blocks) = snapshot::read_blob(&device, sb.root_snapshot_index)?;
+            let (snaps, next_id) = snapshot::deserialize(&data)?;
+            (snaps, next_id, blocks)
+        } else {
+            (BTreeMap::new(), 1, Vec::new())
+        };
 
         Ok(Self {
             device,
@@ -119,7 +125,10 @@ impl<D: BlockDevice> Filesystem<D> {
 
     /// Delete a file. Blocks are deferred-freed, not immediately reused.
     pub fn delete_file(&mut self, file_id: u64) -> Result<(), FsError> {
-        let inode = self.inodes.remove(&file_id).ok_or(FsError::NotFound(file_id))?;
+        let inode = self
+            .inodes
+            .remove(&file_id)
+            .ok_or(FsError::NotFound(file_id))?;
         let next_txg = self.superblock.txg + 1;
         for ext in inode.extents() {
             self.deferred.push(DeferredFree {
@@ -516,9 +525,7 @@ impl<D: BlockDevice> Filesystem<D> {
     fn extent_in_any_snapshot(&self, file_id: u64, start_block: u32) -> bool {
         self.snapshots.values().any(|s| {
             s.files.get(&file_id).map_or(false, |fs| {
-                fs.extents
-                    .iter()
-                    .any(|e| e.start_block == start_block)
+                fs.extents.iter().any(|e| e.start_block == start_block)
             })
         })
     }
@@ -580,21 +587,11 @@ impl<D: BlockDevice> crate::Files for Filesystem<D> {
         self.delete_file(file.0)
     }
 
-    fn read(
-        &self,
-        file: crate::FileId,
-        offset: u64,
-        buf: &mut [u8],
-    ) -> Result<usize, FsError> {
+    fn read(&self, file: crate::FileId, offset: u64, buf: &mut [u8]) -> Result<usize, FsError> {
         Filesystem::read(self, file.0, offset, buf)
     }
 
-    fn write(
-        &mut self,
-        file: crate::FileId,
-        offset: u64,
-        data: &[u8],
-    ) -> Result<(), FsError> {
+    fn write(&mut self, file: crate::FileId, offset: u64, data: &[u8]) -> Result<(), FsError> {
         Filesystem::write(self, file.0, offset, data)
     }
 
@@ -682,8 +679,7 @@ fn read_extents<D: BlockDevice>(
             let n = remaining.min(available);
 
             if n > 0 {
-                buf[buf_pos..buf_pos + n]
-                    .copy_from_slice(&block_buf[src_start..src_start + n]);
+                buf[buf_pos..buf_pos + n].copy_from_slice(&block_buf[src_start..src_start + n]);
                 buf_pos += n;
             }
         }

@@ -11,9 +11,7 @@
 
 use alloc::{format, vec, vec::Vec};
 
-use crate::block::BlockDevice;
-use crate::superblock::DATA_START;
-use crate::{FsError, BLOCK_SIZE};
+use crate::{block::BlockDevice, superblock::DATA_START, FsError, BLOCK_SIZE};
 
 /// Maximum free extents that fit in one persistence block.
 /// (BLOCK_SIZE - 8 byte header) / 8 bytes per entry.
@@ -89,9 +87,7 @@ impl Allocator {
             let count = get_u32(&buf, off + 4);
 
             if count == 0 {
-                return Err(FsError::Corrupt(format!(
-                    "free extent {i} has zero count"
-                )));
+                return Err(FsError::Corrupt(format!("free extent {i} has zero count")));
             }
             if start < prev_end {
                 return Err(FsError::Corrupt(format!(
@@ -173,9 +169,7 @@ impl Allocator {
         }
 
         // Coalesce with left neighbor (at pos-1).
-        if pos > 0
-            && self.free[pos - 1].start + self.free[pos - 1].count == self.free[pos].start
-        {
+        if pos > 0 && self.free[pos - 1].start + self.free[pos - 1].count == self.free[pos].start {
             self.free[pos - 1].count += self.free[pos].count;
             self.free.remove(pos);
         }

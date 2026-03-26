@@ -4,7 +4,7 @@ Thick Virgil3D GPU driver — reads the scene graph from shared memory and rende
 
 ## Architecture
 
-```
+```text
 Core (layout + scene build) → Scene Graph (shared memory) → virgil-render (tree walk + Gallium3D + present) → Display
 ```
 

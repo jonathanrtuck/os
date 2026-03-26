@@ -9,8 +9,8 @@
 //!
 //! ```text
 //! ┌──────────┬─────────────────────┬──────────────────────┐
-//! │  Header  │  Node array         │  Data buffer          │
-//! │  80 B    │  N × NODE_SIZE      │  variable-length      │
+//! │  Header  │  Node array         │  Data buffer         │
+//! │  80 B    │  N × NODE_SIZE      │  variable-length     │
 //! └──────────┴─────────────────────┴──────────────────────┘
 //! ```
 //!

@@ -427,24 +427,24 @@ Kernel change before filesystem work. Foundation must be correct before building
 **Decision:** RedoxFS-style one-block inode. Each inode occupies one 16 KiB block, partitioned into three regions:
 
 ```text
-┌─────────────────────────────────────────────────────────────┐
-│  HEADER (64 bytes)                                          │
-│  file_id: u64, size: u64, created: u64, modified: u64       │
-│  flags: u32, extent_count: u16, snapshot_count: u16         │
-│  indirect_block: u32, snapshot_list_block: u32, reserved    │
-├─────────────────────────────────────────────────────────────┤
-│  EXTENT LIST (up to 16 entries × 12 bytes = 192 bytes)      │
-│  Per extent: start_block (u32) + count (u16) +              │
+┌──────────────────────────────────────────────────────────────┐
+│  HEADER (64 bytes)                                           │
+│  file_id: u64, size: u64, created: u64, modified: u64        │
+│  flags: u32, extent_count: u16, snapshot_count: u16          │
+│  indirect_block: u32, snapshot_list_block: u32, reserved     │
+├──────────────────────────────────────────────────────────────┤
+│  EXTENT LIST (up to 16 entries × 12 bytes = 192 bytes)       │
+│  Per extent: start_block (u32) + count (u16) +               │
 │              birth_txg (u48, 6 bytes)                        │
-├─────────────────────────────────────────────────────────────┤
+├──────────────────────────────────────────────────────────────┤
 │  SNAPSHOT LIST (inline up to ~8 records)                     │
 │  Per snapshot: snapshot_id (u32) + saved extent list pointer │
 │  Overflows to linked snapshot blocks via snapshot_list_block │
-├─────────────────────────────────────────────────────────────┤
-│  INLINE DATA (remaining ~15.5 KiB)                          │
-│  When flags.inline_data set: file content stored here       │
-│  Otherwise: unused (zero-filled)                            │
-└─────────────────────────────────────────────────────────────┘
+├──────────────────────────────────────────────────────────────┤
+│  INLINE DATA (remaining ~15.5 KiB)                           │
+│  When flags.inline_data set: file content stored here        │
+│  Otherwise: unused (zero-filled)                             │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 **Why one-block inodes:** Most document files are small (manifests, text, configs < 15 KiB). Inline data means these files are one block on disk — one read gets metadata + content + extent list + snapshot history. Zero indirection. For larger files: 16 extents × 16 KiB blocks = 256 KiB directly addressable; `indirect_block` handles overflow for rare large files.

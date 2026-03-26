@@ -12,10 +12,7 @@
 
 use alloc::vec;
 
-use crate::block::BlockDevice;
-use crate::crc32::crc32;
-use crate::now_nanos;
-use crate::{FsError, BLOCK_SIZE};
+use crate::{block::BlockDevice, crc32::crc32, now_nanos, FsError, BLOCK_SIZE};
 
 /// Number of slots in the superblock ring.
 pub const RING_SIZE: u32 = 16;

@@ -2,13 +2,13 @@
 
 Userspace programs. Each is a `#![no_std]` ELF binary embedded into init at build time.
 
-| Program        | Purpose                                                                                  |
-| -------------- | ---------------------------------------------------------------------------------------- |
+| Program        | Purpose                                                                                                                           |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------- |
 | `text-editor/` | Editor process: content-type-specific input→write translator (insert, delete, tab/dedent). Navigation and selection live in core. |
-| `echo/`        | Minimal test program (proof of userspace execution)                                      |
-| `fuzz/`        | Adversarial syscall fuzzer: 31 phases of invalid/edge-case syscalls                      |
-| `fuzz-helper/` | Child process spawned by the fuzzer for process lifecycle tests                          |
-| `stress/`      | IPC/scheduler/timer stress test: 3 channel pairs, 10M iterations per worker, 7 threads   |
+| `echo/`        | Minimal test program (proof of userspace execution)                                                                               |
+| `fuzz/`        | Adversarial syscall fuzzer: 31 phases of invalid/edge-case syscalls                                                               |
+| `fuzz-helper/` | Child process spawned by the fuzzer for process lifecycle tests                                                                   |
+| `stress/`      | IPC/scheduler/timer stress test: 3 channel pairs, 10M iterations per worker, 7 threads                                            |
 
 ## Conventions
 

@@ -235,7 +235,7 @@ Three-tier allocation with address-based dealloc routing.
 
 ### Allocation Flow
 
-```
+```text
 GlobalAlloc::alloc(layout)
   ├─ size ≤ 2048 → slab::try_alloc() → O(1) from slab cache
   │   └─ slab full → slab::grow() → page_allocator::alloc_frame()
@@ -245,7 +245,7 @@ GlobalAlloc::alloc(layout)
 
 ### Deallocation Routing (Address-Based, NOT Size-Based)
 
-```
+```text
 GlobalAlloc::dealloc(ptr, layout)
   ├─ ptr ∈ [region_start, region_end) → linked-list free
   └─ ptr ∉ heap region → slab::try_free()
@@ -321,7 +321,7 @@ Double-free is harmless (clears already-clear bit).
 
 ### End-to-End Trace
 
-```
+```text
 process::create_from_user_elf()
   │ address_space_id::alloc() → (Asid(N), gen)
   │ AddressSpace::new(asid) → L0 page table allocated

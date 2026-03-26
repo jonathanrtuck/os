@@ -8,7 +8,7 @@ use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::process;
 
-use fs::{BlockDevice, FsError, Filesystem, BLOCK_SIZE};
+use fs::{BlockDevice, Filesystem, FsError, BLOCK_SIZE};
 use store::Store;
 
 // ── FileDevice ──────────────────────────────────────────────────────
@@ -176,12 +176,7 @@ fn main() {
         store.set_attribute(id, "style", font.style).unwrap();
 
         file_count += 1;
-        println!(
-            "  font  {:?}  {}  ({} bytes)",
-            id,
-            font.name,
-            data.len()
-        );
+        println!("  font  {:?}  {}  ({} bytes)", id, font.name, data.len());
     }
 
     // Ingest test.png if present.
@@ -206,8 +201,5 @@ fn main() {
         process::exit(1);
     });
 
-    println!(
-        "created {} with {file_count} files",
-        output_path.display()
-    );
+    println!("created {} with {file_count} files", output_path.display());
 }
