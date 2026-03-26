@@ -58,9 +58,9 @@ For the full design landscape, see the [decision register](design/decisions.md) 
 
 ### Prerequisites
 
-- **Rust nightly** with `aarch64-unknown-none` target (`rustup target add aarch64-unknown-none`)
-- **QEMU** (`qemu-system-aarch64`)
-- **Python 3 with Pillow** (optional, for screenshot conversion only)
+- **Rust nightly** with `aarch64-unknown-none` target (handled automatically by `rust-toolchain.toml` — just [install Rust](https://rustup.rs/))
+- **[Hypervisor](https://github.com/jonathanrtuck/hypervisor)** (`make install` from that repo) — native Metal GPU rendering on macOS
+- For QEMU path: **QEMU** with `qemu-system-aarch64` (`brew install qemu`)
 
 ### Build
 
