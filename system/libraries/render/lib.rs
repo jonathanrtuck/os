@@ -63,7 +63,7 @@ const LRU_CACHE_CAPACITY: usize = 256;
 /// glyph rasterization.
 pub struct LruRasterizer {
     /// LRU cache for non-ASCII glyphs. Keyed by (glyph_id, font_size,
-    /// axis_hash). Populated on-demand during rendering when the fixed
+    /// style_id). Populated on-demand during rendering when the fixed
     /// ASCII cache misses.
     pub cache: fonts::cache::LruGlyphCache,
     /// Mono font data (owned copy for on-demand rasterization).
@@ -111,7 +111,7 @@ impl LruRasterizer {
         &mut self,
         glyph_id: u16,
         font_size: u16,
-        axis_hash: u32,
+        style_id: u32,
     ) -> Option<&fonts::cache::LruCachedGlyph> {
         // Clear the raster buffer.
         for b in self.raster_buf.iter_mut() {
@@ -152,8 +152,8 @@ impl LruRasterizer {
         };
 
         self.cache
-            .insert_with_axes(glyph_id, font_size, axis_hash, cached);
-        self.cache.get_with_axes(glyph_id, font_size, axis_hash)
+            .insert_with_axes(glyph_id, font_size, style_id, cached);
+        self.cache.get_with_axes(glyph_id, font_size, style_id)
     }
 }
 

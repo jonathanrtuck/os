@@ -10,9 +10,9 @@ use scene::{fnv1a, Border, Color, Content, FillRule, NodeFlags, NULL};
 
 use super::{
     allocate_line_nodes, allocate_selection_rects, byte_to_line_col, chars_per_line, dc, doc_width,
-    layout_mono_lines, layout_rich_lines, rich_axis_hash, scroll_runs, shape_chrome_text,
-    shape_rich_segment, shape_visible_runs, update_clock_inline, FontInfo, RichLine, SceneConfig,
-    FONT_SANS, N_CLOCK_TEXT, N_CONTENT, N_CURSOR, N_DOC_IMAGE, N_DOC_TEXT, N_PAGE, N_POINTER,
+    layout_mono_lines, layout_rich_lines, scroll_runs, shape_chrome_text, shape_rich_segment,
+    shape_visible_runs, update_clock_inline, FontInfo, RichLine, SceneConfig, N_CLOCK_TEXT,
+    N_CONTENT, N_CURSOR, N_DOC_IMAGE, N_DOC_TEXT, N_PAGE, N_POINTER,
     N_ROOT, N_SHADOW, N_STRIP, N_TITLE_BAR, N_TITLE_ICON, N_TITLE_TEXT, WELL_KNOWN_COUNT,
 };
 use crate::icons;
@@ -206,7 +206,7 @@ pub fn build_full_scene(
             glyphs: title_glyph_ref,
             glyph_count: title_glyphs.len() as u16,
             font_size: cfg.font_size,
-            axis_hash: FONT_SANS,
+            style_id: 1,
         };
         n.content_hash = fnv1a(title_label);
         n.flags = NodeFlags::VISIBLE;
@@ -224,7 +224,7 @@ pub fn build_full_scene(
             glyphs: clock_glyph_ref,
             glyph_count: clock_glyphs.len() as u16,
             font_size: cfg.font_size,
-            axis_hash: FONT_SANS,
+            style_id: 1,
         };
         n.content_hash = fnv1a(clock_text);
         n.flags = NodeFlags::VISIBLE;
@@ -433,7 +433,7 @@ pub fn build_clock_update(w: &mut scene::SceneWriter<'_>, cfg: &SceneConfig, clo
             glyphs: new_ref,
             glyph_count: new_count,
             font_size: cfg.font_size,
-            axis_hash: FONT_SANS,
+            style_id: 1,
         };
         n.content_hash = fnv1a(clock_text);
         w.mark_dirty(N_CLOCK_TEXT);
@@ -649,7 +649,7 @@ pub fn build_document_content(
             glyphs: title_glyph_ref,
             glyph_count: title_glyphs.len() as u16,
             font_size: cfg.font_size,
-            axis_hash: FONT_SANS,
+            style_id: 1,
         };
         n.content_hash = fnv1a(title_label);
     }
@@ -662,7 +662,7 @@ pub fn build_document_content(
             glyphs: clock_glyph_ref,
             glyph_count: clock_glyphs.len() as u16,
             font_size: cfg.font_size,
-            axis_hash: FONT_SANS,
+            style_id: 1,
         };
         n.content_hash = fnv1a(clock_text);
     }
@@ -822,7 +822,7 @@ fn allocate_rich_line_nodes(
 
             let glyph_ref = w.push_shaped_glyphs(&shaped);
             let glyph_count = shaped.len() as u16;
-            let axis_hash = rich_axis_hash(style.font_family, style.weight, italic);
+            let style_id = 0u32; // Temporary — Task 5 wires up real StyleTable.
 
             let color = Color::rgba(
                 style.color[0],
@@ -841,7 +841,7 @@ fn allocate_rich_line_nodes(
                     glyphs: glyph_ref,
                     glyph_count,
                     font_size,
-                    axis_hash,
+                    style_id,
                 };
                 n.content_hash = scene::fnv1a(&glyph_ref.offset.to_le_bytes());
                 n.flags = NodeFlags::VISIBLE;
@@ -938,7 +938,7 @@ pub fn build_rich_document_content(
             glyphs: title_glyph_ref,
             glyph_count: title_glyphs.len() as u16,
             font_size: cfg.font_size,
-            axis_hash: FONT_SANS,
+            style_id: 1,
         };
         n.content_hash = fnv1a(title_label);
     }
@@ -949,7 +949,7 @@ pub fn build_rich_document_content(
             glyphs: clock_glyph_ref,
             glyph_count: clock_glyphs.len() as u16,
             font_size: cfg.font_size,
-            axis_hash: FONT_SANS,
+            style_id: 1,
         };
         n.content_hash = fnv1a(clock_text);
     }

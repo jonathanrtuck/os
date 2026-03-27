@@ -16,9 +16,8 @@ pub use full::{
     build_rich_document_content, build_selection_update, RichFonts, CURSOR_HOTSPOT_OFFSET,
 };
 pub use incremental::{delete_line, insert_line, update_single_line};
-// Re-export font identity constants from the scene library (single source
-// of truth) so submodules can use `super::FONT_SANS`.
-pub(crate) use scene::FONT_SANS;
+// Font identity constants removed. Style IDs are assigned at runtime
+// by core's StyleTable. Temporary literals used until Task 5.
 use scene::{Color, Content, DataRef, NodeFlags, ShapedGlyph, NULL};
 
 // ── Float math helpers (no_std) ─────────────────────────────────────
@@ -501,19 +500,6 @@ pub fn shape_rich_segment(
     shape_text(font_data, text, font_size, upem, axes)
 }
 
-/// Compute an axis_hash for a rich text style's variable font settings.
-/// Encodes font_family, weight, and italic into a single u32 for the
-/// scene graph's glyph cache key.
-pub fn rich_axis_hash(font_family: u8, weight: u16, italic: bool) -> u32 {
-    // Combine font identity + weight + italic flag into a unique hash.
-    let mut h: u32 = font_family as u32;
-    h = h.wrapping_mul(65599).wrapping_add(weight as u32);
-    if italic {
-        h = h.wrapping_mul(65599).wrapping_add(1);
-    }
-    h
-}
-
 /// Count lines in a text buffer (newlines + 1).
 pub fn count_lines(text: &[u8]) -> usize {
     let mut count: usize = 1;
@@ -575,7 +561,7 @@ pub(crate) fn allocate_line_nodes(
                 glyphs: glyph_ref,
                 glyph_count,
                 font_size,
-                axis_hash: 0,
+                style_id: 0,
             };
             n.content_hash = scene::fnv1a(&glyph_ref.offset.to_le_bytes());
             n.flags = NodeFlags::VISIBLE;
@@ -637,7 +623,7 @@ pub(crate) fn update_clock_inline(
             glyphs: new_ref,
             glyph_count: new_count,
             font_size: cfg.font_size,
-            axis_hash: FONT_SANS,
+            style_id: 1,
         };
         n.content_hash = scene::fnv1a(clock_text);
         w.mark_dirty(N_CLOCK_TEXT);

@@ -75,11 +75,11 @@ pub(super) fn render_content(
             glyphs,
             glyph_count,
             font_size,
-            axis_hash,
+            style_id,
         } => {
-            // Select glyph cache by font identity (scene::FONT_MONO = 0,
-            // scene::FONT_SANS = 1). Non-mono fonts use the prop_cache.
-            let cache = if axis_hash != scene::FONT_MONO {
+            // Select glyph cache by style identity (0 = mono, 1 = sans).
+            // Non-mono fonts use the prop_cache.
+            let cache = if style_id != 0 {
                 ctx.prop_cache
             } else {
                 ctx.mono_cache
@@ -95,7 +95,7 @@ pub(super) fn render_content(
                 draw_x,
                 draw_y,
                 font_size,
-                axis_hash,
+                style_id,
                 ctx.font_size_px,
                 lru,
             );
@@ -137,7 +137,7 @@ fn render_glyphs(
     draw_x: i32,
     draw_y: i32,
     font_size: u16,
-    axis_hash: u32,
+    style_id: u32,
     font_size_px: u16,
     mut lru: Option<&mut LruRasterizer>,
 ) {
@@ -169,7 +169,7 @@ fn render_glyphs(
     } else {
         font_size_px
     };
-    let lru_axis_hash = axis_hash;
+    let lru_style_id = style_id;
 
     for sg in shaped_glyphs {
         let cx = round_f32(pen_x);
@@ -184,16 +184,16 @@ fn render_glyphs(
             // LRU fallback: check cache hit first, then rasterize on demand.
             if lru
                 .cache
-                .get_with_axes(sg.glyph_id, lru_font_size, lru_axis_hash)
+                .get_with_axes(sg.glyph_id, lru_font_size, lru_style_id)
                 .is_none()
             {
                 // Cache miss — rasterize on demand and insert into LRU.
-                let _ = lru.rasterize_and_get(sg.glyph_id, lru_font_size, lru_axis_hash);
+                let _ = lru.rasterize_and_get(sg.glyph_id, lru_font_size, lru_style_id);
             }
             // Now fetch from LRU (either was already there, or just inserted).
             if let Some(g) = lru
                 .cache
-                .get_with_axes(sg.glyph_id, lru_font_size, lru_axis_hash)
+                .get_with_axes(sg.glyph_id, lru_font_size, lru_style_id)
             {
                 let px = cx + g.bearing_x;
                 let py = draw_y + (cache.ascent as i32 - g.bearing_y);

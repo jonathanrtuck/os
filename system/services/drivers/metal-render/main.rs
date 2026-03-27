@@ -549,12 +549,12 @@ pub extern "C" fn _start() -> ! {
                 if let scene::Content::Glyphs {
                     glyphs,
                     glyph_count,
-                    axis_hash,
+                    style_id,
                     ..
                 } = node.content
                 {
-                    // Map axis_hash to font_id (scene::FONT_MONO=0, scene::FONT_SANS=1).
-                    let font_id = (axis_hash as u16).min(1);
+                    // Map style_id to font_id (0=mono, 1=sans).
+                    let font_id = (style_id as u16).min(1);
                     let raster_font = font_slices[font_id as usize];
                     if raster_font.is_empty() {
                         continue;

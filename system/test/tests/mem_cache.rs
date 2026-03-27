@@ -271,11 +271,11 @@ fn cache_preserves_all_metrics_fields() {
 }
 
 // ---------------------------------------------------------------------------
-// VAL-CACHE-004: Axis hash keying — same glyph at different axes are independent
+// VAL-CACHE-004: Style ID keying — same glyph at different styles are independent
 // ---------------------------------------------------------------------------
 
 #[test]
-fn cache_axis_hash_independent_entries() {
+fn cache_style_id_independent_entries() {
     let mut cache = LruGlyphCache::new(64);
     let g_default = LruCachedGlyph {
         width: 10,
@@ -294,7 +294,7 @@ fn cache_axis_hash_independent_entries() {
         coverage: vec![200; 143],
     };
 
-    // Same glyph ID + font size, different axis hashes.
+    // Same glyph ID + font size, different style IDs.
     cache.insert_with_axes(42, 18, 0, g_default.clone());
     cache.insert_with_axes(42, 18, 0xABCD, g_bold.clone());
 
@@ -308,12 +308,12 @@ fn cache_axis_hash_independent_entries() {
 }
 
 #[test]
-fn cache_axis_hash_miss_different_hash() {
+fn cache_style_id_miss_different_id() {
     let mut cache = LruGlyphCache::new(64);
     let glyph = dummy_glyph(50);
     cache.insert_with_axes(42, 18, 0, glyph);
 
-    // Same glyph ID + font size, different axis hash = miss.
+    // Same glyph ID + font size, different style_id = miss.
     assert!(cache.get_with_axes(42, 18, 1).is_none());
 }
 

@@ -236,15 +236,15 @@ impl<'a> FallbackChain<'a> {
 /// The `font_index` is the position in the fallback chain (0 = primary,
 /// 1 = first fallback, etc.). Axis values are hashed as before.
 pub fn font_identifier_hash(font_index: u8, axis_values: &[AxisValue]) -> u32 {
-    let axis_hash = fonts::rasterize::axis_values_hash(axis_values);
+    let style_id = fonts::rasterize::axis_values_hash(axis_values);
 
-    // Combine font_index with axis_hash using FNV-1a mixing.
+    // Combine font_index with style_id using FNV-1a mixing.
     let mut h: u32 = 0x811c_9dc5;
     // Mix in font_index.
     h ^= font_index as u32;
     h = h.wrapping_mul(0x0100_0193);
-    // Mix in axis_hash.
-    h ^= axis_hash;
+    // Mix in style_id.
+    h ^= style_id;
     h = h.wrapping_mul(0x0100_0193);
 
     h

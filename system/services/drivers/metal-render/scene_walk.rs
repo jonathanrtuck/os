@@ -490,7 +490,7 @@ pub(crate) fn walk_scene(
             color,
             glyphs,
             glyph_count,
-            axis_hash,
+            style_id,
             ..
         } => {
             let shaped = reader.front_shaped_glyphs(glyphs, glyph_count);
@@ -514,8 +514,8 @@ pub(crate) fn walk_scene(
             // 16.16 fixed-point to f32 conversion factor.
             let fp16 = 65536.0f32;
 
-            // Map axis_hash to font_id for atlas lookup (scene::FONT_MONO=0, scene::FONT_SANS=1).
-            let font_id = (axis_hash as u16).min(1);
+            // Map style_id to font_id for atlas lookup (0=mono, 1=sans).
+            let font_id = (style_id as u16).min(1);
 
             for sg in shaped {
                 if let Some(entry) = ctx.atlas.lookup_compat(sg.glyph_id, font_id) {

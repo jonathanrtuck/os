@@ -198,7 +198,7 @@ pub fn update_single_line(
             glyphs: new_ref,
             glyph_count: new_count,
             font_size: cfg.font_size,
-            axis_hash: 0,
+            style_id: 0,
         };
         n.content_hash = scene::fnv1a(&new_ref.offset.to_le_bytes());
         w.mark_dirty(cur);
@@ -485,7 +485,7 @@ pub fn insert_line(
             glyphs: new_ref,
             glyph_count: new_count,
             font_size: cfg.font_size,
-            axis_hash: 0,
+            style_id: 0,
         };
         n.content_hash = fnv1a(&new_ref.offset.to_le_bytes());
         w.mark_dirty(mod_node);
@@ -526,7 +526,7 @@ pub fn insert_line(
             glyphs: new_glyph_ref,
             glyph_count: new_shaped.len() as u16,
             font_size: cfg.font_size,
-            axis_hash: 0,
+            style_id: 0,
         };
         n.content_hash = fnv1a(&new_glyph_ref.offset.to_le_bytes());
         n.flags = NodeFlags::VISIBLE;
@@ -692,7 +692,7 @@ pub fn delete_line(
             glyphs: new_ref,
             glyph_count: shaped.len() as u16,
             font_size: cfg.font_size,
-            axis_hash: 0,
+            style_id: 0,
         };
         n.content_hash = fnv1a(&new_ref.offset.to_le_bytes());
     }

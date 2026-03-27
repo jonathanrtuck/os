@@ -208,15 +208,8 @@ pub fn path_close(buf: &mut Vec<u8>) {
 
 // ── Font identity constants ─────────────────────────────────────────
 
-/// Font identity constants for `Content::Glyphs`.
-///
-/// Used by core to specify which font was used for shaping, and by
-/// render backends to select the correct glyph cache/atlas. Stored in
-/// the `axis_hash` field of `Content::Glyphs` (the field name is
-/// historical — the wire format is unchanged).
-pub const FONT_MONO: u32 = 0;
-pub const FONT_SANS: u32 = 1;
-pub const FONT_SERIF: u32 = 2;
+// Font identity constants FONT_MONO/FONT_SANS/FONT_SERIF removed.
+// Style IDs are now assigned at runtime by core's StyleTable.
 
 // ── Content variant ─────────────────────────────────────────────────
 
@@ -286,9 +279,9 @@ pub enum Content {
         /// Font size in points (e.g., 18). Render backends scale to device
         /// pixels by multiplying by scale_factor. Used as glyph cache key.
         font_size: u16,
-        /// Hash of variable font axis values used for rasterization
-        /// (0 = default). Used as glyph cache key.
-        axis_hash: u32,
+        /// Style identifier assigned by core's StyleTable. Used as
+        /// glyph cache key to distinguish fonts/weights/styles.
+        style_id: u32,
     },
 }
 

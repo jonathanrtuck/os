@@ -246,8 +246,8 @@ impl GlyphCache {
 // LRU glyph cache
 // ---------------------------------------------------------------------------
 
-/// Cache key: (glyph_id, font_size, axis_hash).
-/// The axis_hash is 0 for default axis values (no variation).
+/// Cache key: (glyph_id, font_size, style_id).
+/// The style_id is 0 for default style (no variation).
 type CacheKey = (u16, u16, u32);
 
 /// Sentinel value meaning "no linked-list neighbor."
@@ -329,17 +329,17 @@ impl LruGlyphCache {
         self.get_with_axes(glyph_id, font_size, 0)
     }
 
-    /// Look up a cached glyph by `(glyph_id, font_size, axis_hash)`.
+    /// Look up a cached glyph by `(glyph_id, font_size, style_id)`.
     ///
-    /// The `axis_hash` distinguishes glyphs rasterized at different variable
-    /// font axis positions. Use 0 for default axis values.
+    /// The `style_id` distinguishes glyphs rasterized at different variable
+    /// font axis positions. Use 0 for default style.
     pub fn get_with_axes(
         &mut self,
         glyph_id: u16,
         font_size: u16,
-        axis_hash: u32,
+        style_id: u32,
     ) -> Option<&LruCachedGlyph> {
-        let key = (glyph_id, font_size, axis_hash);
+        let key = (glyph_id, font_size, style_id);
         let &idx = self.index.get(&key)?;
         self.move_to_head(idx);
         Some(&self.entries[idx].glyph)
@@ -355,18 +355,18 @@ impl LruGlyphCache {
         self.insert_with_axes(glyph_id, font_size, 0, glyph);
     }
 
-    /// Insert a glyph into the cache with axis value hash.
+    /// Insert a glyph into the cache with style identifier.
     ///
-    /// The `axis_hash` distinguishes glyphs rasterized at different variable
-    /// font axis positions. Use 0 for default axis values.
+    /// The `style_id` distinguishes glyphs rasterized at different variable
+    /// font axis positions. Use 0 for default style.
     pub fn insert_with_axes(
         &mut self,
         glyph_id: u16,
         font_size: u16,
-        axis_hash: u32,
+        style_id: u32,
         glyph: LruCachedGlyph,
     ) {
-        let key = (glyph_id, font_size, axis_hash);
+        let key = (glyph_id, font_size, style_id);
 
         // Update existing entry.
         if let Some(&idx) = self.index.get(&key) {
