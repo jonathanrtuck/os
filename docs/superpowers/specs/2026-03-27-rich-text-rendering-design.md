@@ -19,19 +19,25 @@ Root cause: the atlas and renderer were built for a single font at one size. The
 ## Design Principles
 
 - **Never revisit.** Success = fonts and text rendering are architecturally complete. Arbitrary fonts, arbitrary variable axes, arbitrary sizes. No artificial limits.
-- **Cache by full identity.** A glyph's visual identity is (glyph_id, font_size_px, axis_hash). The atlas key must capture all three dimensions.
+- **Cache by full identity.** A glyph's visual identity is (glyph_id, font_size_px, style_id). The atlas key must capture all three dimensions.
+- **Collision-free by construction.** No hashing for identity. Sequential IDs are unique by assignment, not by probability.
 - **Leaf node complexity.** The atlas is a leaf node behind a simple interface. Internal complexity (hash table, eviction) doesn't leak.
-- **Scene graph stays compact.** Each glyph node carries axis_hash (u32) and font_size (u16). No axis values in the scene graph.
+- **Scene graph stays compact.** Each glyph node carries style_id (u32) and font_size (u16). No axis values in the scene graph.
+- **Horizontal LTR assumed.** Layout uses x for inline advance and y for block advance. This is a known assumption tied to unsettled Decision #15 (Layout Engine). Vertical text and RTL require a layout engine redesign — not a rendering change. This spec does not abstract inline/block direction, but documents where the assumption lives so future work knows what to change.
 
 ## Section 1: Font Style Registry
 
 ### Problem
 
-The renderer needs axis values (weight, italic, optical size, etc.) and font data to rasterize a glyph. The scene graph only carries an opaque `axis_hash`. The renderer can't decode a hash.
+The renderer needs axis values (weight, italic, optical size, etc.) and font data to rasterize a glyph. The scene graph only carries a compact style identifier. The renderer needs a lookup table to map this identifier to rasterization parameters.
 
 ### Design
 
-Core writes a **font style registry** as the first item in the scene data buffer each frame. It maps axis_hash to rasterization parameters:
+**Sequential style IDs replace hashing.** Core maintains a style table. Each unique `(content_id, axes[])` combination gets the next u32 ID (0, 1, 2, ...). The scene graph carries `style_id` — a direct index into the style registry. No hash, no collisions, ever.
+
+The `Content::Glyphs` field is renamed from `axis_hash` to `style_id`. Its semantics change from "opaque hash" to "index into the style registry." The binary layout (u32) is unchanged.
+
+Core writes the **style registry** as the first item in the scene data buffer each frame. It maps style_id to rasterization parameters:
 
 ```rust
 #[repr(C)]
@@ -44,7 +50,7 @@ struct StyleRegistryHeader {
 
 #[repr(C)]
 struct StyleRegistryEntry {
-    axis_hash: u32,
+    style_id: u32,       // sequential, collision-free
     content_id: u32,     // font data location in Content Region
     ascent_fu: u16,      // font ascender in font units
     descent_fu: u16,     // font descender in font units (positive = below baseline)
@@ -63,67 +69,49 @@ struct AxisValue {
 
 **MAX_STYLE_AXES = 8.** Covers all practical variable font axes (OpenType fonts rarely exceed 5). Entry size = 4+4+2+2+2+1+1+64 = 80 bytes. For the 7 default palette styles (body, heading1, heading2, bold, italic, bold-italic, code) plus 2 chrome styles (mono for plain text, sans for chrome): 9 entries × 80 bytes + 8 byte header = 728 bytes in the 128 KiB data buffer.
 
-### axis_hash computation
+### Style ID assignment
 
-**Single canonical function**, used by both core and renderer. Replaces both the existing `rich_axis_hash()` in `core/layout/mod.rs` and `fonts::rasterize::axis_values_hash()` in the fonts library:
+Core maintains a `StyleTable` — a small array of `(content_id, axes[])` tuples. When building a scene graph, core calls:
 
 ```rust
-/// Canonical axis_hash: FNV-1a over (content_id, sorted axis tag+value pairs).
-/// Deterministic — same inputs always produce the same hash.
-pub fn axis_hash(content_id: u32, axes: &[AxisValue]) -> u32 {
-    let mut h: u32 = 2166136261; // FNV offset basis
-    // Hash content_id bytes
-    for b in content_id.to_le_bytes() {
-        h ^= b as u32;
-        h = h.wrapping_mul(16777619);
-    }
-    // Hash axes sorted by tag (caller must sort)
-    for ax in axes {
-        for b in ax.tag {
-            h ^= b as u32;
-            h = h.wrapping_mul(16777619);
-        }
-        for b in ax.value.to_le_bytes() {
-            h ^= b as u32;
-            h = h.wrapping_mul(16777619);
-        }
-    }
-    h
-}
+/// Get or assign a style_id for this (content_id, axes) combination.
+/// Returns the existing ID if already registered, or assigns the next
+/// sequential ID. Collision-free by construction.
+fn style_id_for(&mut self, content_id: u32, axes: &[AxisValue]) -> u32
 ```
 
-This function lives in the `protocol` library (shared by core and renderer). The caller sorts axes by tag before hashing — the sort ensures axis ordering doesn't affect the result.
+Linear scan of the table for deduplication. For 9 styles this is trivial. For a font browser with hundreds of visible styles, still negligible — the table is small and hot in cache.
+
+IDs are stable within a session but NOT across reboots. They're ephemeral scene-graph identifiers, not persistent data. The piece table stores style information (font_family, weight, italic), not style_ids. Core recomputes IDs at startup.
 
 ### FONT_MONO / FONT_SANS / FONT_SERIF
 
-These are **no longer compile-time constants** in the scene library. They become runtime values computed at core startup from the actual content_ids of the loaded fonts:
+These are **no longer compile-time constants** in the scene library. They become runtime values: the style_ids assigned to the three base fonts at default weight:
 
 ```rust
 // In core, at startup:
-let font_mono_hash = axis_hash(mono_content_id, &[]); // default weight, no axes
-let font_sans_hash = axis_hash(sans_content_id, &[]);
-let font_serif_hash = axis_hash(serif_content_id, &[]);
+let style_mono = style_table.style_id_for(mono_content_id, &[]);  // → 0
+let style_sans = style_table.style_id_for(sans_content_id, &[]);  // → 1
+let style_serif = style_table.style_id_for(serif_content_id, &[]); // → 2
 ```
 
-The scene library's `pub const FONT_MONO: u32 = 0` / `FONT_SANS: u32 = 1` / `FONT_SERIF: u32 = 2` are removed. Core stores the computed hashes and uses them when building chrome text nodes and plain text document nodes.
+Since these are the first three registered, they'll be 0, 1, 2 — but code must not depend on this. The scene library's `pub const FONT_MONO/FONT_SANS/FONT_SERIF` are removed. Core stores the assigned IDs and uses them when building chrome text nodes and plain text document nodes.
 
 ### Registry placement
 
-The style registry is **always the first item** in the scene data buffer. The renderer reads it at a fixed offset (byte 0 of the data buffer) — no scanning for a magic sentinel. The magic field exists for validation, not discovery.
+The style registry is **always the first item** in the scene data buffer. The renderer reads it at a fixed offset (byte 0 of the data buffer) — no scanning. The magic field exists for validation, not discovery.
 
 ### Plain text documents
 
 **All documents write a style registry.** For text/plain, the registry has 2 entries: the document's mono font (for text) and the sans font (for chrome). For text/rich, it has 2 + N palette entries. No special fallback path — the registry is always present.
 
-### Hash collision risk
-
-FNV-1a on (content_id + axes) is not collision-resistant for adversarial inputs, but it's statistically sufficient for practical use. For 100 distinct styles, the birthday probability of a u32 collision is ~0.0001%. The style registry lookup validates content_id, so a hash collision would produce a wrong font — visible but not a crash. If this ever becomes a concern, upgrade to a 64-bit hash (the axis_hash field in Content::Glyphs could be repurposed or the Content enum resized).
-
 ### Renderer flow
 
 1. At frame start, read `StyleRegistryHeader` from data buffer offset 0
-2. Validate magic, build a local lookup array: axis_hash → &StyleRegistryEntry
-3. During pre-scan and scene walk, look up axis_hash to get font data + axes
+2. Validate magic, build a local lookup array indexed by style_id (direct index, O(1))
+3. During pre-scan and scene walk, look up style_id to get font data + axes
+
+Since style_ids are sequential starting from 0, the renderer can use a simple array indexed by style_id instead of a hash map for the registry lookup. This is O(1) with no hashing or probing.
 
 ## Section 2: Hash-Map Glyph Atlas
 
@@ -135,11 +123,12 @@ The current atlas is a flat array indexed by `font_id * GLYPH_STRIDE + glyph_id`
 
 Replace with an open-addressed hash table. Fixed capacity, no heap allocation.
 
-**Key:** `(glyph_id: u16, font_size_px: u16, axis_hash: u32)` packed into a `u64`.
+**Key:** `(glyph_id: u16, font_size_px: u16, style_id: u32)` packed into a `u64`.
 
 **Entry:** Same as today — `{ u, v, width, height, bearing_x, bearing_y }` (12 bytes).
 
 **Slot:**
+
 ```rust
 struct AtlasSlot {
     key: u64,            // u64::MAX = empty sentinel
@@ -147,15 +136,17 @@ struct AtlasSlot {
 }
 ```
 
-**Empty sentinel:** `u64::MAX`. This avoids collision with any valid key — a valid key would require `glyph_id=0xFFFF, font_size_px=0xFFFF, axis_hash=0xFFFFFFFF`, which is degenerate (65535px font size is impossible).
+**Empty sentinel:** `u64::MAX`. This avoids collision with any valid key — a valid key would require `glyph_id=0xFFFF, font_size_px=0xFFFF, style_id=0xFFFFFFFF`, which is degenerate (65535px font size and 4 billion styles are both impossible).
 
 **Capacity:** 16384 slots. At 20 bytes/slot = 320 KB. Handles 200+ fonts × 80 glyphs comfortably.
 
 **Hash function:** FNV-1a over the 8-byte packed key. Probe linearly on collision.
 
-**Lookup:** `fn lookup(&self, glyph_id: u16, font_size_px: u16, axis_hash: u32) -> Option<&AtlasEntry>`
+Note: the hash here is for the atlas's internal bucket placement, NOT for identity. The key is the identity (collision-free because style_id is collision-free). The hash just distributes keys across buckets. A hash collision in the atlas means a linear probe, not a wrong glyph.
 
-**Insert:** `fn insert(&mut self, glyph_id: u16, font_size_px: u16, axis_hash: u32, entry: AtlasEntry) -> bool`
+**Lookup:** `fn lookup(&self, glyph_id: u16, font_size_px: u16, style_id: u32) -> Option<&AtlasEntry>`
+
+**Insert:** `fn insert(&mut self, glyph_id: u16, font_size_px: u16, style_id: u32, entry: AtlasEntry) -> bool`
 
 **Eviction:** When the pixel texture fills (row packing hits the bottom), full reset — clear all slots (fill with `u64::MAX`), reset row packing. Next frame re-rasterizes visible glyphs on demand. Correct behavior (never stale), simple, and the interface supports upgrading to LRU later without changing callers.
 
@@ -175,13 +166,15 @@ The current rasterization scratch buffer is 100×100 pixels (`main.rs:571`). At 
 
 ## Section 3: Layout Fixes (Core Service)
 
+**Assumption:** All layout in this section assumes horizontal left-to-right text. "x" means inline direction, "y" means block direction. This is documented in the Design Principles section and tied to Decision #15.
+
 ### 3a: Per-segment x-offset
 
 **File:** `services/core/layout/full.rs`, `allocate_rich_line_nodes()` (line 772)
 
 Currently each segment's scene node has `n.x` unset (defaults to 0) at line 836. Fix: track a running `pen_x` across segments within each line. After shaping a segment, sum its glyph x_advances to get segment width. Set `n.x = scene::pt(pen_x)` before advancing.
 
-```
+```text
 for line in rich_lines:
     pen_x = 0.0
     for seg in line.segments:
@@ -200,7 +193,7 @@ Currently `y += line_height` (line 463) uses a global constant. Fix: compute eac
 
 For each line, walk its segments. For each segment's style, compute line height from font metrics:
 
-```
+```text
 segment_line_h = (ascender + abs(descender) + line_gap) * font_size / upem
 ```
 
@@ -227,6 +220,7 @@ pub struct FontInfo<'a> {
 Fix: apply HVAR (Horizontal Metrics Variation) deltas. The HVAR table maps (glyph_id, axis_coordinates) → advance width delta. The corrected advance is `hmtx_advance + hvar_delta`.
 
 **New function in fonts library:**
+
 ```rust
 pub fn glyph_h_advance_with_axes(
     font_data: &[u8],
@@ -238,6 +232,7 @@ pub fn glyph_h_advance_with_axes(
 Falls back to plain `glyph_h_metrics` if no HVAR table exists (graceful degradation for fonts without variation tables).
 
 **Font HVAR availability:**
+
 - **Inter:** Yes — well-designed variable font with HVAR. Primary use case (bold text wider than regular) is covered.
 - **JetBrains Mono:** Monospace — advance widths are constant across all weights by definition. HVAR not needed; fallback to hmtx is correct.
 - **Source Serif 4:** Should have HVAR for weight axis. Verify during implementation.
@@ -250,10 +245,10 @@ Falls back to plain `glyph_h_metrics` if no HVAR table exists (graceful degradat
 
 Summary of all changes:
 
-| File | Change |
-|------|--------|
-| `atlas.rs` | Rewrite: hash-map atlas replacing flat array |
-| `main.rs` | Load 3 font slices (add serif). Read font_size per node. Parse style registry. Pass axes to rasterizer. Increase raster buffer to 256×256. |
+| File            | Change                                                                                                                                                                                                                                    |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `atlas.rs`      | Rewrite: hash-map atlas replacing flat array                                                                                                                                                                                              |
+| `main.rs`       | Load 3 font slices (add serif). Read font_size per node. Parse style registry. Pass axes to rasterizer. Increase raster buffer to 256×256.                                                                                                |
 | `scene_walk.rs` | Per-node baseline from registry's ascent_fu + node's font_size. Per-node font_size_px for atlas lookup. Remove global `font_ascent` from `RenderContext`. Explicitly destructure `font_size` from `Content::Glyphs` (was hidden by `..`). |
 
 ### Pre-scan loop (main.rs)
@@ -262,8 +257,8 @@ Currently scans all visible glyph nodes and rasterizes missing glyphs at a singl
 
 1. Read `font_size` from each `Content::Glyphs` node
 2. Compute `font_size_px = round_font_size(font_size, scale_factor)` (per node, using the canonical rounding function)
-3. Check atlas for `(glyph_id, font_size_px, axis_hash)`
-4. On miss: look up `axis_hash` in style registry → get content_id + axes
+3. Check atlas for `(glyph_id, font_size_px, style_id)`
+4. On miss: look up `style_id` in style registry → get content_id + axes
 5. Find font data via content_id in Content Region
 6. Call `rasterize_with_axes(font_data, glyph_id, font_size_px, axes)`
 7. Insert into hash-map atlas
@@ -272,11 +267,11 @@ Currently scans all visible glyph nodes and rasterizes missing glyphs at a singl
 
 Currently uses global `font_ascent` (line 508) and ignores `font_size` (destructured away by `..` at line 494). Changes:
 
-1. Explicitly destructure `font_size` from `Content::Glyphs` node (change `..` pattern)
-2. Look up `axis_hash` in style registry → get `ascent_fu`, `upem`
+1. Explicitly destructure `font_size` and `style_id` from `Content::Glyphs` node (change `..` pattern to named fields)
+2. Look up `style_id` in style registry (array index) → get `ascent_fu`, `upem`
 3. Compute `baseline = abs_y + (ascent_fu as f32 * font_size as f32 / upem as f32)` (per node)
 4. Compute `font_size_px = round_font_size(font_size, scale_factor)` (same canonical function)
-5. Look up glyphs in atlas with `(glyph_id, font_size_px, axis_hash)` key
+5. Look up glyphs in atlas with `(glyph_id, font_size_px, style_id)` key
 
 The `font_ascent: u32` field is **removed** from `RenderContext`. Baseline is always computed per-node from the style registry. No global, no fallback.
 
@@ -303,8 +298,8 @@ cpu-render and virgil-render are out of scope for this sprint. They continue to 
 ### Unit tests
 
 - Hash-map atlas: insert, lookup, collision handling, full-reset eviction, capacity limits, u64::MAX sentinel
-- Style registry: serialization/deserialization round-trip, lookup by axis_hash
-- axis_hash computation: deterministic, collision-resistant, sorted-axes invariance, matches across core and renderer
+- Style registry: serialization/deserialization round-trip, lookup by style_id
+- StyleTable: style_id assignment is deterministic, deduplicates identical (content_id, axes) pairs
 - HVAR parser: advance deltas match reference values for Inter at weight 700
 - Per-line height computation: mixed-size lines get correct height
 - Per-segment x-offset: multi-segment lines don't overlap
@@ -326,9 +321,9 @@ cpu-render and virgil-render are out of scope for this sprint. They continue to 
 ## Execution Order (Foundation Up)
 
 1. **fonts library:** HVAR parser + `glyph_h_advance_with_axes()`
-2. **protocol library:** Style registry types (StyleRegistryHeader, StyleRegistryEntry, AxisValue) + canonical `axis_hash()` function
-3. **scene library:** Remove compile-time FONT_MONO/FONT_SANS/FONT_SERIF constants
-4. **core layout:** Extended FontInfo with metrics. Per-line height, per-segment x-offset, variation-aware advances. Compute axis_hash values at startup. Write style registry into scene data buffer.
+2. **protocol library:** Style registry types (StyleRegistryHeader, StyleRegistryEntry, AxisValue)
+3. **scene library:** Rename `axis_hash` → `style_id` in Content::Glyphs. Remove compile-time FONT_MONO/FONT_SANS/FONT_SERIF constants.
+4. **core:** StyleTable for sequential ID assignment. Extended FontInfo with metrics. Per-line height, per-segment x-offset, variation-aware advances. Write style registry into scene data buffer.
 5. **metal-render atlas:** Hash-map rewrite
 6. **metal-render main+scene_walk:** Registry parsing, per-node font_size, per-node baseline, axes to rasterizer, remove global font_ascent, increase raster buffer, load serif font
 7. **Visual verification:** TDD loop with hypervisor captures
@@ -339,5 +334,6 @@ Each layer is testable independently before the next begins.
 
 - cpu-render / virgil-render backend updates (separate task)
 - Atlas LRU eviction (upgrade path exists, not needed yet)
-- Font loading from disk / font browser (future milestone)
+- Font discovery / user-installable fonts / font browser (future milestone — basic font loading from disk and Content Region already works)
 - OpenType feature support beyond variable axes (ligatures, contextual alternates — already handled by shaper)
+- Vertical text / RTL layout (requires settling Decision #15: Layout Engine)
