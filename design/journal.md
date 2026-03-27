@@ -4,6 +4,12 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Milestone Roadmap (2026-03-26)
+
+**Status: AGREED.** See `roadmap.md` for the canonical milestone plan (v0.5–v1.0), sequencing rationale, and decision dependencies. Revised after completing v0.3 (rendering) and v0.4 (persistence).
+
+---
+
 ## v0.4 Document Store Design (2026-03-26)
 
 **Status: ALL PHASES COMPLETE (A–G).** v0.4 is done.

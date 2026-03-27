@@ -128,11 +128,19 @@ Content types: `None`, `InlineImage` (per-frame scene data), `Image` (Content Re
 
 **16 KiB page migration (2026-03-25): DONE.** Kernel page granule changed from 4K to 16K. 2-level page tables (L2+L3, T0SZ/T1SZ=28, 64 GiB VA). KERNEL_VA_OFFSET changed to 0xFFFF_FFF0_0000_0000 (T1SZ=28 consequence). Boot tables: 2 L2 roots with 32 MiB block entries. Address space: simplified 4-level→2-level walk. Userspace: 16K section alignment in link.ld, PAGE_SIZE updated in ipc/sys/protocol/virtio libraries. Key bug found and fixed: ELF segments sharing 16K pages caused permission conflicts (last-segment-wins overwrote RX with RO). All 2,236 tests pass.
 
-**Future milestones:**
+**Milestone roadmap** (see `design/roadmap.md` for full details and rationale):
 
-- v0.5: Rich inline text / multi-style runs, system clipboard
-- v0.6: Video / animated media, JPEG decoder (requires mimetype routing from filesystem layer)
-- Later: BiDi / complex scripts, multi-display
+- v0.5: Rich text (multi-style runs, operation coalescing)
+- v0.6: Media (JPEG, audio, video) — swappable with v0.7
+- v0.7: Design decisions (settle #10, #15, #17 as interfaces, clipboard)
+- v0.8: Compound documents & layout engine
+- v0.9: Realtime & streaming (conversations/presence as document types)
+- v0.10: CLI / TUI (fundamental OS interface, not an app)
+- v0.11: Network (TCP/IP, DNS, TLS)
+- v0.12: Web (browser-as-translator)
+- v0.13: Real hardware (bare-metal target)
+- v0.14+: UX iteration (GUI + CLI, document browse/search, look & feel — multiple passes)
+- v1.0: Ship
 
 **System code:** `system/kernel/` (33 .rs + 2 .S), `system/services/{init,core,document,drivers/{cpu-render,virgil-render,metal-render,virtio-blk,virtio-console,virtio-input,virtio-9p},decoders/{png}}/`, `system/libraries/{sys,virtio,drawing,fonts,animation,layout,scene,ipc,protocol,render,fs,store}/`, `system/user/{echo,text-editor,stress,fuzz,fuzz-helper}/`, `system/test/`, `tools/mkdisk/`. 28 syscalls. 4 SMP cores, EEVDF scheduler.
 

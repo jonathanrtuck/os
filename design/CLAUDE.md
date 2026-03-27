@@ -8,6 +8,7 @@ Design documents for the document-centric OS. This is the primary artifact of th
 - `foundations.md` — The core idea, guiding beliefs, glossary, content model (3-layer type system), viewer-first design, editor augmentation model, edit protocol, undo/history architecture
 - `decisions.md` — 17 tiered decisions with tradeoffs, implementation readiness, dependency chains
 - `architecture.md` — The system's architectural narrative: pipeline, responsibilities, decision checklist
+- `roadmap.md` — Milestone plan (v0.5--v1.0), sequencing rationale, decision dependencies, descoped items
 - `journal.md` — Open threads, discussion backlog, insights log, research spikes. The "pick up where you left off" document
 - `research/` — COW filesystems, OS landscape, font rendering, kernel hardening gap analysis
 
