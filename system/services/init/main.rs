@@ -1419,7 +1419,7 @@ pub extern "C" fn _start() -> ! {
                 let mut entry_count: u32 = 0;
 
                 // Font loading table: (attribute name, content_id, log label).
-                let fonts: [(&[u8], u32, &[u8]); 3] = [
+                let fonts: [(&[u8], u32, &[u8]); 6] = [
                     (
                         b"JetBrains Mono",
                         protocol::content::CONTENT_ID_FONT_MONO,
@@ -1430,6 +1430,21 @@ pub extern "C" fn _start() -> ! {
                         b"Source Serif 4",
                         protocol::content::CONTENT_ID_FONT_SERIF,
                         b"serif",
+                    ),
+                    (
+                        b"JetBrains Mono Italic",
+                        protocol::content::CONTENT_ID_FONT_MONO_ITALIC,
+                        b"mono-italic",
+                    ),
+                    (
+                        b"Inter Italic",
+                        protocol::content::CONTENT_ID_FONT_SANS_ITALIC,
+                        b"sans-italic",
+                    ),
+                    (
+                        b"Source Serif 4 Italic",
+                        protocol::content::CONTENT_ID_FONT_SERIF_ITALIC,
+                        b"serif-italic",
                     ),
                 ];
 
@@ -1683,8 +1698,8 @@ pub extern "C" fn _start() -> ! {
         let mut data_cursor = data_start;
         let mut entry_count: u32 = 0;
 
-        // Load 3 fonts via 9p.
-        let fonts_9p: [(&[u8], u32, &[u8]); 3] = [
+        // Load 6 fonts via 9p (regular + italic for each family).
+        let fonts_9p: [(&[u8], u32, &[u8]); 6] = [
             (
                 b"jetbrains-mono.ttf",
                 protocol::content::CONTENT_ID_FONT_MONO,
@@ -1699,6 +1714,21 @@ pub extern "C" fn _start() -> ! {
                 b"source-serif-4.ttf",
                 protocol::content::CONTENT_ID_FONT_SERIF,
                 b"serif",
+            ),
+            (
+                b"jetbrains-mono-italic.ttf",
+                protocol::content::CONTENT_ID_FONT_MONO_ITALIC,
+                b"mono-italic",
+            ),
+            (
+                b"inter-italic.ttf",
+                protocol::content::CONTENT_ID_FONT_SANS_ITALIC,
+                b"sans-italic",
+            ),
+            (
+                b"source-serif-4-italic.ttf",
+                protocol::content::CONTENT_ID_FONT_SERIF_ITALIC,
+                b"serif-italic",
             ),
         ];
 

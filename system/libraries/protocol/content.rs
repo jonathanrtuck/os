@@ -26,6 +26,12 @@ pub const CONTENT_ID_FONT_MONO: u32 = 1;
 pub const CONTENT_ID_FONT_SANS: u32 = 2;
 /// Serif font (Source Serif 4) — rendering data for body text.
 pub const CONTENT_ID_FONT_SERIF: u32 = 3;
+/// Monospace italic font (JetBrains Mono Italic).
+pub const CONTENT_ID_FONT_MONO_ITALIC: u32 = 4;
+/// Sans-serif italic font (Inter Italic).
+pub const CONTENT_ID_FONT_SANS_ITALIC: u32 = 5;
+/// Serif italic font (Source Serif 4 Italic).
+pub const CONTENT_ID_FONT_SERIF_ITALIC: u32 = 6;
 /// First dynamically assigned content ID (for decoded images, etc.).
 pub const CONTENT_ID_DYNAMIC_START: u32 = 16;
 

@@ -12,8 +12,8 @@ use super::{
     allocate_line_nodes, allocate_selection_rects, byte_to_line_col, chars_per_line, dc, doc_width,
     layout_mono_lines, layout_rich_lines, scroll_runs, shape_chrome_text, shape_rich_segment,
     shape_visible_runs, update_clock_inline, FontInfo, RichLine, SceneConfig, N_CLOCK_TEXT,
-    N_CONTENT, N_CURSOR, N_DOC_IMAGE, N_DOC_TEXT, N_PAGE, N_POINTER,
-    N_ROOT, N_SHADOW, N_STRIP, N_TITLE_BAR, N_TITLE_ICON, N_TITLE_TEXT, WELL_KNOWN_COUNT,
+    N_CONTENT, N_CURSOR, N_DOC_IMAGE, N_DOC_TEXT, N_PAGE, N_POINTER, N_ROOT, N_SHADOW, N_STRIP,
+    N_TITLE_BAR, N_TITLE_ICON, N_TITLE_TEXT, WELL_KNOWN_COUNT,
 };
 use crate::icons;
 
@@ -770,13 +770,33 @@ pub struct RichFonts<'a> {
     pub serif_ascender: i16,
     pub serif_descender: i16,
     pub serif_line_gap: i16,
+    pub mono_italic_data: &'a [u8],
+    pub mono_italic_upem: u16,
+    pub mono_italic_content_id: u32,
+    pub mono_italic_ascender: i16,
+    pub mono_italic_descender: i16,
+    pub mono_italic_line_gap: i16,
+    pub sans_italic_data: &'a [u8],
+    pub sans_italic_upem: u16,
+    pub sans_italic_content_id: u32,
+    pub sans_italic_ascender: i16,
+    pub sans_italic_descender: i16,
+    pub sans_italic_line_gap: i16,
+    pub serif_italic_data: &'a [u8],
+    pub serif_italic_upem: u16,
+    pub serif_italic_content_id: u32,
+    pub serif_italic_ascender: i16,
+    pub serif_italic_descender: i16,
+    pub serif_italic_line_gap: i16,
 }
 
 impl<'a> RichFonts<'a> {
     /// Resolve a piecetable Style to font data + metrics.
+    /// When FLAG_ITALIC is set, returns the italic font variant.
     pub fn resolve(&self, style: &piecetable::Style) -> FontInfo<'_> {
-        match style.font_family {
-            piecetable::FONT_MONO => FontInfo {
+        let italic = style.flags & piecetable::FLAG_ITALIC != 0;
+        match (style.font_family, italic) {
+            (piecetable::FONT_MONO, false) => FontInfo {
                 data: self.mono_data,
                 upem: self.mono_upem,
                 content_id: self.mono_content_id,
@@ -784,7 +804,39 @@ impl<'a> RichFonts<'a> {
                 descender: self.mono_descender,
                 line_gap: self.mono_line_gap,
             },
-            piecetable::FONT_SERIF => FontInfo {
+            (piecetable::FONT_MONO, true) => FontInfo {
+                data: if self.mono_italic_data.is_empty() {
+                    self.mono_data
+                } else {
+                    self.mono_italic_data
+                },
+                upem: if self.mono_italic_upem > 0 {
+                    self.mono_italic_upem
+                } else {
+                    self.mono_upem
+                },
+                content_id: if self.mono_italic_data.is_empty() {
+                    self.mono_content_id
+                } else {
+                    self.mono_italic_content_id
+                },
+                ascender: if self.mono_italic_upem > 0 {
+                    self.mono_italic_ascender
+                } else {
+                    self.mono_ascender
+                },
+                descender: if self.mono_italic_upem > 0 {
+                    self.mono_italic_descender
+                } else {
+                    self.mono_descender
+                },
+                line_gap: if self.mono_italic_upem > 0 {
+                    self.mono_italic_line_gap
+                } else {
+                    self.mono_line_gap
+                },
+            },
+            (piecetable::FONT_SERIF, false) => FontInfo {
                 data: self.serif_data,
                 upem: self.serif_upem,
                 content_id: self.serif_content_id,
@@ -792,13 +844,77 @@ impl<'a> RichFonts<'a> {
                 descender: self.serif_descender,
                 line_gap: self.serif_line_gap,
             },
-            _ => FontInfo {
+            (piecetable::FONT_SERIF, true) => FontInfo {
+                data: if self.serif_italic_data.is_empty() {
+                    self.serif_data
+                } else {
+                    self.serif_italic_data
+                },
+                upem: if self.serif_italic_upem > 0 {
+                    self.serif_italic_upem
+                } else {
+                    self.serif_upem
+                },
+                content_id: if self.serif_italic_data.is_empty() {
+                    self.serif_content_id
+                } else {
+                    self.serif_italic_content_id
+                },
+                ascender: if self.serif_italic_upem > 0 {
+                    self.serif_italic_ascender
+                } else {
+                    self.serif_ascender
+                },
+                descender: if self.serif_italic_upem > 0 {
+                    self.serif_italic_descender
+                } else {
+                    self.serif_descender
+                },
+                line_gap: if self.serif_italic_upem > 0 {
+                    self.serif_italic_line_gap
+                } else {
+                    self.serif_line_gap
+                },
+            },
+            (_, false) => FontInfo {
                 data: self.sans_data,
                 upem: self.sans_upem,
                 content_id: self.sans_content_id,
                 ascender: self.sans_ascender,
                 descender: self.sans_descender,
                 line_gap: self.sans_line_gap,
+            },
+            (_, true) => FontInfo {
+                data: if self.sans_italic_data.is_empty() {
+                    self.sans_data
+                } else {
+                    self.sans_italic_data
+                },
+                upem: if self.sans_italic_upem > 0 {
+                    self.sans_italic_upem
+                } else {
+                    self.sans_upem
+                },
+                content_id: if self.sans_italic_data.is_empty() {
+                    self.sans_content_id
+                } else {
+                    self.sans_italic_content_id
+                },
+                ascender: if self.sans_italic_upem > 0 {
+                    self.sans_italic_ascender
+                } else {
+                    self.sans_ascender
+                },
+                descender: if self.sans_italic_upem > 0 {
+                    self.sans_italic_descender
+                } else {
+                    self.sans_descender
+                },
+                line_gap: if self.sans_italic_upem > 0 {
+                    self.sans_italic_line_gap
+                } else {
+                    self.sans_line_gap
+                },
             },
         }
     }
@@ -824,14 +940,17 @@ fn allocate_rich_line_nodes(
     let scroll_pt = scroll_y >> 10;
 
     for line in rich_lines {
-        // Visibility culling.
-        let line_bottom = line.y + line_height as i32;
+        // Visibility culling using per-line height.
+        let line_bottom = line.y + line.line_height;
         if line_bottom <= scroll_pt {
             continue;
         }
         if line.y >= scroll_pt + viewport_height {
             continue;
         }
+
+        // Track running x position within the line (points, fractional).
+        let mut pen_x: f32 = 0.0;
 
         for seg in &line.segments {
             let seg_text = if seg.text_start + seg.text_len <= scratch.len() {
@@ -847,14 +966,8 @@ fn allocate_rich_line_nodes(
             let font_size = style.font_size_pt as u16;
             let italic = style.flags & piecetable::FLAG_ITALIC != 0;
 
-            let shaped = shape_rich_segment(
-                fi.data,
-                seg_text,
-                font_size,
-                fi.upem,
-                style.weight,
-                italic,
-            );
+            let shaped =
+                shape_rich_segment(fi.data, seg_text, font_size, fi.upem, style.weight, italic);
             if shaped.is_empty() {
                 continue;
             }
@@ -876,13 +989,7 @@ fn allocate_rich_line_nodes(
                 };
                 axis_count += 1;
             }
-            if italic {
-                axes_buf[axis_count] = fonts::rasterize::AxisValue {
-                    tag: *b"ital",
-                    value: 1.0,
-                };
-                axis_count += 1;
-            }
+            // Italic uses a separate font file — no ital axis needed.
             let style_id = style_table.style_id_for(
                 fi.content_id,
                 &axes_buf[..axis_count],
@@ -900,9 +1007,10 @@ fn allocate_rich_line_nodes(
 
             if let Some(node_id) = w.alloc_node() {
                 let n = w.node_mut(node_id);
+                n.x = scene::pt(pen_x as i32);
                 n.y = scene::pt(seg.y);
                 n.width = scene::upt(doc_width);
-                n.height = scene::upt(line_height);
+                n.height = scene::upt(line.line_height as u32);
                 n.content = Content::Glyphs {
                     color,
                     glyphs: glyph_ref,
@@ -921,6 +1029,10 @@ fn allocate_rich_line_nodes(
                 }
                 prev_node = node_id;
             }
+
+            // Advance pen by segment width (x_advance is 16.16 fixed-point).
+            let seg_width: f32 = shaped.iter().map(|g| g.x_advance as f32 / 65536.0).sum();
+            pen_x += seg_width;
         }
     }
 
@@ -978,13 +1090,7 @@ pub fn build_rich_document_content(
                 };
                 axis_count += 1;
             }
-            if style.flags & piecetable::FLAG_ITALIC != 0 {
-                axes_buf[axis_count] = fonts::rasterize::AxisValue {
-                    tag: *b"ital",
-                    value: 1.0,
-                };
-                axis_count += 1;
-            }
+            // Italic uses a separate font file — no ital axis needed.
             let axes = &axes_buf[..axis_count];
             let _ = style_table.style_id_for(
                 fi.content_id,
@@ -1138,13 +1244,8 @@ pub fn build_rich_document_content(
     // Cursor positioning for rich text.
     // Use byte position in logical text. For now, use a simple approach:
     // walk the rich_lines to find which line/column the cursor is on.
-    let (cursor_x, cursor_y) = rich_cursor_position(
-        pt_buf,
-        &scratch[..text_len],
-        cursor_pos,
-        &rich_lines,
-        fonts,
-    );
+    let (cursor_x, cursor_y) =
+        rich_cursor_position(pt_buf, &scratch[..text_len], cursor_pos, &rich_lines, fonts);
 
     {
         let n = w.node_mut(N_CURSOR);
@@ -1196,17 +1297,29 @@ fn rich_cursor_position(
             };
             let fi = fonts.resolve(style);
 
+            // Build variation axes for this segment's style.
+            let mut axes_buf = [fonts::rasterize::AxisValue {
+                tag: [0; 4],
+                value: 0.0,
+            }; 2];
+            let mut axis_count = 0;
+            if style.weight != 400 {
+                axes_buf[axis_count] = fonts::rasterize::AxisValue {
+                    tag: *b"wght",
+                    value: style.weight as f32,
+                };
+                axis_count += 1;
+            }
+            // Italic uses a separate font file — no ital axis needed.
+            let axes = &axes_buf[..axis_count];
+
             let seg_text = &text[seg.text_start..seg_end.min(text.len())];
             let measure_end = (cursor_pos as usize).min(seg_end) - seg.text_start;
             let measure_text = &seg_text[..measure_end.min(seg_text.len())];
 
             for ch in core::str::from_utf8(measure_text).unwrap_or("").chars() {
-                x_pt += super::char_advance_pt(
-                    fi.data,
-                    ch,
-                    style.font_size_pt as u16,
-                    fi.upem,
-                );
+                x_pt +=
+                    super::char_advance_pt(fi.data, ch, style.font_size_pt as u16, fi.upem, axes);
             }
 
             if cursor_pos as usize <= seg_end {

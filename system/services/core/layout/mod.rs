@@ -335,6 +335,8 @@ pub struct RichSegment {
 pub struct RichLine {
     pub segments: Vec<RichSegment>,
     pub y: i32,
+    /// Computed line height in points (max of all segment heights).
+    pub line_height: i32,
 }
 
 /// Font data pointer + metrics for a given style, resolved from the
@@ -502,13 +504,27 @@ pub(crate) fn base_style_table(cfg: &SceneConfig) -> (StyleTable, u32, u32) {
 }
 
 /// Measure character advance width in points using font metrics.
-fn char_advance_pt(font_data: &[u8], ch: char, font_size: u16, upem: u16) -> f32 {
+///
+/// When `axes` is non-empty, uses HVAR-adjusted advances for correct
+/// variable-font widths (e.g. bold Inter is wider than regular).
+fn char_advance_pt(
+    font_data: &[u8],
+    ch: char,
+    font_size: u16,
+    upem: u16,
+    axes: &[fonts::rasterize::AxisValue],
+) -> f32 {
     if upem == 0 || font_data.is_empty() {
         return 8.0; // fallback
     }
     let gid = fonts::rasterize::glyph_id_for_char(font_data, ch).unwrap_or(0);
-    let (advance_fu, _) = fonts::rasterize::glyph_h_metrics(font_data, gid).unwrap_or((0, 0));
-    (advance_fu as f32 * font_size as f32) / upem as f32
+    let advance_fu = if !axes.is_empty() {
+        fonts::rasterize::glyph_h_advance_with_axes(font_data, gid, axes).unwrap_or(0) as f32
+    } else {
+        let (adv, _) = fonts::rasterize::glyph_h_metrics(font_data, gid).unwrap_or((0, 0));
+        adv as f32
+    };
+    (advance_fu * font_size as f32) / upem as f32
 }
 
 /// Build MeasuredChar stream from piece table styled runs, then break
@@ -554,6 +570,22 @@ pub fn layout_rich_lines(
             _ => sans_font,
         };
 
+        // Build variation axes for this run's style.
+        let mut axes_buf = [fonts::rasterize::AxisValue {
+            tag: [0; 4],
+            value: 0.0,
+        }; 2];
+        let mut axis_count = 0;
+        if style.weight != 400 {
+            axes_buf[axis_count] = fonts::rasterize::AxisValue {
+                tag: *b"wght",
+                value: style.weight as f32,
+            };
+            axis_count += 1;
+        }
+        // Italic uses a separate font file — no ital axis needed.
+        let axes = &axes_buf[..axis_count];
+
         // Walk the bytes of this run's text, decoding UTF-8.
         let run_start = run.byte_offset as usize;
         let run_end = run_start + run.byte_len as usize;
@@ -564,15 +596,12 @@ pub fn layout_rich_lines(
         };
 
         let mut offset = run_start;
-        for ch in core::str::from_utf8(run_text)
-            .unwrap_or("")
-            .chars()
-        {
+        for ch in core::str::from_utf8(run_text).unwrap_or("").chars() {
             let byte_len = ch.len_utf8() as u8;
             let width = if ch == '\n' {
                 0.0
             } else {
-                char_advance_pt(fi.data, ch, style.font_size_pt as u16, fi.upem)
+                char_advance_pt(fi.data, ch, style.font_size_pt as u16, fi.upem, axes)
             };
             measured.push(layout_lib::MeasuredChar {
                 byte_offset: offset as u32,
@@ -590,12 +619,26 @@ pub fn layout_rich_lines(
     let line_breaks =
         layout_lib::break_measured_lines(&measured, line_width_pt, layout_lib::BreakMode::Word);
 
-    // Split each line back into per-style segments.
+    // Split each line back into per-style segments and compute per-line height.
     let mut result: Vec<RichLine> = Vec::with_capacity(line_breaks.len());
     let mut y = 0i32;
 
+    // Helper: compute line height (points) from font metrics and font size.
+    let style_line_height = |style: &piecetable::Style, fi: &FontInfo<'_>| -> i32 {
+        if fi.upem == 0 {
+            return line_height;
+        }
+        let asc = (fi.ascender as i32).abs();
+        let desc = (fi.descender as i32).abs();
+        let gap = (fi.line_gap as i32).max(0);
+        let h = ((asc + desc + gap) as f32 * style.font_size_pt as f32) / fi.upem as f32;
+        // Round up to avoid clipping.
+        (h + 0.5) as i32
+    };
+
     for lb in &line_breaks {
         let mut segments: Vec<RichSegment> = Vec::new();
+        let mut max_line_h = line_height; // fallback to global line_height
 
         // Find MeasuredChars in this line's byte range.
         for mc in &measured {
@@ -624,6 +667,19 @@ pub fn layout_rich_lines(
                 }
             }
 
+            // Compute this segment's line height contribution.
+            if let Some(style) = piecetable::style(pt_buf, run.style_id) {
+                let fi = match style.font_family {
+                    piecetable::FONT_MONO => mono_font,
+                    piecetable::FONT_SERIF => serif_font,
+                    _ => sans_font,
+                };
+                let h = style_line_height(style, fi);
+                if h > max_line_h {
+                    max_line_h = h;
+                }
+            }
+
             segments.push(RichSegment {
                 style_id: run.style_id,
                 text_start: mc.byte_offset as usize,
@@ -632,8 +688,12 @@ pub fn layout_rich_lines(
             });
         }
 
-        result.push(RichLine { segments, y });
-        y += line_height;
+        result.push(RichLine {
+            segments,
+            y,
+            line_height: max_line_h,
+        });
+        y += max_line_h;
     }
 
     result
@@ -662,13 +722,8 @@ pub fn shape_rich_segment(
         };
         axis_count += 1;
     }
-    if italic {
-        axes_buf[axis_count] = fonts::rasterize::AxisValue {
-            tag: *b"ital",
-            value: 1.0,
-        };
-        axis_count += 1;
-    }
+    // Italic uses a separate font file — no ital axis needed.
+    // The caller passes the italic font's data directly.
     let axes = &axes_buf[..axis_count];
 
     shape_text(font_data, text, font_size, upem, axes)
