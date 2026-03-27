@@ -350,7 +350,7 @@ Notification for both: `channel_signal` syscall wakes the consumer from `sys::wa
 
 - **Single-threaded tree walk.** Multi-core rasterization (horizontal strip parallelism) is an internal optimization — no interface changes needed.
 
-**No restrictions imposed.** Pure `no_std` library with `alloc` dependency. Depends on drawing, scene, fonts, protocol. Host-side tests in `system/test/tests/scene_render.rs`.
+**No restrictions imposed.** Pure `no_std` library with `alloc` dependency. Depends on drawing, scene, fonts, protocol. Host-side tests in `system/test/tests/render_scene_render.rs`.
 
 ---
 

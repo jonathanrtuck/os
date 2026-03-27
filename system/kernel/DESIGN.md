@@ -970,7 +970,7 @@ Removed `wait_used` from virtio library. Kept virtio as a pure library (no sysca
 - `interrupt.rs` — embedded `WaitableRegistry<InterruptId>` in `InterruptTable` alongside `slots: [Option<u32>; 32]` (IRQ number only). Domain-specific code (GIC, IRQ handling) untouched. 186 → 158 lines.
 - `channel.rs` — kept as-is (two endpoints per channel, consume-on-check semantics, shared pages — genuinely different pattern).
 
-**Result:** New `waitable.rs` (~97 lines). Net: ~100 lines removed. 20 host tests in `test/tests/waitable.rs`.
+**Result:** New `waitable.rs` (~97 lines). Net: ~100 lines removed. 20 host tests in `test/tests/kernel_waitable.rs`.
 
 **Depends on:** Nothing, but doing 10.6 immediately after makes sense (the registry's internal data structure benefits from O(1) lookup).
 
@@ -1194,7 +1194,7 @@ if i + 1 < bufs.len() {
 
 **Bug:** The IPC backbone — encoded ChannelId scheme, two-phase wake, lost-wakeup prevention, endpoint close/refcount — has zero host-level testing. The channel encoding math and state machine are pure algorithms with no hardware dependencies.
 
-**Fix:** Create `test/tests/channel.rs`. Test: encoding/decoding (`channel_index`, `endpoint_index`), signal/pending flag logic, close_endpoint refcounting, double-close behavior.
+**Fix:** Create `test/tests/ipc_channel.rs`. Test: encoding/decoding (`channel_index`, `endpoint_index`), signal/pending flag logic, close_endpoint refcounting, double-close behavior.
 
 **Scope:** New test file. ~100–150 lines.
 
@@ -1206,7 +1206,7 @@ if i + 1 < bufs.len() {
 
 **Bug:** The futex hash function, bucket lookup, and PA-keyed wait/wake logic are pure algorithms. The cross-process PA-keyed synchronization semantics are a subtle invariant not validated anywhere.
 
-**Fix:** Create `test/tests/futex.rs`. Test: bucket index computation, hash distribution, registration/deregistration.
+**Fix:** Create `test/tests/kernel_futex.rs`. Test: bucket index computation, hash distribution, registration/deregistration.
 
 **Scope:** New test file. ~80–100 lines.
 
@@ -1220,7 +1220,7 @@ if i + 1 < bufs.len() {
 
 **Fix:** Refactor to `#[path = "…"] mod slab;` and `#[path = "…"] mod address_space_id;` with the same stubs used by other tests.
 
-**Scope:** `test/tests/slab.rs`, `test/tests/asid.rs`. ~40 lines each.
+**Scope:** `test/tests/mem_slab.rs`, `test/tests/mem_asid.rs`. ~40 lines each.
 
 ---
 

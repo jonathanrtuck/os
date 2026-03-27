@@ -25,7 +25,7 @@ All scripts build the kernel (release) and boot QEMU automatically.
 
 ## Conventions
 
-- Test files mirror kernel module names where possible (e.g., `buddy.rs` tests `page_allocator.rs`)
-- Tests prefixed with `adversarial_` are stress/fuzz tests targeting audit findings
+- Test files use category prefixes for subsetting (e.g., `cargo test kernel_` runs only kernel tests, `cargo test mem_` runs memory tests)
+- Tests prefixed with `stress_adversarial_` are stress/fuzz tests targeting audit findings
 - `#[cfg_attr(miri, ignore)]` on tests incompatible with Miri (FFI, inline asm stubs, integer-to-pointer casts)
 - OOM fault injection: `page_allocator::set_fail_after(Some(n))` makes allocations fail after n successes
