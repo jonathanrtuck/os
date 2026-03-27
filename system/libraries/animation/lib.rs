@@ -46,9 +46,6 @@
 
 // ── Mathematical constants ───────────────────────────────────────────────────
 
-/// `π`
-const PI: f32 = core::f32::consts::PI;
-
 /// `2π`
 const TAU: f32 = core::f32::consts::TAU;
 
@@ -1464,6 +1461,8 @@ impl<T: Lerp + Copy> Animated<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const PI: f32 = core::f32::consts::PI;
 
     // Convenience: collect all easing variants (no alloc — fixed-size array).
     fn all_easings() -> [Easing; 24] {

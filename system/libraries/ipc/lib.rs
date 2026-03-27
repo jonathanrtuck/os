@@ -4,12 +4,12 @@
 //! Each channel has two pages (one per direction), each containing a SPSC
 //! ring buffer of fixed 64-byte messages.
 //!
-//! # Ring buffer page layout (one direction, 4 KiB)
+//! # Ring buffer page layout (one direction, 16 KiB)
 //!
 //! ```text
-//! [0..63]      Producer header — head: u32 (monotonic counter) + padding
-//! [64..127]    Consumer header — tail: u32 (monotonic counter) + padding
-//! [128..4095]  62 message slots × 64 bytes
+//! [0..63]       Producer header — head: u32 (monotonic counter) + padding
+//! [64..127]     Consumer header — tail: u32 (monotonic counter) + padding
+//! [128..16383]  254 message slots × 64 bytes
 //! ```
 //!
 //! Head and tail occupy separate cache lines (64 bytes on AArch64) to
@@ -94,7 +94,7 @@ pub struct Message {
     pub msg_type: u32,
     pub payload: [u8; PAYLOAD_SIZE],
 }
-/// One direction of a ring buffer, backed by a single 4 KiB shared page.
+/// One direction of a ring buffer, backed by a single shared page (PAGE_SIZE bytes).
 ///
 /// The page is shared between two processes. Only the producer calls `send`,
 /// only the consumer calls `try_recv`. The SPSC protocol ensures safety
@@ -112,7 +112,7 @@ impl Channel {
     ///
     /// # Safety
     ///
-    /// Both pages must be valid 4 KiB shared mappings. `endpoint` must be 0 or 1.
+    /// Both pages must be valid PAGE_SIZE shared mappings. `endpoint` must be 0 or 1.
     pub unsafe fn from_pages(page0: *mut u8, page1: *mut u8, endpoint: u8) -> Self {
         debug_assert!(endpoint <= 1);
 
@@ -236,7 +236,7 @@ impl RingBuf {
     ///
     /// # Safety
     ///
-    /// `base` must point to a 4 KiB page mapped read/write in this process.
+    /// `base` must point to a PAGE_SIZE page mapped read/write in this process.
     /// The page must be shared with exactly one other process (the peer).
     pub const unsafe fn from_raw(base: *mut u8) -> Self {
         Self { base }

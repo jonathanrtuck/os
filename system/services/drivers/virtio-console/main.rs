@@ -31,11 +31,11 @@ pub extern "C" fn _start() -> ! {
     };
     let mmio_pa = config.mmio_pa;
     let irq = config.irq;
-    // Map the 4K page containing the MMIO region. Virtio-mmio slots have
-    // 0x200 stride, so most sit at sub-page offsets within a 4K page.
-    let page_offset = mmio_pa & 0xFFF;
-    let page_pa = mmio_pa & !0xFFF;
-    let page_va = sys::device_map(page_pa, 0x1000).unwrap_or_else(|_| {
+    // Map the page containing the MMIO region. Virtio-mmio slots have
+    // 0x200 stride, so most sit at sub-page offsets within a page.
+    let page_offset = mmio_pa & (ipc::PAGE_SIZE as u64 - 1);
+    let page_pa = mmio_pa & !(ipc::PAGE_SIZE as u64 - 1);
+    let page_va = sys::device_map(page_pa, ipc::PAGE_SIZE as u64).unwrap_or_else(|_| {
         sys::print(b"virtio-console: device_map failed\n");
         sys::exit();
     });

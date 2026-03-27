@@ -479,20 +479,20 @@ fn device_map_zero_size_rejected() {
 #[test]
 fn device_map_below_ram_succeeds() {
     // MMIO space below RAM_START (e.g., GIC at 0x0800_0000).
-    assert!(validate_device_map(0x0800_0000, 0x1000).is_ok());
+    assert!(validate_device_map(0x0800_0000, PAGE_SIZE).is_ok());
 }
 
 #[test]
 fn device_map_above_ram_succeeds() {
     // MMIO space above RAM_END_MAX.
-    assert!(validate_device_map(RAM_END_MAX, 0x1000).is_ok());
+    assert!(validate_device_map(RAM_END_MAX, PAGE_SIZE).is_ok());
 }
 
 #[test]
 fn device_map_overlapping_ram_rejected() {
     // PA range overlaps with RAM — not a device.
     assert_eq!(
-        validate_device_map(RAM_START, 0x1000),
+        validate_device_map(RAM_START, PAGE_SIZE),
         Err(Error::InvalidArgument)
     );
 }
@@ -550,7 +550,10 @@ fn memory_share_below_ram_rejected() {
 
 #[test]
 fn memory_share_above_ram_rejected() {
-    assert_eq!(validate_memory_share(RAM_END_MAX, 1), Err(Error::BadAddress));
+    assert_eq!(
+        validate_memory_share(RAM_END_MAX, 1),
+        Err(Error::BadAddress)
+    );
 }
 
 #[test]

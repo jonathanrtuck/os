@@ -123,10 +123,10 @@ fn start_process(handle: sys::ProcessHandle, name: &[u8]) {
 /// Reads two MMIO registers (DeviceFeaturesSel, DeviceFeatures).
 /// Does not change device state — safe to call before driver negotiation.
 fn probe_virgl(gpu_pa: u64) -> bool {
-    let page_pa = gpu_pa & !0xFFF;
-    let page_offset = (gpu_pa & 0xFFF) as usize;
+    let page_pa = gpu_pa & !(PAGE_SIZE as u64 - 1);
+    let page_offset = (gpu_pa & (PAGE_SIZE as u64 - 1)) as usize;
 
-    let va = match sys::device_map(page_pa, 0x1000) {
+    let va = match sys::device_map(page_pa, PAGE_SIZE as u64) {
         Ok(v) => v,
         Err(_) => {
             sys::print(b"     virgl probe: device_map failed, assuming no virgl\n");

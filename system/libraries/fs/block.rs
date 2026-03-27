@@ -3,7 +3,7 @@
 //! The `BlockDevice` trait is the filesystem's foundation. Every layer above
 //! (superblock, allocator, inodes, snapshots) operates through this trait.
 
-use crate::{FsError, BLOCK_SIZE};
+use crate::FsError;
 
 /// Abstract block device.
 ///
@@ -19,24 +19,4 @@ pub trait BlockDevice {
     fn flush(&mut self) -> Result<(), FsError>;
     /// Total number of blocks on this device.
     fn block_count(&self) -> u32;
-}
-
-pub(crate) fn check_bounds(index: u32, count: u32) -> Result<(), FsError> {
-    if index >= count {
-        return Err(FsError::OutOfBounds {
-            block: index,
-            count,
-        });
-    }
-    Ok(())
-}
-
-pub(crate) fn check_buf(buf: &[u8]) -> Result<(), FsError> {
-    if buf.len() != BLOCK_SIZE as usize {
-        return Err(FsError::BadBufferSize {
-            expected: BLOCK_SIZE,
-            actual: buf.len(),
-        });
-    }
-    Ok(())
 }

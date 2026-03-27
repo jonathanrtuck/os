@@ -181,9 +181,9 @@ pub fn init_device(
     mmio_pa: u64,
     irq: u32,
 ) -> (virtio::Device, virtio::Virtqueue, sys::InterruptHandle) {
-    let page_offset = mmio_pa & 0xFFF;
-    let page_pa = mmio_pa & !0xFFF;
-    let page_va = sys::device_map(page_pa, 0x1000).unwrap_or_else(|_| {
+    let page_offset = mmio_pa & (ipc::PAGE_SIZE as u64 - 1);
+    let page_pa = mmio_pa & !(ipc::PAGE_SIZE as u64 - 1);
+    let page_va = sys::device_map(page_pa, ipc::PAGE_SIZE as u64).unwrap_or_else(|_| {
         sys::print(b"cpu-render: device_map failed\n");
         sys::exit();
     });

@@ -839,7 +839,7 @@ pub extern "C" fn _start() -> ! {
         .flatten()
     {
         if rtc_config.mmio_pa != 0 {
-            match sys::device_map(rtc_config.mmio_pa, 4096) {
+            match sys::device_map(rtc_config.mmio_pa, ipc::PAGE_SIZE as u64) {
                 Ok(va) => {
                     state().rtc_mmio_va = va;
                     sys::print(b"     pl031 rtc mapped\n");

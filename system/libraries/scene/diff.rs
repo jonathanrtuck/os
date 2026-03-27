@@ -110,27 +110,3 @@ pub fn abs_bounds(
 
     (bx, by, bw, bh)
 }
-
-// ── Math helpers ────────────────────────────────────────────────────
-
-/// Floor for f32 in `no_std`.
-fn floor_f32(x: f32) -> f32 {
-    let i = x as i32;
-    let f = i as f32;
-    if x < f {
-        f - 1.0
-    } else {
-        f
-    }
-}
-
-/// Ceil for f32 in `no_std`.
-fn ceil_f32(x: f32) -> f32 {
-    let i = x as i32;
-    let f = i as f32;
-    if x > f {
-        f + 1.0
-    } else {
-        f
-    }
-}

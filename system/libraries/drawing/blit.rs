@@ -2,10 +2,7 @@
 
 #[cfg(target_arch = "aarch64")]
 use crate::blend::blit_blend_scalar_4px;
-use crate::{
-    blend::{blit_blend_scalar_1px, fill_rect_blend_scalar_1px},
-    div255, min, Color, Surface, SRGB_TO_LINEAR,
-};
+use crate::{blend::blit_blend_scalar_1px, div255, min, Color, Surface, SRGB_TO_LINEAR};
 
 impl<'a> Surface<'a> {
     /// Copy pixels from a source buffer onto this surface at (dst_x, dst_y).

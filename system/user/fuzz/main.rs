@@ -1827,14 +1827,14 @@ fn phase_33_handle_send_success() {
 fn phase_34_device_map_success() {
     // Map 1 page of UART0 MMIO (PA 0x0900_0000). This is always present
     // on QEMU virt and is below RAM_START, so it passes the PA validation.
-    match sys::device_map(0x0900_0000, 4096) {
+    match sys::device_map(0x0900_0000, ipc::PAGE_SIZE as u64) {
         Ok(va) => {
             // Read the UART Data Register — any value is fine, just verify
             // the mapping doesn't fault.
             let _val = unsafe { core::ptr::read_volatile(va as *const u32) };
 
             // Map same region again (second mapping should succeed — separate VA).
-            match sys::device_map(0x0900_0000, 4096) {
+            match sys::device_map(0x0900_0000, ipc::PAGE_SIZE as u64) {
                 Ok(_va2) => {}
                 Err(_) => {
                     // Not a test failure — kernel may disallow double map.
@@ -1848,7 +1848,7 @@ fn phase_34_device_map_success() {
     }
 
     // device_map with PA inside RAM should fail.
-    let r = sys::device_map(0x4000_0000, 4096);
+    let r = sys::device_map(0x4000_0000, ipc::PAGE_SIZE as u64);
     if r.is_ok() {
         phase_fail(b"phase 34", b"device_map of RAM PA should fail");
     }

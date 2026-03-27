@@ -765,9 +765,9 @@ pub extern "C" fn _start() -> ! {
     };
 
     // Map MMIO region.
-    let page_offset = dev_config.mmio_pa & 0xFFF;
-    let page_pa = dev_config.mmio_pa & !0xFFF;
-    let page_va = sys::device_map(page_pa, 0x1000).unwrap_or_else(|_| {
+    let page_offset = dev_config.mmio_pa & (ipc::PAGE_SIZE as u64 - 1);
+    let page_pa = dev_config.mmio_pa & !(ipc::PAGE_SIZE as u64 - 1);
+    let page_va = sys::device_map(page_pa, ipc::PAGE_SIZE as u64).unwrap_or_else(|_| {
         sys::print(b"metal-render: device_map failed\n");
         sys::exit();
     });
