@@ -599,7 +599,7 @@ extern "C" fn thread_trampoline() -> ! {
 fn alloc_thread_stack() -> u64 {
     const STACK_PAGES: u64 = 2;
     match sys::memory_alloc(STACK_PAGES) {
-        Ok(va) => (va + (STACK_PAGES as usize * 4096)) as u64,
+        Ok(va) => (va + (STACK_PAGES as usize * ipc::PAGE_SIZE)) as u64,
         Err(_) => 0,
     }
 }

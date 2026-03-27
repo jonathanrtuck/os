@@ -66,9 +66,9 @@ extern "C" fn timer_worker(_args: u64) -> ! {
 
 /// Allocate a user stack for a new thread. Returns the stack top VA.
 fn alloc_thread_stack() -> u64 {
-    const STACK_PAGES: u64 = 4; // 16 KiB
+    const STACK_PAGES: u64 = 4; // 64 KiB
     match sys::memory_alloc(STACK_PAGES) {
-        Ok(va) => (va + (STACK_PAGES as usize * 4096)) as u64,
+        Ok(va) => (va + (STACK_PAGES as usize * ipc::PAGE_SIZE)) as u64,
         Err(_) => {
             sys::print(b"stress: stack alloc failed\n");
             sys::exit();
