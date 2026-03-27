@@ -574,7 +574,7 @@ pub fn layout_rich_lines(
         let mut axes_buf = [fonts::rasterize::AxisValue {
             tag: [0; 4],
             value: 0.0,
-        }; 2];
+        }; 3];
         let mut axis_count = 0;
         if style.weight != 400 {
             axes_buf[axis_count] = fonts::rasterize::AxisValue {
@@ -584,6 +584,12 @@ pub fn layout_rich_lines(
             axis_count += 1;
         }
         // Italic uses a separate font file — no ital axis needed.
+        // Optical size for fonts that support it (Inter, Source Serif 4).
+        axes_buf[axis_count] = fonts::rasterize::AxisValue {
+            tag: *b"opsz",
+            value: style.font_size_pt as f32,
+        };
+        axis_count += 1;
         let axes = &axes_buf[..axis_count];
 
         // Walk the bytes of this run's text, decoding UTF-8.
@@ -713,7 +719,7 @@ pub fn shape_rich_segment(
     let mut axes_buf = [fonts::rasterize::AxisValue {
         tag: *b"wght",
         value: 0.0,
-    }; 2];
+    }; 3];
     let mut axis_count = 0;
     if weight != 400 {
         axes_buf[axis_count] = fonts::rasterize::AxisValue {
@@ -723,7 +729,12 @@ pub fn shape_rich_segment(
         axis_count += 1;
     }
     // Italic uses a separate font file — no ital axis needed.
-    // The caller passes the italic font's data directly.
+    // Optical size for fonts that support it.
+    axes_buf[axis_count] = fonts::rasterize::AxisValue {
+        tag: *b"opsz",
+        value: font_size as f32,
+    };
+    axis_count += 1;
     let axes = &axes_buf[..axis_count];
 
     shape_text(font_data, text, font_size, upem, axes)

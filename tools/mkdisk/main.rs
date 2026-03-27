@@ -179,9 +179,20 @@ fn main() {
         println!("  font  {:?}  {}  ({} bytes)", id, font.name, data.len());
     }
 
-    // Create a sample text/rich document with styled content.
+    // Create a sample text/rich document showcasing all 7 styles.
     {
-        let sample_text = b"Hello, World!\nWelcome to rich text.";
+        let sample_text = b"Rich Text Demo\nTypography\nBody text. Bold text. Italic text. Bold italic. Inline code.\nParagraphs\nSecond paragraph to verify newline handling.\n";
+        //                   ^0            ^14          ^25       ^36        ^47          ^60             ^75
+        // Byte offsets:
+        //   "Rich Text Demo\n"          = 0..15   (15 bytes) → heading1 (style 1)
+        //   "Typography\n"              = 15..26  (11 bytes) → heading2 (style 2)
+        //   "Body text. "               = 26..37  (11 bytes) → body (style 0)
+        //   "Bold text. "               = 37..48  (11 bytes) → bold (style 3)
+        //   "Italic text. "             = 48..62  (14 bytes) → italic (style 4)
+        //   "Bold italic. "             = 62..76  (14 bytes) → bold-italic (style 5)
+        //   "Inline code."              = 76..88  (12 bytes) → code (style 6)
+        //   "\nParagraphs\n"            = 88..101 (13 bytes) → heading2 (style 2)
+        //   "Second paragraph...\n"     = 101..end          → body (style 0)
         let mut pt_buf = vec![0u8; 4096];
 
         let cap = pt_buf.len();
@@ -195,11 +206,7 @@ fn main() {
             process::exit(1);
         }
 
-        // Add the full default style palette (body, heading1, heading2, bold,
-        // italic, bold-italic, code). Body is already at index 0 from init;
-        // add_default_styles adds indices 1–6 (skipping duplicate body? No —
-        // it adds all 7). We already have one style from init_with_text, so
-        // add the remaining 6 individually to avoid a duplicate body entry.
+        // Add styles 1-6 (body is already at index 0).
         let extra_styles = [
             piecetable::heading1_style(),
             piecetable::heading2_style(),
@@ -215,8 +222,16 @@ fn main() {
             }
         }
 
-        // Apply heading1 (index 1) to "Hello, World!\n" (bytes 0..14).
-        piecetable::apply_style(&mut pt_buf, 0, 14, 1);
+        // Apply styles to ranges (byte offsets verified by script).
+        piecetable::apply_style(&mut pt_buf, 0, 15, 1); // heading1
+        piecetable::apply_style(&mut pt_buf, 15, 26, 2); // heading2
+                                                         // 26..37 body (stays style 0)
+        piecetable::apply_style(&mut pt_buf, 37, 48, 3); // bold
+        piecetable::apply_style(&mut pt_buf, 48, 61, 4); // italic
+        piecetable::apply_style(&mut pt_buf, 61, 74, 5); // bold-italic
+        piecetable::apply_style(&mut pt_buf, 74, 86, 6); // code
+        piecetable::apply_style(&mut pt_buf, 86, 98, 2); // heading2
+                                                         // 98..143 body (stays style 0)
 
         // Compute the actual used size from the header fields.
         let h = piecetable::header(&pt_buf);

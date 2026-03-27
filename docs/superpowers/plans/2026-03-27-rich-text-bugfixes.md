@@ -18,21 +18,21 @@
 
 ### Modified Files
 
-| File | Changes |
-|------|---------|
-| `system/libraries/layout/lib.rs` | Fix newline line break in `break_measured_lines()` |
-| `system/libraries/piecetable/lib.rs` | Add `find_style_by_role()` function |
-| `system/libraries/protocol/content.rs` | Add 3 italic font CONTENT_ID constants |
-| `system/services/core/input.rs` | Rich text delete dispatch, role-based style lookup, heading shortcuts |
-| `system/services/core/documents.rs` | Verify rich_delete/rich_delete_range work correctly |
-| `system/services/core/layout/mod.rs` | Italic font info, opsz axis support |
-| `system/services/core/layout/full.rs` | RichFonts italic data, selection rendering, opsz in style registration |
-| `system/services/core/main.rs` | Load italic font metrics, pass to layout |
-| `system/services/init/main.rs` | Load 3 italic font files via 9p into Content Region |
-| `system/services/drivers/metal-render/main.rs` | Add italic fonts to font_data_map |
-| `tools/mkdisk/main.rs` | Rich sample document with all 7 styles |
-| `system/test/tests/text_layout.rs` | Newline line break tests |
-| `system/test/tests/piecetable.rs` | find_style_by_role tests |
+| File                                           | Changes                                                                |
+| ---------------------------------------------- | ---------------------------------------------------------------------- |
+| `system/libraries/layout/lib.rs`               | Fix newline line break in `break_measured_lines()`                     |
+| `system/libraries/piecetable/lib.rs`           | Add `find_style_by_role()` function                                    |
+| `system/libraries/protocol/content.rs`         | Add 3 italic font CONTENT_ID constants                                 |
+| `system/services/core/input.rs`                | Rich text delete dispatch, role-based style lookup, heading shortcuts  |
+| `system/services/core/documents.rs`            | Verify rich_delete/rich_delete_range work correctly                    |
+| `system/services/core/layout/mod.rs`           | Italic font info, opsz axis support                                    |
+| `system/services/core/layout/full.rs`          | RichFonts italic data, selection rendering, opsz in style registration |
+| `system/services/core/main.rs`                 | Load italic font metrics, pass to layout                               |
+| `system/services/init/main.rs`                 | Load 3 italic font files via 9p into Content Region                    |
+| `system/services/drivers/metal-render/main.rs` | Add italic fonts to font_data_map                                      |
+| `tools/mkdisk/main.rs`                         | Rich sample document with all 7 styles                                 |
+| `system/test/tests/text_layout.rs`             | Newline line break tests                                               |
+| `system/test/tests/piecetable.rs`              | find_style_by_role tests                                               |
 
 ---
 
@@ -41,12 +41,14 @@
 **Bugs fixed:** #2 (backspace wrong char), #3 (Cmd+A+backspace doesn't clear)
 
 **Files:**
+
 - Modify: `system/services/core/input.rs` — lines 497-600 (backspace/delete handlers)
 - Modify: `system/services/core/documents.rs` — verify rich_delete, rich_delete_range
 
 **Context:** `input.rs` calls `doc_delete_range()` (flat buffer, plain text) for ALL documents, even rich text. Rich text documents need `rich_delete_range()` (piece table). The document format is available as `s.doc_format == super::DocumentFormat::Rich`.
 
 Five call sites in `input.rs` need format-checking:
+
 - Line 504: selection + backspace → `doc_delete_range(lo, hi)`
 - Line 523: Opt+backspace word delete → `doc_delete_range(boundary, cursor)`
 - Line 552: selection + Delete key → `doc_delete_range(lo, hi)`
@@ -112,7 +114,7 @@ Expected: `after-delete.png` shows empty page (all text cleared).
 
 - [ ] **Step 7: Commit**
 
-```
+```text
 fix(core): dispatch rich text deletes through piece table
 
 Cmd+A + backspace, Opt+backspace word delete, and selection delete
@@ -127,6 +129,7 @@ plain text doc_delete_range().
 **Bug fixed:** #1 (newlines don't trigger line breaks)
 
 **Files:**
+
 - Modify: `system/libraries/layout/lib.rs` — `break_measured_lines()` (~line 459)
 - Test: `system/test/tests/text_layout.rs`
 
@@ -146,6 +149,7 @@ Look at the screenshot. The factory text is `"Hello, World!\nWelcome to rich tex
 - [ ] **Step 2: If newlines ARE broken, write a failing test**
 
 Add to `system/test/tests/text_layout.rs`:
+
 ```rust
 #[test]
 fn break_measured_lines_newline_splits() {
@@ -181,7 +185,7 @@ Expected: "Hello, World!" on line 1 (heading size), "Welcome to rich text." on l
 
 - [ ] **Step 5: Commit**
 
-```
+```text
 fix(layout): newline line breaks in break_measured_lines
 ```
 
@@ -192,6 +196,7 @@ fix(layout): newline line breaks in break_measured_lines
 **Bugs fixed:** #4 (italic doesn't render), #11 (italic font files not in Content Region)
 
 **Files:**
+
 - Modify: `system/libraries/protocol/content.rs` — add 3 italic content IDs
 - Modify: `system/services/init/main.rs` — load 3 italic fonts via 9p (~line 1687)
 - Modify: `system/services/core/layout/mod.rs` — StyleTable maps italic to italic content_id
@@ -206,6 +211,7 @@ The key insight: when a piece table style has `FLAG_ITALIC`, the StyleTable shou
 - [ ] **Step 1: Add italic content IDs to protocol**
 
 Add to `system/libraries/protocol/content.rs` after the existing constants:
+
 ```rust
 pub const CONTENT_ID_FONT_MONO_ITALIC: u32 = 4;
 pub const CONTENT_ID_FONT_SANS_ITALIC: u32 = 5;
@@ -234,6 +240,7 @@ Also load italic fonts from the disk-loading path (native filesystem). Check bot
 In `services/core/main.rs`, load italic font metrics at startup (same pattern as regular fonts — find entry in Content Region, call `font_metrics()`).
 
 In `layout/mod.rs`, the `SceneConfig` and `StyleTable` need italic content_ids and metrics. When registering a style with `FLAG_ITALIC`:
+
 ```rust
 let content_id = if style.flags & piecetable::FLAG_ITALIC != 0 {
     match style.font_family {
@@ -254,6 +261,7 @@ if style.weight != 400 {
 - [ ] **Step 4: Extend RichFonts with italic data**
 
 In `layout/full.rs`, add italic font data to `RichFonts`:
+
 ```rust
 pub struct RichFonts<'a> {
     // ... existing regular fonts ...
@@ -279,7 +287,7 @@ cd system/test && cargo test -- --test-threads=1
 
 - [ ] **Step 7: Commit**
 
-```
+```text
 feat: load italic font files for all three font families
 
 Inter, JetBrains Mono, and Source Serif 4 italic files loaded into
@@ -294,6 +302,7 @@ Renderer resolves italic font data via style registry.
 **Bugs fixed:** #7 (minimal factory doc), #9 (color not tested), #10 (opsz not used)
 
 **Files:**
+
 - Modify: `tools/mkdisk/main.rs` — richer sample document
 - Modify: `system/services/core/layout/mod.rs` — add opsz axis to style registration
 - Modify: `system/services/core/layout/full.rs` — pass opsz when building axes
@@ -309,6 +318,7 @@ let sample_text = b"Rich Text Demo\nTypography\nBody text. Bold text. Italic tex
 ```
 
 Apply styles to ranges:
+
 - "Rich Text Demo\n" → heading1 (style 1)
 - "Typography\n" → heading2 (style 2)
 - "Body text. " → body (style 0)
@@ -334,7 +344,7 @@ Expected: Multiple styles visible — large heading, medium subheading, body wit
 
 - [ ] **Step 4: Commit**
 
-```
+```text
 feat: rich factory document with all 7 styles + optical size axis
 
 Sample document showcases heading1, heading2, body, bold, italic,
@@ -349,6 +359,7 @@ Inter and Source Serif 4.
 **Bugs fixed:** #6 (hardcoded style IDs), #8 (no heading shortcuts)
 
 **Files:**
+
 - Modify: `system/libraries/piecetable/lib.rs` — add `find_style_by_role()`
 - Modify: `system/services/core/input.rs` — use role lookup for Cmd+B/I, add Cmd+1/2
 - Test: `system/test/tests/piecetable.rs`
@@ -356,6 +367,7 @@ Inter and Source Serif 4.
 - [ ] **Step 1: Write failing test for find_style_by_role**
 
 Add to `system/test/tests/piecetable.rs`:
+
 ```rust
 #[test]
 fn find_style_by_role_finds_bold() {
@@ -378,6 +390,7 @@ fn find_style_by_role_returns_none_for_missing() {
 - [ ] **Step 2: Implement find_style_by_role**
 
 Add to `system/libraries/piecetable/lib.rs`:
+
 ```rust
 /// Find the first style in the palette with the given semantic role.
 pub fn find_style_by_role(buf: &[u8], role: u8) -> Option<u8> {
@@ -396,6 +409,7 @@ pub fn find_style_by_role(buf: &[u8], role: u8) -> Option<u8> {
 - [ ] **Step 3: Update input.rs to use role lookup**
 
 Replace hardcoded `3` and `4` in Cmd+B and Cmd+I handlers with:
+
 ```rust
 let bold_id = piecetable::find_style_by_role(buf, piecetable::ROLE_STRONG).unwrap_or(0);
 let italic_id = piecetable::find_style_by_role(buf, piecetable::ROLE_EMPHASIS).unwrap_or(0);
@@ -414,7 +428,7 @@ cd system/test && cargo test -- --test-threads=1
 
 - [ ] **Step 6: Commit**
 
-```
+```text
 feat(core): role-based style lookup and heading shortcuts
 
 Cmd+B/I now look up styles by ROLE_STRONG/ROLE_EMPHASIS instead of
@@ -428,6 +442,7 @@ hardcoded indices. Added Cmd+1 (heading1) and Cmd+2 (heading2).
 **Bug fixed:** #5 (selection not rendered)
 
 **Files:**
+
 - Modify: `system/services/core/layout/full.rs` — implement `allocate_rich_selection_rects()`
 
 **Context:** The mono path has `allocate_selection_rects()` that creates colored background rectangles. Rich text needs the same but with proportional x-positioning using glyph advances.
@@ -455,6 +470,7 @@ fn allocate_rich_selection_rects(
 ```
 
 For each `RichLine` that overlaps [sel_start, sel_end):
+
 1. Compute x_start: walk shaped glyphs from line start to `max(sel_start, line_start)`, summing advances
 2. Compute x_end: continue walking to `min(sel_end, line_end)`
 3. Emit a selection rect node at (x_start, line.y) with width (x_end - x_start) and height line.line_height
@@ -483,7 +499,7 @@ Expected: Blue/purple selection highlight visible behind all text.
 
 - [ ] **Step 5: Commit**
 
-```
+```text
 feat(core): selection rendering for rich text documents
 
 Proportional selection rectangles using glyph advance measurement.
@@ -494,13 +510,13 @@ Same visual style as mono text selection.
 
 ## Summary
 
-| Task | Bugs Fixed | Complexity | Dependencies |
-|------|-----------|------------|--------------|
-| 1. Delete dispatch | #2, #3 | Low | None |
-| 2. Newline breaks | #1 | Low-Med | None (verify first) |
-| 3. Italic fonts | #4, #11 | High | None |
-| 4. Factory doc + opsz | #7, #9, #10 | Medium | Task 3 (italic in sample) |
-| 5. Role lookup + shortcuts | #6, #8 | Low | None |
-| 6. Selection rendering | #5 | Medium-High | Task 2 (line breaks needed) |
+| Task                       | Bugs Fixed  | Complexity  | Dependencies                |
+| -------------------------- | ----------- | ----------- | --------------------------- |
+| 1. Delete dispatch         | #2, #3      | Low         | None                        |
+| 2. Newline breaks          | #1          | Low-Med     | None (verify first)         |
+| 3. Italic fonts            | #4, #11     | High        | None                        |
+| 4. Factory doc + opsz      | #7, #9, #10 | Medium      | Task 3 (italic in sample)   |
+| 5. Role lookup + shortcuts | #6, #8      | Low         | None                        |
+| 6. Selection rendering     | #5          | Medium-High | Task 2 (line breaks needed) |
 
 Tasks 1, 2, 3, and 5 are independent and can be parallelized.

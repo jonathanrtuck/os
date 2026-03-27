@@ -980,7 +980,7 @@ fn allocate_rich_line_nodes(
             let mut axes_buf = [fonts::rasterize::AxisValue {
                 tag: *b"wght",
                 value: 0.0,
-            }; 2];
+            }; 3];
             let mut axis_count = 0;
             if style.weight != 400 {
                 axes_buf[axis_count] = fonts::rasterize::AxisValue {
@@ -990,6 +990,12 @@ fn allocate_rich_line_nodes(
                 axis_count += 1;
             }
             // Italic uses a separate font file — no ital axis needed.
+            // Optical size for fonts that support it (Inter, Source Serif 4).
+            axes_buf[axis_count] = fonts::rasterize::AxisValue {
+                tag: *b"opsz",
+                value: style.font_size_pt as f32,
+            };
+            axis_count += 1;
             let style_id = style_table.style_id_for(
                 fi.content_id,
                 &axes_buf[..axis_count],
@@ -1081,7 +1087,7 @@ pub fn build_rich_document_content(
             let mut axes_buf = [fonts::rasterize::AxisValue {
                 tag: *b"wght",
                 value: 0.0,
-            }; 2];
+            }; 3];
             let mut axis_count = 0;
             if style.weight != 400 {
                 axes_buf[axis_count] = fonts::rasterize::AxisValue {
@@ -1091,6 +1097,11 @@ pub fn build_rich_document_content(
                 axis_count += 1;
             }
             // Italic uses a separate font file — no ital axis needed.
+            axes_buf[axis_count] = fonts::rasterize::AxisValue {
+                tag: *b"opsz",
+                value: style.font_size_pt as f32,
+            };
+            axis_count += 1;
             let axes = &axes_buf[..axis_count];
             let _ = style_table.style_id_for(
                 fi.content_id,
@@ -1301,7 +1312,7 @@ fn rich_cursor_position(
             let mut axes_buf = [fonts::rasterize::AxisValue {
                 tag: [0; 4],
                 value: 0.0,
-            }; 2];
+            }; 3];
             let mut axis_count = 0;
             if style.weight != 400 {
                 axes_buf[axis_count] = fonts::rasterize::AxisValue {
@@ -1311,6 +1322,11 @@ fn rich_cursor_position(
                 axis_count += 1;
             }
             // Italic uses a separate font file — no ital axis needed.
+            axes_buf[axis_count] = fonts::rasterize::AxisValue {
+                tag: *b"opsz",
+                value: style.font_size_pt as f32,
+            };
+            axis_count += 1;
             let axes = &axes_buf[..axis_count];
 
             let seg_text = &text[seg.text_start..seg_end.min(text.len())];
