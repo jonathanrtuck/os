@@ -378,3 +378,174 @@ pub fn word_boundary_forward(text: &[u8], pos: usize) -> usize {
 fn is_whitespace(b: u8) -> bool {
     b == b' ' || b == b'\n' || b == b'\t'
 }
+
+// ── Mixed-style line breaking ────────────────────────────────────────
+
+/// A pre-measured character for mixed-style line breaking.
+///
+/// The caller measures each character using its style's font metrics,
+/// then passes the stream to `break_measured_lines`. The breaker does
+/// not need to know about fonts, styles, or piece tables.
+#[derive(Debug, Clone, Copy)]
+pub struct MeasuredChar {
+    /// Byte offset in the logical text.
+    pub byte_offset: u32,
+    /// UTF-8 byte length of this character (1–4).
+    pub byte_len: u8,
+    /// Advance width in points, from the character's font metrics.
+    pub width: f32,
+    /// Index of the styled run this character belongs to.
+    pub run_index: u16,
+    /// Whether this character is whitespace (space, tab).
+    pub is_whitespace: bool,
+    /// Whether this character is a newline.
+    pub is_newline: bool,
+}
+
+/// A line produced by `break_measured_lines`.
+#[derive(Debug, Clone, Copy)]
+pub struct LineBreak {
+    /// Start byte offset in logical text.
+    pub byte_start: u32,
+    /// End byte offset in logical text (exclusive).
+    pub byte_end: u32,
+    /// Actual rendered width of this line in points.
+    pub width: f32,
+}
+
+/// Line breaking mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BreakMode {
+    /// Break at word boundaries (after whitespace). Falls back to
+    /// character-level breaking for words that exceed the line width.
+    Word,
+    /// Break at any character boundary.
+    Char,
+}
+
+/// Break a stream of pre-measured characters into lines.
+///
+/// This is the mixed-style equivalent of `layout_paragraph`. Instead of
+/// measuring characters internally via `FontMetrics`, the caller
+/// pre-measures each character and passes the results here. This
+/// decouples the breaker from any font or style knowledge.
+///
+/// Existing `CharBreaker`/`WordBreaker` paths are unchanged — this
+/// function is used only for `text/rich` documents.
+pub fn break_measured_lines(
+    chars: &[MeasuredChar],
+    line_width: f32,
+    mode: BreakMode,
+) -> Vec<LineBreak> {
+    let mut lines = Vec::new();
+    if chars.is_empty() {
+        return lines;
+    }
+
+    let mut i = 0;
+    while i < chars.len() {
+        let line_start_byte = chars[i].byte_offset;
+        let mut width: f32 = 0.0;
+        // Last valid word-break: (char index of first char in next word,
+        // trimmed byte_end, trimmed width).
+        let mut best_break: Option<(usize, u32, f32)> = None;
+        let line_start_idx = i;
+        let mut line_emitted = false;
+
+        while i < chars.len() {
+            let mc = &chars[i];
+
+            // Hard newline — emit line without it, advance past it.
+            if mc.is_newline {
+                lines.push(LineBreak {
+                    byte_start: line_start_byte,
+                    byte_end: mc.byte_offset,
+                    width,
+                });
+                i += 1;
+                line_emitted = true;
+                break;
+            }
+
+            // Would this character exceed the line width?
+            if width + mc.width > line_width && i > line_start_idx {
+                if mode == BreakMode::Word {
+                    if let Some((next_idx, trimmed_end, trimmed_w)) = best_break {
+                        lines.push(LineBreak {
+                            byte_start: line_start_byte,
+                            byte_end: trimmed_end,
+                            width: trimmed_w,
+                        });
+                        // Skip any remaining whitespace to find the next word.
+                        i = next_idx;
+                        while i < chars.len()
+                            && chars[i].is_whitespace
+                            && !chars[i].is_newline
+                        {
+                            i += 1;
+                        }
+                        line_emitted = true;
+                        break;
+                    }
+                }
+                // Char mode, or word mode with no break opportunity.
+                lines.push(LineBreak {
+                    byte_start: line_start_byte,
+                    byte_end: mc.byte_offset,
+                    width,
+                });
+                line_emitted = true;
+                break;
+            }
+
+            width += mc.width;
+            i += 1;
+
+            // Record word-break opportunity after whitespace.
+            if mode == BreakMode::Word && mc.is_whitespace && !mc.is_newline {
+                let (trimmed_end, trimmed_w) =
+                    trim_trailing(chars, line_start_idx, i);
+                best_break = Some((i, trimmed_end, trimmed_w));
+            }
+        }
+
+        if !line_emitted {
+            // Reached end of input — emit remaining content.
+            let end_byte = chars.last().map_or(line_start_byte, |last| {
+                last.byte_offset + last.byte_len as u32
+            });
+            lines.push(LineBreak {
+                byte_start: line_start_byte,
+                byte_end: end_byte,
+                width,
+            });
+            break;
+        }
+    }
+
+    lines
+}
+
+/// Trim trailing whitespace from `chars[start_idx..end_idx]`.
+/// Returns `(trimmed_byte_end, trimmed_width)`.
+fn trim_trailing(
+    chars: &[MeasuredChar],
+    start_idx: usize,
+    end_idx: usize,
+) -> (u32, f32) {
+    let mut trim_end = end_idx;
+    while trim_end > start_idx && chars[trim_end - 1].is_whitespace {
+        trim_end -= 1;
+    }
+    let byte_end = if trim_end > start_idx {
+        let last = &chars[trim_end - 1];
+        last.byte_offset + last.byte_len as u32
+    } else {
+        chars[start_idx].byte_offset
+    };
+    let mut w: f32 = 0.0;
+    for mc in &chars[start_idx..trim_end] {
+        w += mc.width;
+    }
+    (byte_end, w)
+}
