@@ -2647,13 +2647,65 @@ pub extern "C" fn _start() -> ! {
                 }
 
                 prev_line_count = new_line_count;
+            } else if selection_changed && is_rich_doc {
+                // Rich text selection — full rebuild (proportional positioning).
+                if !timer_fired {
+                    documents::format_time_hms(clock_seconds(), &mut time_buf);
+                }
+                let s = state();
+                let rich_fonts = scene_state::RichFonts {
+                    mono_data: font_data(),
+                    mono_upem: s.font_upem,
+                    mono_content_id: protocol::content::CONTENT_ID_FONT_MONO,
+                    mono_ascender: s.font_ascender,
+                    mono_descender: s.font_descender,
+                    mono_line_gap: s.font_line_gap,
+                    sans_data: sans_font_data(),
+                    sans_upem: s.sans_font_upem,
+                    sans_content_id: protocol::content::CONTENT_ID_FONT_SANS,
+                    sans_ascender: s.sans_font_ascender,
+                    sans_descender: s.sans_font_descender,
+                    sans_line_gap: s.sans_font_line_gap,
+                    serif_data: serif_font_data(),
+                    serif_upem: s.serif_font_upem,
+                    serif_content_id: protocol::content::CONTENT_ID_FONT_SERIF,
+                    serif_ascender: s.serif_font_ascender,
+                    serif_descender: s.serif_font_descender,
+                    serif_line_gap: s.serif_font_line_gap,
+                    mono_italic_data: mono_italic_font_data(),
+                    mono_italic_upem: s.mono_italic_font_upem,
+                    mono_italic_content_id: protocol::content::CONTENT_ID_FONT_MONO_ITALIC,
+                    mono_italic_ascender: s.mono_italic_font_ascender,
+                    mono_italic_descender: s.mono_italic_font_descender,
+                    mono_italic_line_gap: s.mono_italic_font_line_gap,
+                    sans_italic_data: sans_italic_font_data(),
+                    sans_italic_upem: s.sans_italic_font_upem,
+                    sans_italic_content_id: protocol::content::CONTENT_ID_FONT_SANS_ITALIC,
+                    sans_italic_ascender: s.sans_italic_font_ascender,
+                    sans_italic_descender: s.sans_italic_font_descender,
+                    sans_italic_line_gap: s.sans_italic_font_line_gap,
+                    serif_italic_data: serif_italic_font_data(),
+                    serif_italic_upem: s.serif_italic_font_upem,
+                    serif_italic_content_id: protocol::content::CONTENT_ID_FONT_SERIF_ITALIC,
+                    serif_italic_ascender: s.serif_italic_font_ascender,
+                    serif_italic_descender: s.serif_italic_font_descender,
+                    serif_italic_line_gap: s.serif_italic_font_line_gap,
+                };
+                scene.update_rich_document_content(
+                    &scene_cfg,
+                    documents::rich_buf_ref(),
+                    &rich_fonts,
+                    s.cursor_pos as u32,
+                    s.sel_start as u32,
+                    s.sel_end as u32,
+                    b"Rich Text",
+                    &time_buf,
+                    s.scroll_offset,
+                    timer_fired,
+                    s.cursor_opacity,
+                );
             } else if selection_changed {
-                // Selection changed without text change (e.g., click
-                // to clear selection, shift-arrow to extend selection).
-                // Also updates cursor position in the scene graph so
-                // that click-to-reposition is immediately visible.
-                // Clock text is updated only by update_document_content
-                // (timer-driven) to prevent data buffer leak.
+                // Mono text selection changed.
                 let s = state();
                 let sel_text_h = scene_cfg
                     .page_height
@@ -2670,11 +2722,66 @@ pub extern "C" fn _start() -> ! {
                     scroll_pt,
                     s.cursor_opacity,
                 );
+            } else if changed && is_rich_doc {
+                // Rich text cursor-only update — full rebuild needed because
+                // proportional cursor positioning requires the styled layout.
+                if !timer_fired {
+                    documents::format_time_hms(clock_seconds(), &mut time_buf);
+                }
+                let s = state();
+                let rich_fonts = scene_state::RichFonts {
+                    mono_data: font_data(),
+                    mono_upem: s.font_upem,
+                    mono_content_id: protocol::content::CONTENT_ID_FONT_MONO,
+                    mono_ascender: s.font_ascender,
+                    mono_descender: s.font_descender,
+                    mono_line_gap: s.font_line_gap,
+                    sans_data: sans_font_data(),
+                    sans_upem: s.sans_font_upem,
+                    sans_content_id: protocol::content::CONTENT_ID_FONT_SANS,
+                    sans_ascender: s.sans_font_ascender,
+                    sans_descender: s.sans_font_descender,
+                    sans_line_gap: s.sans_font_line_gap,
+                    serif_data: serif_font_data(),
+                    serif_upem: s.serif_font_upem,
+                    serif_content_id: protocol::content::CONTENT_ID_FONT_SERIF,
+                    serif_ascender: s.serif_font_ascender,
+                    serif_descender: s.serif_font_descender,
+                    serif_line_gap: s.serif_font_line_gap,
+                    mono_italic_data: mono_italic_font_data(),
+                    mono_italic_upem: s.mono_italic_font_upem,
+                    mono_italic_content_id: protocol::content::CONTENT_ID_FONT_MONO_ITALIC,
+                    mono_italic_ascender: s.mono_italic_font_ascender,
+                    mono_italic_descender: s.mono_italic_font_descender,
+                    mono_italic_line_gap: s.mono_italic_font_line_gap,
+                    sans_italic_data: sans_italic_font_data(),
+                    sans_italic_upem: s.sans_italic_font_upem,
+                    sans_italic_content_id: protocol::content::CONTENT_ID_FONT_SANS_ITALIC,
+                    sans_italic_ascender: s.sans_italic_font_ascender,
+                    sans_italic_descender: s.sans_italic_font_descender,
+                    sans_italic_line_gap: s.sans_italic_font_line_gap,
+                    serif_italic_data: serif_italic_font_data(),
+                    serif_italic_upem: s.serif_italic_font_upem,
+                    serif_italic_content_id: protocol::content::CONTENT_ID_FONT_SERIF_ITALIC,
+                    serif_italic_ascender: s.serif_italic_font_ascender,
+                    serif_italic_descender: s.serif_italic_font_descender,
+                    serif_italic_line_gap: s.serif_italic_font_line_gap,
+                };
+                scene.update_rich_document_content(
+                    &scene_cfg,
+                    documents::rich_buf_ref(),
+                    &rich_fonts,
+                    s.cursor_pos as u32,
+                    s.sel_start as u32,
+                    s.sel_end as u32,
+                    b"Rich Text",
+                    &time_buf,
+                    s.scroll_offset,
+                    timer_fired,
+                    s.cursor_opacity,
+                );
             } else if changed {
-                // Cursor moved without text or selection change
-                // (e.g., arrow keys producing a MSG_CURSOR_MOVE
-                // that doesn't trigger scroll change).
-                // When timer_fired, also updates clock in-place.
+                // Mono text cursor-only update.
                 let s = state();
                 let dw = scene_cfg
                     .page_width
