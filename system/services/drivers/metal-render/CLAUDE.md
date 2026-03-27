@@ -2,6 +2,18 @@
 
 Metal GPU driver — reads the scene graph from shared memory and renders using serialized Metal commands sent over a custom virtio device (device ID 22).
 
+## Key Files
+
+- `main.rs` -- Entry point, constants, render loop orchestration (glyph pre-scan, frame submission, dither pass, blur processing, cursor plane)
+- `shaders.rs` -- Embedded MSL shader source (solid, textured, glyph, rounded-rect SDF, analytical shadow, stencil, box-blur compute, dither)
+- `scene_walk.rs` -- `RenderContext` struct, `walk_scene()` recursive tree walk, `ClipRect`, `ImageAtlas`, vertex emission helpers, flush helpers
+- `path.rs` -- Path command parsing, cubic Bezier flattening, stencil-then-cover fan tessellation (`ParsedPath`, `draw_path_stencil_cover`)
+- `pipeline.rs` -- Phase D: shader compilation, render/compute pipeline creation, depth/stencil states, samplers, texture allocation
+- `device.rs` -- Phase A-C: virtio device init, display handshake, render config reception (`DisplayConfig`, `RenderConfig`)
+- `atlas.rs` -- `GlyphAtlas` with row-based packing, `AtlasEntry` per rasterized glyph
+- `virtio_helpers.rs` -- Virtqueue submission wrappers (`submit_setup`, `submit_render`, `send_setup`, `send_render`)
+- `dma.rs` -- `DmaBuf` allocation wrapper
+
 ## Architecture
 
 ```text
