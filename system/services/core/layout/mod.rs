@@ -16,8 +16,9 @@ pub use full::{
     build_rich_document_content, build_selection_update, RichFonts, CURSOR_HOTSPOT_OFFSET,
 };
 pub use incremental::{delete_line, insert_line, update_single_line};
+// Style table is used by scene_state (via main.rs re-export path).
 // Font identity constants removed. Style IDs are assigned at runtime
-// by core's StyleTable. Temporary literals used until Task 5.
+// by core's StyleTable — sequential, collision-free by construction.
 use scene::{Color, Content, DataRef, NodeFlags, ShapedGlyph, NULL};
 
 // ── Float math helpers (no_std) ─────────────────────────────────────
@@ -107,10 +108,26 @@ pub struct SceneConfig<'a> {
     pub font_data: &'a [u8],
     pub upem: u16,
     pub axes: &'a [fonts::rasterize::AxisValue],
+    /// Content Region content_id for the mono font.
+    pub mono_content_id: u32,
+    /// Mono font typographic ascent (font units, positive).
+    pub mono_ascender: i16,
+    /// Mono font typographic descent (font units, negative).
+    pub mono_descender: i16,
+    /// Mono font line gap (font units).
+    pub mono_line_gap: i16,
     /// Sans font data (Inter) for chrome text (title, clock).
     /// Falls back to font_data (mono) when empty.
     pub sans_font_data: &'a [u8],
     pub sans_upem: u16,
+    /// Content Region content_id for the sans font.
+    pub sans_content_id: u32,
+    /// Sans font typographic ascent (font units, positive).
+    pub sans_ascender: i16,
+    /// Sans font typographic descent (font units, negative).
+    pub sans_descender: i16,
+    /// Sans font line gap (font units).
+    pub sans_line_gap: i16,
 }
 
 // ── Layout types ────────────────────────────────────────────────────
@@ -325,6 +342,163 @@ pub struct RichLine {
 pub struct FontInfo<'a> {
     pub data: &'a [u8],
     pub upem: u16,
+    /// Content Region content_id for the font data (TTF bytes).
+    pub content_id: u32,
+    /// Typographic ascent in font units (positive, above baseline).
+    pub ascender: i16,
+    /// Typographic descent in font units (negative, below baseline).
+    pub descender: i16,
+    /// Typographic line gap in font units.
+    pub line_gap: i16,
+}
+
+// ── Style table (sequential ID assignment) ──────────────────────────
+
+/// A registered (content_id, axes) combination with font metrics.
+struct StyleEntry {
+    content_id: u32,
+    axes: Vec<fonts::rasterize::AxisValue>,
+    ascent_fu: u16,
+    descent_fu: u16,
+    upem: u16,
+}
+
+/// Sequential style ID assignment. Collision-free by construction.
+///
+/// Maps unique (content_id, axes) combinations to sequential u32 IDs.
+/// Created fresh each scene build, then serialized into the scene data
+/// buffer as a style registry for the renderer.
+pub struct StyleTable {
+    entries: Vec<StyleEntry>,
+}
+
+impl StyleTable {
+    /// Create an empty style table.
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    /// Get or assign a style_id for the given font + axes combination.
+    ///
+    /// Linear scan for dedup (typically < 10 entries), assigns the next
+    /// sequential ID on miss.
+    pub fn style_id_for(
+        &mut self,
+        content_id: u32,
+        axes: &[fonts::rasterize::AxisValue],
+        ascent_fu: u16,
+        descent_fu: u16,
+        upem: u16,
+    ) -> u32 {
+        for (i, e) in self.entries.iter().enumerate() {
+            if e.content_id == content_id && axes_eq(&e.axes, axes) {
+                return i as u32;
+            }
+        }
+        let id = self.entries.len() as u32;
+        self.entries.push(StyleEntry {
+            content_id,
+            axes: axes.to_vec(),
+            ascent_fu,
+            descent_fu,
+            upem,
+        });
+        id
+    }
+
+    /// Number of registered styles.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Convert to registry entries for scene data buffer serialization.
+    pub fn to_registry_entries(&self) -> Vec<protocol::content::StyleRegistryEntry> {
+        self.entries
+            .iter()
+            .enumerate()
+            .map(|(i, e)| {
+                let mut axes = [protocol::content::StyleAxisValue {
+                    tag: [0; 4],
+                    value: 0.0,
+                }; protocol::content::MAX_STYLE_AXES];
+                let axis_count = e.axes.len().min(protocol::content::MAX_STYLE_AXES);
+                for (j, av) in e.axes.iter().take(axis_count).enumerate() {
+                    axes[j] = protocol::content::StyleAxisValue {
+                        tag: av.tag,
+                        value: av.value,
+                    };
+                }
+                protocol::content::StyleRegistryEntry {
+                    style_id: i as u32,
+                    content_id: e.content_id,
+                    ascent_fu: e.ascent_fu,
+                    descent_fu: e.descent_fu,
+                    upem: e.upem,
+                    axis_count: axis_count as u8,
+                    _pad: 0,
+                    axes,
+                }
+            })
+            .collect()
+    }
+}
+
+/// Compare two axis slices for equality (same tags and values).
+fn axes_eq(a: &[fonts::rasterize::AxisValue], b: &[fonts::rasterize::AxisValue]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    for (av, bv) in a.iter().zip(b.iter()) {
+        if av.tag != bv.tag || av.value != bv.value {
+            return false;
+        }
+    }
+    true
+}
+
+/// Write the style registry into the scene data buffer as the first item.
+///
+/// Returns the number of bytes written. The registry lives at offset 0
+/// of the data buffer; the renderer reads from this fixed offset.
+pub(crate) fn write_style_registry(
+    w: &mut scene::SceneWriter<'_>,
+    style_table: &StyleTable,
+) -> usize {
+    let registry_entries = style_table.to_registry_entries();
+    // 8192 bytes is enough for ~100 entries (80 bytes each + 8 byte header).
+    let mut registry_buf = [0u8; 8192];
+    let registry_size =
+        protocol::content::write_style_registry(&mut registry_buf, &registry_entries);
+    if registry_size > 0 {
+        let _registry_ref = w.push_data(&registry_buf[..registry_size]);
+    }
+    registry_size
+}
+
+/// Create a StyleTable with the two base styles (mono=0, sans=1)
+/// registered from the SceneConfig. Returns `(style_table, mono_style_id, sans_style_id)`.
+///
+/// The order is deterministic: mono is always 0, sans is always 1.
+/// This matches what the incremental path assumes.
+pub(crate) fn base_style_table(cfg: &SceneConfig) -> (StyleTable, u32, u32) {
+    let mut st = StyleTable::new();
+    let mono_id = st.style_id_for(
+        cfg.mono_content_id,
+        cfg.axes,
+        cfg.mono_ascender as u16,
+        (-cfg.mono_descender) as u16,
+        cfg.upem,
+    );
+    let sans_id = st.style_id_for(
+        cfg.sans_content_id,
+        &[],
+        cfg.sans_ascender as u16,
+        (-cfg.sans_descender) as u16,
+        cfg.sans_upem,
+    );
+    (st, mono_id, sans_id)
 }
 
 /// Measure character advance width in points using font metrics.
@@ -546,6 +720,7 @@ pub(crate) fn allocate_line_nodes(
     line_height: u32,
     scene_text_color: Color,
     font_size: u16,
+    style_id: u32,
 ) -> u16 {
     w.node_mut(N_DOC_TEXT).first_child = NULL;
     let mut prev_line_node: u16 = NULL;
@@ -561,7 +736,7 @@ pub(crate) fn allocate_line_nodes(
                 glyphs: glyph_ref,
                 glyph_count,
                 font_size,
-                style_id: 0,
+                style_id,
             };
             n.content_hash = scene::fnv1a(&glyph_ref.offset.to_le_bytes());
             n.flags = NodeFlags::VISIBLE;
@@ -612,7 +787,10 @@ pub(crate) fn update_clock_inline(
     cfg: &SceneConfig,
 ) {
     let clock_node = w.node(N_CLOCK_TEXT);
-    if let Content::Glyphs { color, .. } = clock_node.content {
+    if let Content::Glyphs {
+        color, style_id, ..
+    } = clock_node.content
+    {
         let new_glyphs = shape_chrome_text(cfg, clock_text);
         let new_ref = w.push_shaped_glyphs(&new_glyphs);
         let new_count = new_glyphs.len() as u16;
@@ -623,7 +801,7 @@ pub(crate) fn update_clock_inline(
             glyphs: new_ref,
             glyph_count: new_count,
             font_size: cfg.font_size,
-            style_id: 1,
+            style_id,
         };
         n.content_hash = scene::fnv1a(clock_text);
         w.mark_dirty(N_CLOCK_TEXT);

@@ -191,14 +191,18 @@ pub fn update_single_line(
         let new_ref = w.push_shaped_glyphs(&shaped);
         let new_count = shaped.len() as u16;
 
-        // Update the line node.
+        // Update the line node, preserving its existing style_id.
+        let existing_style_id = match w.node(cur).content {
+            Content::Glyphs { style_id, .. } => style_id,
+            _ => 0,
+        };
         let n = w.node_mut(cur);
         n.content = Content::Glyphs {
             color: scene_text_color,
             glyphs: new_ref,
             glyph_count: new_count,
             font_size: cfg.font_size,
-            style_id: 0,
+            style_id: existing_style_id,
         };
         n.content_hash = scene::fnv1a(&new_ref.offset.to_le_bytes());
         w.mark_dirty(cur);
@@ -479,13 +483,18 @@ pub fn insert_line(
         let new_ref = w.push_shaped_glyphs(&shaped);
         let new_count = shaped.len() as u16;
 
+        // Preserve existing style_id from the full build.
+        let existing_style_id = match w.node(mod_node).content {
+            Content::Glyphs { style_id, .. } => style_id,
+            _ => 0,
+        };
         let n = w.node_mut(mod_node);
         n.content = Content::Glyphs {
             color: scene_text_color,
             glyphs: new_ref,
             glyph_count: new_count,
             font_size: cfg.font_size,
-            style_id: 0,
+            style_id: existing_style_id,
         };
         n.content_hash = fnv1a(&new_ref.offset.to_le_bytes());
         w.mark_dirty(mod_node);
@@ -516,6 +525,19 @@ pub fn insert_line(
 
     let new_glyph_ref = w.push_shaped_glyphs(&new_shaped);
 
+    // Read style_id from the first existing line node (set by full build).
+    let mono_style_id = {
+        let first = w.node(N_DOC_TEXT).first_child;
+        if first != scene::NULL {
+            match w.node(first).content {
+                Content::Glyphs { style_id, .. } => style_id,
+                _ => 0,
+            }
+        } else {
+            0
+        }
+    };
+
     {
         let n = w.node_mut(new_node);
         n.y = scene::pt(new_run.y);
@@ -526,7 +548,7 @@ pub fn insert_line(
             glyphs: new_glyph_ref,
             glyph_count: new_shaped.len() as u16,
             font_size: cfg.font_size,
-            style_id: 0,
+            style_id: mono_style_id,
         };
         n.content_hash = fnv1a(&new_glyph_ref.offset.to_le_bytes());
         n.flags = NodeFlags::VISIBLE;
@@ -685,6 +707,11 @@ pub fn delete_line(
 
     let new_ref = w.push_shaped_glyphs(&shaped);
 
+    // Preserve existing style_id from the full build.
+    let existing_style_id = match w.node(surviving_node).content {
+        Content::Glyphs { style_id, .. } => style_id,
+        _ => 0,
+    };
     {
         let n = w.node_mut(surviving_node);
         n.content = Content::Glyphs {
@@ -692,7 +719,7 @@ pub fn delete_line(
             glyphs: new_ref,
             glyph_count: shaped.len() as u16,
             font_size: cfg.font_size,
-            style_id: 0,
+            style_id: existing_style_id,
         };
         n.content_hash = fnv1a(&new_ref.offset.to_le_bytes());
     }

@@ -231,12 +231,30 @@ pub(crate) struct CoreState {
     pub(crate) font_data_ptr: *const u8,
     pub(crate) font_data_len: usize,
     pub(crate) font_upem: u16,
+    /// Mono font typographic ascent (font units, positive above baseline).
+    pub(crate) font_ascender: i16,
+    /// Mono font typographic descent (font units, negative below baseline).
+    pub(crate) font_descender: i16,
+    /// Mono font line gap (font units).
+    pub(crate) font_line_gap: i16,
     pub(crate) sans_font_data_ptr: *const u8,
     pub(crate) sans_font_data_len: usize,
     pub(crate) sans_font_upem: u16,
+    /// Sans font typographic ascent (font units, positive above baseline).
+    pub(crate) sans_font_ascender: i16,
+    /// Sans font typographic descent (font units, negative below baseline).
+    pub(crate) sans_font_descender: i16,
+    /// Sans font line gap (font units).
+    pub(crate) sans_font_line_gap: i16,
     pub(crate) serif_font_data_ptr: *const u8,
     pub(crate) serif_font_data_len: usize,
     pub(crate) serif_font_upem: u16,
+    /// Serif font typographic ascent (font units, positive above baseline).
+    pub(crate) serif_font_ascender: i16,
+    /// Serif font typographic descent (font units, negative below baseline).
+    pub(crate) serif_font_descender: i16,
+    /// Serif font line gap (font units).
+    pub(crate) serif_font_line_gap: i16,
     /// Content Region base VA and size (for PNG decode output).
     pub(crate) content_va: usize,
     pub(crate) content_size: usize,
@@ -324,12 +342,21 @@ impl CoreState {
             font_data_ptr: core::ptr::null(),
             font_data_len: 0,
             font_upem: 1000,
+            font_ascender: 800,
+            font_descender: -200,
+            font_line_gap: 0,
             sans_font_data_ptr: core::ptr::null(),
             sans_font_data_len: 0,
             sans_font_upem: 1000,
+            sans_font_ascender: 800,
+            sans_font_descender: -200,
+            sans_font_line_gap: 0,
             serif_font_data_ptr: core::ptr::null(),
             serif_font_data_len: 0,
             serif_font_upem: 1000,
+            serif_font_ascender: 800,
+            serif_font_descender: -200,
+            serif_font_line_gap: 0,
             content_va: 0,
             content_size: 0,
             content_alloc: protocol::content::ContentAllocator::empty(),
@@ -729,6 +756,9 @@ pub extern "C" fn _start() -> ! {
                     let s = state();
                     s.char_w_fx = if char_w_fx > 0 { char_w_fx } else { 8 * 65536 };
                     s.line_h = if line_h > 0 { line_h } else { 20 };
+                    s.font_ascender = fm.ascent;
+                    s.font_descender = fm.descent;
+                    s.font_line_gap = fm.line_gap;
                 }
 
                 sys::print(b"     font metrics loaded\n");
@@ -749,6 +779,9 @@ pub extern "C" fn _start() -> ! {
                 s.sans_font_data_ptr = sans_ptr;
                 s.sans_font_data_len = entry.length as usize;
                 s.sans_font_upem = fm.units_per_em;
+                s.sans_font_ascender = fm.ascent;
+                s.sans_font_descender = fm.descent;
+                s.sans_font_line_gap = fm.line_gap;
                 sys::print(b"     sans font (Inter) loaded\n");
             } else {
                 sys::print(b"     warning: sans font parse failed\n");
@@ -768,6 +801,9 @@ pub extern "C" fn _start() -> ! {
                 s.serif_font_data_ptr = serif_ptr;
                 s.serif_font_data_len = entry.length as usize;
                 s.serif_font_upem = fm.units_per_em;
+                s.serif_font_ascender = fm.ascent;
+                s.serif_font_descender = fm.descent;
+                s.serif_font_line_gap = fm.line_gap;
                 sys::print(b"     serif font loaded\n");
             } else {
                 sys::print(b"     warning: serif font parse failed\n");
@@ -1163,8 +1199,16 @@ pub extern "C" fn _start() -> ! {
             font_data: font_data(),
             upem: s.font_upem,
             axes: &[],
+            mono_content_id: protocol::content::CONTENT_ID_FONT_MONO,
+            mono_ascender: s.font_ascender,
+            mono_descender: s.font_descender,
+            mono_line_gap: s.font_line_gap,
             sans_font_data: sans_font_data(),
             sans_upem: s.sans_font_upem,
+            sans_content_id: protocol::content::CONTENT_ID_FONT_SANS,
+            sans_ascender: s.sans_font_ascender,
+            sans_descender: s.sans_font_descender,
+            sans_line_gap: s.sans_font_line_gap,
         }
     };
 
@@ -1193,10 +1237,22 @@ pub extern "C" fn _start() -> ! {
             let rich_fonts = scene_state::RichFonts {
                 mono_data: font_data(),
                 mono_upem: s.font_upem,
+                mono_content_id: protocol::content::CONTENT_ID_FONT_MONO,
+                mono_ascender: s.font_ascender,
+                mono_descender: s.font_descender,
+                mono_line_gap: s.font_line_gap,
                 sans_data: sans_font_data(),
                 sans_upem: s.sans_font_upem,
+                sans_content_id: protocol::content::CONTENT_ID_FONT_SANS,
+                sans_ascender: s.sans_font_ascender,
+                sans_descender: s.sans_font_descender,
+                sans_line_gap: s.sans_font_line_gap,
                 serif_data: serif_font_data(),
                 serif_upem: s.serif_font_upem,
+                serif_content_id: protocol::content::CONTENT_ID_FONT_SERIF,
+                serif_ascender: s.serif_font_ascender,
+                serif_descender: s.serif_font_descender,
+                serif_line_gap: s.serif_font_line_gap,
             };
             scene.update_rich_document_content(
                 &scene_cfg,
@@ -2233,10 +2289,22 @@ pub extern "C" fn _start() -> ! {
                     let rich_fonts = scene_state::RichFonts {
                         mono_data: font_data(),
                         mono_upem: s.font_upem,
+                        mono_content_id: protocol::content::CONTENT_ID_FONT_MONO,
+                        mono_ascender: s.font_ascender,
+                        mono_descender: s.font_descender,
+                        mono_line_gap: s.font_line_gap,
                         sans_data: sans_font_data(),
                         sans_upem: s.sans_font_upem,
+                        sans_content_id: protocol::content::CONTENT_ID_FONT_SANS,
+                        sans_ascender: s.sans_font_ascender,
+                        sans_descender: s.sans_font_descender,
+                        sans_line_gap: s.sans_font_line_gap,
                         serif_data: serif_font_data(),
                         serif_upem: s.serif_font_upem,
+                        serif_content_id: protocol::content::CONTENT_ID_FONT_SERIF,
+                        serif_ascender: s.serif_font_ascender,
+                        serif_descender: s.serif_font_descender,
+                        serif_line_gap: s.serif_font_line_gap,
                     };
                     scene.update_rich_document_content(
                         &scene_cfg,
@@ -2261,10 +2329,22 @@ pub extern "C" fn _start() -> ! {
                 let rich_fonts = scene_state::RichFonts {
                     mono_data: font_data(),
                     mono_upem: s.font_upem,
+                    mono_content_id: protocol::content::CONTENT_ID_FONT_MONO,
+                    mono_ascender: s.font_ascender,
+                    mono_descender: s.font_descender,
+                    mono_line_gap: s.font_line_gap,
                     sans_data: sans_font_data(),
                     sans_upem: s.sans_font_upem,
+                    sans_content_id: protocol::content::CONTENT_ID_FONT_SANS,
+                    sans_ascender: s.sans_font_ascender,
+                    sans_descender: s.sans_font_descender,
+                    sans_line_gap: s.sans_font_line_gap,
                     serif_data: serif_font_data(),
                     serif_upem: s.serif_font_upem,
+                    serif_content_id: protocol::content::CONTENT_ID_FONT_SERIF,
+                    serif_ascender: s.serif_font_ascender,
+                    serif_descender: s.serif_font_descender,
+                    serif_line_gap: s.serif_font_line_gap,
                 };
                 scene.update_rich_document_content(
                     &scene_cfg,

@@ -108,6 +108,11 @@ pub fn build_full_scene(
 
     w.clear();
 
+    // ── Style registry (first item in data buffer) ───────────────────
+
+    let (style_table, mono_style_id, sans_style_id) = super::base_style_table(cfg);
+    super::write_style_registry(w, &style_table);
+
     // ── Push data ────────────────────────────────────────────────────
 
     // Chrome glyphs.
@@ -206,7 +211,7 @@ pub fn build_full_scene(
             glyphs: title_glyph_ref,
             glyph_count: title_glyphs.len() as u16,
             font_size: cfg.font_size,
-            style_id: 1,
+            style_id: sans_style_id,
         };
         n.content_hash = fnv1a(title_label);
         n.flags = NodeFlags::VISIBLE;
@@ -224,7 +229,7 @@ pub fn build_full_scene(
             glyphs: clock_glyph_ref,
             glyph_count: clock_glyphs.len() as u16,
             font_size: cfg.font_size,
-            style_id: 1,
+            style_id: sans_style_id,
         };
         n.content_hash = fnv1a(clock_text);
         n.flags = NodeFlags::VISIBLE;
@@ -299,6 +304,7 @@ pub fn build_full_scene(
         cfg.line_height,
         scene_text_color,
         cfg.font_size,
+        mono_style_id,
     );
 
     // Link cursor after line nodes.
@@ -422,7 +428,10 @@ pub fn build_full_scene(
 /// mark N_CLOCK_TEXT changed.
 pub fn build_clock_update(w: &mut scene::SceneWriter<'_>, cfg: &SceneConfig, clock_text: &[u8]) {
     let clock_node = w.node(N_CLOCK_TEXT);
-    if let Content::Glyphs { color, .. } = clock_node.content {
+    if let Content::Glyphs {
+        color, style_id, ..
+    } = clock_node.content
+    {
         let new_glyphs = shape_chrome_text(cfg, clock_text);
         let new_ref = w.push_shaped_glyphs(&new_glyphs);
         let new_count = new_glyphs.len() as u16;
@@ -433,7 +442,7 @@ pub fn build_clock_update(w: &mut scene::SceneWriter<'_>, cfg: &SceneConfig, clo
             glyphs: new_ref,
             glyph_count: new_count,
             font_size: cfg.font_size,
-            style_id: 1,
+            style_id,
         };
         n.content_hash = fnv1a(clock_text);
         w.mark_dirty(N_CLOCK_TEXT);
@@ -572,6 +581,10 @@ pub fn build_document_content(
     // are re-pushed in build_full_scene on the next full rebuild.
     w.reset_data();
 
+    // ── Style registry (first item in data buffer) ───────────────────
+    let (style_table, mono_style_id, sans_style_id) = super::base_style_table(cfg);
+    super::write_style_registry(w, &style_table);
+
     // Re-push pointer cursor image data (invalidated by reset_data).
     {
         let cursor_px = CURSOR_SIZE_PT * 2;
@@ -649,7 +662,7 @@ pub fn build_document_content(
             glyphs: title_glyph_ref,
             glyph_count: title_glyphs.len() as u16,
             font_size: cfg.font_size,
-            style_id: 1,
+            style_id: sans_style_id,
         };
         n.content_hash = fnv1a(title_label);
     }
@@ -662,7 +675,7 @@ pub fn build_document_content(
             glyphs: clock_glyph_ref,
             glyph_count: clock_glyphs.len() as u16,
             font_size: cfg.font_size,
-            style_id: 1,
+            style_id: sans_style_id,
         };
         n.content_hash = fnv1a(clock_text);
     }
@@ -685,6 +698,7 @@ pub fn build_document_content(
         cfg.line_height,
         scene_text_color,
         cfg.font_size,
+        mono_style_id,
     );
 
     // Link cursor after line nodes.
@@ -740,10 +754,22 @@ pub fn build_document_content(
 pub struct RichFonts<'a> {
     pub mono_data: &'a [u8],
     pub mono_upem: u16,
+    pub mono_content_id: u32,
+    pub mono_ascender: i16,
+    pub mono_descender: i16,
+    pub mono_line_gap: i16,
     pub sans_data: &'a [u8],
     pub sans_upem: u16,
+    pub sans_content_id: u32,
+    pub sans_ascender: i16,
+    pub sans_descender: i16,
+    pub sans_line_gap: i16,
     pub serif_data: &'a [u8],
     pub serif_upem: u16,
+    pub serif_content_id: u32,
+    pub serif_ascender: i16,
+    pub serif_descender: i16,
+    pub serif_line_gap: i16,
 }
 
 impl<'a> RichFonts<'a> {
@@ -753,14 +779,26 @@ impl<'a> RichFonts<'a> {
             piecetable::FONT_MONO => FontInfo {
                 data: self.mono_data,
                 upem: self.mono_upem,
+                content_id: self.mono_content_id,
+                ascender: self.mono_ascender,
+                descender: self.mono_descender,
+                line_gap: self.mono_line_gap,
             },
             piecetable::FONT_SERIF => FontInfo {
                 data: self.serif_data,
                 upem: self.serif_upem,
+                content_id: self.serif_content_id,
+                ascender: self.serif_ascender,
+                descender: self.serif_descender,
+                line_gap: self.serif_line_gap,
             },
             _ => FontInfo {
                 data: self.sans_data,
                 upem: self.sans_upem,
+                content_id: self.sans_content_id,
+                ascender: self.sans_ascender,
+                descender: self.sans_descender,
+                line_gap: self.sans_line_gap,
             },
         }
     }
@@ -775,6 +813,7 @@ fn allocate_rich_line_nodes(
     scratch: &[u8],
     pt_buf: &[u8],
     fonts: &RichFonts<'_>,
+    style_table: &mut super::StyleTable,
     doc_width: u32,
     line_height: u32,
     scroll_y: scene::Mpt,
@@ -822,7 +861,35 @@ fn allocate_rich_line_nodes(
 
             let glyph_ref = w.push_shaped_glyphs(&shaped);
             let glyph_count = shaped.len() as u16;
-            let style_id = 0u32; // Temporary — Task 5 wires up real StyleTable.
+
+            // Resolve style_id from the StyleTable using the font's
+            // content_id and the style's variation axes.
+            let mut axes_buf = [fonts::rasterize::AxisValue {
+                tag: *b"wght",
+                value: 0.0,
+            }; 2];
+            let mut axis_count = 0;
+            if style.weight != 400 {
+                axes_buf[axis_count] = fonts::rasterize::AxisValue {
+                    tag: *b"wght",
+                    value: style.weight as f32,
+                };
+                axis_count += 1;
+            }
+            if italic {
+                axes_buf[axis_count] = fonts::rasterize::AxisValue {
+                    tag: *b"ital",
+                    value: 1.0,
+                };
+                axis_count += 1;
+            }
+            let style_id = style_table.style_id_for(
+                fi.content_id,
+                &axes_buf[..axis_count],
+                fi.ascender as u16,
+                (-fi.descender) as u16,
+                fi.upem,
+            );
 
             let color = Color::rgba(
                 style.color[0],
@@ -888,6 +955,48 @@ pub fn build_rich_document_content(
     w.set_node_count(WELL_KNOWN_COUNT);
     w.reset_data();
 
+    // ── Style registry (first item in data buffer) ───────────────────
+    // Start with base styles (mono=0, sans=1), then register styles
+    // from the piece table's style palette for rich text segments.
+    let (mut style_table, _mono_style_id, sans_style_id) = super::base_style_table(cfg);
+
+    // Register each unique style from the piece table palette.
+    let palette_count = piecetable::style_count(pt_buf);
+    for si in 0..palette_count {
+        if let Some(style) = piecetable::style(pt_buf, si as u8) {
+            let fi = fonts.resolve(style);
+            // Build axis values for variable font variations.
+            let mut axes_buf = [fonts::rasterize::AxisValue {
+                tag: *b"wght",
+                value: 0.0,
+            }; 2];
+            let mut axis_count = 0;
+            if style.weight != 400 {
+                axes_buf[axis_count] = fonts::rasterize::AxisValue {
+                    tag: *b"wght",
+                    value: style.weight as f32,
+                };
+                axis_count += 1;
+            }
+            if style.flags & piecetable::FLAG_ITALIC != 0 {
+                axes_buf[axis_count] = fonts::rasterize::AxisValue {
+                    tag: *b"ital",
+                    value: 1.0,
+                };
+                axis_count += 1;
+            }
+            let axes = &axes_buf[..axis_count];
+            let _ = style_table.style_id_for(
+                fi.content_id,
+                axes,
+                fi.ascender as u16,
+                (-fi.descender) as u16,
+                fi.upem,
+            );
+        }
+    }
+    super::write_style_registry(w, &style_table);
+
     // Re-push pointer cursor image data.
     {
         let cursor_px = CURSOR_SIZE_PT * 2;
@@ -938,7 +1047,7 @@ pub fn build_rich_document_content(
             glyphs: title_glyph_ref,
             glyph_count: title_glyphs.len() as u16,
             font_size: cfg.font_size,
-            style_id: 1,
+            style_id: sans_style_id,
         };
         n.content_hash = fnv1a(title_label);
     }
@@ -949,7 +1058,7 @@ pub fn build_rich_document_content(
             glyphs: clock_glyph_ref,
             glyph_count: clock_glyphs.len() as u16,
             font_size: cfg.font_size,
-            style_id: 1,
+            style_id: sans_style_id,
         };
         n.content_hash = fnv1a(clock_text);
     }
@@ -965,14 +1074,26 @@ pub fn build_rich_document_content(
     let mono_fi = FontInfo {
         data: fonts.mono_data,
         upem: fonts.mono_upem,
+        content_id: fonts.mono_content_id,
+        ascender: fonts.mono_ascender,
+        descender: fonts.mono_descender,
+        line_gap: fonts.mono_line_gap,
     };
     let sans_fi = FontInfo {
         data: fonts.sans_data,
         upem: fonts.sans_upem,
+        content_id: fonts.sans_content_id,
+        ascender: fonts.sans_ascender,
+        descender: fonts.sans_descender,
+        line_gap: fonts.sans_line_gap,
     };
     let serif_fi = FontInfo {
         data: fonts.serif_data,
         upem: fonts.serif_upem,
+        content_id: fonts.serif_content_id,
+        ascender: fonts.serif_ascender,
+        descender: fonts.serif_descender,
+        line_gap: fonts.serif_line_gap,
     };
     let rich_lines = layout_rich_lines(
         pt_buf,
@@ -998,6 +1119,7 @@ pub fn build_rich_document_content(
         &scratch[..text_len],
         pt_buf,
         fonts,
+        &mut style_table,
         doc_width,
         cfg.line_height,
         scroll_y,
