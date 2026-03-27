@@ -11,8 +11,13 @@ name = "mkdisk"
 version = "0.1.0"
 dependencies = [
  "fs",
+ "piecetable",
  "store",
 ]
+
+[[package]]
+name = "piecetable"
+version = "0.1.0"
 
 [[package]]
 name = "store"

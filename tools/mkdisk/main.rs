@@ -179,6 +179,67 @@ fn main() {
         println!("  font  {:?}  {}  ({} bytes)", id, font.name, data.len());
     }
 
+    // Create a sample text/rich document with styled content.
+    {
+        let sample_text = b"Hello, World!\nWelcome to rich text.";
+        let mut pt_buf = vec![0u8; 4096];
+
+        let cap = pt_buf.len();
+        if !piecetable::init_with_text(
+            &mut pt_buf,
+            cap,
+            sample_text,
+            &piecetable::default_body_style(),
+        ) {
+            eprintln!("error: failed to init piece table");
+            process::exit(1);
+        }
+
+        // Add the full default style palette (body, heading1, heading2, bold,
+        // italic, bold-italic, code). Body is already at index 0 from init;
+        // add_default_styles adds indices 1–6 (skipping duplicate body? No —
+        // it adds all 7). We already have one style from init_with_text, so
+        // add the remaining 6 individually to avoid a duplicate body entry.
+        let extra_styles = [
+            piecetable::heading1_style(),
+            piecetable::heading2_style(),
+            piecetable::bold_style(),
+            piecetable::italic_style(),
+            piecetable::bold_italic_style(),
+            piecetable::code_style(),
+        ];
+        for s in &extra_styles {
+            if piecetable::add_style(&mut pt_buf, s).is_none() {
+                eprintln!("error: failed to add style to piece table");
+                process::exit(1);
+            }
+        }
+
+        // Apply heading1 (index 1) to "Hello, World!\n" (bytes 0..14).
+        piecetable::apply_style(&mut pt_buf, 0, 14, 1);
+
+        // Compute the actual used size from the header fields.
+        let h = piecetable::header(&pt_buf);
+        let used = piecetable::HEADER_SIZE
+            + (h.style_count as usize) * core::mem::size_of::<piecetable::Style>()
+            + (h.piece_count as usize) * core::mem::size_of::<piecetable::Piece>()
+            + h.original_len as usize
+            + h.add_len as usize;
+        let pt_bytes = &pt_buf[..used];
+
+        let id = store.create("text/rich").unwrap();
+        store.write(id, 0, pt_bytes).unwrap();
+        store.set_attribute(id, "name", "welcome").unwrap();
+
+        file_count += 1;
+        println!(
+            "  rich  {:?}  welcome  ({} bytes, {} styles)",
+            id,
+            pt_bytes.len(),
+            7
+        );
+    }
+
     // Ingest test.png if present.
     let png_path = share_dir.join("test.png");
     if png_path.exists() {

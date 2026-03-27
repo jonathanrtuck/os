@@ -9,4 +9,5 @@ path = "main.rs"
 
 [dependencies]
 fs = { path = "../../system/libraries/fs" }
+piecetable = { path = "../../system/libraries/piecetable" }
 store = { path = "../../system/libraries/store" }
