@@ -1267,9 +1267,135 @@ pub fn build_rich_document_content(
     }
     w.mark_dirty(N_CURSOR);
 
-    // Selection — not yet implemented for rich text (would need
-    // proportional column calculation). Skip for now.
-    let _ = (sel_start, sel_end);
+    // Selection rendering for rich text with proportional x-positioning.
+    let (sel_lo, sel_hi) = if sel_start <= sel_end {
+        (sel_start as usize, sel_end as usize)
+    } else {
+        (sel_end as usize, sel_start as usize)
+    };
+
+    if sel_lo < sel_hi {
+        let sel_color = dc(cfg.sel_color);
+        let scroll_pt = scroll_y >> 10;
+        let mut prev_sel_node: u16 = NULL;
+
+        for line in &rich_lines {
+            // Compute line's byte range from its segments.
+            let line_byte_start = line.segments.first().map_or(0, |s| s.text_start);
+            let line_byte_end = line
+                .segments
+                .last()
+                .map_or(0, |s| s.text_start + s.text_len);
+
+            // Skip lines outside the selection.
+            if line_byte_end <= sel_lo || line_byte_start >= sel_hi {
+                continue;
+            }
+
+            // Visibility culling.
+            let line_bottom = line.y + line.line_height;
+            if line_bottom <= scroll_pt || line.y >= scroll_pt + text_area_h as i32 {
+                continue;
+            }
+
+            // Walk segments to compute x_start and x_end of selection on this line.
+            let mut pen_x: f32 = 0.0;
+            let mut x_start: f32 = 0.0;
+            let mut x_end: f32 = 0.0;
+            let mut found_start = false;
+            let clamp_lo = sel_lo.max(line_byte_start);
+            let clamp_hi = sel_hi.min(line_byte_end);
+
+            for seg in &line.segments {
+                let seg_start = seg.text_start;
+                let seg_end = seg.text_start + seg.text_len;
+                let Some(style) = piecetable::style(pt_buf, seg.style_id) else {
+                    continue;
+                };
+                let fi = fonts.resolve(style);
+
+                // Build axes for char_advance_pt.
+                let mut axes_buf = [fonts::rasterize::AxisValue {
+                    tag: [0; 4],
+                    value: 0.0,
+                }; 3];
+                let mut axis_count = 0;
+                if style.weight != 400 {
+                    axes_buf[axis_count] = fonts::rasterize::AxisValue {
+                        tag: *b"wght",
+                        value: style.weight as f32,
+                    };
+                    axis_count += 1;
+                }
+                axes_buf[axis_count] = fonts::rasterize::AxisValue {
+                    tag: *b"opsz",
+                    value: style.font_size_pt as f32,
+                };
+                axis_count += 1;
+                let axes = &axes_buf[..axis_count];
+
+                let seg_text_slice = &scratch[seg_start..seg_end.min(text_len)];
+                let mut byte_pos = seg_start;
+                for ch in core::str::from_utf8(seg_text_slice).unwrap_or("").chars() {
+                    if byte_pos == clamp_lo {
+                        x_start = pen_x;
+                        found_start = true;
+                    }
+                    let adv = super::char_advance_pt(
+                        fi.data,
+                        ch,
+                        style.font_size_pt as u16,
+                        fi.upem,
+                        axes,
+                    );
+                    byte_pos += ch.len_utf8();
+                    pen_x += adv;
+                    if byte_pos >= clamp_hi {
+                        x_end = pen_x;
+                        break;
+                    }
+                }
+
+                if byte_pos >= clamp_hi {
+                    break;
+                }
+            }
+
+            // If selection extends to end of line, use full pen_x.
+            if found_start && x_end <= x_start {
+                x_end = pen_x;
+            }
+            if !found_start {
+                continue;
+            }
+
+            let rect_w = x_end - x_start;
+            if rect_w <= 0.0 {
+                continue;
+            }
+
+            if let Some(sel_id) = w.alloc_node() {
+                let n = w.node_mut(sel_id);
+                n.x = scene::pt(x_start as i32);
+                n.y = scene::pt(line.y);
+                n.width = scene::upt(rect_w as u32 + 1);
+                n.height = scene::upt(line.line_height as u32);
+                n.background = sel_color;
+                n.content = Content::None;
+                n.flags = NodeFlags::VISIBLE;
+                n.next_sibling = NULL;
+
+                if prev_sel_node == NULL {
+                    // Link selection after cursor.
+                    w.node_mut(N_CURSOR).next_sibling = sel_id;
+                } else {
+                    w.node_mut(prev_sel_node).next_sibling = sel_id;
+                }
+                w.mark_dirty(sel_id);
+                prev_sel_node = sel_id;
+            }
+        }
+    }
 }
 
 /// Compute cursor (x, y) in millipoints for a rich text document.
