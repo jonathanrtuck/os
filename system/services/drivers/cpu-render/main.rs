@@ -54,7 +54,7 @@ const CORE_HANDLE: u8 = 1;
 /// Framebuffer chunk allocation order (256 KiB per chunk = 64 pages).
 const CHUNK_ORDER: u32 = 6;
 const CHUNK_PAGES: usize = 1 << CHUNK_ORDER;
-const CHUNK_BYTES: usize = CHUNK_PAGES * 4096;
+const CHUNK_BYTES: usize = CHUNK_PAGES * ipc::PAGE_SIZE;
 
 /// Maximum chunks per buffer (covers up to 8K resolution).
 const MAX_CHUNKS: usize = 512;

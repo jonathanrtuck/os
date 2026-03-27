@@ -423,7 +423,7 @@ pub extern "C" fn _start() -> ! {
         sys::print(b"virtio-9p: dma_alloc (vq) failed\n");
         sys::exit();
     });
-    let vq_bytes = (1usize << order) * 4096;
+    let vq_bytes = (1usize << order) * ipc::PAGE_SIZE;
 
     unsafe { core::ptr::write_bytes(vq_va as *mut u8, 0, vq_bytes) };
 

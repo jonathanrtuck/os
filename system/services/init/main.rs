@@ -78,10 +78,11 @@ const MMIO_DEVICE_FEATURES: usize = 0x010;
 const MMIO_DEVICE_FEATURES_SEL: usize = 0x014;
 /// Pseudo device ID for the PL031 RTC (matches kernel's DEVICE_ID_PL031_RTC).
 const DEVICE_PL031_RTC: u32 = 200;
+const PAGE_SIZE: usize = ipc::PAGE_SIZE;
 /// Document buffer: 1 page. First 64 bytes = header, rest = content.
 const DOC_BUF_PAGES: u64 = 1;
 const DOC_BUF_HEADER: u32 = 64;
-const DOC_BUF_CAPACITY: u32 = (DOC_BUF_PAGES as u32 * 4096) - DOC_BUF_HEADER;
+const DOC_BUF_CAPACITY: u32 = (DOC_BUF_PAGES as u32 * PAGE_SIZE as u32) - DOC_BUF_HEADER;
 /// Maximum number of virtio-input devices we can handle (keyboard + tablet).
 const MAX_INPUT_DEVICES: usize = 4;
 /// Boot-phase timeout: 10 seconds in nanoseconds.
@@ -188,9 +189,9 @@ fn setup_render_pipeline(
     // These must be shared BEFORE starting the render service.
     // -----------------------------------------------------------------------
     let scene_size = scene::TRIPLE_SCENE_SIZE;
-    let scene_pages_needed = (scene_size + 4095) / 4096;
+    let scene_pages_needed = (scene_size + ipc::PAGE_SIZE - 1) / ipc::PAGE_SIZE;
     let scene_order = (scene_pages_needed.next_power_of_two().trailing_zeros()) as u32;
-    let scene_alloc_bytes = (1usize << scene_order) * 4096;
+    let scene_alloc_bytes = (1usize << scene_order) * ipc::PAGE_SIZE;
     let mut scene_pa: u64 = 0;
     let scene_va = sys::dma_alloc(scene_order, &mut scene_pa).unwrap_or_else(|_| {
         sys::print(b"init: dma_alloc (scene graph) failed\n");
@@ -202,7 +203,7 @@ fn setup_render_pipeline(
 
     sys::print(b"     scene graph: shared memory allocated\n");
 
-    let scene_page_count = scene_alloc_bytes as u64 / 4096;
+    let scene_page_count = scene_alloc_bytes as u64 / PAGE_SIZE as u64;
 
     // Document buffer (pre-allocated by _start before font loading).
     let (doc_pa, doc_va) = doc_buf;
@@ -219,8 +220,8 @@ fn setup_render_pipeline(
         sys::exit();
     });
 
-    // SAFETY: input_state_va is a valid 1-page DMA region; zeroing 4096 bytes is within bounds.
-    unsafe { core::ptr::write_bytes(input_state_va as *mut u8, 0, 4096) };
+    // SAFETY: input_state_va is a valid 1-page DMA region; zeroing PAGE_SIZE bytes is within bounds.
+    unsafe { core::ptr::write_bytes(input_state_va as *mut u8, 0, PAGE_SIZE) };
 
     sys::print(b"     pointer state register: 4 KiB shared\n");
 
@@ -231,7 +232,7 @@ fn setup_render_pipeline(
         (0u64, 0u32)
     };
     let content_pages = if content_size_val > 0 {
-        (content_size_val as u64 + 4095) / 4096
+        (content_size_val as u64 + PAGE_SIZE as u64 - 1) / PAGE_SIZE as u64
     } else {
         0
     };
@@ -241,7 +242,7 @@ fn setup_render_pipeline(
         (0u64, 0u32, 0u32)
     };
     let file_store_pages = if png_len > 0 {
-        ((png_offset as u64 + png_len as u64) + 4095) / 4096
+        ((png_offset as u64 + png_len as u64) + PAGE_SIZE as u64 - 1) / PAGE_SIZE as u64
     } else {
         0
     };
@@ -722,7 +723,7 @@ fn setup_render_pipeline(
                 let dec_ch = init_channel(dec_ch_idx);
                 let dec_config = protocol::decode::DecoderConfig {
                     file_store_va: dec_fs_va as u64,
-                    file_store_size: (file_store_pages as u32) * 4096,
+                    file_store_size: (file_store_pages as u32) * PAGE_SIZE as u32,
                     content_va: dec_content_va as u64,
                     content_size: content_size_val,
                 };
@@ -1169,8 +1170,8 @@ pub extern "C" fn _start() -> ! {
         sys::print(b"init: dma_alloc (doc buffer) failed\n");
         sys::exit();
     });
-    // SAFETY: doc_va is a 1-page DMA region just allocated; zeroing 4096 bytes is within bounds.
-    unsafe { core::ptr::write_bytes(doc_va as *mut u8, 0, 4096) };
+    // SAFETY: doc_va is a 1-page DMA region just allocated; zeroing PAGE_SIZE bytes is within bounds.
+    unsafe { core::ptr::write_bytes(doc_va as *mut u8, 0, PAGE_SIZE) };
 
     if let Some((fs_proc, fs_ch, fs_ch_idx, fs_pa, fs_irq)) = fs_dev {
         // ── Native font loading from document service ────────────────────
@@ -1184,7 +1185,7 @@ pub extern "C" fn _start() -> ! {
             sys::print(b"init: dma_alloc (content region) failed\n");
             sys::exit();
         });
-        let content_capacity: u32 = (content_page_count as u32) * 4096; // 4 MiB
+        let content_capacity: u32 = (content_page_count as u32) * PAGE_SIZE as u32; // 4 MiB
 
         // SAFETY: content_va..+content_capacity is the DMA region just allocated; zeroing is within bounds.
         unsafe { core::ptr::write_bytes(content_va as *mut u8, 0, content_capacity as usize) };
@@ -1197,7 +1198,7 @@ pub extern "C" fn _start() -> ! {
             sys::print(b"init: dma_alloc (file store) failed\n");
             sys::exit();
         });
-        let fs_capacity: u32 = (fs_page_count as u32) * 4096; // 1 MiB
+        let fs_capacity: u32 = (fs_page_count as u32) * PAGE_SIZE as u32; // 1 MiB
 
         // SAFETY: store_va..+fs_capacity is the DMA region just allocated; zeroing is within bounds.
         unsafe { core::ptr::write_bytes(_store_va as *mut u8, 0, fs_capacity as usize) };
@@ -1563,7 +1564,7 @@ pub extern "C" fn _start() -> ! {
             sys::print(b"init: dma_alloc (content region) failed\n");
             sys::exit();
         });
-        let content_capacity: u32 = (content_page_count as u32) * 4096;
+        let content_capacity: u32 = (content_page_count as u32) * PAGE_SIZE as u32;
 
         // SAFETY: content_va..+content_capacity is the DMA region just allocated; zeroing is within bounds.
         unsafe { core::ptr::write_bytes(content_va as *mut u8, 0, content_capacity as usize) };
@@ -1576,7 +1577,7 @@ pub extern "C" fn _start() -> ! {
             sys::print(b"init: dma_alloc (file store) failed\n");
             sys::exit();
         });
-        let fs_capacity: u32 = (fs_page_count as u32) * 4096;
+        let fs_capacity: u32 = (fs_page_count as u32) * PAGE_SIZE as u32;
 
         // SAFETY: store_va..+fs_capacity is the DMA region just allocated; zeroing is within bounds.
         unsafe { core::ptr::write_bytes(_store_va as *mut u8, 0, fs_capacity as usize) };

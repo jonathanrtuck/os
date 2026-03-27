@@ -178,14 +178,14 @@ pub(crate) fn attach_backing(
     // For simplicity, allocate in 256 KiB chunks (order 6 = 64 pages).
     const CHUNK_ORDER: u32 = 6;
     const CHUNK_PAGES: usize = 1 << CHUNK_ORDER;
-    const CHUNK_BYTES: usize = CHUNK_PAGES * 4096;
+    const CHUNK_BYTES: usize = CHUNK_PAGES * ipc::PAGE_SIZE;
     let chunks_needed = (fb_bytes + CHUNK_BYTES - 1) / CHUNK_BYTES;
 
     // Allocate the command DMA buffer (needs space for header + entries).
     let header_size = core::mem::size_of::<AttachBacking>();
     let entry_size = core::mem::size_of::<MemEntry>();
     let total_cmd_bytes = header_size + chunks_needed * entry_size;
-    let cmd_pages = (total_cmd_bytes + 4095) / 4096;
+    let cmd_pages = (total_cmd_bytes + ipc::PAGE_SIZE - 1) / ipc::PAGE_SIZE;
     let cmd_order = (cmd_pages.next_power_of_two().trailing_zeros()) as u32;
     let mut cmd = DmaBuf::alloc(cmd_order);
 
@@ -226,8 +226,8 @@ pub(crate) fn attach_backing(
     }
 
     // Response goes after command data, page-aligned.
-    let resp_offset = ((total_cmd_bytes + 4095) / 4096) * 4096;
-    let (resp_pa, resp_va, resp_buf) = if resp_offset + 64 <= (1 << cmd_order) * 4096 {
+    let resp_offset = ((total_cmd_bytes + ipc::PAGE_SIZE - 1) / ipc::PAGE_SIZE) * ipc::PAGE_SIZE;
+    let (resp_pa, resp_va, resp_buf) = if resp_offset + 64 <= (1 << cmd_order) * ipc::PAGE_SIZE {
         (cmd.pa + resp_offset as u64, cmd.va + resp_offset, None)
     } else {
         let rb = DmaBuf::alloc(0);
@@ -388,7 +388,7 @@ pub(crate) fn attach_backing_vbo(
     let entry_size = core::mem::size_of::<MemEntry>();
 
     // Allocate DMA pages for VBO backing.
-    let vbo_pages = ((size_bytes as usize) + 4095) / 4096;
+    let vbo_pages = ((size_bytes as usize) + ipc::PAGE_SIZE - 1) / ipc::PAGE_SIZE;
     let vbo_order = (vbo_pages.next_power_of_two().trailing_zeros()) as u32;
     let mut vbo_pa: u64 = 0;
     let vbo_va = sys::dma_alloc(vbo_order, &mut vbo_pa).unwrap_or_else(|_| {
@@ -396,7 +396,7 @@ pub(crate) fn attach_backing_vbo(
         sys::exit();
     });
     // SAFETY: vbo_va is valid DMA memory, zero it.
-    unsafe { core::ptr::write_bytes(vbo_va as *mut u8, 0, (1usize << vbo_order) * 4096) };
+    unsafe { core::ptr::write_bytes(vbo_va as *mut u8, 0, (1usize << vbo_order) * ipc::PAGE_SIZE) };
 
     // Write attach backing header + one entry.
     let ptr = cmd.va as *mut u8;
@@ -414,7 +414,7 @@ pub(crate) fn attach_backing_vbo(
             ptr.add(header_size) as *mut MemEntry,
             MemEntry {
                 addr: vbo_pa,
-                length: (1u32 << vbo_order) * 4096,
+                length: (1u32 << vbo_order) * ipc::PAGE_SIZE as u32,
                 _padding: 0,
             },
         );
@@ -561,7 +561,7 @@ pub(crate) fn attach_and_ctx_resource(
     let header_size = core::mem::size_of::<AttachBacking>();
     let entry_size = core::mem::size_of::<MemEntry>();
 
-    let pages = ((size_bytes as usize) + 4095) / 4096;
+    let pages = ((size_bytes as usize) + ipc::PAGE_SIZE - 1) / ipc::PAGE_SIZE;
     let order = (pages.next_power_of_two().trailing_zeros()) as u32;
     let mut pa: u64 = 0;
     let va = sys::dma_alloc(order, &mut pa).unwrap_or_else(|_| {
@@ -569,7 +569,7 @@ pub(crate) fn attach_and_ctx_resource(
         sys::exit();
     });
     // SAFETY: va is valid DMA memory of (1 << order) pages.
-    unsafe { core::ptr::write_bytes(va as *mut u8, 0, (1usize << order) * 4096) };
+    unsafe { core::ptr::write_bytes(va as *mut u8, 0, (1usize << order) * ipc::PAGE_SIZE) };
 
     let ptr = cmd.va as *mut u8;
     // SAFETY: writing into zeroed DMA page at correct offsets.
@@ -586,7 +586,7 @@ pub(crate) fn attach_and_ctx_resource(
             ptr.add(header_size) as *mut MemEntry,
             MemEntry {
                 addr: pa,
-                length: (1u32 << order) * 4096,
+                length: (1u32 << order) * ipc::PAGE_SIZE as u32,
                 _padding: 0,
             },
         );

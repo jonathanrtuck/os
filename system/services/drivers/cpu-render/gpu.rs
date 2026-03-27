@@ -125,7 +125,7 @@ impl DmaBuf {
             sys::exit();
         });
         // SAFETY: va is a valid DMA allocation of (1 << order) pages.
-        unsafe { core::ptr::write_bytes(va as *mut u8, 0, (1usize << order) * 4096) };
+        unsafe { core::ptr::write_bytes(va as *mut u8, 0, (1usize << order) * ipc::PAGE_SIZE) };
         DmaBuf { va, pa, order }
     }
 
@@ -206,7 +206,7 @@ pub fn init_device(
         sys::print(b"cpu-render: dma_alloc (vq) failed\n");
         sys::exit();
     });
-    let vq_bytes = (1usize << vq_order) * 4096;
+    let vq_bytes = (1usize << vq_order) * ipc::PAGE_SIZE;
     // SAFETY: vq_va is a valid DMA allocation of vq_bytes.
     unsafe { core::ptr::write_bytes(vq_va as *mut u8, 0, vq_bytes) };
     let mut vq = virtio::Virtqueue::new(queue_size, vq_va, vq_pa);
@@ -312,7 +312,7 @@ pub fn attach_backing_sg(
     let header_size = core::mem::size_of::<AttachBacking>();
     let entry_size = core::mem::size_of::<MemEntry>();
     let total_bytes = header_size + (nr_entries as usize) * entry_size;
-    let cmd_pages = (total_bytes + 4095) / 4096;
+    let cmd_pages = (total_bytes + ipc::PAGE_SIZE - 1) / ipc::PAGE_SIZE;
     let cmd_order = (cmd_pages.next_power_of_two().trailing_zeros()) as u32;
     let cmd = DmaBuf::alloc(cmd_order);
     let ptr = cmd.va as *mut u8;
@@ -340,8 +340,8 @@ pub fn attach_backing_sg(
             );
         }
     }
-    let resp_offset = ((total_bytes + 4095) / 4096) * 4096;
-    let (resp_pa, resp_va, resp_buf) = if resp_offset + 64 <= (1 << cmd_order) * 4096 {
+    let resp_offset = ((total_bytes + ipc::PAGE_SIZE - 1) / ipc::PAGE_SIZE) * ipc::PAGE_SIZE;
+    let (resp_pa, resp_va, resp_buf) = if resp_offset + 64 <= (1 << cmd_order) * ipc::PAGE_SIZE {
         (cmd.pa + resp_offset as u64, cmd.va + resp_offset, None)
     } else {
         let rb = DmaBuf::alloc(0);

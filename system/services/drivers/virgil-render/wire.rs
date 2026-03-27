@@ -138,7 +138,7 @@ impl DmaBuf {
             sys::exit();
         });
         // SAFETY: va is valid DMA memory of (1 << order) pages, freshly allocated.
-        unsafe { core::ptr::write_bytes(va as *mut u8, 0, (1usize << order) * 4096) };
+        unsafe { core::ptr::write_bytes(va as *mut u8, 0, (1usize << order) * ipc::PAGE_SIZE) };
         DmaBuf { va, pa, order }
     }
 

@@ -41,8 +41,8 @@ pub(crate) fn submit_3d(
     let total_cmd_bytes = header_size + data_bytes as usize;
 
     // Allocate DMA buffer large enough for header + command data + response.
-    let total_with_resp = total_cmd_bytes + 4096; // leave room for response
-    let cmd_pages = (total_with_resp + 4095) / 4096;
+    let total_with_resp = total_cmd_bytes + ipc::PAGE_SIZE; // leave room for response
+    let cmd_pages = (total_with_resp + ipc::PAGE_SIZE - 1) / ipc::PAGE_SIZE;
     let cmd_order = (cmd_pages.next_power_of_two().trailing_zeros()) as u32;
     let mut cmd = DmaBuf::alloc(cmd_order);
 
@@ -70,7 +70,7 @@ pub(crate) fn submit_3d(
     }
 
     // Response at page-aligned offset after command data.
-    let resp_offset = ((total_cmd_bytes + 4095) / 4096) * 4096;
+    let resp_offset = ((total_cmd_bytes + ipc::PAGE_SIZE - 1) / ipc::PAGE_SIZE) * ipc::PAGE_SIZE;
     let resp_pa = cmd.pa + resp_offset as u64;
     let resp_va = cmd.va + resp_offset;
 

@@ -69,7 +69,7 @@ pub(crate) fn init_device(
         sys::print(b"virgil-render: dma_alloc (vq) failed\n");
         sys::exit();
     });
-    let vq_bytes = (1usize << vq_order) * 4096;
+    let vq_bytes = (1usize << vq_order) * ipc::PAGE_SIZE;
     // SAFETY: vq_va is valid DMA memory of vq_bytes size, freshly allocated.
     unsafe { core::ptr::write_bytes(vq_va as *mut u8, 0, vq_bytes) };
     let mut vq = virtio::Virtqueue::new(queue_size, vq_va, vq_pa);

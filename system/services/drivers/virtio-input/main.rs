@@ -211,7 +211,7 @@ pub extern "C" fn _start() -> ! {
         sys::print(b"virtio-input: dma_alloc (vq) failed\n");
         sys::exit();
     });
-    let vq_bytes = (1usize << vq_order) * 4096;
+    let vq_bytes = (1usize << vq_order) * ipc::PAGE_SIZE;
 
     // SAFETY: vq_va is a valid DMA allocation of vq_bytes; zeroing virtqueue memory before use.
     unsafe { core::ptr::write_bytes(vq_va as *mut u8, 0, vq_bytes) };
@@ -239,7 +239,7 @@ pub extern "C" fn _start() -> ! {
     });
 
     // SAFETY: event_va is a valid DMA page allocation; zeroing event buffer memory before use.
-    unsafe { core::ptr::write_bytes(event_va as *mut u8, 0, 4096) };
+    unsafe { core::ptr::write_bytes(event_va as *mut u8, 0, ipc::PAGE_SIZE) };
 
     // Pre-post all event buffers (each 8 bytes, device-writable).
     for i in 0..NUM_EVENT_BUFS {

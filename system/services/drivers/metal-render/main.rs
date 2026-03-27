@@ -542,14 +542,14 @@ impl DmaBuf {
             sys::print(b"metal-render: dma_alloc failed\n");
             sys::exit();
         });
-        let bytes = (1usize << order) * 4096;
+        let bytes = (1usize << order) * ipc::PAGE_SIZE;
         // SAFETY: va points to freshly allocated DMA memory of `bytes` size.
         unsafe { core::ptr::write_bytes(va as *mut u8, 0, bytes) };
         Self { va, pa, order }
     }
 
     fn size(&self) -> usize {
-        (1usize << self.order) * 4096
+        (1usize << self.order) * ipc::PAGE_SIZE
     }
 }
 
@@ -3490,7 +3490,7 @@ fn alloc_virtqueue(device: &virtio::Device, index: u32, size: u32) -> virtio::Vi
         sys::print(b"metal-render: dma_alloc (vq) failed\n");
         sys::exit();
     });
-    let bytes = (1usize << order) * 4096;
+    let bytes = (1usize << order) * ipc::PAGE_SIZE;
     // SAFETY: va is freshly allocated DMA memory of `bytes` size.
     unsafe { core::ptr::write_bytes(va as *mut u8, 0, bytes) };
     let vq = virtio::Virtqueue::new(size, va, pa);
