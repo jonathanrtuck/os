@@ -61,7 +61,9 @@ pub struct PieceTableHeader {
     pub text_len: u32,
     pub cursor_pos: u32,
     pub operation_id: u32,
-    pub _reserved: [u8; 32],
+    pub selection_start: u32,
+    pub selection_end: u32,
+    pub _reserved: [u8; 24],
 }
 
 const _HEADER_SIZE_CHECK: () = assert!(mem::size_of::<PieceTableHeader>() == HEADER_SIZE);
@@ -896,6 +898,24 @@ pub fn apply_style(buf: &mut [u8], start: u32, end: u32, style_id: u8) {
 /// Set the current insertion style.
 pub fn set_current_style(buf: &mut [u8], style_id: u8) {
     read_header_mut(buf).current_style = style_id;
+}
+
+/// Get the current insertion style.
+pub fn current_style(buf: &[u8]) -> u8 {
+    read_header(buf).current_style
+}
+
+/// Set the selection range in the header.
+pub fn set_selection(buf: &mut [u8], start: u32, end: u32) {
+    let h = read_header_mut(buf);
+    h.selection_start = start;
+    h.selection_end = end;
+}
+
+/// Get the selection range from the header.
+pub fn selection(buf: &[u8]) -> (u32, u32) {
+    let h = read_header(buf);
+    (h.selection_start, h.selection_end)
 }
 
 /// Increment operation_id and return the new value.

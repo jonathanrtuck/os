@@ -12,8 +12,8 @@ use protocol::{
 use super::{
     clamp_f32, content_text_layout,
     documents::{doc_content, doc_delete_range, doc_write_header},
-    EDITOR_HANDLE, KEY_A, KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_HOME, KEY_LEFT,
-    KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_TAB, KEY_UP,
+    EDITOR_HANDLE, KEY_A, KEY_B, KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_HOME, KEY_I,
+    KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_TAB, KEY_UP,
 };
 
 pub(crate) struct KeyAction {
@@ -108,6 +108,9 @@ pub(crate) fn update_selection_from_anchor() -> bool {
     let changed = s.sel_start != new_start || s.sel_end != new_end;
     s.sel_start = new_start;
     s.sel_end = new_end;
+    if changed && s.doc_format == super::DocumentFormat::Rich {
+        super::documents::rich_set_selection(new_start, new_end);
+    }
     changed
 }
 
@@ -118,6 +121,9 @@ pub(crate) fn clear_selection() {
     s.anchor = 0;
     s.sel_start = 0;
     s.sel_end = 0;
+    if s.doc_format == super::DocumentFormat::Rich {
+        super::documents::rich_set_selection(0, 0);
+    }
 }
 
 /// Send MSG_SET_CURSOR to the editor to sync its local cursor.
@@ -265,6 +271,65 @@ pub(crate) fn process_key_event(
                 changed: true,
                 text_changed: false,
                 selection_changed: true,
+                context_switched: false,
+                consumed: true,
+            }
+        }
+
+        // ── Cmd+B: toggle bold ──────────────────────────────────
+        KEY_B if cmd => {
+            let s = super::state();
+            if s.doc_format != super::DocumentFormat::Rich {
+                return no_change;
+            }
+            if s.has_selection {
+                let lo = s.sel_start;
+                let hi = s.sel_end;
+                // Toggle: if the selection start is already bold (style 3),
+                // revert to body (style 0); otherwise apply bold.
+                let buf = super::documents::rich_buf_ref();
+                let cur = piecetable::style_at(buf, lo as u32).unwrap_or(0);
+                let target = if cur == 3 { 0u8 } else { 3u8 };
+                super::documents::rich_apply_style(lo, hi, target);
+            } else {
+                // Toggle insertion style.
+                let buf = super::documents::rich_buf_ref();
+                let cur = piecetable::current_style(buf);
+                let target = if cur == 3 { 0u8 } else { 3u8 };
+                super::documents::rich_set_current_style(target);
+            }
+            KeyAction {
+                changed: true,
+                text_changed: true,
+                selection_changed: false,
+                context_switched: false,
+                consumed: true,
+            }
+        }
+
+        // ── Cmd+I: toggle italic ────────────────────────────────
+        KEY_I if cmd => {
+            let s = super::state();
+            if s.doc_format != super::DocumentFormat::Rich {
+                return no_change;
+            }
+            if s.has_selection {
+                let lo = s.sel_start;
+                let hi = s.sel_end;
+                let buf = super::documents::rich_buf_ref();
+                let cur = piecetable::style_at(buf, lo as u32).unwrap_or(0);
+                let target = if cur == 4 { 0u8 } else { 4u8 };
+                super::documents::rich_apply_style(lo, hi, target);
+            } else {
+                let buf = super::documents::rich_buf_ref();
+                let cur = piecetable::current_style(buf);
+                let target = if cur == 4 { 0u8 } else { 4u8 };
+                super::documents::rich_set_current_style(target);
+            }
+            KeyAction {
+                changed: true,
+                text_changed: true,
+                selection_changed: false,
                 context_switched: false,
                 consumed: true,
             }

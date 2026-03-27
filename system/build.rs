@@ -49,6 +49,7 @@ const INIT_EMBEDDED: &[(&str, &str)] = &[
     ("metal-render", "METAL_RENDER_ELF"),
     ("png-decode", "PNG_DECODE_ELF"),
     ("text-editor", "TEXT_EDITOR_ELF"),
+    ("rich-editor", "RICH_EDITOR_ELF"),
     ("stress", "STRESS_ELF"),
     ("fuzz", "FUZZ_ELF"),
 ];
@@ -78,6 +79,7 @@ const PROGRAMS: &[(&str, &str, bool, bool)] = &[
     ("metal-render", "services/drivers/metal-render", true, true),
     ("png-decode", "services/decoders/png", false, false),
     ("text-editor", "user/text-editor", false, false),
+    ("rich-editor", "user/rich-editor", false, false),
     ("stress", "user/stress", false, false),
     ("fuzz-helper", "user/fuzz-helper", false, false),
     ("fuzz", "user/fuzz", false, false),
@@ -254,6 +256,9 @@ fn main() {
         if name == "core" {
             externs.push(("animation", animation_rlib.clone()));
             externs.push(("layout", layout_rlib.clone()));
+            externs.push(("piecetable", piecetable_rlib.clone()));
+        }
+        if name == "rich-editor" {
             externs.push(("piecetable", piecetable_rlib.clone()));
         }
         if name == "document" {

@@ -651,13 +651,13 @@ fn setup_render_pipeline(
     // -----------------------------------------------------------------------
     // Phase 9: Core ↔ Editor channel.
     // -----------------------------------------------------------------------
-    sys::print(b"     spawning text editor\n");
+    sys::print(b"     spawning rich editor\n");
 
     let (editor_proc, _editor_ch, editor_ch_idx) =
-        match spawn_with_channel(TEXT_EDITOR_ELF, next_channel) {
+        match spawn_with_channel(RICH_EDITOR_ELF, next_channel) {
             Some(v) => v,
             None => {
-                sys::print(b"init: failed to spawn text editor\n");
+                sys::print(b"init: failed to spawn rich editor\n");
                 sys::exit();
             }
         };
@@ -904,7 +904,7 @@ fn setup_render_pipeline(
         sys::yield_now();
     }
 
-    sys::print(b"     starting text editor\n");
+    sys::print(b"     starting rich editor\n");
 
     start_process(editor_proc, b"editor");
 

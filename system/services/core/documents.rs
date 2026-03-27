@@ -174,6 +174,7 @@ pub(crate) fn rich_delete_range(start: usize, end: usize) -> bool {
 pub(crate) fn rich_apply_style(start: usize, end: usize, style_id: u8) {
     let buf = rich_buf();
     piecetable::apply_style(buf, start as u32, end as u32, style_id);
+    rich_sync_header();
 }
 
 /// Set the current insertion style for a rich text document.
@@ -198,6 +199,12 @@ pub(crate) fn rich_cursor_pos() -> usize {
 pub(crate) fn rich_set_cursor_pos(pos: usize) {
     let buf = rich_buf();
     piecetable::set_cursor_pos(buf, pos as u32);
+}
+
+/// Write selection range to the piece table header for editor reads.
+pub(crate) fn rich_set_selection(start: usize, end: usize) {
+    let buf = rich_buf();
+    piecetable::set_selection(buf, start as u32, end as u32);
 }
 
 /// Advance the piece table operation_id (called at snapshot boundaries).
