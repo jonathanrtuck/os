@@ -9,6 +9,7 @@
 ## IPC Protocol
 
 **Receives:**
+
 - `MSG_DEVICE_CONFIG` — MMIO address and IRQ from init (handle 0)
 - `MSG_FS_CONFIG` — Doc buffer VA and capacity from init (handle 0)
 - `MSG_FS_COMMIT` — Commit request from core (handle 1)

@@ -9,12 +9,14 @@ Root userspace task. The kernel spawns only init; init reads the device manifest
 ## IPC Protocol
 
 **Creates and manages all IPC channels:**
+
 - Config channels (init to each child) — device config, compositor config, editor config
 - Input channels (input driver to core) — keyboard/tablet events
 - Scene update channel (core to render service) — scene graph change signals
 - Document channel (core to document service) — document operations
 
 **Sends:**
+
 - `MSG_DEVICE_CONFIG` — MMIO PA and IRQ to all hardware drivers
 - `MSG_GPU_CONFIG` — Framebuffer dimensions to render service
 - `MSG_COMPOSITOR_CONFIG` — Scene graph VA, font data, scale factor to render service
@@ -25,6 +27,7 @@ Root userspace task. The kernel spawns only init; init reads the device manifest
 - `MSG_DOC_CONFIG`, `MSG_DOC_QUERY`, `MSG_DOC_READ`, `MSG_DOC_BOOT_DONE` — Document service boot sequence
 
 **Receives:**
+
 - `MSG_DISPLAY_INFO` — Display resolution from render service
 - `MSG_GPU_READY` — Ready signal from render service
 - `MSG_FS_READ_RESPONSE` — File data from 9P driver

@@ -15,6 +15,7 @@ Parent directory for sandboxed content decoder services. Each decoder runs as an
 ## Architecture
 
 Each decoder service:
+
 1. Receives config from init (File Store VA/size, Content Region VA/size)
 2. Reads encoded file data from File Store (read-only shared memory)
 3. Decodes into a private heap buffer (BGRA pixels + decompression scratch)

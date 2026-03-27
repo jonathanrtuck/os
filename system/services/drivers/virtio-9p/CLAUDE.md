@@ -9,10 +9,12 @@ Host filesystem passthrough driver using the 9P2000.L protocol over virtio trans
 ## IPC Protocol
 
 **Receives:**
+
 - `MSG_DEVICE_CONFIG` — MMIO address and IRQ from init (handle 0)
 - `MSG_FS_READ_REQUEST` — File path and target VA from init (handle 0)
 
 **Sends:**
+
 - `MSG_FS_READ_RESPONSE` — File size and status to init (handle 0)
 
 ## Dependencies

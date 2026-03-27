@@ -15,6 +15,7 @@ Hardware abstraction services. Each driver runs as a sandboxed userspace process
 ## Common Pattern
 
 All drivers follow the same lifecycle:
+
 1. Receive `MSG_DEVICE_CONFIG` from init (MMIO PA, IRQ)
 2. Map MMIO region via `device_map` syscall
 3. Negotiate virtio features

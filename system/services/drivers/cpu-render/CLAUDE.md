@@ -10,12 +10,14 @@ CPU software render service: reads the triple-buffered scene graph from shared m
 ## IPC Protocol
 
 **Receives:**
+
 - `MSG_DEVICE_CONFIG` — GPU MMIO address and IRQ from init (handle 0)
 - `MSG_GPU_CONFIG` — Framebuffer dimensions from init (handle 0)
 - `MSG_COMPOSITOR_CONFIG` — Scene graph VA, font data, scale factor from init (handle 0)
 - `MSG_SCENE_UPDATED` — Scene graph change signal from core (handle 1)
 
 **Sends:**
+
 - `MSG_DISPLAY_INFO` — Display resolution to init (handle 0)
 - `MSG_GPU_READY` — Ready signal to init (handle 0)
 

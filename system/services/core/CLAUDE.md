@@ -23,6 +23,7 @@ Central OS service: sole owner of document state, text layout, scene graph build
 ## IPC Protocol
 
 **Receives:**
+
 - `MSG_KEY_EVENT` — Keyboard events from input driver (handle 1)
 - `MSG_POINTER_BUTTON` — Mouse button events from input driver (handle 1)
 - `MSG_WRITE_INSERT`, `MSG_WRITE_DELETE`, `MSG_WRITE_DELETE_RANGE` — Edit operations from text editor (handle 3)
@@ -32,6 +33,7 @@ Central OS service: sole owner of document state, text layout, scene graph build
 - `MSG_IMAGE_CONFIG`, `MSG_RTC_CONFIG` — Image and RTC config from init
 
 **Sends:**
+
 - `MSG_SCENE_UPDATED` — Scene graph published signal to render service (handle 2)
 - `MSG_KEY_EVENT`, `MSG_SET_CURSOR` — Input forwarding to text editor (handle 3)
 - `MSG_DOC_COMMIT`, `MSG_DOC_QUERY`, `MSG_DOC_READ`, `MSG_DOC_SNAPSHOT`, `MSG_DOC_RESTORE`, `MSG_DOC_CREATE`, `MSG_DOC_DELETE_SNAPSHOT` — Document operations to document service (handle 5)

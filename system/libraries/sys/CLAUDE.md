@@ -4,7 +4,7 @@ Syscall wrappers and userspace heap allocator. Provides safe Rust functions for 
 
 ## Key Files
 
-- `lib.rs` -- All types and functions in one file. Syscall wrappers (exit, write, yield_, channel_create, channel_signal, wait, timer_create, interrupt_register, device_map, dma_alloc, process_create, process_start, memory_share, memory_alloc, memory_free, thread_create, futex_wait, futex_wake, process_set_syscall_filter, etc.). `SyscallError` enum. Typed handle wrappers (`ChannelHandle`, `InterruptHandle`, `ProcessHandle`, `TimerHandle`, `ThreadHandle`, `SchedHandle`). `UserHeap` global allocator with free-list, spinlock, and `HeapStats` instrumentation. `counter()` and `counter_freq()` for sub-ms timing via CNTVCT_EL0.
+- `lib.rs` -- All types and functions in one file. Syscall wrappers (exit, write, yield\_, channel_create, channel_signal, wait, timer_create, interrupt_register, device_map, dma_alloc, process_create, process_start, memory_share, memory_alloc, memory_free, thread_create, futex_wait, futex_wake, process_set_syscall_filter, etc.). `SyscallError` enum. Typed handle wrappers (`ChannelHandle`, `InterruptHandle`, `ProcessHandle`, `TimerHandle`, `ThreadHandle`, `SchedHandle`). `UserHeap` global allocator with free-list, spinlock, and `HeapStats` instrumentation. `counter()` and `counter_freq()` for sub-ms timing via CNTVCT_EL0.
 
 ## Dependencies
 

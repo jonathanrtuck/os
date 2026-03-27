@@ -9,9 +9,11 @@ Keyboard and tablet input driver. Reads Linux evdev events from the virtio-input
 ## IPC Protocol
 
 **Receives:**
+
 - `MSG_DEVICE_CONFIG` — MMIO address and IRQ from init (handle 0)
 
 **Sends:**
+
 - `MSG_KEY_EVENT` — Keyboard key press/release with ASCII translation and modifier state (to core, handle 1)
 - `MSG_POINTER_BUTTON` — Mouse button press/release (to core, handle 1)
 - Pointer position written to shared atomic `PointerState` register (u64, no IPC ring)

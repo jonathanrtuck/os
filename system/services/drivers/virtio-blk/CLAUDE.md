@@ -9,9 +9,11 @@ Standalone block device driver and self-test. Maps a virtio-blk device, negotiat
 ## IPC Protocol
 
 **Receives:**
+
 - `MSG_DEVICE_CONFIG` — MMIO address and IRQ from init (handle 0)
 
 **Sends:**
+
 - Signals handle 0 on completion
 
 ## Dependencies

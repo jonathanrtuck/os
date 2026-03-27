@@ -9,9 +9,11 @@ Console output driver (placeholder). Maps a virtio-console device, negotiates fe
 ## IPC Protocol
 
 **Receives:**
+
 - `MSG_DEVICE_CONFIG` — MMIO address and IRQ from init (handle 0)
 
 **Sends:**
+
 - Signals handle 0 on completion
 
 ## Dependencies
