@@ -204,8 +204,15 @@ pub fn read_blob<D: BlockDevice>(
     let mut block_list = Vec::new();
     let mut current = first_block;
     let mut buf = vec![0u8; BLOCK_SIZE as usize];
+    let max_blocks = device.block_count();
 
     loop {
+        if block_list.len() as u32 >= max_blocks {
+            return Err(FsError::Corrupt(String::from(
+                "blob chain exceeds device block count (cycle?)",
+            )));
+        }
+
         device.read_block(current, &mut buf)?;
         block_list.push(current);
 

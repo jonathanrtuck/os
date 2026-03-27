@@ -191,6 +191,81 @@ impl fs::BlockDevice for VirtioBlockDevice {
     }
 }
 
+// ── Shared IPC handlers (used by both boot-query and main loops) ─────
+
+fn build_query(q: &DocQuery) -> store::Query {
+    let query_str = core::str::from_utf8(&q.data[..q.data_len as usize]).unwrap_or("");
+    match q.query_type {
+        0 => store::Query::MediaType(alloc::string::String::from(query_str)),
+        1 => store::Query::Type(alloc::string::String::from(query_str)),
+        2 => {
+            if let Some(sep) = query_str.find('\0') {
+                store::Query::Attribute {
+                    key: alloc::string::String::from(&query_str[..sep]),
+                    value: alloc::string::String::from(&query_str[sep + 1..]),
+                }
+            } else {
+                store::Query::MediaType(alloc::string::String::from(""))
+            }
+        }
+        _ => store::Query::MediaType(alloc::string::String::from("")),
+    }
+}
+
+fn handle_query(store: &store::Store, q: &DocQuery, ch: &ipc::Channel, signal: sys::ChannelHandle) {
+    let results = store.query(&build_query(q));
+    let count = results.len().min(6) as u32;
+
+    let mut result = DocQueryResult {
+        count,
+        _pad: 0,
+        file_ids: [0u64; 6],
+    };
+    for (i, fid) in results.iter().take(6).enumerate() {
+        result.file_ids[i] = fid.0;
+    }
+
+    // SAFETY: DocQueryResult is #[repr(C)] and fits in 60-byte payload.
+    let reply = unsafe { ipc::Message::from_payload(MSG_DOC_QUERY_RESULT, &result) };
+    ch.send(&reply);
+    let _ = sys::channel_signal(signal);
+}
+
+fn handle_read(
+    store: &store::Store,
+    r: &DocRead,
+    target: usize,
+    ch: &ipc::Channel,
+    signal: sys::ChannelHandle,
+) {
+    let file_id = fs::FileId(r.file_id);
+    let capacity = r.capacity as usize;
+
+    let mut done = DocReadDone {
+        file_id: r.file_id,
+        len: 0,
+        status: 1,
+    };
+
+    // SAFETY: target points to shared memory mapped by init (Content Region or doc buffer).
+    let buf = unsafe { core::slice::from_raw_parts_mut(target as *mut u8, capacity) };
+
+    match store.read(file_id, 0, buf) {
+        Ok(n) => {
+            done.len = n as u32;
+            done.status = 0;
+        }
+        Err(_) => {
+            done.status = 1;
+        }
+    }
+
+    // SAFETY: DocReadDone is #[repr(C)] and fits in 60-byte payload.
+    let reply = unsafe { ipc::Message::from_payload(MSG_DOC_READ_DONE, &done) };
+    ch.send(&reply);
+    let _ = sys::channel_signal(signal);
+}
+
 // ── Entry point ──────────────────────────────────────────────────────
 
 #[unsafe(no_mangle)]
@@ -199,6 +274,7 @@ pub extern "C" fn _start() -> ! {
 
     // ── Phase 1: Receive config from init ────────────────────────────
 
+    // SAFETY: CHANNEL_SHM_BASE points to init-allocated shared memory pages.
     let ch = unsafe { ipc::Channel::from_base(protocol::CHANNEL_SHM_BASE, ipc::PAGE_SIZE, 1) };
     let mut msg = ipc::Message::new(0);
 
@@ -376,82 +452,19 @@ pub extern "C" fn _start() -> ! {
                 match msg.msg_type {
                     MSG_DOC_QUERY => {
                         if let Some(Message::DocQuery(q)) = decode(msg.msg_type, &msg.payload) {
-                            let query_str =
-                                core::str::from_utf8(&q.data[..q.data_len as usize]).unwrap_or("");
-
-                            let query = match q.query_type {
-                                0 => {
-                                    store::Query::MediaType(alloc::string::String::from(query_str))
-                                }
-                                1 => store::Query::Type(alloc::string::String::from(query_str)),
-                                2 => {
-                                    // Attribute query: data is "key\0value".
-                                    if let Some(sep) = query_str.find('\0') {
-                                        store::Query::Attribute {
-                                            key: alloc::string::String::from(&query_str[..sep]),
-                                            value: alloc::string::String::from(
-                                                &query_str[sep + 1..],
-                                            ),
-                                        }
-                                    } else {
-                                        store::Query::MediaType(alloc::string::String::from(""))
-                                    }
-                                }
-                                _ => store::Query::MediaType(alloc::string::String::from("")),
-                            };
-
-                            let results = store.query(&query);
-                            let count = results.len().min(6) as u32;
-
-                            let mut result = DocQueryResult {
-                                count,
-                                _pad: 0,
-                                file_ids: [0u64; 6],
-                            };
-                            for (i, fid) in results.iter().take(6).enumerate() {
-                                result.file_ids[i] = fid.0;
-                            }
-
-                            let reply = unsafe {
-                                ipc::Message::from_payload(MSG_DOC_QUERY_RESULT, &result)
-                            };
-                            ch.send(&reply);
-                            let _ = sys::channel_signal(sys::ChannelHandle(0));
+                            handle_query(&store, &q, &ch, sys::ChannelHandle(0));
                         }
                     }
 
                     MSG_DOC_READ => {
                         if let Some(Message::DocRead(r)) = decode(msg.msg_type, &msg.payload) {
-                            let file_id = fs::FileId(r.file_id);
-                            let target = r.target_va as usize;
-                            let capacity = r.capacity as usize;
-
-                            let mut done = DocReadDone {
-                                file_id: r.file_id,
-                                len: 0,
-                                status: 1,
-                            };
-
-                            // SAFETY: target_va points to Content Region shared
-                            // memory mapped by init before starting this process.
-                            let buf = unsafe {
-                                core::slice::from_raw_parts_mut(target as *mut u8, capacity)
-                            };
-
-                            match store.read(file_id, 0, buf) {
-                                Ok(n) => {
-                                    done.len = n as u32;
-                                    done.status = 0;
-                                }
-                                Err(_) => {
-                                    done.status = 1;
-                                }
-                            }
-
-                            let reply =
-                                unsafe { ipc::Message::from_payload(MSG_DOC_READ_DONE, &done) };
-                            ch.send(&reply);
-                            let _ = sys::channel_signal(sys::ChannelHandle(0));
+                            handle_read(
+                                &store,
+                                &r,
+                                r.target_va as usize,
+                                &ch,
+                                sys::ChannelHandle(0),
+                            );
                         }
                     }
 
@@ -475,6 +488,7 @@ pub extern "C" fn _start() -> ! {
     // ── Phase 5: IPC loop ────────────────────────────────────────────
 
     // Core channel: handle 1 (sent by init via handle_send).
+    // SAFETY: channel_shm_va(1) points to init-allocated shared memory pages.
     let core_ch =
         unsafe { ipc::Channel::from_base(protocol::channel_shm_va(1), ipc::PAGE_SIZE, 1) };
 
@@ -489,6 +503,7 @@ pub extern "C" fn _start() -> ! {
                         // Read document content from shared buffer.
                         // Header: [0..8) = content_len (u64), [8..16) = cursor_pos,
                         //          [16..64) = reserved, [64..) = content
+                        // SAFETY: doc_va points to doc buffer header; first u64 is content_len.
                         let content_len =
                             unsafe { core::ptr::read_volatile(doc_va as *const u64) as usize };
 
@@ -504,87 +519,31 @@ pub extern "C" fn _start() -> ! {
                             core::slice::from_raw_parts((doc_va + 64) as *const u8, actual_len)
                         };
 
-                        let _ = store.write(file_id, 0, content);
-                        let _ = store.truncate(file_id, actual_len as u64);
-                        let _ = store.commit();
+                        if let Err(_) = store.write(file_id, 0, content) {
+                            sys::print(b"document: commit write failed\n");
+                        } else if let Err(_) = store.truncate(file_id, actual_len as u64) {
+                            sys::print(b"document: commit truncate failed\n");
+                        } else if let Err(_) = store.commit() {
+                            sys::print(b"document: commit flush failed\n");
+                        }
                     }
                 }
 
                 MSG_DOC_QUERY => {
                     if let Some(Message::DocQuery(q)) = decode(msg.msg_type, &msg.payload) {
-                        let query_str =
-                            core::str::from_utf8(&q.data[..q.data_len as usize]).unwrap_or("");
-
-                        let query = match q.query_type {
-                            0 => store::Query::MediaType(alloc::string::String::from(query_str)),
-                            1 => store::Query::Type(alloc::string::String::from(query_str)),
-                            2 => {
-                                if let Some(sep) = query_str.find('\0') {
-                                    store::Query::Attribute {
-                                        key: alloc::string::String::from(&query_str[..sep]),
-                                        value: alloc::string::String::from(&query_str[sep + 1..]),
-                                    }
-                                } else {
-                                    store::Query::MediaType(alloc::string::String::from(""))
-                                }
-                            }
-                            _ => store::Query::MediaType(alloc::string::String::from("")),
-                        };
-
-                        let results = store.query(&query);
-                        let count = results.len().min(6) as u32;
-
-                        let mut result = DocQueryResult {
-                            count,
-                            _pad: 0,
-                            file_ids: [0u64; 6],
-                        };
-                        for (i, fid) in results.iter().take(6).enumerate() {
-                            result.file_ids[i] = fid.0;
-                        }
-
-                        let reply =
-                            unsafe { ipc::Message::from_payload(MSG_DOC_QUERY_RESULT, &result) };
-                        core_ch.send(&reply);
-                        let _ = sys::channel_signal(sys::ChannelHandle(1));
+                        handle_query(&store, &q, &core_ch, sys::ChannelHandle(1));
                     }
                 }
 
                 MSG_DOC_READ => {
                     if let Some(Message::DocRead(r)) = decode(msg.msg_type, &msg.payload) {
-                        let file_id = fs::FileId(r.file_id);
                         // target_va=0 means "write to the shared doc buffer".
                         let target = if r.target_va == 0 {
-                            doc_va + 64 // DOC_HEADER_SIZE = 64
+                            doc_va + 64
                         } else {
                             r.target_va as usize
                         };
-                        let capacity = r.capacity as usize;
-
-                        let mut done = DocReadDone {
-                            file_id: r.file_id,
-                            len: 0,
-                            status: 1,
-                        };
-
-                        // SAFETY: target_va points to shared memory mapped by init,
-                        // or doc_va+64 points to the doc buffer content area.
-                        let buf =
-                            unsafe { core::slice::from_raw_parts_mut(target as *mut u8, capacity) };
-
-                        match store.read(file_id, 0, buf) {
-                            Ok(n) => {
-                                done.len = n as u32;
-                                done.status = 0;
-                            }
-                            Err(_) => {
-                                done.status = 1;
-                            }
-                        }
-
-                        let reply = unsafe { ipc::Message::from_payload(MSG_DOC_READ_DONE, &done) };
-                        core_ch.send(&reply);
-                        let _ = sys::channel_signal(sys::ChannelHandle(1));
+                        handle_read(&store, &r, target, &core_ch, sys::ChannelHandle(1));
                     }
                 }
 
@@ -612,6 +571,7 @@ pub extern "C" fn _start() -> ! {
                             }
                         }
 
+                        // SAFETY: DocSnapshotResult is #[repr(C)] and fits in 60-byte payload.
                         let reply =
                             unsafe { ipc::Message::from_payload(MSG_DOC_SNAPSHOT_RESULT, &result) };
                         core_ch.send(&reply);
@@ -632,6 +592,7 @@ pub extern "C" fn _start() -> ! {
                             }
                         }
 
+                        // SAFETY: DocRestoreResult is #[repr(C)] and fits in 60-byte payload.
                         let reply =
                             unsafe { ipc::Message::from_payload(MSG_DOC_RESTORE_RESULT, &result) };
                         core_ch.send(&reply);
@@ -662,6 +623,7 @@ pub extern "C" fn _start() -> ! {
                             }
                         }
 
+                        // SAFETY: DocCreateResult is #[repr(C)] and fits in 60-byte payload.
                         let reply =
                             unsafe { ipc::Message::from_payload(MSG_DOC_CREATE_RESULT, &result) };
                         core_ch.send(&reply);

@@ -203,6 +203,9 @@ impl<D: BlockDevice> Filesystem<D> {
 
         // Allocate new blocks and write content.
         let block_count = blocks_for(content.len());
+        if block_count > u16::MAX as u32 {
+            return Err(FsError::NoSpace); // Extent count is u16; file too large.
+        }
         let start = self.allocator.alloc(block_count).ok_or(FsError::NoSpace)?;
         write_content(&mut self.device, start, &content)?;
 
