@@ -1620,10 +1620,7 @@ pub extern "C" fn _start() -> ! {
         }
 
         // Flush pending snapshot on typing pause (coalesce window elapsed).
-        if snapshot_pending
-            && !text_changed
-            && now_ms.saturating_sub(last_edit_ms) >= COALESCE_MS
-        {
+        if snapshot_pending && !text_changed && now_ms.saturating_sub(last_edit_ms) >= COALESCE_MS {
             take_snapshot!();
             snapshot_pending = false;
         }
