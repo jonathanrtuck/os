@@ -218,7 +218,11 @@ pub extern "C" fn _start() -> ! {
     )
     .unwrap();
     let atlas_ptr = unsafe { alloc::alloc::alloc_zeroed(atlas_layout) as *mut GlyphAtlas };
+    // SAFETY: atlas_ptr is valid, properly aligned, and zeroed. We must call
+    // reset() because alloc_zeroed produces key=0 in every slot, but the
+    // hash-map atlas uses u64::MAX as the empty sentinel.
     let glyph_atlas = unsafe { &mut *atlas_ptr };
+    glyph_atlas.reset();
     let mut font_ascent: u32 = 14;
 
     // Parse Content Region header to find font data.
