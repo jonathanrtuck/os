@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 // Re-export all public items from submodules.
 pub use full::{
     build_clock_update, build_cursor_update, build_document_content, build_full_scene,
-    build_selection_update, CURSOR_HOTSPOT_OFFSET,
+    build_rich_document_content, build_selection_update, RichFonts, CURSOR_HOTSPOT_OFFSET,
 };
 pub use incremental::{delete_line, insert_line, update_single_line};
 // Re-export font identity constants from the scene library (single source
@@ -299,6 +299,219 @@ pub(crate) fn shape_chrome_text(cfg: &SceneConfig, text: &[u8]) -> Vec<ShapedGly
         cfg.sans_upem,
         cfg.axes,
     )
+}
+
+// ── Rich text (multi-style) layout ──────────────────────────────────
+
+/// A styled segment within a visual line. Produced by splitting
+/// `LineBreak` ranges back into per-run segments.
+pub struct RichSegment {
+    /// Style from the piece table palette.
+    pub style_id: u8,
+    /// Byte range in scratch text buffer.
+    pub text_start: usize,
+    pub text_len: usize,
+    /// Y position in document coordinates (points).
+    pub y: i32,
+}
+
+/// A visual line of rich text, containing one or more styled segments.
+pub struct RichLine {
+    pub segments: Vec<RichSegment>,
+    pub y: i32,
+}
+
+/// Font data pointer + metrics for a given style, resolved from the
+/// Content Region. Core resolves these once per font family.
+pub struct FontInfo<'a> {
+    pub data: &'a [u8],
+    pub upem: u16,
+}
+
+/// Measure character advance width in points using font metrics.
+fn char_advance_pt(font_data: &[u8], ch: char, font_size: u16, upem: u16) -> f32 {
+    if upem == 0 || font_data.is_empty() {
+        return 8.0; // fallback
+    }
+    let gid = fonts::rasterize::glyph_id_for_char(font_data, ch).unwrap_or(0);
+    let (advance_fu, _) = fonts::rasterize::glyph_h_metrics(font_data, gid).unwrap_or((0, 0));
+    (advance_fu as f32 * font_size as f32) / upem as f32
+}
+
+/// Build MeasuredChar stream from piece table styled runs, then break
+/// into lines using the layout library's `break_measured_lines`.
+///
+/// Returns a list of `RichLine`, each containing styled segments ready
+/// for shaping and scene graph construction.
+///
+/// `scratch` is a caller-provided buffer for extracting logical text.
+/// `resolve_font` maps a piecetable::Style to font data + metrics.
+pub fn layout_rich_lines(
+    pt_buf: &[u8],
+    scratch: &mut [u8],
+    line_width_pt: f32,
+    line_height: i32,
+    mono_font: &FontInfo<'_>,
+    sans_font: &FontInfo<'_>,
+    serif_font: &FontInfo<'_>,
+) -> Vec<RichLine> {
+    let run_count = piecetable::styled_run_count(pt_buf);
+    if run_count == 0 {
+        return Vec::new();
+    }
+
+    // Copy all logical text into scratch buffer.
+    let text_len = piecetable::text_len(pt_buf);
+    let copied = piecetable::text_slice(pt_buf, 0, text_len, scratch);
+    let text = &scratch[..copied];
+
+    // Build MeasuredChar stream.
+    let mut measured: Vec<layout_lib::MeasuredChar> = Vec::new();
+
+    for run_idx in 0..run_count {
+        let Some(run) = piecetable::styled_run(pt_buf, run_idx) else {
+            continue;
+        };
+        let Some(style) = piecetable::style(pt_buf, run.style_id) else {
+            continue;
+        };
+        let fi = match style.font_family {
+            piecetable::FONT_MONO => mono_font,
+            piecetable::FONT_SERIF => serif_font,
+            _ => sans_font,
+        };
+
+        // Walk the bytes of this run's text, decoding UTF-8.
+        let run_start = run.byte_offset as usize;
+        let run_end = run_start + run.byte_len as usize;
+        let run_text = if run_end <= text.len() {
+            &text[run_start..run_end]
+        } else {
+            continue;
+        };
+
+        let mut offset = run_start;
+        for ch in core::str::from_utf8(run_text)
+            .unwrap_or("")
+            .chars()
+        {
+            let byte_len = ch.len_utf8() as u8;
+            let width = if ch == '\n' {
+                0.0
+            } else {
+                char_advance_pt(fi.data, ch, style.font_size_pt as u16, fi.upem)
+            };
+            measured.push(layout_lib::MeasuredChar {
+                byte_offset: offset as u32,
+                byte_len,
+                width,
+                run_index: run_idx as u16,
+                is_whitespace: ch == ' ' || ch == '\t',
+                is_newline: ch == '\n',
+            });
+            offset += byte_len as usize;
+        }
+    }
+
+    // Break into lines.
+    let line_breaks =
+        layout_lib::break_measured_lines(&measured, line_width_pt, layout_lib::BreakMode::Word);
+
+    // Split each line back into per-style segments.
+    let mut result: Vec<RichLine> = Vec::with_capacity(line_breaks.len());
+    let mut y = 0i32;
+
+    for lb in &line_breaks {
+        let mut segments: Vec<RichSegment> = Vec::new();
+
+        // Find MeasuredChars in this line's byte range.
+        for mc in &measured {
+            if mc.byte_offset < lb.byte_start {
+                continue;
+            }
+            if mc.byte_offset >= lb.byte_end {
+                break;
+            }
+            if mc.is_newline {
+                continue;
+            }
+
+            let run_idx = mc.run_index as usize;
+            let Some(run) = piecetable::styled_run(pt_buf, run_idx) else {
+                continue;
+            };
+
+            // Coalesce into current segment if same style.
+            if let Some(last) = segments.last_mut() {
+                if last.style_id == run.style_id
+                    && last.text_start + last.text_len == mc.byte_offset as usize
+                {
+                    last.text_len += mc.byte_len as usize;
+                    continue;
+                }
+            }
+
+            segments.push(RichSegment {
+                style_id: run.style_id,
+                text_start: mc.byte_offset as usize,
+                text_len: mc.byte_len as usize,
+                y,
+            });
+        }
+
+        result.push(RichLine { segments, y });
+        y += line_height;
+    }
+
+    result
+}
+
+/// Shape a rich text segment and return scene-graph glyphs.
+/// Uses the style to determine font, size, and axes.
+pub fn shape_rich_segment(
+    font_data: &[u8],
+    text: &[u8],
+    font_size: u16,
+    upem: u16,
+    weight: u16,
+    italic: bool,
+) -> Vec<scene::ShapedGlyph> {
+    // Build axis values for variable font.
+    let mut axes_buf = [fonts::rasterize::AxisValue {
+        tag: *b"wght",
+        value: 0.0,
+    }; 2];
+    let mut axis_count = 0;
+    if weight != 400 {
+        axes_buf[axis_count] = fonts::rasterize::AxisValue {
+            tag: *b"wght",
+            value: weight as f32,
+        };
+        axis_count += 1;
+    }
+    if italic {
+        axes_buf[axis_count] = fonts::rasterize::AxisValue {
+            tag: *b"ital",
+            value: 1.0,
+        };
+        axis_count += 1;
+    }
+    let axes = &axes_buf[..axis_count];
+
+    shape_text(font_data, text, font_size, upem, axes)
+}
+
+/// Compute an axis_hash for a rich text style's variable font settings.
+/// Encodes font_family, weight, and italic into a single u32 for the
+/// scene graph's glyph cache key.
+pub fn rich_axis_hash(font_family: u8, weight: u16, italic: bool) -> u32 {
+    // Combine font identity + weight + italic flag into a unique hash.
+    let mut h: u32 = font_family as u32;
+    h = h.wrapping_mul(65599).wrapping_add(weight as u32);
+    if italic {
+        h = h.wrapping_mul(65599).wrapping_add(1);
+    }
+    h
 }
 
 /// Count lines in a text buffer (newlines + 1).

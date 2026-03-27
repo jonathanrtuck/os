@@ -254,6 +254,7 @@ fn main() {
         if name == "core" {
             externs.push(("animation", animation_rlib.clone()));
             externs.push(("layout", layout_rlib.clone()));
+            externs.push(("piecetable", piecetable_rlib.clone()));
         }
         if name == "document" {
             externs.push(("fs", fs_rlib.clone()));

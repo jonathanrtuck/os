@@ -29,6 +29,7 @@ extern crate animation;
 extern crate drawing;
 extern crate fonts;
 extern crate layout as layout_lib;
+extern crate piecetable;
 extern crate render;
 extern crate scene;
 
@@ -63,8 +64,8 @@ use protocol::{
     },
     edit::{
         self, CursorMove, SelectionUpdate, WriteDelete, WriteDeleteRange, WriteInsert,
-        MSG_CURSOR_MOVE, MSG_SELECTION_UPDATE, MSG_SET_CURSOR, MSG_WRITE_DELETE,
-        MSG_WRITE_DELETE_RANGE, MSG_WRITE_INSERT,
+        MSG_CURSOR_MOVE, MSG_SELECTION_UPDATE, MSG_SET_CURSOR, MSG_STYLE_APPLY,
+        MSG_STYLE_SET_CURRENT, MSG_WRITE_DELETE, MSG_WRITE_DELETE_RANGE, MSG_WRITE_INSERT,
     },
     input::{self, KeyEvent, PointerButton, MSG_KEY_EVENT, MSG_POINTER_BUTTON},
 };
@@ -86,6 +87,16 @@ fn clamp_f32(x: f32, min: f32, max: f32) -> f32 {
 #[inline]
 fn round_f32(x: f32) -> i32 {
     drawing::round_f32(x)
+}
+
+/// Document format discriminant — determines which code path core uses
+/// for document operations, layout, and scene building.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DocumentFormat {
+    /// text/plain — flat UTF-8 buffer (existing path, unchanged).
+    Plain,
+    /// text/rich — piece table in shared memory.
+    Rich,
 }
 
 const COMPOSITOR_HANDLE: sys::ChannelHandle = sys::ChannelHandle(2);
@@ -212,6 +223,8 @@ pub(crate) struct CoreState {
     pub(crate) doc_capacity: usize,
     /// FileId of the active text document in the store.
     pub(crate) doc_file_id: u64,
+    /// Document format (Plain for text/plain, Rich for text/rich).
+    pub(crate) doc_format: DocumentFormat,
     pub(crate) doc_len: usize,
     pub(crate) font_data_ptr: *const u8,
     pub(crate) font_data_len: usize,
@@ -219,6 +232,9 @@ pub(crate) struct CoreState {
     pub(crate) sans_font_data_ptr: *const u8,
     pub(crate) sans_font_data_len: usize,
     pub(crate) sans_font_upem: u16,
+    pub(crate) serif_font_data_ptr: *const u8,
+    pub(crate) serif_font_data_len: usize,
+    pub(crate) serif_font_upem: u16,
     /// Content Region base VA and size (for PNG decode output).
     pub(crate) content_va: usize,
     pub(crate) content_size: usize,
@@ -301,6 +317,7 @@ impl CoreState {
             doc_buf: core::ptr::null_mut(),
             doc_capacity: 0,
             doc_file_id: 0,
+            doc_format: DocumentFormat::Plain,
             doc_len: 0,
             font_data_ptr: core::ptr::null(),
             font_data_len: 0,
@@ -308,6 +325,9 @@ impl CoreState {
             sans_font_data_ptr: core::ptr::null(),
             sans_font_data_len: 0,
             sans_font_upem: 1000,
+            serif_font_data_ptr: core::ptr::null(),
+            serif_font_data_len: 0,
+            serif_font_upem: 1000,
             content_va: 0,
             content_size: 0,
             content_alloc: protocol::content::ContentAllocator::empty(),
@@ -387,6 +407,18 @@ fn sans_font_data() -> &'static [u8] {
     } else {
         // SAFETY: sans_font_data_ptr points to sans_font_data_len bytes of shared memory.
         unsafe { core::slice::from_raw_parts(s.sans_font_data_ptr, s.sans_font_data_len) }
+    }
+}
+
+/// Access the serif font data slice (Source Serif) from shared memory.
+fn serif_font_data() -> &'static [u8] {
+    let s = state();
+    if s.serif_font_data_ptr.is_null() || s.serif_font_data_len == 0 {
+        // Fallback to sans when serif font not available.
+        sans_font_data()
+    } else {
+        // SAFETY: serif_font_data_ptr points to serif_font_data_len bytes of shared memory.
+        unsafe { core::slice::from_raw_parts(s.serif_font_data_ptr, s.serif_font_data_len) }
     }
 }
 
@@ -720,6 +752,25 @@ pub extern "C" fn _start() -> ! {
                 sys::print(b"     warning: sans font parse failed\n");
             }
         }
+
+        // Serif font (Source Serif 4) for rich text serif content.
+        if let Some(entry) =
+            protocol::content::find_entry(header, protocol::content::CONTENT_ID_FONT_SERIF)
+        {
+            let serif_ptr = (config.content_va as usize + entry.offset as usize) as *const u8;
+            // SAFETY: entry bounds validated by init; content_va region is mapped.
+            let serif_data =
+                unsafe { core::slice::from_raw_parts(serif_ptr, entry.length as usize) };
+            if let Some(fm) = fonts::rasterize::font_metrics(serif_data) {
+                let s = state();
+                s.serif_font_data_ptr = serif_ptr;
+                s.serif_font_data_len = entry.length as usize;
+                s.serif_font_upem = fm.units_per_em;
+                sys::print(b"     serif font loaded\n");
+            } else {
+                sys::print(b"     warning: serif font parse failed\n");
+            }
+        }
     }
 
     // Check for image data — decode via the decoder service (IPC).
@@ -867,56 +918,60 @@ pub extern "C" fn _start() -> ! {
             0,
         )
     };
-    // ── Query or create the active text document ──────────────────────
+    // ── Query or create the active document ────────────────────────────
     //
-    // Ask the document service for existing text/plain files. If one exists,
-    // load its content into the doc buffer. If none, create one on demand.
-    // Use recv_blocking for synchronous RPC (never single wait+try_recv).
+    // Query for text/rich first (preferred), then text/plain. If neither
+    // exists, create a text/plain document. After loading, detect format
+    // from content (piece table magic).
     {
         let fs_handle = FS_HANDLE.0 as u8;
-        let media = b"text/plain";
         let mut reply = ipc::Message::new(0);
 
-        // Send query: media type exact match for "text/plain".
-        let mut query_payload = DocQuery {
-            query_type: 0,
-            data_len: media.len() as u32,
-            data: [0u8; 48],
-        };
-        query_payload.data[..media.len()].copy_from_slice(media);
-        // SAFETY: DocQuery is repr(C) and fits in 60-byte payload.
-        let query_msg = unsafe { ipc::Message::from_payload(MSG_DOC_QUERY, &query_payload) };
-        fs_ch.send(&query_msg);
-        let _ = sys::channel_signal(FS_HANDLE);
+        // Helper: query the document service for a given media type.
+        // Returns the first file_id found, or 0.
+        let query_media = |media: &[u8],
+                           ch: &ipc::Channel,
+                           handle: sys::ChannelHandle,
+                           reply: &mut ipc::Message|
+         -> u64 {
+            let mut query_payload = DocQuery {
+                query_type: 0,
+                data_len: media.len() as u32,
+                data: [0u8; 48],
+            };
+            query_payload.data[..media.len()].copy_from_slice(media);
+            // SAFETY: DocQuery is repr(C) and fits in 60-byte payload.
+            let query_msg = unsafe { ipc::Message::from_payload(MSG_DOC_QUERY, &query_payload) };
+            ch.send(&query_msg);
+            let _ = sys::channel_signal(handle);
 
-        let doc_file_id = if fs_ch.recv_blocking(fs_handle, &mut reply)
-            && reply.msg_type == MSG_DOC_QUERY_RESULT
-        {
-            if let Some(protocol::document::Message::DocQueryResult(result)) =
-                protocol::document::decode(reply.msg_type, &reply.payload)
-            {
-                if result.count > 0 {
-                    result.file_ids[0]
-                } else {
-                    0
+            if ch.recv_blocking(handle.0 as u8, reply) && reply.msg_type == MSG_DOC_QUERY_RESULT {
+                if let Some(protocol::document::Message::DocQueryResult(result)) =
+                    protocol::document::decode(reply.msg_type, &reply.payload)
+                {
+                    if result.count > 0 {
+                        return result.file_ids[0];
+                    }
                 }
-            } else {
-                0
             }
-        } else {
             0
         };
 
+        // Try text/rich first, then text/plain.
+        let mut doc_file_id = query_media(b"text/rich", &fs_ch, FS_HANDLE, &mut reply);
+        let mut detected_format = DocumentFormat::Rich;
+
+        if doc_file_id == 0 {
+            doc_file_id = query_media(b"text/plain", &fs_ch, FS_HANDLE, &mut reply);
+            detected_format = DocumentFormat::Plain;
+        }
+
         if doc_file_id != 0 {
             // Existing document found — read its content into the doc buffer.
-            sys::print(b"     loading existing text document\n");
+            sys::print(b"     loading existing document\n");
             let s = state();
             let read_payload = DocRead {
                 file_id: doc_file_id,
-                // target_va=0 signals the document service to write into the
-                // shared doc buffer (doc_va + DOC_HEADER_SIZE) rather than an
-                // arbitrary VA. Core and the document service have different
-                // VAs for the same physical page.
                 target_va: 0,
                 capacity: s.doc_capacity as u32,
                 _pad: 0,
@@ -932,22 +987,55 @@ pub extern "C" fn _start() -> ! {
                 {
                     if done.status == 0 && done.len > 0 {
                         let s = state();
-                        s.doc_len = done.len as usize;
                         s.doc_file_id = doc_file_id;
-                        documents::doc_write_header();
-                        sys::print(b"     document content loaded\n");
+
+                        // Detect format from loaded content.
+                        // For text/rich, the document service writes the piece
+                        // table bytes starting at doc_buf (no DOC_HEADER_SIZE
+                        // offset for rich). But the document service always
+                        // writes at doc_buf + DOC_HEADER_SIZE. So for rich
+                        // documents, we check the magic at that offset.
+                        let content_start =
+                            // SAFETY: doc_buf valid, done.len <= capacity.
+                            unsafe { core::slice::from_raw_parts(s.doc_buf.add(DOC_HEADER_SIZE), done.len as usize) };
+
+                        if detected_format == DocumentFormat::Rich
+                            && done.len >= 64
+                            && piecetable::validate(content_start)
+                        {
+                            // Rich document: piece table bytes at doc_buf +
+                            // DOC_HEADER_SIZE (same offset as flat text).
+                            s.doc_format = DocumentFormat::Rich;
+                            s.doc_len = done.len as usize;
+
+                            // Restore cursor position from piece table header.
+                            s.cursor_pos = piecetable::cursor_pos(documents::rich_buf_ref()) as usize;
+                            // Sync doc_len to shared header for commit.
+                            documents::doc_write_header();
+                            sys::print(b"     rich text document loaded\n");
+                        } else {
+                            // Plain text document.
+                            s.doc_format = DocumentFormat::Plain;
+                            s.doc_len = done.len as usize;
+                            documents::doc_write_header();
+                            sys::print(b"     plain text document loaded\n");
+                        }
                     } else {
                         state().doc_file_id = doc_file_id;
+                        state().doc_format = detected_format;
                     }
                 } else {
                     state().doc_file_id = doc_file_id;
+                    state().doc_format = detected_format;
                 }
             } else {
                 state().doc_file_id = doc_file_id;
+                state().doc_format = detected_format;
             }
         } else {
-            // No text document exists — create one.
+            // No document exists — create a text/plain document.
             sys::print(b"     creating new text document\n");
+            let media = b"text/plain";
             let mut create_payload = DocCreate {
                 media_type_len: media.len() as u32,
                 _pad: 0,
@@ -966,6 +1054,7 @@ pub extern "C" fn _start() -> ! {
                 {
                     if result.status == 0 {
                         state().doc_file_id = result.file_id;
+                        state().doc_format = DocumentFormat::Plain;
                         sys::print(b"     text document created\n");
                     } else {
                         sys::print(b"     warning: document create failed\n");
@@ -1079,13 +1168,15 @@ pub extern "C" fn _start() -> ! {
 
     {
         let s = state();
+        let is_rich_doc = s.doc_format == DocumentFormat::Rich;
+        let title_label: &[u8] = if is_rich_doc { b"Rich Text" } else { b"Text" };
         scene.build_editor_scene(
             &scene_cfg,
-            documents::doc_content(),
+            if is_rich_doc { &[] } else { documents::doc_content() },
             s.cursor_pos as u32,
             s.sel_start as u32,
             s.sel_end as u32,
-            b"Text",
+            title_label,
             &time_buf,
             0,
             s.cursor_opacity,
@@ -1095,6 +1186,30 @@ pub extern "C" fn _start() -> ! {
             0,
             0,
         );
+        // For rich text, immediately rebuild document content with styled layout.
+        if is_rich_doc {
+            let rich_fonts = scene_state::RichFonts {
+                mono_data: font_data(),
+                mono_upem: s.font_upem,
+                sans_data: sans_font_data(),
+                sans_upem: s.sans_font_upem,
+                serif_data: serif_font_data(),
+                serif_upem: s.serif_font_upem,
+            };
+            scene.update_rich_document_content(
+                &scene_cfg,
+                documents::rich_buf_ref(),
+                &rich_fonts,
+                s.cursor_pos as u32,
+                s.sel_start as u32,
+                s.sel_end as u32,
+                title_label,
+                &time_buf,
+                0,
+                true,
+                s.cursor_opacity,
+            );
+        }
     }
 
     // Signal compositor that first frame is ready.
@@ -1472,6 +1587,7 @@ pub extern "C" fn _start() -> ! {
         }
 
         // Process editor write requests.
+        let is_rich = state().doc_format == DocumentFormat::Rich;
         while editor_ch.try_recv(&mut msg) {
             match msg.msg_type {
                 MSG_WRITE_INSERT => {
@@ -1482,8 +1598,17 @@ pub extern "C" fn _start() -> ! {
                     };
                     let pos = insert.position as usize;
 
-                    if documents::doc_insert(pos, insert.byte) {
-                        state().cursor_pos = pos + 1;
+                    let ok = if is_rich {
+                        documents::rich_insert(pos, insert.byte)
+                    } else {
+                        documents::doc_insert(pos, insert.byte)
+                    };
+                    if ok {
+                        let s = state();
+                        s.cursor_pos = pos + 1;
+                        if is_rich {
+                            documents::rich_set_cursor_pos(s.cursor_pos);
+                        }
 
                         changed = true;
                         text_changed = true;
@@ -1497,8 +1622,17 @@ pub extern "C" fn _start() -> ! {
                     };
                     let pos = del.position as usize;
 
-                    if documents::doc_delete(pos) {
-                        state().cursor_pos = pos;
+                    let ok = if is_rich {
+                        documents::rich_delete(pos)
+                    } else {
+                        documents::doc_delete(pos)
+                    };
+                    if ok {
+                        let s = state();
+                        s.cursor_pos = pos;
+                        if is_rich {
+                            documents::rich_set_cursor_pos(s.cursor_pos);
+                        }
 
                         changed = true;
                         text_changed = true;
@@ -1511,14 +1645,22 @@ pub extern "C" fn _start() -> ! {
                         continue;
                     };
                     let pos = cm.position as usize;
+                    let doc_text_len = if is_rich {
+                        documents::rich_text_len()
+                    } else {
+                        state().doc_len
+                    };
 
-                    if pos <= state().doc_len {
+                    if pos <= doc_text_len {
                         state().cursor_pos = pos;
 
-                        documents::doc_write_header();
+                        if is_rich {
+                            documents::rich_set_cursor_pos(pos);
+                        } else {
+                            documents::doc_write_header();
+                        }
 
                         changed = true;
-                        // Cursor-only move: no text change.
                     }
                 }
                 MSG_SELECTION_UPDATE => {
@@ -1543,12 +1685,52 @@ pub extern "C" fn _start() -> ! {
                     let start = dr.start as usize;
                     let end = dr.end as usize;
 
-                    if documents::doc_delete_range(start, end) {
-                        state().cursor_pos = start;
+                    let ok = if is_rich {
+                        documents::rich_delete_range(start, end)
+                    } else {
+                        documents::doc_delete_range(start, end)
+                    };
+                    if ok {
+                        let s = state();
+                        s.cursor_pos = start;
+                        if is_rich {
+                            documents::rich_set_cursor_pos(s.cursor_pos);
+                        }
 
                         changed = true;
                         text_changed = true;
                     }
+                }
+                MSG_STYLE_APPLY => {
+                    // Only valid for rich text documents.
+                    if !is_rich {
+                        continue;
+                    }
+                    let Some(edit::Message::StyleApply(sa)) =
+                        edit::decode(msg.msg_type, &msg.payload)
+                    else {
+                        continue;
+                    };
+                    documents::rich_apply_style(
+                        sa.start as usize,
+                        sa.end as usize,
+                        sa.style_id,
+                    );
+                    // Style changes modify the piece table — trigger rebuild.
+                    changed = true;
+                    text_changed = true;
+                }
+                MSG_STYLE_SET_CURRENT => {
+                    if !is_rich {
+                        continue;
+                    }
+                    let Some(edit::Message::StyleSetCurrent(sc)) =
+                        edit::decode(msg.msg_type, &msg.payload)
+                    else {
+                        continue;
+                    };
+                    documents::rich_set_current_style(sc.style_id);
+                    // No scene rebuild needed — only affects future insertions.
                 }
                 _ => {}
             }
@@ -1621,6 +1803,10 @@ pub extern "C" fn _start() -> ! {
 
         // Flush pending snapshot on typing pause (coalesce window elapsed).
         if snapshot_pending && !text_changed && now_ms.saturating_sub(last_edit_ms) >= COALESCE_MS {
+            // Advance piece table operation_id at snapshot boundary.
+            if state().doc_format == DocumentFormat::Rich {
+                documents::rich_next_operation();
+            }
             take_snapshot!();
             snapshot_pending = false;
         }
@@ -1628,6 +1814,9 @@ pub extern "C" fn _start() -> ! {
         // Flush pending snapshot immediately before undo/redo so the
         // current editing burst is undoable as a single step.
         if snapshot_pending && (undo_requested || redo_requested) {
+            if state().doc_format == DocumentFormat::Rich {
+                documents::rich_next_operation();
+            }
             take_snapshot!();
             snapshot_pending = false;
         }
@@ -1675,12 +1864,22 @@ pub extern "C" fn _start() -> ! {
                                     if done.status == 0 {
                                         let s = state();
                                         s.doc_len = done.len as usize;
-                                        // Clamp cursor to new content length.
-                                        if s.cursor_pos > s.doc_len {
-                                            s.cursor_pos = s.doc_len;
+                                        if s.doc_format == DocumentFormat::Rich {
+                                            // Restore cursor from piece table header.
+                                            let text_len = documents::rich_text_len();
+                                            s.cursor_pos = documents::rich_cursor_pos();
+                                            if s.cursor_pos > text_len {
+                                                s.cursor_pos = text_len;
+                                            }
+                                        } else {
+                                            if s.cursor_pos > s.doc_len {
+                                                s.cursor_pos = s.doc_len;
+                                            }
                                         }
                                         input_handling::clear_selection();
-                                        documents::doc_write_header();
+                                        if s.doc_format != DocumentFormat::Rich {
+                                            documents::doc_write_header();
+                                        }
                                         input_handling::sync_cursor_to_editor(&editor_ch);
                                         let _ = sys::channel_signal(EDITOR_HANDLE);
                                         text_changed = true;
@@ -1734,11 +1933,21 @@ pub extern "C" fn _start() -> ! {
                                     if done.status == 0 {
                                         let s = state();
                                         s.doc_len = done.len as usize;
-                                        if s.cursor_pos > s.doc_len {
-                                            s.cursor_pos = s.doc_len;
+                                        if s.doc_format == DocumentFormat::Rich {
+                                            let text_len = documents::rich_text_len();
+                                            s.cursor_pos = documents::rich_cursor_pos();
+                                            if s.cursor_pos > text_len {
+                                                s.cursor_pos = text_len;
+                                            }
+                                        } else {
+                                            if s.cursor_pos > s.doc_len {
+                                                s.cursor_pos = s.doc_len;
+                                            }
                                         }
                                         input_handling::clear_selection();
-                                        documents::doc_write_header();
+                                        if s.doc_format != DocumentFormat::Rich {
+                                            documents::doc_write_header();
+                                        }
                                         input_handling::sync_cursor_to_editor(&editor_ch);
                                         let _ = sys::channel_signal(EDITOR_HANDLE);
                                         text_changed = true;
@@ -1984,6 +2193,8 @@ pub extern "C" fn _start() -> ! {
 
             // Only context_switched requires a full rebuild. Timer+input
             // coincidence is handled incrementally by each targeted method.
+            let is_rich_doc = state().doc_format == DocumentFormat::Rich;
+
             if context_switched {
                 if !timer_fired {
                     documents::format_time_hms(clock_seconds(), &mut time_buf);
@@ -1992,12 +2203,16 @@ pub extern "C" fn _start() -> ! {
                 let s = state();
                 let title: &[u8] = if s.active_space != 0 {
                     b"Image"
+                } else if is_rich_doc {
+                    b"Rich Text"
                 } else {
                     b"Text"
                 };
+                // Full scene build always uses flat text for structure.
+                // For rich text, we follow with a rich content update.
                 scene.build_editor_scene(
                     &scene_cfg,
-                    documents::doc_content(),
+                    if is_rich_doc { &[] } else { documents::doc_content() },
                     s.cursor_pos as u32,
                     s.sel_start as u32,
                     s.sel_end as u32,
@@ -2011,8 +2226,59 @@ pub extern "C" fn _start() -> ! {
                     s.slide_offset,
                     s.active_space,
                 );
+                // Immediately rebuild document content with rich text layout.
+                if is_rich_doc {
+                    let rich_fonts = scene_state::RichFonts {
+                        mono_data: font_data(),
+                        mono_upem: s.font_upem,
+                        sans_data: sans_font_data(),
+                        sans_upem: s.sans_font_upem,
+                        serif_data: serif_font_data(),
+                        serif_upem: s.serif_font_upem,
+                    };
+                    scene.update_rich_document_content(
+                        &scene_cfg,
+                        documents::rich_buf_ref(),
+                        &rich_fonts,
+                        s.cursor_pos as u32,
+                        s.sel_start as u32,
+                        s.sel_end as u32,
+                        title,
+                        &time_buf,
+                        s.scroll_offset,
+                        true,
+                        s.cursor_opacity,
+                    );
+                }
+            } else if text_changed && is_rich_doc {
+                // Rich text content changed — always full rebuild.
+                if !timer_fired {
+                    documents::format_time_hms(clock_seconds(), &mut time_buf);
+                }
+                let s = state();
+                let rich_fonts = scene_state::RichFonts {
+                    mono_data: font_data(),
+                    mono_upem: s.font_upem,
+                    sans_data: sans_font_data(),
+                    sans_upem: s.sans_font_upem,
+                    serif_data: serif_font_data(),
+                    serif_upem: s.serif_font_upem,
+                };
+                scene.update_rich_document_content(
+                    &scene_cfg,
+                    documents::rich_buf_ref(),
+                    &rich_fonts,
+                    s.cursor_pos as u32,
+                    s.sel_start as u32,
+                    s.sel_end as u32,
+                    b"Rich Text",
+                    &time_buf,
+                    s.scroll_offset,
+                    timer_fired,
+                    s.cursor_opacity,
+                );
             } else if text_changed {
-                // Document content changed (insert/delete/scroll).
+                // Plain text content changed (insert/delete/scroll).
                 if !timer_fired {
                     documents::format_time_hms(clock_seconds(), &mut time_buf);
                 }
@@ -2021,9 +2287,6 @@ pub extern "C" fn _start() -> ! {
                 let new_line_count = scene_state::count_lines(doc);
 
                 if scroll_changed {
-                    // Scroll changed — visible lines differ, incremental
-                    // paths would leave stale line-node y positions from
-                    // the previous frame. Full rebuild.
                     let s = state();
                     scene.update_document_content(
                         &scene_cfg,
@@ -2038,9 +2301,6 @@ pub extern "C" fn _start() -> ! {
                         s.cursor_opacity,
                     );
                 } else if new_line_count == prev_line_count {
-                    // Same line count — incremental single-line update.
-                    // Only reshapes the changed line, pushes new glyph data
-                    // at the bump pointer, and updates cursor/selection.
                     let s = state();
                     let cpl = if s.char_w_fx > 0 {
                         ((scene_cfg
@@ -2068,7 +2328,6 @@ pub extern "C" fn _start() -> ! {
                         s.cursor_opacity,
                     );
                 } else if new_line_count == prev_line_count + 1 {
-                    // Single line inserted (Enter key) — incremental insert.
                     let s = state();
                     scene.update_document_insert_line(
                         &scene_cfg,
@@ -2083,7 +2342,6 @@ pub extern "C" fn _start() -> ! {
                         s.cursor_opacity,
                     );
                 } else if new_line_count + 1 == prev_line_count {
-                    // Single line deleted (Backspace at BOL) — incremental delete.
                     let s = state();
                     scene.update_document_delete_line(
                         &scene_cfg,
@@ -2098,8 +2356,6 @@ pub extern "C" fn _start() -> ! {
                         s.cursor_opacity,
                     );
                 } else {
-                    // Multi-line change (paste, delete selection spanning lines) —
-                    // full rebuild (compaction).
                     let s = state();
                     scene.update_document_content(
                         &scene_cfg,

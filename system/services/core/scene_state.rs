@@ -13,13 +13,14 @@ use scene::{TripleWriter, TRIPLE_SCENE_SIZE};
 
 use super::layout::{
     build_clock_update, build_cursor_update, build_document_content, build_full_scene,
-    build_selection_update, delete_line, insert_line, update_single_line,
+    build_rich_document_content, build_selection_update, delete_line, insert_line,
+    update_single_line,
 };
 // Re-export layout types and constants used by main.rs.
 pub use super::layout::{
-    byte_to_line_col, count_lines, SceneConfig, N_CLOCK_TEXT, N_CONTENT, N_CURSOR, N_DOC_IMAGE,
-    N_DOC_TEXT, N_PAGE, N_POINTER, N_ROOT, N_SHADOW, N_STRIP, N_TITLE_BAR, N_TITLE_ICON,
-    N_TITLE_TEXT, WELL_KNOWN_COUNT,
+    byte_to_line_col, count_lines, RichFonts, SceneConfig, N_CLOCK_TEXT, N_CONTENT, N_CURSOR,
+    N_DOC_IMAGE, N_DOC_TEXT, N_PAGE, N_POINTER, N_ROOT, N_SHADOW, N_STRIP, N_TITLE_BAR,
+    N_TITLE_ICON, N_TITLE_TEXT, WELL_KNOWN_COUNT,
 };
 
 pub struct SceneState {
@@ -381,6 +382,44 @@ impl SceneState {
                 &mut w,
                 cfg,
                 doc_text,
+                cursor_pos,
+                sel_start,
+                sel_end,
+                title_label,
+                clock_text,
+                scroll_y,
+                mark_clock_changed,
+                cursor_opacity,
+            );
+        }
+        tw.publish();
+    }
+
+    /// Update document content for a text/rich document using the piece table.
+    /// Always does a full compaction rebuild (no incremental path yet for rich text).
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_rich_document_content(
+        &mut self,
+        cfg: &SceneConfig,
+        pt_buf: &[u8],
+        fonts: &RichFonts<'_>,
+        cursor_pos: u32,
+        sel_start: u32,
+        sel_end: u32,
+        title_label: &[u8],
+        clock_text: &[u8],
+        scroll_y: scene::Mpt,
+        mark_clock_changed: bool,
+        cursor_opacity: u8,
+    ) {
+        let mut tw = self.triple();
+        {
+            let mut w = tw.acquire_copy();
+            build_rich_document_content(
+                &mut w,
+                cfg,
+                pt_buf,
+                fonts,
                 cursor_pos,
                 sel_start,
                 sel_end,

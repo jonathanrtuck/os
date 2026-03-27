@@ -10,10 +10,10 @@ use scene::{fnv1a, Border, Color, Content, FillRule, NodeFlags, NULL};
 
 use super::{
     allocate_line_nodes, allocate_selection_rects, byte_to_line_col, chars_per_line, dc, doc_width,
-    layout_mono_lines, scroll_runs, shape_chrome_text, shape_visible_runs, update_clock_inline,
-    SceneConfig, FONT_SANS, N_CLOCK_TEXT, N_CONTENT, N_CURSOR, N_DOC_IMAGE, N_DOC_TEXT, N_PAGE,
-    N_POINTER, N_ROOT, N_SHADOW, N_STRIP, N_TITLE_BAR, N_TITLE_ICON, N_TITLE_TEXT,
-    WELL_KNOWN_COUNT,
+    layout_mono_lines, layout_rich_lines, rich_axis_hash, scroll_runs, shape_chrome_text,
+    shape_rich_segment, shape_visible_runs, update_clock_inline, FontInfo, RichLine, SceneConfig,
+    FONT_SANS, N_CLOCK_TEXT, N_CONTENT, N_CURSOR, N_DOC_IMAGE, N_DOC_TEXT, N_PAGE, N_POINTER,
+    N_ROOT, N_SHADOW, N_STRIP, N_TITLE_BAR, N_TITLE_ICON, N_TITLE_TEXT, WELL_KNOWN_COUNT,
 };
 use crate::icons;
 
@@ -730,5 +730,379 @@ pub fn build_document_content(
             text_area_h,
             scroll_pt,
         );
+    }
+}
+
+// ── Rich text scene building ────────────────────────────────────────
+
+/// Configuration for rich text rendering. Extends SceneConfig with
+/// font data pointers for all three font families (mono, sans, serif).
+pub struct RichFonts<'a> {
+    pub mono_data: &'a [u8],
+    pub mono_upem: u16,
+    pub sans_data: &'a [u8],
+    pub sans_upem: u16,
+    pub serif_data: &'a [u8],
+    pub serif_upem: u16,
+}
+
+impl<'a> RichFonts<'a> {
+    /// Resolve a piecetable Style to font data + metrics.
+    pub fn resolve(&self, style: &piecetable::Style) -> FontInfo<'_> {
+        match style.font_family {
+            piecetable::FONT_MONO => FontInfo {
+                data: self.mono_data,
+                upem: self.mono_upem,
+            },
+            piecetable::FONT_SERIF => FontInfo {
+                data: self.serif_data,
+                upem: self.serif_upem,
+            },
+            _ => FontInfo {
+                data: self.sans_data,
+                upem: self.sans_upem,
+            },
+        }
+    }
+}
+
+/// Allocate per-line, per-segment Glyphs nodes for rich text under
+/// N_DOC_TEXT. Each styled segment in a line becomes its own Glyphs
+/// node, linked as siblings. Returns the last allocated node ID.
+fn allocate_rich_line_nodes(
+    w: &mut scene::SceneWriter<'_>,
+    rich_lines: &[RichLine],
+    scratch: &[u8],
+    pt_buf: &[u8],
+    fonts: &RichFonts<'_>,
+    doc_width: u32,
+    line_height: u32,
+    scroll_y: scene::Mpt,
+    viewport_height: i32,
+) -> u16 {
+    w.node_mut(N_DOC_TEXT).first_child = NULL;
+    let mut prev_node: u16 = NULL;
+    let scroll_pt = scroll_y >> 10;
+
+    for line in rich_lines {
+        // Visibility culling.
+        let line_bottom = line.y + line_height as i32;
+        if line_bottom <= scroll_pt {
+            continue;
+        }
+        if line.y >= scroll_pt + viewport_height {
+            continue;
+        }
+
+        for seg in &line.segments {
+            let seg_text = if seg.text_start + seg.text_len <= scratch.len() {
+                &scratch[seg.text_start..seg.text_start + seg.text_len]
+            } else {
+                continue;
+            };
+
+            let Some(style) = piecetable::style(pt_buf, seg.style_id) else {
+                continue;
+            };
+            let fi = fonts.resolve(style);
+            let font_size = style.font_size_pt as u16;
+            let italic = style.flags & piecetable::FLAG_ITALIC != 0;
+
+            let shaped = shape_rich_segment(
+                fi.data,
+                seg_text,
+                font_size,
+                fi.upem,
+                style.weight,
+                italic,
+            );
+            if shaped.is_empty() {
+                continue;
+            }
+
+            let glyph_ref = w.push_shaped_glyphs(&shaped);
+            let glyph_count = shaped.len() as u16;
+            let axis_hash = rich_axis_hash(style.font_family, style.weight, italic);
+
+            let color = Color::rgba(
+                style.color[0],
+                style.color[1],
+                style.color[2],
+                style.color[3],
+            );
+
+            if let Some(node_id) = w.alloc_node() {
+                let n = w.node_mut(node_id);
+                n.y = scene::pt(seg.y);
+                n.width = scene::upt(doc_width);
+                n.height = scene::upt(line_height);
+                n.content = Content::Glyphs {
+                    color,
+                    glyphs: glyph_ref,
+                    glyph_count,
+                    font_size,
+                    axis_hash,
+                };
+                n.content_hash = scene::fnv1a(&glyph_ref.offset.to_le_bytes());
+                n.flags = NodeFlags::VISIBLE;
+                n.next_sibling = NULL;
+
+                if prev_node == NULL {
+                    w.node_mut(N_DOC_TEXT).first_child = node_id;
+                } else {
+                    w.node_mut(prev_node).next_sibling = node_id;
+                }
+                prev_node = node_id;
+            }
+        }
+    }
+
+    prev_node
+}
+
+/// Build or rebuild document content for a text/rich document.
+///
+/// Replaces `build_document_content` for rich text. Layout uses the
+/// piece table's styled runs, shaping each segment with its own font.
+#[allow(clippy::too_many_arguments)]
+pub fn build_rich_document_content(
+    w: &mut scene::SceneWriter<'_>,
+    cfg: &SceneConfig,
+    pt_buf: &[u8],
+    fonts: &RichFonts<'_>,
+    cursor_pos: u32,
+    sel_start: u32,
+    sel_end: u32,
+    title_label: &[u8],
+    clock_text: &[u8],
+    scroll_y: scene::Mpt,
+    mark_clock_changed: bool,
+    cursor_opacity: u8,
+) {
+    let doc_width = doc_width(cfg);
+    let page_padding = cfg.text_inset_x;
+    let text_area_h = cfg.page_height.saturating_sub(2 * page_padding);
+    let scroll_pt = scroll_y >> 10;
+
+    // Remove old dynamic nodes.
+    w.set_node_count(WELL_KNOWN_COUNT);
+    w.reset_data();
+
+    // Re-push pointer cursor image data.
+    {
+        let cursor_px = CURSOR_SIZE_PT * 2;
+        let cursor_pixels = icons::rasterize_cursor(cursor_px);
+        let cursor_ref = w.push_data(&cursor_pixels);
+        let cursor_hash = fnv1a(&cursor_pixels);
+        let n = w.node_mut(N_POINTER);
+        n.content = Content::InlineImage {
+            data: cursor_ref,
+            src_width: cursor_px as u16,
+            src_height: cursor_px as u16,
+        };
+        n.content_hash = cursor_hash;
+    }
+
+    // Re-push title icon.
+    {
+        let icon_size_pt = cfg.line_height * 3 / 4;
+        let icon_size_px = icon_size_pt * 2;
+        let icon_pixels = icons::rasterize_icon(
+            icons::FILE_TEXT,
+            icon_size_px,
+            dc(cfg.chrome_title_color),
+            1.5,
+        );
+        let icon_data_ref = w.push_data(&icon_pixels);
+        let icon_hash = fnv1a(&icon_pixels);
+        let n = w.node_mut(N_TITLE_ICON);
+        n.content = Content::InlineImage {
+            data: icon_data_ref,
+            src_width: icon_size_px as u16,
+            src_height: icon_size_px as u16,
+        };
+        n.content_hash = icon_hash;
+    }
+
+    // Re-push chrome text.
+    let title_glyphs = shape_chrome_text(cfg, title_label);
+    let title_glyph_ref = w.push_shaped_glyphs(&title_glyphs);
+    let clock_glyphs = shape_chrome_text(cfg, clock_text);
+    let clock_glyph_ref = w.push_shaped_glyphs(&clock_glyphs);
+
+    // Update chrome node references.
+    {
+        let n = w.node_mut(N_TITLE_TEXT);
+        n.content = Content::Glyphs {
+            color: dc(cfg.chrome_title_color),
+            glyphs: title_glyph_ref,
+            glyph_count: title_glyphs.len() as u16,
+            font_size: cfg.font_size,
+            axis_hash: FONT_SANS,
+        };
+        n.content_hash = fnv1a(title_label);
+    }
+    {
+        let n = w.node_mut(N_CLOCK_TEXT);
+        n.content = Content::Glyphs {
+            color: dc(cfg.chrome_clock_color),
+            glyphs: clock_glyph_ref,
+            glyph_count: clock_glyphs.len() as u16,
+            font_size: cfg.font_size,
+            axis_hash: FONT_SANS,
+        };
+        n.content_hash = fnv1a(clock_text);
+    }
+    if mark_clock_changed {
+        w.mark_dirty(N_CLOCK_TEXT);
+    }
+
+    // Layout rich text.
+    let line_width_pt = doc_width as f32;
+    let mut scratch = [0u8; 32768];
+    let text_len = piecetable::text_slice(pt_buf, 0, piecetable::text_len(pt_buf), &mut scratch);
+
+    let mono_fi = FontInfo {
+        data: fonts.mono_data,
+        upem: fonts.mono_upem,
+    };
+    let sans_fi = FontInfo {
+        data: fonts.sans_data,
+        upem: fonts.sans_upem,
+    };
+    let serif_fi = FontInfo {
+        data: fonts.serif_data,
+        upem: fonts.serif_upem,
+    };
+    let rich_lines = layout_rich_lines(
+        pt_buf,
+        &mut scratch,
+        line_width_pt,
+        cfg.line_height as i32,
+        &mono_fi,
+        &sans_fi,
+        &serif_fi,
+    );
+
+    // Set up N_DOC_TEXT.
+    w.node_mut(N_DOC_TEXT).next_sibling = NULL;
+    w.node_mut(N_DOC_TEXT).content_transform =
+        scene::AffineTransform::translate(0.0, -scene::mpt_to_f32(scroll_y));
+    w.node_mut(N_DOC_TEXT).content = Content::None;
+    w.node_mut(N_DOC_TEXT).content_hash = text_len as u32;
+
+    // Allocate per-segment glyph nodes.
+    let prev_line_node = allocate_rich_line_nodes(
+        w,
+        &rich_lines,
+        &scratch[..text_len],
+        pt_buf,
+        fonts,
+        doc_width,
+        cfg.line_height,
+        scroll_y,
+        text_area_h as i32,
+    );
+
+    // Link cursor after line nodes.
+    if prev_line_node == NULL {
+        w.node_mut(N_DOC_TEXT).first_child = N_CURSOR;
+    } else {
+        w.node_mut(prev_line_node).next_sibling = N_CURSOR;
+    }
+
+    w.mark_dirty(N_DOC_TEXT);
+
+    // Cursor positioning for rich text.
+    // Use byte position in logical text. For now, use a simple approach:
+    // walk the rich_lines to find which line/column the cursor is on.
+    let (cursor_x, cursor_y) = rich_cursor_position(
+        pt_buf,
+        &scratch[..text_len],
+        cursor_pos,
+        &rich_lines,
+        fonts,
+    );
+
+    {
+        let n = w.node_mut(N_CURSOR);
+        n.x = cursor_x;
+        n.y = cursor_y;
+        n.opacity = cursor_opacity;
+        n.next_sibling = NULL;
+    }
+    w.mark_dirty(N_CURSOR);
+
+    // Selection — not yet implemented for rich text (would need
+    // proportional column calculation). Skip for now.
+    let _ = (sel_start, sel_end);
+}
+
+/// Compute cursor (x, y) in millipoints for a rich text document.
+///
+/// Walks the styled runs to measure the cursor's x position using
+/// proportional font metrics.
+fn rich_cursor_position(
+    pt_buf: &[u8],
+    text: &[u8],
+    cursor_pos: u32,
+    rich_lines: &[RichLine],
+    fonts: &RichFonts<'_>,
+) -> (scene::Mpt, scene::Mpt) {
+    // Find which line the cursor is on.
+    for line in rich_lines {
+        if line.segments.is_empty() {
+            continue;
+        }
+        let line_start = line.segments[0].text_start;
+        let last_seg = line.segments.last().unwrap();
+        let line_end = last_seg.text_start + last_seg.text_len;
+
+        if (cursor_pos as usize) < line_start || (cursor_pos as usize) > line_end {
+            continue;
+        }
+
+        // Cursor is on this line. Measure x by walking chars up to cursor_pos.
+        let mut x_pt: f32 = 0.0;
+        for seg in &line.segments {
+            let seg_end = seg.text_start + seg.text_len;
+            if cursor_pos as usize <= seg.text_start {
+                break;
+            }
+            let Some(style) = piecetable::style(pt_buf, seg.style_id) else {
+                continue;
+            };
+            let fi = fonts.resolve(style);
+
+            let seg_text = &text[seg.text_start..seg_end.min(text.len())];
+            let measure_end = (cursor_pos as usize).min(seg_end) - seg.text_start;
+            let measure_text = &seg_text[..measure_end.min(seg_text.len())];
+
+            for ch in core::str::from_utf8(measure_text).unwrap_or("").chars() {
+                x_pt += super::char_advance_pt(
+                    fi.data,
+                    ch,
+                    style.font_size_pt as u16,
+                    fi.upem,
+                );
+            }
+
+            if cursor_pos as usize <= seg_end {
+                break;
+            }
+        }
+
+        // Convert to 16.16 fixed-point millipoints (>> 6 converts 16.16 to Mpt).
+        let x_fx = (x_pt * 65536.0) as i64;
+        let cursor_x = (x_fx >> 6) as scene::Mpt;
+        let cursor_y = scene::pt(line.y);
+        return (cursor_x, cursor_y);
+    }
+
+    // Cursor past end — put it on the last line.
+    if let Some(last_line) = rich_lines.last() {
+        (0, scene::pt(last_line.y))
+    } else {
+        (0, 0)
     }
 }
