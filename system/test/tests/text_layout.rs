@@ -653,3 +653,89 @@ fn word_boundary_tabs() {
     assert_eq!(word_boundary_backward(text, 11), 6);
     assert_eq!(word_boundary_forward(text, 0), 6);
 }
+
+// ── break_measured_lines newline tests ───────────────────────────────
+
+#[test]
+fn break_measured_lines_newline_splits() {
+    use layout::{break_measured_lines, BreakMode, MeasuredChar};
+    let chars = vec![
+        MeasuredChar {
+            byte_offset: 0,
+            byte_len: 1,
+            width: 8.0,
+            run_index: 0,
+            is_whitespace: false,
+            is_newline: false,
+        }, // 'A'
+        MeasuredChar {
+            byte_offset: 1,
+            byte_len: 1,
+            width: 0.0,
+            run_index: 0,
+            is_whitespace: false,
+            is_newline: true,
+        }, // '\n'
+        MeasuredChar {
+            byte_offset: 2,
+            byte_len: 1,
+            width: 8.0,
+            run_index: 0,
+            is_whitespace: false,
+            is_newline: false,
+        }, // 'B'
+    ];
+    let lines = break_measured_lines(&chars, 1000.0, BreakMode::Word);
+    assert_eq!(lines.len(), 2, "newline should produce 2 lines");
+    assert_eq!(lines[0].byte_start, 0);
+    assert_eq!(lines[0].byte_end, 1); // 'A' only
+    assert_eq!(lines[1].byte_start, 2);
+    assert_eq!(lines[1].byte_end, 3); // 'B' only
+}
+
+#[test]
+fn break_measured_lines_consecutive_newlines() {
+    use layout::{break_measured_lines, BreakMode, MeasuredChar};
+    let chars = vec![
+        MeasuredChar {
+            byte_offset: 0,
+            byte_len: 1,
+            width: 8.0,
+            run_index: 0,
+            is_whitespace: false,
+            is_newline: false,
+        }, // 'A'
+        MeasuredChar {
+            byte_offset: 1,
+            byte_len: 1,
+            width: 0.0,
+            run_index: 0,
+            is_whitespace: false,
+            is_newline: true,
+        }, // '\n'
+        MeasuredChar {
+            byte_offset: 2,
+            byte_len: 1,
+            width: 0.0,
+            run_index: 0,
+            is_whitespace: false,
+            is_newline: true,
+        }, // '\n'
+        MeasuredChar {
+            byte_offset: 3,
+            byte_len: 1,
+            width: 8.0,
+            run_index: 0,
+            is_whitespace: false,
+            is_newline: false,
+        }, // 'B'
+    ];
+    let lines = break_measured_lines(&chars, 1000.0, BreakMode::Word);
+    assert_eq!(lines.len(), 3, "two newlines should produce 3 lines");
+    assert_eq!(lines[0].byte_start, 0);
+    assert_eq!(lines[0].byte_end, 1);
+    assert_eq!(lines[1].byte_start, 2);
+    assert_eq!(lines[1].byte_end, 2); // empty line
+    assert_eq!(lines[2].byte_start, 3);
+    assert_eq!(lines[2].byte_end, 4);
+}
