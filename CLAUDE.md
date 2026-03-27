@@ -56,7 +56,7 @@ Read these before making any design suggestions:
 
 - Everything-is-files is architectural, not UX. Users see abstractions (documents, conversations, meetings), not files.
 - File paths are metadata, not the organizing principle.
-- GUI and CLI are equally fundamental OS interfaces, not applications.
+- GUI, CLI, and assistive interfaces are equally fundamental OS interfaces, not applications. Accessibility is first-class — semantic structure in the data model, not annotations after the fact.
 - How view/edit translates to CLI is an open question (tools-as-subshells? read-commands-always-safe?).
 - Prototype success = demonstrating the concept works and scales, even with only 1-2 content types fully implemented. Breadth is not required; depth on the interesting parts is.
 - If the design has value, it could be open-sourced for community build-out. But no expectation of that — design coherence is the goal regardless.

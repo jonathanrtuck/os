@@ -4,6 +4,52 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## v0.5 Rich Text Design (2026-03-27)
+
+**Status: DESIGN SETTLED.** Ready for mission execution.
+
+### Design session summary
+
+Explored three approaches for multi-style text storage:
+
+- **A. Parallel style array** (NSAttributedString/Pango model) — text in one buffer, styles in a separate structure indexed by byte ranges. Simple, well-proven, but: two data structures that must stay in sync, every edit shifts style ranges, and would be replaced when collaboration arrives.
+- **B. Inline markers** (Markdown-like) — rejected immediately. This is a serialization format, not a runtime representation.
+- **C. Piece table with inline style attributes** — chosen. Each piece carries a style ID. Operations are structural, not positional. Natural path to selective undo and collaboration.
+
+**Why piece table over parallel styles:** The OS architecture already commits to operation-aware content structures ("content-type rebase handlers enable selective undo and collaboration"). A parallel style array would be throwaway work — replaced when selective undo or collaboration arrives. The piece table is the data structure the architecture calls for. Build the right thing once.
+
+### Key decisions
+
+1. **Piece table library** (`libraries/piecetable/`) — a leaf node library. Core calls it but doesn't know internals. Same pattern as fonts/layout/drawing libraries. Text-specific complexity pushed to a leaf, not into core.
+
+2. **Piece table is the SSOT** — shared memory format = on-disk format = one representation. No dual flat-buffer materialization. `from_bytes()` is a pointer cast with validation, not deserialization. Consumers that need flat text use the library to extract it. Same pattern as the scene graph.
+
+3. **Single file per document** — the piece table contains both text and styles. One FileId, atomic snapshots, no sync risk. Considered two-file split (text + styles) but: no real advantage for search (library provides `text_slice()`), and one file is simpler in every dimension.
+
+4. **Style palette** — 32 named styles, `u8` index per piece. Compact, trivial equality, encourages consistent styling. `Style` struct includes `role: u8` for accessibility semantic roles (heading, emphasis, body, code).
+
+5. **StyledRun interface** — `StyledRun { byte_offset, byte_len, style_id }`. No text data in the run — consumer copies text on demand via `copy_run_text()`. Iterator coalesces adjacent same-style pieces. This is the contract between the piece table library and layout.
+
+6. **text/plain unchanged** — different media type, different format, different code path. Content-type-aware dispatch in core. Upgrading plain→rich wraps flat bytes in a piece table with one piece and one default style.
+
+7. **COW undo unchanged** — snapshots + 300ms debounce continue to work. Piece table's `operation_id` field recorded for future selective undo but not used yet.
+
+8. **Accessibility elevated to guiding belief** — a11y is a first-class interface alongside GUI and CLI. Semantic roles in the data model, not annotations after the fact. Updated `foundations.md` Belief #4.
+
+### Bidi, i18n, a11y analysis
+
+- **Bidi:** Piece table stores logical order (correct). Bidi reordering is a layout-time operation (UAX #9). Not implemented in v0.5 but design doesn't block it.
+- **i18n:** UTF-8 already handles all scripts. Script itemization and font fallback are layout concerns, not piece table concerns.
+- **A11y:** `Style.role: u8` carries semantic meaning (heading, emphasis, body, code). One byte, forward-compatible. Screen reader navigation by heading/role becomes possible once the a11y interface is built.
+
+### Open design thoughts (not blocking v0.5)
+
+- **Plain vs rich as different editors** — "pen vs markers." Architecturally clean (editors bind to content types). The rich editor is the plain editor + style key bindings. Could be same binary with mode or separate binaries. Implementation detail for later.
+- **Mixed-style line breaking** — layout library's `WordBreaker`/`CharBreaker` need to handle varying character widths across style boundaries. Likely solved by feeding the breaker `(char, width)` pairs where the caller resolves widths per-style. The breaker stays generic.
+- **Compound documents with plain-only children** — if a compound doc specifies text/plain regions, the rich editor doesn't bind. Upgrading a region changes its media type. Falls out of the existing content-type model.
+
+---
+
 ## Milestone Roadmap (2026-03-26)
 
 **Status: AGREED.** See `roadmap.md` for the canonical milestone plan (v0.5–v1.0), sequencing rationale, and decision dependencies. Revised after completing v0.3 (rendering) and v0.4 (persistence).

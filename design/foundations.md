@@ -34,7 +34,7 @@ Precedents that validate this: PDF is an open standard that every OS can render,
 
 3. **Viewing is the default; editing is a deliberate second step.** Opening a file shows it. Editing requires an explicit action — like picking up a tool.
 
-4. **The GUI and CLI are both interfaces to the same underlying system.** Neither is "the real one." Both talk to the same services and APIs. The CLI may expose more than the GUI, but nothing in the GUI is inaccessible from the CLI.
+4. **The GUI, CLI, and assistive interfaces are all equally fundamental.** Neither is "the real one." All talk to the same services and APIs. The CLI may expose more than the GUI, but nothing in the GUI is inaccessible from the CLI. Accessibility is not a feature bolted onto a visual interface — it is a parallel interface to the same system, with the same status as GUI and CLI. Semantic structure (headings, roles, relationships) exists in the data model, not as annotations added after the fact. Every content type, interaction primitive, and navigation mechanism must be designed with all three interfaces in mind from the start.
 
 5. **Internally opinionated, externally compatible.** The OS can structure data and workflows however it wants internally, but at its boundaries it speaks standard formats (common mimetypes). Nothing is trapped. An audio file created here plays on macOS or Windows.
 
