@@ -158,6 +158,18 @@ pub struct RasterBuffer<'a> {
     pub height: u32,
 }
 
+/// Returns the horizontal advance width for a glyph, adjusted for variation axes.
+///
+/// Tries HVAR first (fast per-glyph delta lookup). Falls back to the plain
+/// hmtx advance when no axes are specified or the font has no HVAR table.
+pub fn glyph_h_advance_with_axes(
+    font_data: &[u8],
+    glyph_id: u16,
+    axes: &[AxisValue],
+) -> Option<i32> {
+    super::hvar::advance_with_delta(font_data, glyph_id, axes)
+}
+
 /// Compute a deterministic hash of axis values for use as a glyph cache key component.
 ///
 /// The hash is computed from the axis tags and values. An empty axis values
