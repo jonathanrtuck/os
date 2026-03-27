@@ -212,29 +212,4 @@ impl GlyphAtlas {
         // Note: pixel buffer is not cleared — stale data is harmless since
         // all lookups go through the hash table.
     }
-
-    // ── COMPAT: remove in Task 7 when callers updated ─────────────────
-
-    /// Compatibility wrapper: delegates to new API with `font_size_px=0,
-    /// style_id=font_id as u32`.
-    pub(crate) fn lookup_compat(&self, glyph_id: u16, font_id: u16) -> Option<&AtlasEntry> {
-        // COMPAT: remove in Task 7 when callers updated
-        self.lookup(glyph_id, 0, font_id as u32)
-    }
-
-    /// Compatibility wrapper: delegates to new API with `font_size_px=0,
-    /// style_id=font_id as u32`.
-    pub(crate) fn pack_compat(
-        &mut self,
-        glyph_id: u16,
-        font_id: u16,
-        w: u16,
-        h: u16,
-        bearing_x: i16,
-        bearing_y: i16,
-        data: &[u8],
-    ) -> bool {
-        // COMPAT: remove in Task 7 when callers updated
-        self.pack(glyph_id, 0, font_id as u32, w, h, bearing_x, bearing_y, data)
-    }
 }

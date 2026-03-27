@@ -180,25 +180,21 @@ fn collision_handling() {
 }
 
 #[test]
-fn compat_lookup_works() {
+fn pack_and_lookup_by_style_id() {
     let mut atlas = GlyphAtlas::new();
     let data = [128u8; 4]; // 2x2 glyph
-    assert!(atlas.pack_compat(65, 0, 2, 2, 0, 2, &data));
-    assert!(atlas.pack_compat(65, 1, 2, 2, 0, 2, &data));
+    assert!(atlas.pack(65, 16, 0, 2, 2, 0, 2, &data));
+    assert!(atlas.pack(65, 16, 1, 2, 2, 0, 2, &data));
 
-    // compat lookup with font_id=0 should find the entry.
-    let e0 = atlas.lookup_compat(65, 0).expect("font_id 0");
+    // Lookup with style_id=0 should find the first entry.
+    let e0 = atlas.lookup(65, 16, 0).expect("style_id 0");
     assert_eq!(e0.width, 2);
     assert_eq!(e0.u, 0);
 
-    // compat lookup with font_id=1 should find a different entry.
-    let e1 = atlas.lookup_compat(65, 1).expect("font_id 1");
+    // Lookup with style_id=1 should find a different entry.
+    let e1 = atlas.lookup(65, 16, 1).expect("style_id 1");
     assert_eq!(e1.width, 2);
     assert_eq!(e1.u, 2); // packed after the first glyph
-
-    // The new API should also find them (font_size_px=0, style_id=font_id).
-    assert!(atlas.lookup(65, 0, 0).is_some());
-    assert!(atlas.lookup(65, 0, 1).is_some());
 }
 
 #[test]
