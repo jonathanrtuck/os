@@ -6,11 +6,11 @@ use protocol::metal;
 use scene::{Content, Node, NodeFlags, NodeId, NULL};
 
 use crate::{
-    atlas::{GlyphAtlas, MAX_FONTS},
+    atlas::{GlyphAtlas, ATLAS_HEIGHT, ATLAS_WIDTH},
     dma::DmaBuf,
     path::{draw_path_stencil_cover, parse_path_to_points, PathPointsBuf},
     virtio_helpers::send_setup,
-    ATLAS_HEIGHT, ATLAS_WIDTH, CURSOR_PLANE_NODE, DSS_CLIP_TEST, DSS_NONE, DSS_STENCIL_WRITE,
+    CURSOR_PLANE_NODE, DSS_CLIP_TEST, DSS_NONE, DSS_STENCIL_WRITE,
     IMG_TEX_DIM, MAX_INLINE_BYTES, PIPE_GLYPH, PIPE_ROUNDED_RECT, PIPE_SHADOW, PIPE_SOLID,
     PIPE_SOLID_NO_MSAA, PIPE_STENCIL_WRITE, PIPE_TEXTURED, SAMPLER_LINEAR, SAMPLER_NEAREST,
     TEX_ATLAS, TEX_IMAGE, VERTEX_BYTES,
@@ -515,10 +515,10 @@ pub(crate) fn walk_scene(
             let fp16 = 65536.0f32;
 
             // Map axis_hash to font_id for atlas lookup (scene::FONT_MONO=0, scene::FONT_SANS=1).
-            let font_id = (axis_hash as u16).min((MAX_FONTS - 1) as u16);
+            let font_id = (axis_hash as u16).min(1);
 
             for sg in shaped {
-                if let Some(entry) = ctx.atlas.lookup(sg.glyph_id, font_id) {
+                if let Some(entry) = ctx.atlas.lookup_compat(sg.glyph_id, font_id) {
                     let gx =
                         pen_x + entry.bearing_x as f32 / glyph_scale + sg.x_offset as f32 / fp16;
                     let gy = baseline_y - entry.bearing_y as f32 / glyph_scale

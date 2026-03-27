@@ -43,7 +43,7 @@ mod shaders;
 #[path = "virtio_helpers.rs"]
 mod virtio_helpers;
 
-use atlas::{GlyphAtlas, MAX_FONTS};
+use atlas::{GlyphAtlas, ATLAS_HEIGHT, ATLAS_WIDTH};
 use dma::DmaBuf;
 use path::PathPointsBuf;
 use scene_walk::{
@@ -127,9 +127,7 @@ pub(crate) const TEX_RESOLVE: u32 = 56;
 /// sub-rectangles of this single atlas texture via `ImageAtlas`.
 pub(crate) const IMG_TEX_DIM: u32 = 1024;
 
-/// Glyph atlas dimensions.
-pub(crate) const ATLAS_WIDTH: u32 = 512;
-pub(crate) const ATLAS_HEIGHT: u32 = 512;
+// Glyph atlas dimensions imported from atlas module (ATLAS_WIDTH, ATLAS_HEIGHT).
 
 /// Maximum vertex bytes per set_vertex_bytes call (Metal's 4KB limit).
 pub(crate) const MAX_INLINE_BYTES: usize = 4096;
@@ -284,7 +282,7 @@ pub extern "C" fn _start() -> ! {
         &[]
     };
     // Array of font slices indexed by font_id (0 = mono, 1 = sans).
-    let font_slices: [&[u8]; MAX_FONTS] = [font_slice, sans_font_slice];
+    let font_slices: [&[u8]; 2] = [font_slice, sans_font_slice];
 
     // Rasterization scratch space — kept alive for on-demand rasterization.
     let scratch_layout_persistent = alloc::alloc::Layout::from_size_align(
@@ -336,7 +334,7 @@ pub extern "C" fn _start() -> ! {
         let mut atlas_full_warned = false;
 
         for sg in &shaped {
-            if glyph_atlas.lookup(sg.glyph_id, 0).is_some() {
+            if glyph_atlas.lookup_compat(sg.glyph_id, 0).is_some() {
                 continue;
             }
             let mut rb = fonts::rasterize::RasterBuffer {
@@ -353,7 +351,7 @@ pub extern "C" fn _start() -> ! {
                 &[],
                 scale_factor_int,
             ) {
-                if glyph_atlas.pack(
+                if glyph_atlas.pack_compat(
                     sg.glyph_id,
                     0,
                     m.width as u16,
@@ -374,7 +372,7 @@ pub extern "C" fn _start() -> ! {
         if !sans_font_slice.is_empty() {
             let sans_shaped = fonts::shape(sans_font_slice, ascii, &[]);
             for sg in &sans_shaped {
-                if glyph_atlas.lookup(sg.glyph_id, 1).is_some() {
+                if glyph_atlas.lookup_compat(sg.glyph_id, 1).is_some() {
                     continue;
                 }
                 let mut rb = fonts::rasterize::RasterBuffer {
@@ -391,7 +389,7 @@ pub extern "C" fn _start() -> ! {
                     &[],
                     scale_factor_int,
                 ) {
-                    if glyph_atlas.pack(
+                    if glyph_atlas.pack_compat(
                         sg.glyph_id,
                         1,
                         m.width as u16,
@@ -556,14 +554,14 @@ pub extern "C" fn _start() -> ! {
                 } = node.content
                 {
                     // Map axis_hash to font_id (scene::FONT_MONO=0, scene::FONT_SANS=1).
-                    let font_id = (axis_hash as u16).min((MAX_FONTS - 1) as u16);
+                    let font_id = (axis_hash as u16).min(1);
                     let raster_font = font_slices[font_id as usize];
                     if raster_font.is_empty() {
                         continue;
                     }
                     let shaped = reader.front_shaped_glyphs(glyphs, glyph_count);
                     for sg in shaped {
-                        if glyph_atlas.lookup(sg.glyph_id, font_id).is_some() {
+                        if glyph_atlas.lookup_compat(sg.glyph_id, font_id).is_some() {
                             continue;
                         }
                         let mut rb = fonts::rasterize::RasterBuffer {
@@ -581,7 +579,7 @@ pub extern "C" fn _start() -> ! {
                             scale_factor_int,
                         ) {
                             let pack_y = glyph_atlas.row_y;
-                            if glyph_atlas.pack(
+                            if glyph_atlas.pack_compat(
                                 sg.glyph_id,
                                 font_id,
                                 m.width as u16,
