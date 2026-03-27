@@ -16,6 +16,17 @@ use super::{
     KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_TAB, KEY_UP,
 };
 
+/// Delete a byte range using the correct path for the current document format.
+/// Rich text documents route through the piece table; plain text through the flat buffer.
+fn delete_range_for_format(start: usize, end: usize) -> bool {
+    let s = super::state();
+    if s.doc_format == super::DocumentFormat::Rich {
+        super::documents::rich_delete_range(start, end)
+    } else {
+        doc_delete_range(start, end)
+    }
+}
+
 pub(crate) struct KeyAction {
     pub(crate) changed: bool,
     pub(crate) text_changed: bool,
@@ -201,8 +212,19 @@ pub(crate) fn process_key_event(
         return no_change;
     }
 
-    let text = doc_content();
-    let len = text.len();
+    // For rich text the raw buffer holds piece table bytes, not text.
+    // Use logical text length and extracted text for navigation.
+    let raw = doc_content();
+    let is_rich = super::state().doc_format == super::DocumentFormat::Rich;
+    let mut rich_scratch = alloc::vec::Vec::new();
+    let (text, len): (&[u8], usize) = if is_rich {
+        let tl = super::documents::rich_text_len();
+        rich_scratch.resize(tl, 0u8);
+        super::documents::rich_copy_text(&mut rich_scratch);
+        (&rich_scratch, tl)
+    } else {
+        (raw, raw.len())
+    };
     let layout = content_text_layout(page_w, page_pad);
     let cols = layout.cols();
 
@@ -501,7 +523,7 @@ pub(crate) fn process_key_event(
                 let lo = s.sel_start;
                 let hi = s.sel_end;
                 clear_selection();
-                if doc_delete_range(lo, hi) {
+                if delete_range_for_format(lo, hi) {
                     super::state().cursor_pos = lo;
                     doc_write_header();
                     sync_cursor_to_editor(editor_ch);
@@ -520,7 +542,7 @@ pub(crate) fn process_key_event(
                 // Opt+Backspace: word-delete backward.
                 let cursor = super::state().cursor_pos;
                 let boundary = word_boundary_backward(text, cursor);
-                if boundary < cursor && doc_delete_range(boundary, cursor) {
+                if boundary < cursor && delete_range_for_format(boundary, cursor) {
                     super::state().cursor_pos = boundary;
                     super::state().goal_column = None;
                     doc_write_header();
@@ -549,7 +571,7 @@ pub(crate) fn process_key_event(
                 let lo = s.sel_start;
                 let hi = s.sel_end;
                 clear_selection();
-                if doc_delete_range(lo, hi) {
+                if delete_range_for_format(lo, hi) {
                     super::state().cursor_pos = lo;
                     doc_write_header();
                     sync_cursor_to_editor(editor_ch);
@@ -568,7 +590,7 @@ pub(crate) fn process_key_event(
                 // Opt+Delete: word-delete forward.
                 let cursor = super::state().cursor_pos;
                 let boundary = word_boundary_forward(text, cursor);
-                if boundary > cursor && doc_delete_range(cursor, boundary) {
+                if boundary > cursor && delete_range_for_format(cursor, boundary) {
                     super::state().goal_column = None;
                     doc_write_header();
                     sync_cursor_to_editor(editor_ch);
@@ -597,7 +619,7 @@ pub(crate) fn process_key_event(
                 let lo = s.sel_start;
                 let hi = s.sel_end;
                 clear_selection();
-                if doc_delete_range(lo, hi) {
+                if delete_range_for_format(lo, hi) {
                     super::state().cursor_pos = lo;
                     doc_write_header();
                     sync_cursor_to_editor(editor_ch);
