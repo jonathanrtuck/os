@@ -320,6 +320,8 @@ pub mod edit {
     pub const MSG_SELECTION_UPDATE: u32 = 33;
     pub const MSG_WRITE_DELETE_RANGE: u32 = 34;
     pub const MSG_SET_CURSOR: u32 = 35;
+    pub const MSG_STYLE_APPLY: u32 = 36;
+    pub const MSG_STYLE_SET_CURRENT: u32 = 37;
 
     #[repr(C)]
     #[derive(Clone, Copy, Debug, PartialEq)]
@@ -357,7 +359,29 @@ pub mod edit {
     const _: () = assert!(core::mem::size_of::<WriteDelete>() <= 60);
     const _: () = assert!(core::mem::size_of::<WriteDeleteRange>() <= 60);
     const _: () = assert!(core::mem::size_of::<CursorMove>() <= 60);
+    /// Apply a style to a byte range in the active document.
+    /// Sent by the rich text editor to core.
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct StyleApply {
+        pub start: u32,
+        pub end: u32,
+        pub style_id: u8,
+        pub _pad: [u8; 3],
+    }
+
+    /// Set the active insertion style.
+    /// Sent by the rich text editor to core. New text inherits this style.
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct StyleSetCurrent {
+        pub style_id: u8,
+        pub _pad: [u8; 3],
+    }
+
     const _: () = assert!(core::mem::size_of::<SelectionUpdate>() <= 60);
+    const _: () = assert!(core::mem::size_of::<StyleApply>() <= 60);
+    const _: () = assert!(core::mem::size_of::<StyleSetCurrent>() <= 60);
 
     #[derive(Clone, Copy, Debug)]
     pub enum Message {
@@ -367,6 +391,8 @@ pub mod edit {
         CursorMove(CursorMove),
         SelectionUpdate(SelectionUpdate),
         SetCursor(CursorMove),
+        StyleApply(StyleApply),
+        StyleSetCurrent(StyleSetCurrent),
     }
 
     pub fn decode(msg_type: u32, payload: &[u8; crate::PAYLOAD_SIZE]) -> Option<Message> {
@@ -387,6 +413,12 @@ pub mod edit {
                 crate::decode_payload(payload)
             })),
             MSG_SET_CURSOR => Some(Message::SetCursor(unsafe {
+                crate::decode_payload(payload)
+            })),
+            MSG_STYLE_APPLY => Some(Message::StyleApply(unsafe {
+                crate::decode_payload(payload)
+            })),
+            MSG_STYLE_SET_CURRENT => Some(Message::StyleSetCurrent(unsafe {
                 crate::decode_payload(payload)
             })),
             _ => None,
