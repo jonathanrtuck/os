@@ -163,7 +163,6 @@ fn total_used(h: &PieceTableHeader) -> usize {
     add_offset(h.style_count, h.piece_count, h.original_len) + h.add_len as usize
 }
 
-
 // ---------------------------------------------------------------------------
 // Internal buffer accessors
 // ---------------------------------------------------------------------------
@@ -209,7 +208,9 @@ fn write_style(buf: &mut [u8], index: u8, style: &Style) {
 /// Read a byte from the appropriate source buffer.
 fn read_source_byte(buf: &[u8], h: &PieceTableHeader, piece: &Piece, offset_in_piece: u32) -> u8 {
     let abs = if piece.source == SOURCE_ORIGINAL {
-        original_offset(h.style_count, h.piece_count) + piece.offset as usize + offset_in_piece as usize
+        original_offset(h.style_count, h.piece_count)
+            + piece.offset as usize
+            + offset_in_piece as usize
     } else {
         add_offset(h.style_count, h.piece_count, h.original_len)
             + piece.offset as usize
@@ -261,7 +262,12 @@ pub fn init(buf: &mut [u8], _capacity: usize) -> bool {
 /// Initialize a piece table with existing text in the original buffer.
 /// The `default_style` is added as style index 0 and the initial piece
 /// references the entire original buffer with that style.
-pub fn init_with_text(buf: &mut [u8], _capacity: usize, text: &[u8], default_style: &Style) -> bool {
+pub fn init_with_text(
+    buf: &mut [u8],
+    _capacity: usize,
+    text: &[u8],
+    default_style: &Style,
+) -> bool {
     if buf.len() < HEADER_SIZE {
         return false;
     }
@@ -433,7 +439,11 @@ pub fn insert_bytes(buf: &mut [u8], pos: u32, bytes: &[u8]) -> bool {
             Some(pi - 1)
         } else if pos == tl && pi == pc {
             // Appending at the very end — coalesce with the last piece.
-            if pc > 0 { Some(pc - 1) } else { None }
+            if pc > 0 {
+                Some(pc - 1)
+            } else {
+                None
+            }
         } else if off_in > 0 {
             let p = read_piece(buf, sc, pi);
             if off_in == p.length {
@@ -449,9 +459,7 @@ pub fn insert_bytes(buf: &mut [u8], pos: u32, bytes: &[u8]) -> bool {
             let p = read_piece(buf, sc, ci);
             let add_off = add_offset(sc, pc, read_header(buf).original_len);
             let h = read_header(buf);
-            if p.source == SOURCE_ADD
-                && p.style_id == cur_style
-                && p.offset + p.length == h.add_len
+            if p.source == SOURCE_ADD && p.style_id == cur_style && p.offset + p.length == h.add_len
             {
                 // Append to the add buffer and extend the piece.
                 let add_start = add_off + h.add_len as usize;
@@ -529,7 +537,8 @@ pub fn insert_bytes(buf: &mut [u8], pos: u32, bytes: &[u8]) -> bool {
     let new_pc = h.piece_count;
 
     // Append the new text to the add buffer (at its new position).
-    let new_add_data_off = add_offset(sc, new_pc, read_header(buf).original_len) + read_header(buf).add_len as usize;
+    let new_add_data_off =
+        add_offset(sc, new_pc, read_header(buf).original_len) + read_header(buf).add_len as usize;
     if read_header(buf).add_len as usize + bytes.len() > MAX_ADD_BUFFER {
         // Rollback: shift buffers back and restore piece_count.
         // For simplicity in this no_alloc context, we already checked above.
@@ -788,10 +797,7 @@ pub fn apply_style(buf: &mut [u8], start: u32, end: u32, style_id: u8) {
             count += 1;
         } else if p_start >= start && p_end <= end {
             // Entirely within style range — change style.
-            pieces[count] = Piece {
-                style_id,
-                ..p
-            };
+            pieces[count] = Piece { style_id, ..p };
             count += 1;
         } else if start > p_start && end < p_end {
             // Style range splits this piece into three.
@@ -989,6 +995,19 @@ pub fn style(buf: &[u8], id: u8) -> Option<&Style> {
 /// Number of styles in the palette.
 pub fn style_count(buf: &[u8]) -> u8 {
     read_header(buf).style_count
+}
+
+/// Find the first style in the palette with the given semantic role.
+pub fn find_style_by_role(buf: &[u8], role: u8) -> Option<u8> {
+    let h = read_header(buf);
+    for i in 0..h.style_count {
+        if let Some(s) = style(buf, i) {
+            if s.role == role {
+                return Some(i);
+            }
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------

@@ -12,8 +12,8 @@ use protocol::{
 use super::{
     clamp_f32, content_text_layout,
     documents::{doc_content, doc_delete_range, doc_write_header},
-    EDITOR_HANDLE, KEY_A, KEY_B, KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_HOME, KEY_I,
-    KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_TAB, KEY_UP,
+    EDITOR_HANDLE, KEY_1, KEY_2, KEY_A, KEY_B, KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END,
+    KEY_HOME, KEY_I, KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_TAB, KEY_UP,
 };
 
 /// Delete a byte range using the correct path for the current document format.
@@ -304,20 +304,17 @@ pub(crate) fn process_key_event(
             if s.doc_format != super::DocumentFormat::Rich {
                 return no_change;
             }
+            let buf = super::documents::rich_buf_ref();
+            let bold_id = piecetable::find_style_by_role(buf, piecetable::ROLE_STRONG).unwrap_or(0);
             if s.has_selection {
                 let lo = s.sel_start;
                 let hi = s.sel_end;
-                // Toggle: if the selection start is already bold (style 3),
-                // revert to body (style 0); otherwise apply bold.
-                let buf = super::documents::rich_buf_ref();
                 let cur = piecetable::style_at(buf, lo as u32).unwrap_or(0);
-                let target = if cur == 3 { 0u8 } else { 3u8 };
+                let target = if cur == bold_id { 0u8 } else { bold_id };
                 super::documents::rich_apply_style(lo, hi, target);
             } else {
-                // Toggle insertion style.
-                let buf = super::documents::rich_buf_ref();
                 let cur = piecetable::current_style(buf);
-                let target = if cur == 3 { 0u8 } else { 3u8 };
+                let target = if cur == bold_id { 0u8 } else { bold_id };
                 super::documents::rich_set_current_style(target);
             }
             KeyAction {
@@ -335,17 +332,76 @@ pub(crate) fn process_key_event(
             if s.doc_format != super::DocumentFormat::Rich {
                 return no_change;
             }
+            let buf = super::documents::rich_buf_ref();
+            let italic_id =
+                piecetable::find_style_by_role(buf, piecetable::ROLE_EMPHASIS).unwrap_or(0);
             if s.has_selection {
                 let lo = s.sel_start;
                 let hi = s.sel_end;
-                let buf = super::documents::rich_buf_ref();
                 let cur = piecetable::style_at(buf, lo as u32).unwrap_or(0);
-                let target = if cur == 4 { 0u8 } else { 4u8 };
+                let target = if cur == italic_id { 0u8 } else { italic_id };
                 super::documents::rich_apply_style(lo, hi, target);
             } else {
-                let buf = super::documents::rich_buf_ref();
                 let cur = piecetable::current_style(buf);
-                let target = if cur == 4 { 0u8 } else { 4u8 };
+                let target = if cur == italic_id { 0u8 } else { italic_id };
+                super::documents::rich_set_current_style(target);
+            }
+            KeyAction {
+                changed: true,
+                text_changed: true,
+                selection_changed: false,
+                context_switched: false,
+                consumed: true,
+            }
+        }
+
+        // ── Cmd+1: toggle heading1 ──────────────────────────────
+        KEY_1 if cmd => {
+            let s = super::state();
+            if s.doc_format != super::DocumentFormat::Rich {
+                return no_change;
+            }
+            let buf = super::documents::rich_buf_ref();
+            let h1_id =
+                piecetable::find_style_by_role(buf, piecetable::ROLE_HEADING1).unwrap_or(0);
+            if s.has_selection {
+                let lo = s.sel_start;
+                let hi = s.sel_end;
+                let cur = piecetable::style_at(buf, lo as u32).unwrap_or(0);
+                let target = if cur == h1_id { 0u8 } else { h1_id };
+                super::documents::rich_apply_style(lo, hi, target);
+            } else {
+                let cur = piecetable::current_style(buf);
+                let target = if cur == h1_id { 0u8 } else { h1_id };
+                super::documents::rich_set_current_style(target);
+            }
+            KeyAction {
+                changed: true,
+                text_changed: true,
+                selection_changed: false,
+                context_switched: false,
+                consumed: true,
+            }
+        }
+
+        // ── Cmd+2: toggle heading2 ──────────────────────────────
+        KEY_2 if cmd => {
+            let s = super::state();
+            if s.doc_format != super::DocumentFormat::Rich {
+                return no_change;
+            }
+            let buf = super::documents::rich_buf_ref();
+            let h2_id =
+                piecetable::find_style_by_role(buf, piecetable::ROLE_HEADING2).unwrap_or(0);
+            if s.has_selection {
+                let lo = s.sel_start;
+                let hi = s.sel_end;
+                let cur = piecetable::style_at(buf, lo as u32).unwrap_or(0);
+                let target = if cur == h2_id { 0u8 } else { h2_id };
+                super::documents::rich_apply_style(lo, hi, target);
+            } else {
+                let cur = piecetable::current_style(buf);
+                let target = if cur == h2_id { 0u8 } else { h2_id };
                 super::documents::rich_set_current_style(target);
             }
             KeyAction {
