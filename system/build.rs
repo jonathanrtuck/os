@@ -142,6 +142,17 @@ fn main() {
 
     rustc_rlib(&rustc, &layout_src, &layout_rlib, "layout", &[]);
 
+    let piecetable_src = manifest_dir.join("libraries/piecetable/lib.rs");
+    let piecetable_rlib = out_dir.join("libpiecetable.rlib");
+
+    rustc_rlib(
+        &rustc,
+        &piecetable_src,
+        &piecetable_rlib,
+        "piecetable",
+        &[],
+    );
+
     let virtio_src = manifest_dir.join("libraries/virtio/lib.rs");
     let virtio_rlib = out_dir.join("libvirtio.rlib");
 
