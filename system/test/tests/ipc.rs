@@ -1,19 +1,19 @@
 //! Host-side tests for the IPC ring buffer library.
 
-use ipc::{Channel, Message, RingBuf, PAYLOAD_SIZE, SLOT_COUNT};
+use ipc::{Channel, Message, RingBuf, PAGE_SIZE, PAYLOAD_SIZE, SLOT_COUNT};
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Allocate a page-aligned 4 KiB buffer on the heap for testing.
-fn alloc_page() -> Box<[u8; 4096]> {
+/// Allocate a zero-initialized page-sized buffer on the heap for testing.
+fn alloc_page() -> Box<[u8; PAGE_SIZE]> {
     // Zero-initialized — matches kernel behavior (demand-paged zeroed pages).
-    Box::new([0u8; 4096])
+    Box::new([0u8; PAGE_SIZE])
 }
 
 /// Create a RingBuf backed by a test page.
-fn make_ring(page: &mut [u8; 4096]) -> RingBuf {
+fn make_ring(page: &mut [u8; PAGE_SIZE]) -> RingBuf {
     let ring = unsafe { RingBuf::from_raw(page.as_mut_ptr()) };
     ring.init();
     ring
@@ -372,9 +372,9 @@ fn channel_bidirectional_pair() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn channel_from_base_matches_from_pages() {
-    let mut pages = [0u8; 8192]; // two consecutive pages
+    let mut pages = [0u8; PAGE_SIZE * 2]; // two consecutive pages
 
-    let ch = unsafe { Channel::from_base(pages.as_mut_ptr() as usize, 4096, 0) };
+    let ch = unsafe { Channel::from_base(pages.as_mut_ptr() as usize, PAGE_SIZE, 0) };
     ch.init();
 
     let msg = test_msg(5, 0x55);
