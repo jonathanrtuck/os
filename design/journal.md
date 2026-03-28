@@ -4,6 +4,35 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Kernel EC=0x21 instruction abort — sustained load (2026-03-27)
+
+**Status: open-bug**
+
+**Symptom:** Kernel panic after ~6.6M context switches and ~13.2M syscalls under normal interactive use (typing, scrolling in rich text editor). Crash is an instruction abort at EL1 with ELR=FAR=LR=0x4BBC — the kernel branched to a user-space address.
+
+**Crash signature:**
+```
+EC=0x21 ESR=0x86000006 ELR=0x4BBC FAR=0x4BBC
+SP=0xFFFFFFF04302FFC0 LR=0x4BBC TPIDR=0xFFFFFFF0420B6C00
+thread id=0 ctx.elr=0xFFFFFFF0400A1D28 (secondary_main idle loop)
+```
+
+- ESR IFSC=0x6 → level 2 translation fault (L0/L1 entries exist, L2 does not)
+- The saved thread context shows the secondary CPU idle loop (wfi+b), not the faulting code
+- Core 0 had 99.9% of all load (6.6M ctx_sw vs ~31K on cores 1/3, 0 on core 2)
+
+**Relationship to prior TPIDR race (2026-03-14):** Same symptom class (EC=0x21, kernel jumps to user-space address) but different specifics. The prior bug was IFSC=4 (level 0 fault) at FAR=0x0A003A00 (virtio MMIO range) caused by a TPIDR_EL1 write ordering race in `schedule_inner`. That was fixed by moving the TPIDR write inside the scheduler lock. This new crash has IFSC=6 (level 2 fault) at FAR=0x4BBC, suggesting the page walk progresses further — possibly a different corruption vector. The `validate_context_before_eret` check added in the prior fix should catch this class, so either: (a) the validator was bypassed, (b) the corruption happened after validation, or (c) the validator doesn't cover this path.
+
+**Investigation needed:**
+1. Check if `validate_context_before_eret` is still active and covers the faulting path
+2. Determine what code generated the branch to 0x4BBC — was it an `eret` with corrupted ELR, or a corrupted function pointer / return address?
+3. Check if the scheduler lock drop → TPIDR write sequence has a remaining window under heavy single-core load
+4. Stress test: sustained input for 60+ seconds, verify no crash
+
+**Crash log:** `/tmp/hypervisor-crash-2026-03-27-215813.log`
+
+---
+
 ## v0.5 Rich Text Design (2026-03-27)
 
 **Status: DESIGN SETTLED.** Ready for mission execution.

@@ -1356,7 +1356,7 @@ pub fn build_rich_document_content(
         n.x = cursor_info.x;
         n.y = cursor_info.y;
         n.width = scene::upt(cursor_w);
-        n.height = scene::upt(cursor_info.height);
+        n.height = cursor_info.height;
         n.background = Color::rgba(
             cursor_info.color[0],
             cursor_info.color[1],
@@ -1505,7 +1505,9 @@ pub fn build_rich_document_content(
 struct RichCursorInfo {
     x: scene::Mpt,
     y: scene::Mpt,
-    height: u32,
+    /// Cursor height in millipoints (Umpt). Computed from float to avoid
+    /// truncation — guarantees the cursor bottom lands exactly on the baseline.
+    height: scene::Umpt,
     /// Font weight at the cursor position (for cursor width scaling).
     style_weight: u16,
     /// Text color at the cursor position (cursor matches text color).
@@ -1603,44 +1605,43 @@ fn rich_cursor_position(
 
         // Compute cursor height and y from the style at cursor position.
         // Height = cap height (baseline to top of capital letters).
-        let (cursor_h, cursor_cap_pt, cursor_weight, cursor_color, cursor_italic) =
-            if let Some(style) = piecetable::style(pt_buf, cursor_style_id) {
-                let fi = fonts.resolve(style);
-                let cap_h = if fi.upem > 0 {
-                    if fi.cap_height > 0 {
-                        fi.cap_height as f32 * style.font_size_pt as f32 / fi.upem as f32
-                    } else {
-                        (fi.ascender as i32).abs() as f32 * style.font_size_pt as f32
-                            / fi.upem as f32
-                            * 0.7
-                    }
+        // Computed in float, converted to millipoints at the end to avoid
+        // truncation that would cause the cursor to fall short of the baseline.
+        let (cursor_cap_pt, cursor_weight, cursor_color, cursor_italic) = if let Some(style) =
+            piecetable::style(pt_buf, cursor_style_id)
+        {
+            let fi = fonts.resolve(style);
+            let cap_h = if fi.upem > 0 {
+                if fi.cap_height > 0 {
+                    fi.cap_height as f32 * style.font_size_pt as f32 / fi.upem as f32
                 } else {
-                    style.font_size_pt as f32 * 0.7
-                };
-                let is_italic = style.flags & piecetable::FLAG_ITALIC != 0;
-                (cap_h as u32, cap_h, style.weight, style.color, is_italic)
+                    (fi.ascender as i32).abs() as f32 * style.font_size_pt as f32 / fi.upem as f32
+                        * 0.7
+                }
             } else {
-                (
-                    default_height,
-                    default_height as f32 * 0.7,
-                    400,
-                    [32, 32, 32, 255],
-                    false,
-                )
+                style.font_size_pt as f32 * 0.7
             };
+            let is_italic = style.flags & piecetable::FLAG_ITALIC != 0;
+            (cap_h, style.weight, style.color, is_italic)
+        } else {
+            (default_height as f32 * 0.7, 400, [32, 32, 32, 255], false)
+        };
 
-        // Baseline-aligned y: cursor top = baseline - cap_height.
-        // Baseline = line.y + max_ascent_pt.
-        // cursor_y = line.y + max_ascent_pt - cap_height_pt.
-        let baseline_offset = (max_ascent_pt - cursor_cap_pt) as i32;
-        let cursor_y = scene::pt(line.y + baseline_offset);
+        // Baseline-aligned y and height in millipoints (Mpt/Umpt).
+        // Cursor top = baseline - cap_height, cursor bottom = baseline.
+        // Computing both from the same float baseline guarantees alignment.
+        let mpt = scene::MPT_PER_PT as f32;
+        let cursor_top_f = line.y as f32 + max_ascent_pt - cursor_cap_pt;
+        let baseline_f = line.y as f32 + max_ascent_pt;
+        let cursor_y = (cursor_top_f * mpt) as scene::Mpt;
+        let cursor_h_mpt = ((baseline_f - cursor_top_f) * mpt) as scene::Umpt;
 
         let x_fx = (x_pt * 65536.0) as i64;
         let cursor_x = (x_fx >> 6) as scene::Mpt;
         return RichCursorInfo {
             x: cursor_x,
             y: cursor_y,
-            height: cursor_h.max(2),
+            height: cursor_h_mpt.max(scene::upt(2)),
             style_weight: cursor_weight,
             color: cursor_color,
             italic: cursor_italic,
@@ -1653,7 +1654,7 @@ fn rich_cursor_position(
         RichCursorInfo {
             x: 0,
             y: scene::pt(last_line.y),
-            height: default_height,
+            height: scene::upt(default_height),
             style_weight: 400,
             color: fallback_color,
             italic: false,
@@ -1662,7 +1663,7 @@ fn rich_cursor_position(
         RichCursorInfo {
             x: 0,
             y: 0,
-            height: default_height,
+            height: scene::upt(default_height),
             style_weight: 400,
             color: fallback_color,
             italic: false,

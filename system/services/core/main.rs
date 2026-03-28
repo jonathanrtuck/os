@@ -1851,10 +1851,24 @@ pub extern "C" fn _start() -> ! {
                                 match click_count {
                                     2 => {
                                         // Double-click: select word at click position.
+                                        // byte_pos is a cursor position (between characters).
+                                        // If it lands at the start of a word, adjust backward
+                                        // search so it finds THIS word, not the previous one.
+                                        let at_word = byte_pos < text.len()
+                                            && !layout_lib::is_whitespace(text[byte_pos]);
+                                        let back_pos =
+                                            if at_word { byte_pos + 1 } else { byte_pos };
                                         let lo =
-                                            input_handling::word_boundary_backward(text, byte_pos);
-                                        let hi =
-                                            input_handling::word_boundary_forward(text, byte_pos);
+                                            input_handling::word_boundary_backward(text, back_pos);
+                                        // Forward: find end of word only (exclude trailing
+                                        // whitespace — word_boundary_forward includes it
+                                        // because it's designed for Opt+Right navigation).
+                                        let mut hi = byte_pos;
+                                        while hi < text.len()
+                                            && !layout_lib::is_whitespace(text[hi])
+                                        {
+                                            hi += 1;
+                                        }
                                         let s = state();
                                         s.anchor = lo;
                                         s.cursor_pos = hi;

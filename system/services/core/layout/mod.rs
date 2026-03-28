@@ -10,12 +10,12 @@ mod incremental;
 
 use alloc::vec::Vec;
 
+pub(crate) use full::rich_xy_to_byte;
 // Re-export all public items from submodules.
 pub use full::{
     build_clock_update, build_cursor_update, build_document_content, build_full_scene,
     build_rich_document_content, build_selection_update, RichFonts, CURSOR_HOTSPOT_OFFSET,
 };
-pub(crate) use full::rich_xy_to_byte;
 pub use incremental::{delete_line, insert_line, update_single_line};
 // Style table is used by scene_state (via main.rs re-export path).
 // Font identity constants removed. Style IDs are assigned at runtime

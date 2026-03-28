@@ -375,7 +375,7 @@ pub fn word_boundary_forward(text: &[u8], pos: usize) -> usize {
 }
 
 #[inline]
-fn is_whitespace(b: u8) -> bool {
+pub fn is_whitespace(b: u8) -> bool {
     b == b' ' || b == b'\n' || b == b'\t'
 }
 
@@ -478,10 +478,7 @@ pub fn break_measured_lines(
                         });
                         // Skip any remaining whitespace to find the next word.
                         i = next_idx;
-                        while i < chars.len()
-                            && chars[i].is_whitespace
-                            && !chars[i].is_newline
-                        {
+                        while i < chars.len() && chars[i].is_whitespace && !chars[i].is_newline {
                             i += 1;
                         }
                         line_emitted = true;
@@ -503,8 +500,7 @@ pub fn break_measured_lines(
 
             // Record word-break opportunity after whitespace.
             if mode == BreakMode::Word && mc.is_whitespace && !mc.is_newline {
-                let (trimmed_end, trimmed_w) =
-                    trim_trailing(chars, line_start_idx, i);
+                let (trimmed_end, trimmed_w) = trim_trailing(chars, line_start_idx, i);
                 best_break = Some((i, trimmed_end, trimmed_w));
             }
         }
@@ -528,11 +524,7 @@ pub fn break_measured_lines(
 
 /// Trim trailing whitespace from `chars[start_idx..end_idx]`.
 /// Returns `(trimmed_byte_end, trimmed_width)`.
-fn trim_trailing(
-    chars: &[MeasuredChar],
-    start_idx: usize,
-    end_idx: usize,
-) -> (u32, f32) {
+fn trim_trailing(chars: &[MeasuredChar], start_idx: usize, end_idx: usize) -> (u32, f32) {
     let mut trim_end = end_idx;
     while trim_end > start_idx && chars[trim_end - 1].is_whitespace {
         trim_end -= 1;
