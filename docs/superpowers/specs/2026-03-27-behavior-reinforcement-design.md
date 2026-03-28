@@ -28,6 +28,7 @@ Create a new project-level settings file at `.claude/projects/-Users-user-Sites-
 All hooks use `matcher` to match the **tool name** (e.g., `"Bash"`, `"Edit|Write"`). The matcher is a regex against the tool name only — it cannot inspect tool input. To inspect the actual command or file path, the hook script must parse `tool_input` from the JSON received on stdin.
 
 **Blocking (gate):** Script exits with code 2 and writes JSON to stdout:
+
 ```json
 {
   "hookSpecificOutput": {
@@ -39,6 +40,7 @@ All hooks use `matcher` to match the **tool name** (e.g., `"Bash"`, `"Edit|Write
 ```
 
 **Advisory (context injection):** Script exits with code 0 and writes JSON to stdout:
+
 ```json
 {
   "hookSpecificOutput": {
@@ -94,6 +96,7 @@ These rules govern how you work on this project. They are not preferences —
 they are requirements. Violating them wastes the user's time and erodes trust.
 
 ### 1. Understand before acting
+
 - Read every file you will modify, AND every file that depends on it
 - Trace all downstream effects of the change before writing code
 - If the problem has known algorithms or prior art, research them from
@@ -104,6 +107,7 @@ they are requirements. Violating them wastes the user's time and erodes trust.
   cascade silently.
 
 ### 2. Build bottom-up
+
 - Complete the current architectural layer before starting the next
 - No scaffolding, no "good enough for now," no "fix later" —
   production-grade from the first line
@@ -111,6 +115,7 @@ they are requirements. Violating them wastes the user's time and erodes trust.
   behind a clean interface
 
 ### 3. Verify everything yourself
+
 - Write or identify tests BEFORE implementing. Watch them fail.
   Implement. Watch them pass.
 - Run the FULL test suite, not just tests you think are relevant
@@ -125,6 +130,7 @@ they are requirements. Violating them wastes the user's time and erodes trust.
   Unverifiable work does not ship — no exceptions.
 
 ### 4. Fix root causes, not symptoms
+
 - When something breaks, diagnose the actual cause — don't patch the
   surface
 - When fixing a bug, check for the same class of bug in related code
@@ -136,6 +142,7 @@ they are requirements. Violating them wastes the user's time and erodes trust.
 ## Layer 3: CLAUDE.md Restructure
 
 ### Current structure (~350 lines, behavioral rules buried)
+
 1. What This Is
 2. Project Phase
 3. Working Mode
@@ -152,6 +159,7 @@ they are requirements. Violating them wastes the user's time and erodes trust.
 14. Reference Influences
 
 ### Target structure (~250 lines, behavioral rules dominate)
+
 1. **Working Protocol (MANDATORY)** — NEW, top position
 2. What This Is — trimmed
 3. Working Mode — trimmed, overlap with Working Protocol removed
@@ -167,9 +175,11 @@ they are requirements. Violating them wastes the user's time and erodes trust.
 13. Reference Influences
 
 ### Extracted to STATUS.md
+
 The "Where We Left Off" section and all phase-by-phase history moves to `STATUS.md` in the project root. CLAUDE.md gets a one-liner: "Read STATUS.md at session start for current project state."
 
 **STATUS.md structure:**
+
 - Heading: "Project Status" with last-updated date
 - "Current State" — the current milestone focus and what's in progress (equivalent to the first paragraph of "Where We Left Off")
 - "Architecture" — settled architecture summary (IPC, rendering pipeline, content pipeline)
@@ -185,7 +195,7 @@ Added via the company-os MCP server's `propose_claim` tool.
 
 ### Claim 1: Research from authoritative sources
 
-```
+```text
 statement: Never implement from general knowledge when a specification exists.
            Research algorithms from authoritative sources. Look up APIs, syscalls,
            instruction encodings, and wire formats in actual documentation or
@@ -198,7 +208,7 @@ scope: [engineering]
 
 ### Claim 2: Verification tooling gaps block progress
 
-```
+```text
 statement: If a change cannot be verified with existing tooling, building the
            verification tooling becomes the immediate priority. Unverifiable
            work does not ship.
@@ -215,7 +225,9 @@ Total claims: 42 → 44.
 ## Layer 5: Memory Cleanup
 
 ### Delete (19 redundant feedback memories)
+
 All now consolidated into the Working Protocol:
+
 - `feedback_perfect_foundation.md`
 - `feedback_thoroughness.md`
 - `feedback_correctness_over_speed.md`
@@ -237,6 +249,7 @@ All now consolidated into the Working Protocol:
 - `feedback_working_mode_gap.md`
 
 ### Keep (5 unique feedback memories)
+
 - `feedback_a11y_first_class.md` — unique: a11y as first-class principle
 - `feedback_rust_formatting.md` — unique: project-specific tooling
 - `feedback_virgl_visual_testing.md` — unique: driver-specific testing method
@@ -244,6 +257,7 @@ All now consolidated into the Working Protocol:
 - `feedback_comprehensive_test_content.md` — unique: factory document guidance
 
 ### MEMORY.md index
+
 - Remove 19 dead entries + 1 phantom (`feedback_most_correct.md`)
 - Reorganize remaining entries by type (decisions, project state, references, feedback)
 - Net: ~100 lines → ~60 lines
@@ -259,11 +273,9 @@ All now consolidated into the Working Protocol:
 ## Success Criteria
 
 Mechanically verifiable:
+
 1. No conversation where I commit code without having run the test suite (enforced by hook 1a)
 2. Display pipeline changes include imgdiff.py numbers, not eyeballed screenshots (reminded by hook 1b)
 3. Feedback memory count stays at 5, not creeping back up with duplicates (auditable via file count)
 
-Observationally verifiable (require human review of conversation):
-4. First-edit reminder fires and I demonstrably pause to read context before continuing
-5. When verification tooling is missing, I flag it as a blocker rather than shipping anyway
-6. CLAUDE.md Working Protocol is cited in my reasoning when making methodology decisions
+Observationally verifiable (require human review of conversation): 4. First-edit reminder fires and I demonstrably pause to read context before continuing 5. When verification tooling is missing, I flag it as a blocker rather than shipping anyway 6. CLAUDE.md Working Protocol is cited in my reasoning when making methodology decisions
