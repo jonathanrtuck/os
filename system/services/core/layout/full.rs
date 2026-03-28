@@ -1378,41 +1378,30 @@ pub fn build_rich_document_content(
                     continue;
                 };
                 let fi = fonts.resolve(style);
-
-                // Build axes for char_advance_pt.
-                let mut axes_buf = [fonts::rasterize::AxisValue {
-                    tag: [0; 4],
-                    value: 0.0,
-                }; 3];
-                let mut axis_count = 0;
-                if style.weight != 400 {
-                    axes_buf[axis_count] = fonts::rasterize::AxisValue {
-                        tag: *b"wght",
-                        value: style.weight as f32,
-                    };
-                    axis_count += 1;
-                }
-                axes_buf[axis_count] = fonts::rasterize::AxisValue {
-                    tag: *b"opsz",
-                    value: style.font_size_pt as f32,
-                };
-                axis_count += 1;
-                let axes = &axes_buf[..axis_count];
+                let font_size = style.font_size_pt as u16;
+                let italic = style.flags & piecetable::FLAG_ITALIC != 0;
 
                 let seg_text_slice = &scratch[seg_start..seg_end.min(text_len)];
+                // Shape segment (same as renderer) for exact advance matching.
+                let shaped = shape_rich_segment(
+                    fi.data, seg_text_slice, font_size, fi.upem, style.weight, italic,
+                );
+
+                let seg_str = core::str::from_utf8(seg_text_slice).unwrap_or("");
                 let mut byte_pos = seg_start;
-                for ch in core::str::from_utf8(seg_text_slice).unwrap_or("").chars() {
+                let mut glyph_idx = 0usize;
+                for ch in seg_str.chars() {
                     if byte_pos == clamp_lo {
                         x_start = pen_x;
                         found_start = true;
                     }
-                    let adv = super::char_advance_pt(
-                        fi.data,
-                        ch,
-                        style.font_size_pt as u16,
-                        fi.upem,
-                        axes,
-                    );
+                    let adv = if glyph_idx < shaped.len() {
+                        let a = shaped[glyph_idx].x_advance as f32 / 65536.0;
+                        glyph_idx += 1;
+                        a
+                    } else {
+                        0.0
+                    };
                     byte_pos += ch.len_utf8();
                     pen_x += adv;
                     if byte_pos >= clamp_hi {
@@ -1515,10 +1504,10 @@ fn rich_cursor_position(
         // Cursor is on this line. Measure x using the same shaped advances as
         // the renderer to guarantee exact alignment with rendered glyphs.
         let mut x_pt: f32 = 0.0;
-        let mut cursor_style_id: u8 = 0;
+        let mut cursor_style_id: u8 = line.segments.first().map_or(0, |s| s.style_id);
         for seg in &line.segments {
             let seg_end = seg.text_start + seg.text_len;
-            if cursor_pos as usize <= seg.text_start {
+            if (cursor_pos as usize) < seg.text_start {
                 break;
             }
             cursor_style_id = seg.style_id;
@@ -1640,36 +1629,29 @@ pub(crate) fn rich_xy_to_byte(
             continue;
         };
         let fi = fonts.resolve(style);
-
-        let mut axes_buf = [fonts::rasterize::AxisValue {
-            tag: [0; 4],
-            value: 0.0,
-        }; 3];
-        let mut axis_count = 0;
-        if style.weight != 400 {
-            axes_buf[axis_count] = fonts::rasterize::AxisValue {
-                tag: *b"wght",
-                value: style.weight as f32,
-            };
-            axis_count += 1;
-        }
-        axes_buf[axis_count] = fonts::rasterize::AxisValue {
-            tag: *b"opsz",
-            value: style.font_size_pt as f32,
-        };
-        axis_count += 1;
-        let axes = &axes_buf[..axis_count];
+        let font_size = style.font_size_pt as u16;
+        let italic = style.flags & piecetable::FLAG_ITALIC != 0;
 
         let seg_text = &text[seg.text_start..seg_end.min(text.len())];
+        // Shape segment (same as renderer) for exact advance matching.
+        let shaped = shape_rich_segment(fi.data, seg_text, font_size, fi.upem, style.weight, italic);
+
+        let seg_str = core::str::from_utf8(seg_text).unwrap_or("");
         let mut byte_pos = seg.text_start;
-        for ch in core::str::from_utf8(seg_text).unwrap_or("").chars() {
-            let adv = super::char_advance_pt(fi.data, ch, style.font_size_pt as u16, fi.upem, axes);
-            // If the click x is before the midpoint of this character, place cursor before it.
+        let mut glyph_idx = 0usize;
+        for _ch in seg_str.chars() {
+            let adv = if glyph_idx < shaped.len() {
+                let a = shaped[glyph_idx].x_advance as f32 / 65536.0;
+                glyph_idx += 1;
+                a
+            } else {
+                0.0
+            };
             if x_pt < pen_x + adv * 0.5 {
                 return byte_pos;
             }
             pen_x += adv;
-            byte_pos += ch.len_utf8();
+            byte_pos += _ch.len_utf8();
             best_pos = byte_pos;
         }
     }
