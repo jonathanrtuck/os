@@ -5,7 +5,7 @@ Hardware abstraction services. Each driver runs as a sandboxed userspace process
 ## Subdirectories
 
 - `metal-render/` — Metal GPU render service (hypervisor passthrough, default backend). Has its own CLAUDE.md.
-- `virgil-render/` — Virgl GPU render service (Gallium3D via virglrenderer in QEMU). Has its own CLAUDE.md.
+- `virgil-render/` — **DEPRECATED.** Virgl GPU render service (Gallium3D via virglrenderer in QEMU). v0.3 research spike; no longer maintained.
 - `cpu-render/` — CPU software render service + virtio-gpu 2D present (QEMU fallback)
 - `virtio-input/` — Keyboard and tablet input driver (evdev events to IPC)
 - `virtio-blk/` — Block device driver (standalone self-test; document service owns blk in production)

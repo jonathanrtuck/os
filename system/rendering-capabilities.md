@@ -15,8 +15,8 @@ Core (layout + scene build) → Scene Graph (shared memory) → Render Service �
 The scene graph is the interface. Render services are thick drivers that read the scene graph, perform the full tree walk, and produce pixels. Three render services:
 
 - **`metal-render`** (default): Native Metal GPU rendering via serialized Metal commands over a custom virtio device. Used with the [hypervisor](https://github.com/jonathanrtuck/hypervisor) on Apple Silicon. 4x MSAA, sRGB render targets, analytical Gaussian shadows, on-demand glyph atlas, hardware cursor plane. Auto-detects native display resolution (e.g., 4112×2658@120Hz on ProMotion).
-- **`virgil-render`**: GPU-accelerated rendering via Gallium3D command streams (virtio-gpu 3D / Virgl). Glyph atlas, image textures, stencil-then-cover path rendering. Used with virgl-capable QEMU.
-- **`cpu-render`**: Software rasterization via `CpuBackend` + virtio-gpu 2D presentation. Used for headless testing and non-virgl QEMU.
+- **`virgil-render`** _(deprecated)_: GPU-accelerated rendering via Gallium3D command streams (virtio-gpu 3D / Virgl). v0.3 research spike; no longer maintained. Will be removed in a future milestone.
+- **`cpu-render`**: Software rasterization via `CpuBackend` + virtio-gpu 2D presentation. Used for QEMU integration testing. Not actively developed; will be retired once test infrastructure migrates to hypervisor.
 
 All three live as sibling directories under `services/drivers/`. Init probes GPU capabilities at boot and selects the appropriate render service.
 

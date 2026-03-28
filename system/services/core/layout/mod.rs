@@ -7,6 +7,7 @@
 
 mod full;
 mod incremental;
+mod loading;
 
 use alloc::vec::Vec;
 
@@ -17,6 +18,7 @@ pub use full::{
     build_rich_document_content, build_selection_update, RichFonts, CURSOR_HOTSPOT_OFFSET,
 };
 pub use incremental::{delete_line, insert_line, update_single_line};
+pub use loading::{build_loading_scene, update_spinner_angle};
 // Style table is used by scene_state (via main.rs re-export path).
 // Font identity constants removed. Style IDs are assigned at runtime
 // by core's StyleTable — sequential, collision-free by construction.

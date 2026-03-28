@@ -26,6 +26,12 @@ These rules govern how you work on this project. They are not preferences — th
 - Never declare "done" without evidence.
 - If verification tooling doesn't exist for a change, STOP. Building the tooling becomes the immediate priority. Push the original task onto the stack, build what's needed to verify, then resume. Unverifiable work does not ship — no exceptions.
 
+**Visual verification means correctness, not existence.** "Something rendered" is not verification. You must verify it looks _correct_:
+
+- For ANY visual change: capture a BEFORE screenshot as baseline. Make changes. Capture AFTER. Diff with imgdiff.py — verify only intended changes appear and nothing else regressed.
+- For NEW visual elements (no "before" exists): generate a reference image with Python/PIL showing what correct output looks like (e.g., draw an arc, a rectangle, expected text layout). Compare the actual render against it.
+- BEFORE capturing: state what "correct" looks like numerically (bounding box, aspect ratio, position, symmetry). AFTER capturing: compare measured values against stated expectations. If they don't match, the implementation is wrong — don't rationalize the discrepancy.
+
 ### 4. Fix root causes, not symptoms
 
 - When something breaks, diagnose the actual cause — don't patch the surface
@@ -172,7 +178,7 @@ Every `.rs` file follows this order:
 
 **Every change that affects the display pipeline MUST be visually verified before declaring it done.** The user is not a tester. Do not ask them to check if something works. Do not declare a fix without seeing the result yourself. If you cannot close the verification loop, say so explicitly — do not declare success.
 
-### Three render backends, three testing methods
+### Render backends and testing methods
 
 **metal-render (hypervisor, DEFAULT):** The primary development path. The hypervisor has built-in screenshot capture and scripted input injection — no window focus, no macOS utilities, no fragility. Reads directly from the Metal drawable via GPU blit.
 
@@ -243,6 +249,8 @@ Output includes:
 
 Use this to verify: "page left=1164 in both images" is proof of no shift. "colored region: not found" is proof the image is offscreen. Never claim a visual result without a number backing it.
 
+**Always capture a baseline BEFORE making display changes.** Compare before/after with imgdiff.py to verify only intended pixels changed. For new visual elements, generate a reference with Python/PIL (draw the expected shape, text, layout) and compare the actual render against it. "Something rendered" is NOT verification — you must verify it is geometrically and visually correct.
+
 **When you cannot verify a change with available tools, that is a BLOCKING problem.** Fix the tooling gap before shipping the change. Do not ship unverifiable work.
 
 Launch: `cd system && cargo run -r` (default, no env vars needed).
@@ -259,14 +267,7 @@ python3 -c "from PIL import Image; Image.open('/tmp/qemu-screen.ppm').save('/tmp
 
 Launch: `cd system && QEMU=1 VIRGL=0 cargo run -r`.
 
-**virgil-render (QEMU virgl): `screendump` DOES NOT WORK.** It produces stale/cached images because the virgl cocoa display renders via the host GPU, not the guest framebuffer. Instead:
-
-1. Launch with `cd system && QEMU=1 cargo run --release` (opens a cocoa window)
-2. Focus the QEMU window
-3. Use macOS screenshot: `screencapture -l $(osascript -e 'tell app "QEMU" to id of window 1') /tmp/qemu-virgl.png`
-4. Read the PNG with the Read tool
-
-**Sanity check:** If two screenshots show identical clock times, the capture is stale. The clock updates every second — identical timestamps mean you're reading cached data.
+**virgil-render (DEPRECATED):** No longer maintained. Do not use for visual testing. Use metal-render instead.
 
 ### When to use this
 
@@ -280,17 +281,18 @@ Launch: `cd system && QEMU=1 VIRGL=0 cargo run -r`.
 
 Changes to the rendering pipeline must follow this process. These rules exist because a session was lost to shipping unverified rendering changes that broke the display.
 
-Three render backends exist — changes may affect one or all:
+Two active render backends — changes may affect one or both:
 
 - **metal-render** (default): scene graph → metal command buffer → virtio → hypervisor → Metal API → CAMetalLayer
-- **virgil-render**: scene graph → virgl command encoding → virtio-gpu wire → QEMU → virglrenderer → ANGLE → Metal
 - **cpu-render**: scene graph → CpuBackend (libraries/render/) → virtio-gpu 2D → QEMU → display
 
-Relevant code: `protocol/metal.rs`, `protocol/virgl.rs`, `libraries/render/`, `services/drivers/{metal-render,virgil-render,cpu-render}/`, `services/core/` (scene building).
+(virgil-render is deprecated and no longer maintained.)
+
+Relevant code: `protocol/metal.rs`, `libraries/render/`, `services/drivers/{metal-render,cpu-render}/`, `services/core/` (scene building).
 
 ### Before implementing
 
-1. **Validate assumptions against source code, not general knowledge.** Every layer in the pipeline has source code or documentation. If you're uncertain whether a GPU feature is supported, READ the source — do not guess from general knowledge. For metal-render, check the hypervisor's Swift Metal code (`~/Sites/hypervisor/`). For virgil-render, check virglrenderer source or ANGLE docs.
+1. **Validate assumptions against source code, not general knowledge.** Every layer in the pipeline has source code or documentation. If you're uncertain whether a GPU feature is supported, READ the source — do not guess from general knowledge. For metal-render, check the hypervisor's Swift Metal code (`~/Sites/hypervisor/`).
 2. **If an agreed approach turns out to be infeasible, STOP and discuss.** Do not silently switch to a different approach. Come back to the user with: what we agreed, what you found, why it doesn't work, what the alternatives are.
 
 ### During implementation

@@ -13,8 +13,8 @@ use scene::{TripleWriter, TRIPLE_SCENE_SIZE};
 
 use super::layout::{
     build_clock_update, build_cursor_update, build_document_content, build_full_scene,
-    build_rich_document_content, build_selection_update, delete_line, insert_line,
-    update_single_line,
+    build_loading_scene, build_rich_document_content, build_selection_update, delete_line,
+    insert_line, update_single_line, update_spinner_angle,
 };
 // Re-export layout types and constants used by main.rs.
 pub use super::layout::{
@@ -50,6 +50,33 @@ impl SceneState {
     /// from the scene at generation N are safe to free once this returns ≥ N.
     pub fn reader_done_gen(&mut self) -> u32 {
         self.triple().reader_done_gen()
+    }
+
+    /// Build the loading scene (background + spinning arc indicator).
+    ///
+    /// Called once at boot before async init begins. The spinner is
+    /// subsequently animated via `update_spinner`.
+    pub fn build_loading(&mut self, fb_width: u32, fb_height: u32) {
+        let mut tw = self.triple();
+        {
+            let mut w = tw.acquire();
+            build_loading_scene(&mut w, fb_width, fb_height);
+        }
+        tw.publish();
+    }
+
+    /// Rebuild the spinner arc at a new rotation angle.
+    ///
+    /// Called each animation tick during boot. Acquires a copy of the
+    /// current scene, rebuilds the arc path with rotated coordinates,
+    /// and publishes.
+    pub fn update_spinner(&mut self, angle: f32) {
+        let mut tw = self.triple();
+        {
+            let mut w = tw.acquire_copy();
+            update_spinner_angle(&mut w, angle);
+        }
+        tw.publish();
     }
 
     /// Build the full scene tree with both document spaces in the strip.

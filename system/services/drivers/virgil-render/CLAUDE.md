@@ -1,4 +1,6 @@
-# virgil-render
+# virgil-render (DEPRECATED)
+
+> **Deprecated.** This driver was a v0.3 research spike that proved GPU-accelerated rendering via QEMU's virglrenderer. metal-render is the primary render path. This driver is no longer maintained and will be removed in a future milestone. Do not add new features here.
 
 Thick Virgil3D GPU driver — reads the scene graph from shared memory and renders using Gallium3D commands via virtio-gpu 3D mode.
 

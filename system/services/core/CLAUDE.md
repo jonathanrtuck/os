@@ -19,6 +19,7 @@ Central OS service: sole owner of document state, text layout, scene graph build
 - `mod.rs` — Well-known node indices (N_ROOT through N_DOC_IMAGE), SceneConfig, layout helpers
 - `full.rs` — Full scene builds from scratch and compaction rebuilds of document content
 - `incremental.rs` — Incremental updates: single-line edit, line insert (Enter), line delete (Backspace at BOL)
+- `loading.rs` — Boot loading scene: Tabler loader-2 spinner (270° arc), CPU-rasterized as InlineImage each frame
 
 ## IPC Protocol
 

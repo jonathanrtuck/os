@@ -99,6 +99,74 @@ pub(crate) enum DocumentFormat {
     Rich,
 }
 
+// ── Boot state machine ─────────────────────────────────────────────
+//
+// Core boots event-driven: publishes a loading scene immediately,
+// then handles async init replies (document queries, PNG decode,
+// undo snapshot) as events while animating a spinner. Transitions
+// to the full scene when all init completes.
+
+/// PNG decode sub-state (two-phase: header query → full decode).
+#[derive(Clone, Copy)]
+enum DecodePhase {
+    /// No image to decode (no image config received).
+    None,
+    /// Header-only query sent, awaiting dimensions.
+    AwaitingHeader,
+    /// Full decode request sent, awaiting pixel data.
+    AwaitingDecode {
+        alloc_offset: u32,
+        pixel_bytes: u32,
+    },
+    /// Decode complete (success or failure).
+    Done,
+}
+
+/// Document loading sub-state.
+#[derive(Clone, Copy)]
+enum DocPhase {
+    /// Query for text/rich sent, awaiting result.
+    QueryRich,
+    /// Query for text/plain sent (text/rich not found).
+    QueryPlain,
+    /// Document found, read request sent.
+    Reading {
+        file_id: u64,
+        detected_format: DocumentFormat,
+    },
+    /// No document found, create request sent.
+    Creating,
+    /// Document loaded, undo snapshot request sent.
+    AwaitingUndo,
+    /// Complete.
+    Done,
+}
+
+/// Boot-time async init state. Tracks which operations have completed.
+struct BootState {
+    spinner_angle: f32,
+    decode_phase: DecodePhase,
+    doc_phase: DocPhase,
+    image_ready: bool,
+    doc_ready: bool,
+    undo_ready: bool,
+    /// Image config saved from init channel for decode requests.
+    img_file_store_offset: u32,
+    img_file_store_length: u32,
+}
+
+impl BootState {
+    fn all_ready(&self) -> bool {
+        self.image_ready && self.doc_ready && self.undo_ready
+    }
+}
+
+/// Boot timeout: force-transition after 5 seconds regardless of pending replies.
+const BOOT_TIMEOUT_NS: u64 = 5_000_000_000;
+
+/// Spinner rotation increment per frame (~5° per tick at 60fps → ~1.2 sec/rev).
+const SPINNER_ANGLE_DELTA: f32 = 0.0873;
+
 const COMPOSITOR_HANDLE: sys::ChannelHandle = sys::ChannelHandle(2);
 const DECODER_HANDLE: sys::ChannelHandle = sys::ChannelHandle(4);
 pub(crate) const DOC_HEADER_SIZE: usize = 64;
@@ -1032,8 +1100,43 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
-    // Check for image data — decode via the decoder service (IPC).
-    let mut has_image = false;
+    // ── Set up IPC channels (needed before async sends) ─────────────
+    // SAFETY: channel_shm_va(1..N) are bases of channel SHM regions mapped by the kernel;
+    // alignment guaranteed by page-boundary allocation.
+    let input_ch =
+        unsafe { ipc::Channel::from_base(protocol::channel_shm_va(1), ipc::PAGE_SIZE, 1) };
+    let compositor_ch =
+        unsafe { ipc::Channel::from_base(protocol::channel_shm_va(2), ipc::PAGE_SIZE, 0) };
+    let editor_ch =
+        unsafe { ipc::Channel::from_base(protocol::channel_shm_va(3), ipc::PAGE_SIZE, 0) };
+    let decoder_ch = unsafe {
+        ipc::Channel::from_base(
+            protocol::channel_shm_va(DECODER_HANDLE.0 as usize),
+            ipc::PAGE_SIZE,
+            0,
+        )
+    };
+    let fs_ch = unsafe {
+        ipc::Channel::from_base(
+            protocol::channel_shm_va(FS_HANDLE.0 as usize),
+            ipc::PAGE_SIZE,
+            0,
+        )
+    };
+
+    // ── Read remaining init channel messages (fast, already queued) ──
+
+    // Image config — save for async decode, don't block.
+    let mut boot = BootState {
+        spinner_angle: 0.0,
+        decode_phase: DecodePhase::None,
+        doc_phase: DocPhase::QueryRich,
+        image_ready: true, // default: no image to decode
+        doc_ready: false,
+        undo_ready: false,
+        img_file_store_offset: 0,
+        img_file_store_length: 0,
+    };
 
     if let Some(compose::Message::ImageConfig(img_config)) = init_ch
         .try_recv(&mut msg)
@@ -1041,108 +1144,13 @@ pub extern "C" fn _start() -> ! {
         .flatten()
     {
         if img_config.file_store_length > 0 {
-            // Decoder channel (handle 4, set up by init).
-            // Side 0: core is endpoint A (same convention as compositor/editor).
-            let decoder_ch = unsafe {
-                ipc::Channel::from_base(
-                    protocol::channel_shm_va(DECODER_HANDLE.0 as usize),
-                    ipc::PAGE_SIZE,
-                    0,
-                )
-            };
-
-            // Helper: send a decode request and block for the response.
-            let send_and_recv = |ch: &ipc::Channel,
-                                 req: &protocol::decode::DecodeRequest,
-                                 msg: &mut ipc::Message|
-             -> Option<protocol::decode::DecodeResponse> {
-                // SAFETY: DecodeRequest is repr(C) and fits in 60-byte payload.
-                let req_msg = unsafe {
-                    ipc::Message::from_payload(protocol::decode::MSG_DECODE_REQUEST, req)
-                };
-                ch.send(&req_msg);
-                let _ = sys::channel_signal(DECODER_HANDLE);
-                if !ch.recv_blocking(DECODER_HANDLE.0, msg) {
-                    return None;
-                }
-                if let Some(protocol::decode::Message::Response(r)) =
-                    protocol::decode::decode(msg.msg_type, &msg.payload)
-                {
-                    Some(r)
-                } else {
-                    None
-                }
-            };
-
-            // Step 1: Header-only query to get image dimensions.
-            let hdr_req = protocol::decode::DecodeRequest {
-                file_offset: img_config.file_store_offset,
-                file_length: img_config.file_store_length,
-                content_offset: 0,
-                max_output: 0,
-                request_id: 1,
-                flags: protocol::decode::DECODE_FLAG_HEADER_ONLY,
-            };
-            if let Some(hdr_resp) = send_and_recv(&decoder_ch, &hdr_req, &mut msg) {
-                if hdr_resp.status == protocol::decode::DecodeStatus::HeaderOk as u8
-                    && hdr_resp.width > 0
-                    && hdr_resp.height > 0
-                {
-                    // Step 2: Allocate Content Region space (BGRA pixels only).
-                    // Decompression scratch is heap-allocated by the decoder service.
-                    let pixel_bytes = hdr_resp.width as u32 * hdr_resp.height as u32 * 4;
-                    let s = state();
-                    if let Some(alloc_offset) = s.content_alloc.allocate(pixel_bytes) {
-                        // Step 3: Full decode request.
-                        let dec_req = protocol::decode::DecodeRequest {
-                            file_offset: img_config.file_store_offset,
-                            file_length: img_config.file_store_length,
-                            content_offset: alloc_offset,
-                            max_output: pixel_bytes,
-                            request_id: 2,
-                            flags: 0,
-                        };
-                        if let Some(dec_resp) = send_and_recv(&decoder_ch, &dec_req, &mut msg) {
-                            if dec_resp.status == protocol::decode::DecodeStatus::Ok as u8 {
-                                // Step 4: Write Content Region registry entry.
-                                // SAFETY: content_va is mapped read-write.
-                                let header = unsafe {
-                                    &mut *(s.content_va
-                                        as *mut protocol::content::ContentRegionHeader)
-                                };
-                                let entry_idx = header.entry_count as usize;
-                                if entry_idx < protocol::content::MAX_CONTENT_ENTRIES {
-                                    let content_id = protocol::content::CONTENT_ID_DYNAMIC_START;
-                                    header.entries[entry_idx] = protocol::content::ContentEntry {
-                                        content_id,
-                                        offset: alloc_offset,
-                                        length: dec_resp.bytes_written,
-                                        class: protocol::content::ContentClass::Pixels as u8,
-                                        _pad: [0; 3],
-                                        width: dec_resp.width as u16,
-                                        height: dec_resp.height as u16,
-                                        generation: s.scene_generation,
-                                    };
-                                    header.entry_count += 1;
-                                    s.image_content_id = content_id;
-                                    s.image_width = dec_resp.width as u16;
-                                    s.image_height = dec_resp.height as u16;
-                                    sys::print(b"     PNG decoded into Content Region\n");
-                                }
-                            } else {
-                                // Decode failed — return allocation.
-                                s.content_alloc.free(alloc_offset, pixel_bytes);
-                                sys::print(b"     PNG decode failed\n");
-                            }
-                        }
-                    }
-                }
-            }
-            has_image = true;
+            boot.img_file_store_offset = img_config.file_store_offset;
+            boot.img_file_store_length = img_config.file_store_length;
+            boot.image_ready = false;
         }
     }
 
-    // Check for RTC config.
+    // RTC config — fast, synchronous (already on init channel).
     if let Some(compose::Message::RtcConfig(rtc_config)) = init_ch
         .try_recv(&mut msg)
         .then(|| compose::decode(msg.msg_type, &msg.payload))
@@ -1152,7 +1160,6 @@ pub extern "C" fn _start() -> ! {
             match sys::device_map(rtc_config.mmio_pa, ipc::PAGE_SIZE as u64) {
                 Ok(va) => {
                     state().rtc_mmio_va = va;
-                    // Capture epoch once — all future time derived from CNTVCT_EL0.
                     // SAFETY: va points to memory-mapped PL031 RTC data register.
                     let epoch = unsafe { core::ptr::read_volatile(va as *const u32) };
                     state().rtc_epoch_at_boot = epoch as u64;
@@ -1166,198 +1173,390 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
-    // Set up IPC channels.
-    // SAFETY: channel_shm_va(1..3) are bases of channel SHM regions mapped by the kernel;
-    // alignment guaranteed by page-boundary allocation.
-    let input_ch =
-        unsafe { ipc::Channel::from_base(protocol::channel_shm_va(1), ipc::PAGE_SIZE, 1) };
-    let compositor_ch =
-        unsafe { ipc::Channel::from_base(protocol::channel_shm_va(2), ipc::PAGE_SIZE, 0) };
-    let editor_ch =
-        unsafe { ipc::Channel::from_base(protocol::channel_shm_va(3), ipc::PAGE_SIZE, 0) };
-    let fs_ch = unsafe {
-        ipc::Channel::from_base(
-            protocol::channel_shm_va(FS_HANDLE.0 as usize),
-            ipc::PAGE_SIZE,
-            0,
-        )
+    // ── Build loading scene (first visible frame) ───────────────────
+    // SAFETY: scene_va..+TRIPLE_SCENE_SIZE is within the scene SHM region mapped by init;
+    // alignment is 1 (u8 slice). scene_va validated non-zero above.
+    let scene_buf = unsafe {
+        core::slice::from_raw_parts_mut(config.scene_va as *mut u8, scene::TRIPLE_SCENE_SIZE)
     };
-    // ── Query or create the active document ────────────────────────────
-    //
-    // Query for text/rich first (preferred), then text/plain. If neither
-    // exists, create a text/plain document. After loading, detect format
-    // from content (piece table magic).
+    let mut scene = scene_state::SceneState::from_buf(scene_buf);
+
+    scene.build_loading(fb_width, fb_height);
+
+    // Signal compositor — loading scene visible almost immediately.
+    let scene_msg = ipc::Message::new(MSG_SCENE_UPDATED);
+    compositor_ch.send(&scene_msg);
+    let _ = sys::channel_signal(COMPOSITOR_HANDLE);
+    sys::print(b"     loading scene published\n");
+
+    // ── Send async init requests (non-blocking) ─────────────────────
+
+    // PNG decode: send header-only query.
+    if !boot.image_ready {
+        let hdr_req = protocol::decode::DecodeRequest {
+            file_offset: boot.img_file_store_offset,
+            file_length: boot.img_file_store_length,
+            content_offset: 0,
+            max_output: 0,
+            request_id: 1,
+            flags: protocol::decode::DECODE_FLAG_HEADER_ONLY,
+        };
+        // SAFETY: DecodeRequest is repr(C) and fits in 60-byte payload.
+        let req_msg = unsafe {
+            ipc::Message::from_payload(protocol::decode::MSG_DECODE_REQUEST, &hdr_req)
+        };
+        decoder_ch.send(&req_msg);
+        let _ = sys::channel_signal(DECODER_HANDLE);
+        boot.decode_phase = DecodePhase::AwaitingHeader;
+    }
+
+    // Document: send query for text/rich.
     {
-        let fs_handle = FS_HANDLE.0 as u8;
-        let mut reply = ipc::Message::new(0);
-
-        // Helper: query the document service for a given media type.
-        // Returns the first file_id found, or 0.
-        let query_media = |media: &[u8],
-                           ch: &ipc::Channel,
-                           handle: sys::ChannelHandle,
-                           reply: &mut ipc::Message|
-         -> u64 {
-            let mut query_payload = DocQuery {
-                query_type: 0,
-                data_len: media.len() as u32,
-                data: [0u8; 48],
-            };
-            query_payload.data[..media.len()].copy_from_slice(media);
-            // SAFETY: DocQuery is repr(C) and fits in 60-byte payload.
-            let query_msg = unsafe { ipc::Message::from_payload(MSG_DOC_QUERY, &query_payload) };
-            ch.send(&query_msg);
-            let _ = sys::channel_signal(handle);
-
-            if ch.recv_blocking(handle.0 as u8, reply) && reply.msg_type == MSG_DOC_QUERY_RESULT {
-                if let Some(protocol::document::Message::DocQueryResult(result)) =
-                    protocol::document::decode(reply.msg_type, &reply.payload)
-                {
-                    if result.count > 0 {
-                        return result.file_ids[0];
-                    }
-                }
-            }
-            0
+        let media = b"text/rich";
+        let mut query_payload = DocQuery {
+            query_type: 0,
+            data_len: media.len() as u32,
+            data: [0u8; 48],
         };
-
-        // Try text/rich first, then text/plain.
-        let mut doc_file_id = query_media(b"text/rich", &fs_ch, FS_HANDLE, &mut reply);
-        let mut detected_format = DocumentFormat::Rich;
-
-        if doc_file_id == 0 {
-            doc_file_id = query_media(b"text/plain", &fs_ch, FS_HANDLE, &mut reply);
-            detected_format = DocumentFormat::Plain;
-        }
-
-        if doc_file_id != 0 {
-            // Existing document found — read its content into the doc buffer.
-            sys::print(b"     loading existing document\n");
-            let s = state();
-            let read_payload = DocRead {
-                file_id: doc_file_id,
-                target_va: 0,
-                capacity: s.doc_capacity as u32,
-                _pad: 0,
-            };
-            // SAFETY: DocRead is repr(C) and fits in 60-byte payload.
-            let read_msg = unsafe { ipc::Message::from_payload(MSG_DOC_READ, &read_payload) };
-            fs_ch.send(&read_msg);
-            let _ = sys::channel_signal(FS_HANDLE);
-
-            if fs_ch.recv_blocking(fs_handle, &mut reply) && reply.msg_type == MSG_DOC_READ_DONE {
-                if let Some(protocol::document::Message::DocReadDone(done)) =
-                    protocol::document::decode(reply.msg_type, &reply.payload)
-                {
-                    if done.status == 0 && done.len > 0 {
-                        let s = state();
-                        s.doc_file_id = doc_file_id;
-
-                        // Detect format from loaded content.
-                        // For text/rich, the document service writes the piece
-                        // table bytes starting at doc_buf (no DOC_HEADER_SIZE
-                        // offset for rich). But the document service always
-                        // writes at doc_buf + DOC_HEADER_SIZE. So for rich
-                        // documents, we check the magic at that offset.
-                        let content_start =
-                            // SAFETY: doc_buf valid, done.len <= capacity.
-                            unsafe { core::slice::from_raw_parts(s.doc_buf.add(DOC_HEADER_SIZE), done.len as usize) };
-
-                        if detected_format == DocumentFormat::Rich
-                            && done.len >= 64
-                            && piecetable::validate(content_start)
-                        {
-                            // Rich document: piece table bytes at doc_buf +
-                            // DOC_HEADER_SIZE (same offset as flat text).
-                            s.doc_format = DocumentFormat::Rich;
-                            s.doc_len = done.len as usize;
-
-                            // Restore cursor position from piece table header.
-                            s.cursor_pos =
-                                piecetable::cursor_pos(documents::rich_buf_ref()) as usize;
-                            // Sync doc_len to shared header for commit.
-                            documents::doc_write_header();
-                            sys::print(b"     rich text document loaded\n");
-                        } else {
-                            // Plain text document.
-                            s.doc_format = DocumentFormat::Plain;
-                            s.doc_len = done.len as usize;
-                            documents::doc_write_header();
-                            sys::print(b"     plain text document loaded\n");
-                        }
-                    } else {
-                        state().doc_file_id = doc_file_id;
-                        state().doc_format = detected_format;
-                    }
-                } else {
-                    state().doc_file_id = doc_file_id;
-                    state().doc_format = detected_format;
-                }
-            } else {
-                state().doc_file_id = doc_file_id;
-                state().doc_format = detected_format;
-            }
-        } else {
-            // No document exists — create a text/plain document.
-            sys::print(b"     creating new text document\n");
-            let media = b"text/plain";
-            let mut create_payload = DocCreate {
-                media_type_len: media.len() as u32,
-                _pad: 0,
-                media_type: [0u8; 52],
-            };
-            create_payload.media_type[..media.len()].copy_from_slice(media);
-            // SAFETY: DocCreate is repr(C) and fits in 60-byte payload.
-            let create_msg = unsafe { ipc::Message::from_payload(MSG_DOC_CREATE, &create_payload) };
-            fs_ch.send(&create_msg);
-            let _ = sys::channel_signal(FS_HANDLE);
-
-            if fs_ch.recv_blocking(fs_handle, &mut reply) && reply.msg_type == MSG_DOC_CREATE_RESULT
-            {
-                if let Some(protocol::document::Message::DocCreateResult(result)) =
-                    protocol::document::decode(reply.msg_type, &reply.payload)
-                {
-                    if result.status == 0 {
-                        state().doc_file_id = result.file_id;
-                        state().doc_format = DocumentFormat::Plain;
-                        sys::print(b"     text document created\n");
-                    } else {
-                        sys::print(b"     warning: document create failed\n");
-                    }
-                }
-            }
-        }
-    }
-
-    // ── Take initial undo snapshot ─────────────────────────────────────
-    //
-    // Snapshot the document's current state so Cmd+Z can revert to it.
-    // This is the "position 0" baseline for the undo stack.
-    let mut undo_state = UndoState::new();
-    if state().doc_file_id != 0 {
-        let snap_payload = DocSnapshot {
-            file_count: 1,
-            _pad: 0,
-            file_ids: [state().doc_file_id, 0, 0, 0, 0, 0],
-        };
-        // SAFETY: DocSnapshot is repr(C) and fits in 60-byte payload.
-        let snap_msg = unsafe { ipc::Message::from_payload(MSG_DOC_SNAPSHOT, &snap_payload) };
-        fs_ch.send(&snap_msg);
+        query_payload.data[..media.len()].copy_from_slice(media);
+        // SAFETY: DocQuery is repr(C) and fits in 60-byte payload.
+        let query_msg = unsafe { ipc::Message::from_payload(MSG_DOC_QUERY, &query_payload) };
+        fs_ch.send(&query_msg);
         let _ = sys::channel_signal(FS_HANDLE);
+        boot.doc_phase = DocPhase::QueryRich;
+    }
 
-        let mut reply = ipc::Message::new(0);
-        if fs_ch.recv_blocking(FS_HANDLE.0, &mut reply) && reply.msg_type == MSG_DOC_SNAPSHOT_RESULT
-        {
-            if let Some(protocol::document::Message::DocSnapshotResult(result)) =
-                protocol::document::decode(reply.msg_type, &reply.payload)
+    // ── Create animation timer ──────────────────────────────────────
+    let mut anim_timer = sys::timer_create(frame_interval_ns).unwrap_or(sys::TimerHandle(255));
+
+    // ── Boot animation loop ─────────────────────────────────────────
+    //
+    // Multiplex timer ticks (spinner animation) with async init replies
+    // (decoder, document service). Exits when all init completes or
+    // boot timeout expires.
+    let mut undo_state = UndoState::new();
+    let boot_start = sys::counter();
+    let boot_timeout_ticks = if state().counter_freq > 0 {
+        BOOT_TIMEOUT_NS as u128 * state().counter_freq as u128 / 1_000_000_000
+    } else {
+        u128::MAX
+    } as u64;
+
+    loop {
+        // Wait on animation timer + async reply channels.
+        let mut wait_handles = alloc::vec![anim_timer.0, FS_HANDLE.0];
+        if !boot.image_ready {
+            wait_handles.push(DECODER_HANDLE.0);
+        }
+        let _ = sys::wait(&wait_handles, frame_interval_ns);
+
+        // ── Timer tick: rotate spinner ──────────────────────────────
+        if let Ok(_) = sys::wait(&[anim_timer.0], 0) {
+            let _ = sys::handle_close(anim_timer.0);
+            boot.spinner_angle += SPINNER_ANGLE_DELTA;
+            scene.update_spinner(boot.spinner_angle);
+            compositor_ch.send(&scene_msg);
+            let _ = sys::channel_signal(COMPOSITOR_HANDLE);
+            // Recreate one-shot timer.
+            anim_timer = sys::timer_create(frame_interval_ns)
+                .unwrap_or(sys::TimerHandle(255));
+        }
+
+        // ── Decoder replies ─────────────────────────────────────────
+        while !boot.image_ready && decoder_ch.try_recv(&mut msg) {
+            if let Some(protocol::decode::Message::Response(resp)) =
+                protocol::decode::decode(msg.msg_type, &msg.payload)
             {
-                if result.status == 0 {
-                    undo_state.set_initial(result.snapshot_id);
-                    sys::print(b"     initial undo snapshot taken\n");
+                match boot.decode_phase {
+                    DecodePhase::AwaitingHeader => {
+                        if resp.status == protocol::decode::DecodeStatus::HeaderOk as u8
+                            && resp.width > 0
+                            && resp.height > 0
+                        {
+                            let pixel_bytes = resp.width as u32 * resp.height as u32 * 4;
+                            let s = state();
+                            if let Some(alloc_offset) = s.content_alloc.allocate(pixel_bytes) {
+                                // Send full decode request.
+                                let dec_req = protocol::decode::DecodeRequest {
+                                    file_offset: boot.img_file_store_offset,
+                                    file_length: boot.img_file_store_length,
+                                    content_offset: alloc_offset,
+                                    max_output: pixel_bytes,
+                                    request_id: 2,
+                                    flags: 0,
+                                };
+                                let req_msg = unsafe {
+                                    ipc::Message::from_payload(
+                                        protocol::decode::MSG_DECODE_REQUEST,
+                                        &dec_req,
+                                    )
+                                };
+                                decoder_ch.send(&req_msg);
+                                let _ = sys::channel_signal(DECODER_HANDLE);
+                                boot.decode_phase = DecodePhase::AwaitingDecode {
+                                    alloc_offset,
+                                    pixel_bytes,
+                                };
+                            } else {
+                                boot.image_ready = true;
+                                boot.decode_phase = DecodePhase::Done;
+                            }
+                        } else {
+                            boot.image_ready = true;
+                            boot.decode_phase = DecodePhase::Done;
+                        }
+                    }
+                    DecodePhase::AwaitingDecode {
+                        alloc_offset,
+                        pixel_bytes,
+                    } => {
+                        if resp.status == protocol::decode::DecodeStatus::Ok as u8 {
+                            // Register decoded image in Content Region.
+                            let s = state();
+                            // SAFETY: content_va is mapped read-write.
+                            let header = unsafe {
+                                &mut *(s.content_va
+                                    as *mut protocol::content::ContentRegionHeader)
+                            };
+                            let entry_idx = header.entry_count as usize;
+                            if entry_idx < protocol::content::MAX_CONTENT_ENTRIES {
+                                let content_id = protocol::content::CONTENT_ID_DYNAMIC_START;
+                                header.entries[entry_idx] = protocol::content::ContentEntry {
+                                    content_id,
+                                    offset: alloc_offset,
+                                    length: resp.bytes_written,
+                                    class: protocol::content::ContentClass::Pixels as u8,
+                                    _pad: [0; 3],
+                                    width: resp.width as u16,
+                                    height: resp.height as u16,
+                                    generation: s.scene_generation,
+                                };
+                                header.entry_count += 1;
+                                s.image_content_id = content_id;
+                                s.image_width = resp.width as u16;
+                                s.image_height = resp.height as u16;
+                                sys::print(b"     PNG decoded into Content Region\n");
+                            }
+                        } else {
+                            state().content_alloc.free(alloc_offset, pixel_bytes);
+                            sys::print(b"     PNG decode failed\n");
+                        }
+                        boot.image_ready = true;
+                        boot.decode_phase = DecodePhase::Done;
+                    }
+                    _ => {}
                 }
             }
         }
+
+        // ── Document service replies ────────────────────────────────
+        while fs_ch.try_recv(&mut msg) {
+            match boot.doc_phase {
+                DocPhase::QueryRich => {
+                    if let Some(protocol::document::Message::DocQueryResult(result)) =
+                        protocol::document::decode(msg.msg_type, &msg.payload)
+                    {
+                        if result.count > 0 {
+                            // Found text/rich — send read request.
+                            let s = state();
+                            let read_payload = DocRead {
+                                file_id: result.file_ids[0],
+                                target_va: 0,
+                                capacity: s.doc_capacity as u32,
+                                _pad: 0,
+                            };
+                            let read_msg = unsafe {
+                                ipc::Message::from_payload(MSG_DOC_READ, &read_payload)
+                            };
+                            fs_ch.send(&read_msg);
+                            let _ = sys::channel_signal(FS_HANDLE);
+                            boot.doc_phase = DocPhase::Reading {
+                                file_id: result.file_ids[0],
+                                detected_format: DocumentFormat::Rich,
+                            };
+                        } else {
+                            // Not found — try text/plain.
+                            let media = b"text/plain";
+                            let mut query_payload = DocQuery {
+                                query_type: 0,
+                                data_len: media.len() as u32,
+                                data: [0u8; 48],
+                            };
+                            query_payload.data[..media.len()].copy_from_slice(media);
+                            let query_msg = unsafe {
+                                ipc::Message::from_payload(MSG_DOC_QUERY, &query_payload)
+                            };
+                            fs_ch.send(&query_msg);
+                            let _ = sys::channel_signal(FS_HANDLE);
+                            boot.doc_phase = DocPhase::QueryPlain;
+                        }
+                    }
+                }
+                DocPhase::QueryPlain => {
+                    if let Some(protocol::document::Message::DocQueryResult(result)) =
+                        protocol::document::decode(msg.msg_type, &msg.payload)
+                    {
+                        if result.count > 0 {
+                            // Found text/plain — send read request.
+                            let s = state();
+                            let read_payload = DocRead {
+                                file_id: result.file_ids[0],
+                                target_va: 0,
+                                capacity: s.doc_capacity as u32,
+                                _pad: 0,
+                            };
+                            let read_msg = unsafe {
+                                ipc::Message::from_payload(MSG_DOC_READ, &read_payload)
+                            };
+                            fs_ch.send(&read_msg);
+                            let _ = sys::channel_signal(FS_HANDLE);
+                            boot.doc_phase = DocPhase::Reading {
+                                file_id: result.file_ids[0],
+                                detected_format: DocumentFormat::Plain,
+                            };
+                        } else {
+                            // Neither found — create text/plain.
+                            sys::print(b"     creating new text document\n");
+                            let media = b"text/plain";
+                            let mut create_payload = DocCreate {
+                                media_type_len: media.len() as u32,
+                                _pad: 0,
+                                media_type: [0u8; 52],
+                            };
+                            create_payload.media_type[..media.len()].copy_from_slice(media);
+                            let create_msg = unsafe {
+                                ipc::Message::from_payload(MSG_DOC_CREATE, &create_payload)
+                            };
+                            fs_ch.send(&create_msg);
+                            let _ = sys::channel_signal(FS_HANDLE);
+                            boot.doc_phase = DocPhase::Creating;
+                        }
+                    }
+                }
+                DocPhase::Reading {
+                    file_id,
+                    detected_format,
+                } => {
+                    if let Some(protocol::document::Message::DocReadDone(done)) =
+                        protocol::document::decode(msg.msg_type, &msg.payload)
+                    {
+                        if done.status == 0 && done.len > 0 {
+                            let s = state();
+                            s.doc_file_id = file_id;
+                            // SAFETY: doc_buf valid, done.len <= capacity.
+                            let content_start = unsafe {
+                                core::slice::from_raw_parts(
+                                    s.doc_buf.add(DOC_HEADER_SIZE),
+                                    done.len as usize,
+                                )
+                            };
+                            if detected_format == DocumentFormat::Rich
+                                && done.len >= 64
+                                && piecetable::validate(content_start)
+                            {
+                                s.doc_format = DocumentFormat::Rich;
+                                s.doc_len = done.len as usize;
+                                s.cursor_pos =
+                                    piecetable::cursor_pos(documents::rich_buf_ref()) as usize;
+                                documents::doc_write_header();
+                                sys::print(b"     rich text document loaded\n");
+                            } else {
+                                s.doc_format = DocumentFormat::Plain;
+                                s.doc_len = done.len as usize;
+                                documents::doc_write_header();
+                                sys::print(b"     plain text document loaded\n");
+                            }
+                        } else {
+                            state().doc_file_id = file_id;
+                            state().doc_format = detected_format;
+                        }
+                    }
+                    boot.doc_ready = true;
+                    // Send undo snapshot request.
+                    if state().doc_file_id != 0 {
+                        let snap_payload = DocSnapshot {
+                            file_count: 1,
+                            _pad: 0,
+                            file_ids: [state().doc_file_id, 0, 0, 0, 0, 0],
+                        };
+                        let snap_msg = unsafe {
+                            ipc::Message::from_payload(MSG_DOC_SNAPSHOT, &snap_payload)
+                        };
+                        fs_ch.send(&snap_msg);
+                        let _ = sys::channel_signal(FS_HANDLE);
+                        boot.doc_phase = DocPhase::AwaitingUndo;
+                    } else {
+                        boot.undo_ready = true;
+                        boot.doc_phase = DocPhase::Done;
+                    }
+                }
+                DocPhase::Creating => {
+                    if let Some(protocol::document::Message::DocCreateResult(result)) =
+                        protocol::document::decode(msg.msg_type, &msg.payload)
+                    {
+                        if result.status == 0 {
+                            state().doc_file_id = result.file_id;
+                            state().doc_format = DocumentFormat::Plain;
+                            sys::print(b"     text document created\n");
+                        } else {
+                            sys::print(b"     warning: document create failed\n");
+                        }
+                    }
+                    boot.doc_ready = true;
+                    // Send undo snapshot for newly created document.
+                    if state().doc_file_id != 0 {
+                        let snap_payload = DocSnapshot {
+                            file_count: 1,
+                            _pad: 0,
+                            file_ids: [state().doc_file_id, 0, 0, 0, 0, 0],
+                        };
+                        let snap_msg = unsafe {
+                            ipc::Message::from_payload(MSG_DOC_SNAPSHOT, &snap_payload)
+                        };
+                        fs_ch.send(&snap_msg);
+                        let _ = sys::channel_signal(FS_HANDLE);
+                        boot.doc_phase = DocPhase::AwaitingUndo;
+                    } else {
+                        boot.undo_ready = true;
+                        boot.doc_phase = DocPhase::Done;
+                    }
+                }
+                DocPhase::AwaitingUndo => {
+                    if let Some(protocol::document::Message::DocSnapshotResult(result)) =
+                        protocol::document::decode(msg.msg_type, &msg.payload)
+                    {
+                        if result.status == 0 {
+                            undo_state.set_initial(result.snapshot_id);
+                            sys::print(b"     initial undo snapshot taken\n");
+                        }
+                    }
+                    boot.undo_ready = true;
+                    boot.doc_phase = DocPhase::Done;
+                }
+                DocPhase::Done => {
+                    // Spurious message after completion — discard.
+                }
+            }
+        }
+
+        // ── Check completion ────────────────────────────────────────
+        if boot.all_ready() {
+            sys::print(b"     boot init complete\n");
+            break;
+        }
+
+        // ── Boot timeout ────────────────────────────────────────────
+        if sys::counter() - boot_start > boot_timeout_ticks {
+            sys::print(b"     boot timeout - proceeding with available data\n");
+            boot.undo_ready = true;
+            boot.image_ready = true;
+            boot.doc_ready = true;
+            break;
+        }
     }
+
+    // Clean up animation timer.
+    let _ = sys::handle_close(anim_timer.0);
 
     let has_input2 = match sys::wait(&[INPUT2_HANDLE.0], 0) {
         Ok(_) => true,
@@ -1377,17 +1576,12 @@ pub extern "C" fn _start() -> ! {
     } else {
         None
     };
+
+    // ── Transition: build full scene ────────────────────────────────
     // Content area dimensions (for layout).
     let content_w = fb_width;
     let content_h = fb_height;
-    // Scene graph in shared memory.
-    // SAFETY: scene_va..+TRIPLE_SCENE_SIZE is within the scene SHM region mapped by init;
-    // alignment is 1 (u8 slice). scene_va validated non-zero above.
-    let scene_buf = unsafe {
-        core::slice::from_raw_parts_mut(config.scene_va as *mut u8, scene::TRIPLE_SCENE_SIZE)
-    };
-    let mut scene = scene_state::SceneState::from_buf(scene_buf);
-    // Build initial scene.
+    // Build full scene (replaces loading scene).
     let mut time_buf = [0u8; 8];
 
     documents::format_time_hms(clock_seconds(), &mut time_buf);
@@ -1671,7 +1865,7 @@ pub extern "C" fn _start() -> ! {
 
                 let action = input_handling::process_key_event(
                     &key,
-                    has_image,
+                    state().image_content_id != 0,
                     &editor_ch,
                     fb_width,
                     page_width,
@@ -1722,7 +1916,7 @@ pub extern "C" fn _start() -> ! {
 
                         let action = input_handling::process_key_event(
                             &key,
-                            has_image,
+                            state().image_content_id != 0,
                             &editor_ch,
                             fb_width,
                             page_width,

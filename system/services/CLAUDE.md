@@ -8,7 +8,7 @@ Platform services that run as userspace processes. Each is a `#![no_std]` ELF bi
 | `core/`                   | OS service: sole writer, scene graph builder, navigation/selection, input router                  | Scaffolding |
 | `drivers/metal-render/`   | Metal render service: native Metal GPU via hypervisor (default, 4x MSAA)                          | Scaffolding |
 | `drivers/cpu-render/`     | CPU render service: CpuBackend + virtio-gpu 2D present (QEMU fallback)                            | Scaffolding |
-| `drivers/virgil-render/`  | GPU render service: Gallium3D via virglrenderer (virgl-capable QEMU)                              | Scaffolding |
+| `drivers/virgil-render/`  | GPU render service: Gallium3D via virglrenderer (virgl-capable QEMU)                              | Deprecated  |
 | `drivers/virtio-blk/`     | Block device driver: read/write/flush with VIRTIO_BLK_F_FLUSH negotiation (self-test, standalone) | Scaffolding |
 | `drivers/virtio-console/` | Console driver (placeholder)                                                                      | Scaffolding |
 | `drivers/virtio-input/`   | Keyboard + tablet driver: reads evdev events, forwards to core via IPC                            | Scaffolding |
