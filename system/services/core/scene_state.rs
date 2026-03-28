@@ -411,11 +411,11 @@ impl SceneState {
         scroll_y: scene::Mpt,
         mark_clock_changed: bool,
         cursor_opacity: u8,
-    ) {
+    ) -> alloc::vec::Vec<super::layout::RichLine> {
         let mut tw = self.triple();
-        {
+        let lines = {
             let mut w = tw.acquire_copy();
-            build_rich_document_content(
+            let lines = build_rich_document_content(
                 &mut w,
                 cfg,
                 pt_buf,
@@ -429,8 +429,10 @@ impl SceneState {
                 mark_clock_changed,
                 cursor_opacity,
             );
-        }
+            lines
+        };
         tw.publish();
+        lines
     }
 
     /// Apply pointer cursor position and opacity to the latest published scene.

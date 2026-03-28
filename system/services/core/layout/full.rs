@@ -1147,7 +1147,7 @@ pub fn build_rich_document_content(
     scroll_y: scene::Mpt,
     mark_clock_changed: bool,
     cursor_opacity: u8,
-) {
+) -> Vec<RichLine> {
     let doc_width = doc_width(cfg);
     let page_padding = cfg.text_inset_x;
     let text_area_h = cfg.page_height.saturating_sub(2 * page_padding);
@@ -1499,6 +1499,8 @@ pub fn build_rich_document_content(
             }
         }
     }
+
+    rich_lines
 }
 
 /// Cursor metrics for rich text: position, height, and style properties.
@@ -1648,26 +1650,58 @@ fn rich_cursor_position(
         };
     }
 
-    // Cursor past end — put it on the last line.
-    let fallback_color = [32, 32, 32, 255];
-    if let Some(last_line) = rich_lines.last() {
-        RichCursorInfo {
-            x: 0,
-            y: scene::pt(last_line.y),
-            height: scene::upt(default_height),
-            style_weight: 400,
-            color: fallback_color,
-            italic: false,
-        }
-    } else {
-        RichCursorInfo {
-            x: 0,
-            y: 0,
-            height: scene::upt(default_height),
-            style_weight: 400,
-            color: fallback_color,
-            italic: false,
-        }
+    // Cursor past end — position on a new line below the last line.
+    // This happens when text ends with '\n' (trailing newline creates an
+    // implicit empty line) or cursor is moved past all content (Cmd+Down).
+    let last_line_y = rich_lines.last().map_or(0, |l| l.y + l.line_height);
+
+    // Walk backward to find the nearest styled segment.
+    let (fallback_weight, fallback_color, fallback_cap_pt, fallback_italic, fallback_ascent) =
+        rich_lines
+            .iter()
+            .rev()
+            .find(|l| !l.segments.is_empty())
+            .and_then(|l| l.segments.last())
+            .and_then(|seg| {
+                piecetable::style(pt_buf, seg.style_id).map(|style| {
+                    let fi = fonts.resolve(style);
+                    let cap_h = if fi.upem > 0 {
+                        if fi.cap_height > 0 {
+                            fi.cap_height as f32 * style.font_size_pt as f32 / fi.upem as f32
+                        } else {
+                            (fi.ascender as i32).abs() as f32 * style.font_size_pt as f32
+                                / fi.upem as f32
+                                * 0.7
+                        }
+                    } else {
+                        style.font_size_pt as f32 * 0.7
+                    };
+                    let asc = if fi.upem > 0 {
+                        (fi.ascender as i32).abs() as f32 * style.font_size_pt as f32
+                            / fi.upem as f32
+                    } else {
+                        0.0
+                    };
+                    let is_italic = style.flags & piecetable::FLAG_ITALIC != 0;
+                    (style.weight, style.color, cap_h, is_italic, asc)
+                })
+            })
+            .unwrap_or((400, [32, 32, 32, 255], default_height as f32 * 0.7, false, 0.0));
+
+    // Baseline-aligned y, same as the non-fallback path.
+    let mpt = scene::MPT_PER_PT as f32;
+    let cursor_top_f = last_line_y as f32 + fallback_ascent - fallback_cap_pt;
+    let baseline_f = last_line_y as f32 + fallback_ascent;
+    let cursor_y = (cursor_top_f * mpt) as scene::Mpt;
+    let cursor_h_mpt = ((baseline_f - cursor_top_f) * mpt) as scene::Umpt;
+
+    RichCursorInfo {
+        x: 0,
+        y: cursor_y,
+        height: cursor_h_mpt.max(scene::upt(2)),
+        style_weight: fallback_weight,
+        color: fallback_color,
+        italic: fallback_italic,
     }
 }
 

@@ -177,13 +177,17 @@ Every `.rs` file follows this order:
 **metal-render (hypervisor, DEFAULT):** The primary development path. The hypervisor has built-in screenshot capture and scripted input injection — no window focus, no macOS utilities, no fragility. Reads directly from the Metal drawable via GPU blit.
 
 ```sh
+# IMPORTANT: --drive disk.img is REQUIRED for all direct hypervisor invocations.
+# Without it, the document store has no content → nothing renders → no captures.
+# (cargo run -r handles this automatically via run.sh)
+
 # Automated: capture frame 30 as PNG, then exit
 cd system && cargo build --release
-hypervisor target/aarch64-unknown-none/release/kernel --capture 30 /tmp/screenshot.png
+hypervisor target/aarch64-unknown-none/release/kernel --drive disk.img --background --capture 30 /tmp/screenshot.png
 # Then Read /tmp/screenshot.png
 
 # Multi-frame: capture frames 30, 60, 90 in a single boot
-hypervisor target/aarch64-unknown-none/release/kernel --capture 30,60,90 /tmp/test.png
+hypervisor target/aarch64-unknown-none/release/kernel --drive disk.img --background --capture 30,60,90 /tmp/test.png
 # Produces /tmp/test-030.png, /tmp/test-060.png, /tmp/test-090.png
 
 # Event script: type text, edit, capture result (deterministic visual test)
@@ -194,11 +198,11 @@ key backspace
 wait 5
 capture /tmp/after-edit.png
 SCRIPT
-hypervisor target/aarch64-unknown-none/release/kernel --events /tmp/test.events
+hypervisor target/aarch64-unknown-none/release/kernel --drive disk.img --background --events /tmp/test.events
 # Then Read /tmp/after-edit.png
 
 # Fixed resolution for wrap testing (e.g., ~37 chars/line at 400px)
-hypervisor target/aarch64-unknown-none/release/kernel --resolution 400x300 --events /tmp/test.events
+hypervisor target/aarch64-unknown-none/release/kernel --drive disk.img --background --resolution 400x300 --events /tmp/test.events
 
 # Ad-hoc: send SIGUSR1 to running hypervisor
 kill -USR1 $(pgrep hypervisor)
@@ -216,7 +220,7 @@ kill -USR1 $(pgrep hypervisor)
 - `wait 10` — wait 10 extra frames
 - `capture /tmp/out.png` — screenshot at this point
 
-**Background mode:** When using `--events`, the hypervisor runs without stealing focus (`.accessory` activation policy). No Dock icon, no window activation. Metal rendering still works — safe to run during other work.
+**Background mode:** Always use `--background` for automated invocations (captures, event scripts, CI). It sets `.accessory` activation policy: no Dock icon, no window activation, no focus stealing. Metal rendering still works (window exists in compositing tree but ordered behind). Previously background mode was implicit with `--events`; now it's an explicit flag.
 
 ### Numerical image verification (MANDATORY)
 

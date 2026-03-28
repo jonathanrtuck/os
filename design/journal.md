@@ -4,6 +4,40 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Three core service bug fixes (2026-03-28)
+
+**Status: DONE — all three verified**
+
+### Bug 1: Clock ticks at irregular intervals — FIXED
+
+**Root cause:** `clock_seconds()` read the PL031 RTC register each frame, but `create_clock_timer()` aligned to CNTVCT_EL0 second boundaries. Two independent clocks with unsynchronized phases → visible jitter.
+
+**Fix:** `main.rs` — capture PL031 epoch once at boot, derive all displayed time from CNTVCT_EL0. New fields `rtc_epoch_at_boot` and `boot_counter_at_rtc_read` in CoreState. `clock_seconds()` rewritten to use single clock source. **Verified:** three captures at frames 60/120/180 showed 11:22:04 → 11:22:07 → 11:22:10, exactly 3s apart.
+
+### Bug 2: Down arrow on last line changes cursor size in rich text — FIXED
+
+**Root cause:** `rich_cursor_position()` in `layout/full.rs` falls through to a hardcoded fallback (height=18pt, weight=400) when cursor is at end-of-text or on an empty trailing line.
+
+**Fix:** Fallback now walks backward through `rich_lines` to find the last non-empty line's last segment and inherits its style (weight, color, cap height, italic, ascent). Baseline-aligned y computation matches the non-fallback path. **Verified:** Cmd+Down then Down on last line — colored region identical, 108/2.7M pixel diff (cursor blink only).
+
+### Bug 3: Navigation uses monospace layout for rich text — FIXED
+
+**Root cause:** Up/Down/Home/End/PageUp/PageDown use `byte_to_line_col` / `line_col_to_byte` with monospace `UnitM` metrics. Rich text is laid out proportionally by `layout_rich_lines`. Navigation and rendering disagree on line boundaries.
+
+**Fix:** Six navigation functions in `layout/mod.rs`: `rich_byte_to_line`, `rich_cursor_x`, `rich_x_to_byte`, `rich_line_start`, `rich_line_end`, `rich_viewport_lines`. All use the same `shape_rich_segment` as the renderer. `build_rich_document_content` now returns `Vec<RichLine>`, cached in `CoreState.rich_lines` after every scene build. Navigation reads the cache. `input.rs` dispatches to rich or monospace navigation based on `doc_format`. `goal_x: Option<f32>` tracks proportional cursor x across vertical moves (parallel to `goal_column` for monospace). `rich_scroll_for_cursor` handles variable-height line scrolling. `make_rich_fonts()` helper eliminates repeated `RichFonts` construction.
+
+**Verified:** 9-frame event script testing Down×3, Up, Home, End, Cmd+Down, Cmd+Up. Cursor moves correctly across style boundaries (heading→body→code). Home→End shows colored region right-edge shift (x=2488→2492). Cmd+Up returns cursor to document start.
+
+### Hypervisor `--background` flag
+
+**In `~/Sites/hypervisor/` (separate repo), uncommitted.**
+
+Added `--background` flag that sets `.accessory` activation policy and orders the window behind others (via `orderBack`). **Known issue:** window briefly flashes during creation before `orderBack` takes effect — Metal requires the window in the compositing tree. Captures work correctly regardless.
+
+**CLAUDE.md updated:** All hypervisor capture examples now include `--drive disk.img` and `--background`.
+
+---
+
 ## Kernel EC=0x21 instruction abort — sustained load (2026-03-27)
 
 **Status: open-bug**
@@ -46,7 +80,7 @@ thread id=0 ctx.elr=0xFFFFFFF0400A1D28 (secondary_main idle loop)
 
 10. **Disassembly audit of schedule_inner:** All 12 non-SP store instructions verified — every one targets thread fields (heap), State fields (global), or process fields (within State). No stores to arbitrary addresses or to the caller's frame. The generated code is correct.
 
-11. **Callees checked:** __udivti3 (0x30-byte frame), swap_ttbr0 (asm-only), select_best, charge_thread, replenish_contexts, park_old, reap_exited — all within their own frames. No callee writes above its frame boundary.
+11. **Callees checked:** \_\_udivti3 (0x30-byte frame), swap_ttbr0 (asm-only), select_best, charge_thread, replenish_contexts, park_old, reap_exited — all within their own frames. No callee writes above its frame boundary.
 
 12. **Root cause unconfirmed.** Not reproducible with synthetic events (~14 min dense navigation) or interactive use. Ruled out: aliasing UB, out-of-frame stores, heap/buddy corruption paths, shared memory corruption, hypervisor register handling (VCPU.swift reviewed). Remaining candidates: Apple Hypervisor.framework internal bug (register save/restore across 13.2M VM exits), LLVM aarch64 codegen bug at opt-level 3, or Apple Silicon hardware errata.
 

@@ -786,6 +786,199 @@ pub fn count_lines(text: &[u8]) -> usize {
     count
 }
 
+// ── Rich text navigation ───────────────────────────────────────────
+//
+// These functions use the cached `RichLine` layout to provide cursor
+// navigation that matches the proportional rendering exactly. Each
+// function mirrors a monospace counterpart (byte_to_line_col, etc.)
+// but operates on variable-width styled lines instead of fixed columns.
+
+/// Find which `RichLine` contains `cursor_pos`. Returns the line index.
+/// Returns `rich_lines.len()` (one past last valid index) if cursor is
+/// past all segments — callers must handle this as "trailing empty line."
+/// Returns 0 if `rich_lines` is empty.
+pub(crate) fn rich_byte_to_line(rich_lines: &[RichLine], cursor_pos: usize) -> usize {
+    if rich_lines.is_empty() {
+        return 0;
+    }
+    for (i, line) in rich_lines.iter().enumerate() {
+        if line.segments.is_empty() {
+            continue;
+        }
+        let line_start = line.segments[0].text_start;
+        let last_seg = line.segments.last().unwrap();
+        let line_end = last_seg.text_start + last_seg.text_len;
+        // Cursor on this line: start <= cursor_pos <= end.
+        if cursor_pos >= line_start && cursor_pos <= line_end {
+            return i;
+        }
+    }
+    // Past all segments — trailing empty line (conceptual).
+    rich_lines.len()
+}
+
+/// Compute cursor x position (points) on its line via shaped glyph advances.
+/// Uses the same shaping as the renderer (`shape_rich_segment`) for exact alignment.
+pub(crate) fn rich_cursor_x(
+    rich_lines: &[RichLine],
+    pt_buf: &[u8],
+    text: &[u8],
+    cursor_pos: usize,
+    fonts: &full::RichFonts<'_>,
+) -> f32 {
+    if rich_lines.is_empty() {
+        return 0.0;
+    }
+    let line_idx = rich_byte_to_line(rich_lines, cursor_pos);
+    // Past-end sentinel: cursor is on the trailing empty line at x=0.
+    if line_idx >= rich_lines.len() {
+        return 0.0;
+    }
+    let line = &rich_lines[line_idx];
+    let mut x: f32 = 0.0;
+    for seg in &line.segments {
+        let seg_end = seg.text_start + seg.text_len;
+        if cursor_pos < seg.text_start {
+            break;
+        }
+        let Some(style) = piecetable::style(pt_buf, seg.style_id) else {
+            continue;
+        };
+        let fi = fonts.resolve(style);
+        let font_size = style.font_size_pt as u16;
+        let italic = style.flags & piecetable::FLAG_ITALIC != 0;
+        let seg_text = &text[seg.text_start..seg_end.min(text.len())];
+        let shaped = shape_rich_segment(fi.data, seg_text, font_size, fi.upem, style.weight, italic);
+
+        // Count characters to measure up to cursor_pos within this segment.
+        let measure_end = cursor_pos.min(seg_end) - seg.text_start;
+        let measure_text = &seg_text[..measure_end.min(seg_text.len())];
+        let char_count = core::str::from_utf8(measure_text)
+            .unwrap_or("")
+            .chars()
+            .count();
+
+        for g in shaped.iter().take(char_count) {
+            x += g.x_advance as f32 / 65536.0;
+        }
+        if cursor_pos <= seg_end {
+            break;
+        }
+        // Past this segment — add remaining glyph advances.
+        for g in shaped.iter().skip(char_count) {
+            x += g.x_advance as f32 / 65536.0;
+        }
+    }
+    x
+}
+
+/// Given a line index and target x (points), find the closest byte offset.
+/// Uses the same shaping as the renderer for exact alignment.
+pub(crate) fn rich_x_to_byte(
+    rich_lines: &[RichLine],
+    pt_buf: &[u8],
+    text: &[u8],
+    line_idx: usize,
+    target_x: f32,
+    fonts: &full::RichFonts<'_>,
+) -> usize {
+    if rich_lines.is_empty() {
+        return 0;
+    }
+    let line_idx = line_idx.min(rich_lines.len() - 1);
+    let line = &rich_lines[line_idx];
+    if line.segments.is_empty() {
+        // Empty line — return line start from surrounding context.
+        return if line_idx > 0 {
+            rich_line_end(rich_lines, line_idx - 1)
+        } else {
+            0
+        };
+    }
+
+    let mut x: f32 = 0.0;
+    let mut best_pos = line.segments[0].text_start;
+
+    for seg in &line.segments {
+        let seg_end = seg.text_start + seg.text_len;
+        let Some(style) = piecetable::style(pt_buf, seg.style_id) else {
+            continue;
+        };
+        let fi = fonts.resolve(style);
+        let font_size = style.font_size_pt as u16;
+        let italic = style.flags & piecetable::FLAG_ITALIC != 0;
+        let seg_text = &text[seg.text_start..seg_end.min(text.len())];
+        let shaped = shape_rich_segment(fi.data, seg_text, font_size, fi.upem, style.weight, italic);
+
+        // Walk characters and glyphs together to find the closest position.
+        let mut char_byte_offset = seg.text_start;
+        for (gi, ch) in core::str::from_utf8(seg_text).unwrap_or("").chars().enumerate() {
+            let advance = if gi < shaped.len() {
+                shaped[gi].x_advance as f32 / 65536.0
+            } else {
+                0.0
+            };
+            // If midpoint of this glyph is past target, we found the position.
+            if x + advance * 0.5 >= target_x {
+                return char_byte_offset;
+            }
+            x += advance;
+            char_byte_offset += ch.len_utf8();
+        }
+        best_pos = seg_end;
+    }
+    best_pos
+}
+
+/// Byte offset of the start of a rich line.
+pub(crate) fn rich_line_start(rich_lines: &[RichLine], line_idx: usize) -> usize {
+    if rich_lines.is_empty() {
+        return 0;
+    }
+    let idx = line_idx.min(rich_lines.len() - 1);
+    let line = &rich_lines[idx];
+    if let Some(first) = line.segments.first() {
+        first.text_start
+    } else if idx > 0 {
+        // Empty line — position is just past the end of the previous line.
+        rich_line_end(rich_lines, idx - 1)
+    } else {
+        0
+    }
+}
+
+/// Byte offset of the end of a rich line.
+pub(crate) fn rich_line_end(rich_lines: &[RichLine], line_idx: usize) -> usize {
+    if rich_lines.is_empty() {
+        return 0;
+    }
+    let idx = line_idx.min(rich_lines.len() - 1);
+    let line = &rich_lines[idx];
+    if let Some(last) = line.segments.last() {
+        last.text_start + last.text_len
+    } else if idx > 0 {
+        rich_line_end(rich_lines, idx - 1)
+    } else {
+        0
+    }
+}
+
+/// Count how many rich lines fit in a viewport of `viewport_height_pt` points.
+/// Rich lines have variable height, so this scans from a starting line
+/// and sums `line_height` until the viewport is exceeded.
+pub(crate) fn rich_viewport_lines(rich_lines: &[RichLine], viewport_height_pt: i32) -> usize {
+    if rich_lines.is_empty() {
+        return 0;
+    }
+    // Use the average line height across all lines for a consistent page count.
+    let total_h: i32 = rich_lines.iter().map(|l| l.line_height).sum();
+    let avg_h = total_h / rich_lines.len() as i32;
+    if avg_h <= 0 {
+        return 1;
+    }
+    (viewport_height_pt / avg_h).max(1) as usize
+}
+
 /// Convert a `drawing::Color` to the scene graph `Color` type.
 pub(crate) fn dc(c: drawing::Color) -> Color {
     Color::rgba(c.r, c.g, c.b, c.a)

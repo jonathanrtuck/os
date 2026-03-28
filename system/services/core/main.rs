@@ -326,6 +326,10 @@ pub(crate) struct CoreState {
     /// Last-seen packed pointer_xy value (for change detection).
     pub(crate) last_pointer_xy: u64,
     pub(crate) rtc_mmio_va: usize,
+    /// PL031 epoch captured once at boot — never re-read.
+    pub(crate) rtc_epoch_at_boot: u64,
+    /// CNTVCT value at the moment PL031 was read (for elapsed computation).
+    pub(crate) boot_counter_at_rtc_read: u64,
     pub(crate) scroll_animating: bool,
     pub(crate) scroll_offset: scene::Mpt,
     pub(crate) scroll_spring: animation::Spring,
@@ -340,6 +344,12 @@ pub(crate) struct CoreState {
     /// Sticky goal column for Up/Down navigation. Preserved across
     /// consecutive vertical moves, cleared on any horizontal move.
     pub(crate) goal_column: Option<usize>,
+    /// Sticky goal x-position (points) for Up/Down navigation in rich text.
+    /// Preserved across consecutive vertical moves, cleared on horizontal moves.
+    pub(crate) goal_x: Option<f32>,
+    /// Cached rich text line layout from the last scene build.
+    /// Valid until text changes (next scene build updates it).
+    pub(crate) rich_lines: alloc::vec::Vec<layout::RichLine>,
     /// Click state for double/triple-click detection.
     pub(crate) last_click_ms: u64,
     pub(crate) last_click_x: u32,
@@ -440,6 +450,8 @@ impl CoreState {
             input_state_va: 0,
             last_pointer_xy: 0,
             rtc_mmio_va: 0,
+            rtc_epoch_at_boot: 0,
+            boot_counter_at_rtc_read: 0,
             scroll_animating: false,
             scroll_offset: 0,
             scroll_spring: animation::Spring::snappy(0.0),
@@ -448,6 +460,8 @@ impl CoreState {
             anchor: 0,
             has_selection: false,
             goal_column: None,
+            goal_x: None,
+            rich_lines: alloc::vec::Vec::new(),
             last_click_ms: 0,
             last_click_x: 0,
             last_click_y: 0,
@@ -546,24 +560,70 @@ fn serif_italic_font_data() -> &'static [u8] {
     }
 }
 
+/// Construct `RichFonts` from current CoreState font pointers.
+/// Used by both scene building (main.rs) and navigation (input.rs).
+pub(crate) fn make_rich_fonts() -> scene_state::RichFonts<'static> {
+    let s = state();
+    scene_state::RichFonts {
+        mono_data: font_data(),
+        mono_upem: s.font_upem,
+        mono_content_id: protocol::content::CONTENT_ID_FONT_MONO,
+        mono_ascender: s.font_ascender,
+        mono_descender: s.font_descender,
+        mono_line_gap: s.font_line_gap,
+        mono_cap_height: s.font_cap_height,
+        sans_data: sans_font_data(),
+        sans_upem: s.sans_font_upem,
+        sans_content_id: protocol::content::CONTENT_ID_FONT_SANS,
+        sans_ascender: s.sans_font_ascender,
+        sans_descender: s.sans_font_descender,
+        sans_line_gap: s.sans_font_line_gap,
+        sans_cap_height: s.sans_font_cap_height,
+        serif_data: serif_font_data(),
+        serif_upem: s.serif_font_upem,
+        serif_content_id: protocol::content::CONTENT_ID_FONT_SERIF,
+        serif_ascender: s.serif_font_ascender,
+        serif_descender: s.serif_font_descender,
+        serif_line_gap: s.serif_font_line_gap,
+        serif_cap_height: s.serif_font_cap_height,
+        mono_italic_data: mono_italic_font_data(),
+        mono_italic_upem: s.mono_italic_font_upem,
+        mono_italic_content_id: protocol::content::CONTENT_ID_FONT_MONO_ITALIC,
+        mono_italic_ascender: s.mono_italic_font_ascender,
+        mono_italic_descender: s.mono_italic_font_descender,
+        mono_italic_line_gap: s.mono_italic_font_line_gap,
+        mono_italic_cap_height: s.mono_italic_font_cap_height,
+        sans_italic_data: sans_italic_font_data(),
+        sans_italic_upem: s.sans_italic_font_upem,
+        sans_italic_content_id: protocol::content::CONTENT_ID_FONT_SANS_ITALIC,
+        sans_italic_ascender: s.sans_italic_font_ascender,
+        sans_italic_descender: s.sans_italic_font_descender,
+        sans_italic_line_gap: s.sans_italic_font_line_gap,
+        sans_italic_cap_height: s.sans_italic_font_cap_height,
+        serif_italic_data: serif_italic_font_data(),
+        serif_italic_upem: s.serif_italic_font_upem,
+        serif_italic_content_id: protocol::content::CONTENT_ID_FONT_SERIF_ITALIC,
+        serif_italic_ascender: s.serif_italic_font_ascender,
+        serif_italic_descender: s.serif_italic_font_descender,
+        serif_italic_line_gap: s.serif_italic_font_line_gap,
+        serif_italic_cap_height: s.serif_italic_font_cap_height,
+    }
+}
+
 fn clock_seconds() -> u64 {
     let s = state();
-    let rtc_va = s.rtc_mmio_va;
-
-    if rtc_va != 0 {
-        // SAFETY: rtc_va points to memory-mapped PL031 RTC register.
-        let epoch = unsafe { core::ptr::read_volatile(rtc_va as *const u32) };
-
-        epoch as u64
+    let freq = s.counter_freq;
+    if freq == 0 {
+        return 0;
+    }
+    let now = sys::counter();
+    if s.rtc_epoch_at_boot != 0 {
+        // PL031 was read once at boot; derive current time from CNTVCT.
+        let elapsed_ticks = now - s.boot_counter_at_rtc_read;
+        s.rtc_epoch_at_boot + elapsed_ticks / freq
     } else {
-        let now = sys::counter();
+        // No RTC — show uptime.
         let boot = s.boot_counter;
-        let freq = s.counter_freq;
-
-        if freq == 0 {
-            return 0;
-        }
-
         (now - boot) / freq
     }
 }
@@ -1086,6 +1146,11 @@ pub extern "C" fn _start() -> ! {
             match sys::device_map(rtc_config.mmio_pa, ipc::PAGE_SIZE as u64) {
                 Ok(va) => {
                     state().rtc_mmio_va = va;
+                    // Capture epoch once — all future time derived from CNTVCT_EL0.
+                    // SAFETY: va points to memory-mapped PL031 RTC data register.
+                    let epoch = unsafe { core::ptr::read_volatile(va as *const u32) };
+                    state().rtc_epoch_at_boot = epoch as u64;
+                    state().boot_counter_at_rtc_read = sys::counter();
                     sys::print(b"     pl031 rtc mapped\n");
                 }
                 Err(_) => {
@@ -1438,7 +1503,7 @@ pub extern "C" fn _start() -> ! {
                 serif_italic_line_gap: s.serif_italic_font_line_gap,
                 serif_italic_cap_height: s.serif_italic_font_cap_height,
             };
-            scene.update_rich_document_content(
+            let lines = scene.update_rich_document_content(
                 &scene_cfg,
                 documents::rich_buf_ref(),
                 &rich_fonts,
@@ -1451,6 +1516,7 @@ pub extern "C" fn _start() -> ! {
                 true,
                 s.cursor_opacity,
             );
+            state().rich_lines = lines;
         }
     }
 
@@ -1900,6 +1966,7 @@ pub extern "C" fn _start() -> ! {
                                 }
 
                                 state().goal_column = None;
+                                state().goal_x = None;
                                 documents::doc_write_header();
                                 input_handling::sync_cursor_to_editor(&editor_ch);
 
@@ -2646,7 +2713,7 @@ pub extern "C" fn _start() -> ! {
                         serif_italic_line_gap: s.serif_italic_font_line_gap,
                         serif_italic_cap_height: s.serif_italic_font_cap_height,
                     };
-                    scene.update_rich_document_content(
+                    let lines = scene.update_rich_document_content(
                         &scene_cfg,
                         documents::rich_buf_ref(),
                         &rich_fonts,
@@ -2659,6 +2726,7 @@ pub extern "C" fn _start() -> ! {
                         true,
                         s.cursor_opacity,
                     );
+                    state().rich_lines = lines;
                 }
             } else if text_changed && is_rich_doc {
                 // Rich text content changed — always full rebuild.
@@ -2710,7 +2778,7 @@ pub extern "C" fn _start() -> ! {
                     serif_italic_line_gap: s.serif_italic_font_line_gap,
                     serif_italic_cap_height: s.serif_italic_font_cap_height,
                 };
-                scene.update_rich_document_content(
+                let lines = scene.update_rich_document_content(
                     &scene_cfg,
                     documents::rich_buf_ref(),
                     &rich_fonts,
@@ -2723,6 +2791,7 @@ pub extern "C" fn _start() -> ! {
                     timer_fired,
                     s.cursor_opacity,
                 );
+                state().rich_lines = lines;
             } else if text_changed {
                 // Plain text content changed (insert/delete/scroll).
                 if !timer_fired {
@@ -2868,7 +2937,7 @@ pub extern "C" fn _start() -> ! {
                     serif_italic_line_gap: s.serif_italic_font_line_gap,
                     serif_italic_cap_height: s.serif_italic_font_cap_height,
                 };
-                scene.update_rich_document_content(
+                let lines = scene.update_rich_document_content(
                     &scene_cfg,
                     documents::rich_buf_ref(),
                     &rich_fonts,
@@ -2881,6 +2950,7 @@ pub extern "C" fn _start() -> ! {
                     timer_fired,
                     s.cursor_opacity,
                 );
+                state().rich_lines = lines;
             } else if selection_changed {
                 // Mono text selection changed.
                 let s = state();
@@ -2950,7 +3020,7 @@ pub extern "C" fn _start() -> ! {
                     serif_italic_line_gap: s.serif_italic_font_line_gap,
                     serif_italic_cap_height: s.serif_italic_font_cap_height,
                 };
-                scene.update_rich_document_content(
+                let lines = scene.update_rich_document_content(
                     &scene_cfg,
                     documents::rich_buf_ref(),
                     &rich_fonts,
@@ -2963,6 +3033,7 @@ pub extern "C" fn _start() -> ! {
                     timer_fired,
                     s.cursor_opacity,
                 );
+                state().rich_lines = lines;
             } else if changed {
                 // Mono text cursor-only update.
                 let s = state();

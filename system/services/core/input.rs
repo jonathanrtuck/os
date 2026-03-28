@@ -253,6 +253,7 @@ pub(crate) fn process_key_event(
         ($clear_goal:expr) => {{
             if $clear_goal {
                 super::state().goal_column = None;
+                super::state().goal_x = None;
             }
             if !shift {
                 clear_selection();
@@ -298,6 +299,7 @@ pub(crate) fn process_key_event(
             s.cursor_pos = len;
             s.has_selection = len > 0;
             s.goal_column = None;
+            s.goal_x = None;
             update_selection_from_anchor();
             doc_write_header();
             sync_cursor_to_editor(editor_ch);
@@ -430,7 +432,15 @@ pub(crate) fn process_key_event(
             let s = super::state();
             if cmd {
                 // Cmd+Left: move to start of visual line.
-                s.cursor_pos = visual_line_start(text, s.cursor_pos, cols);
+                if is_rich {
+                    let rl = &s.rich_lines;
+                    let line = super::layout::rich_byte_to_line(rl, s.cursor_pos);
+                    if line < rl.len() {
+                        s.cursor_pos = super::layout::rich_line_start(rl, line);
+                    }
+                } else {
+                    s.cursor_pos = visual_line_start(text, s.cursor_pos, cols);
+                }
             } else if alt {
                 // Opt+Left: move to previous word boundary.
                 s.cursor_pos = word_boundary_backward(text, s.cursor_pos);
@@ -454,7 +464,16 @@ pub(crate) fn process_key_event(
                     consumed: true,
                 };
             } else if s.cursor_pos > 0 {
-                s.cursor_pos -= 1;
+                // Move back one character (UTF-8 aware for rich text).
+                if is_rich {
+                    let mut p = s.cursor_pos - 1;
+                    while p > 0 && text[p] & 0xC0 == 0x80 {
+                        p -= 1; // Skip continuation bytes.
+                    }
+                    s.cursor_pos = p;
+                } else {
+                    s.cursor_pos -= 1;
+                }
             }
             nav_finish!(true)
         }
@@ -465,7 +484,15 @@ pub(crate) fn process_key_event(
             let s = super::state();
             if cmd {
                 // Cmd+Right: move to end of visual line.
-                s.cursor_pos = visual_line_end(text, s.cursor_pos, cols);
+                if is_rich {
+                    let rl = &s.rich_lines;
+                    let line = super::layout::rich_byte_to_line(rl, s.cursor_pos);
+                    if line < rl.len() {
+                        s.cursor_pos = super::layout::rich_line_end(rl, line);
+                    }
+                } else {
+                    s.cursor_pos = visual_line_end(text, s.cursor_pos, cols);
+                }
             } else if alt {
                 // Opt+Right: move to next word boundary.
                 s.cursor_pos = word_boundary_forward(text, s.cursor_pos);
@@ -489,7 +516,16 @@ pub(crate) fn process_key_event(
                     consumed: true,
                 };
             } else if s.cursor_pos < len {
-                s.cursor_pos += 1;
+                // Move forward one character (UTF-8 aware for rich text).
+                if is_rich {
+                    let mut p = s.cursor_pos + 1;
+                    while p < len && text[p] & 0xC0 == 0x80 {
+                        p += 1; // Skip continuation bytes.
+                    }
+                    s.cursor_pos = p;
+                } else {
+                    s.cursor_pos += 1;
+                }
             }
             nav_finish!(true)
         }
@@ -501,6 +537,32 @@ pub(crate) fn process_key_event(
                 // Cmd+Up: move to start of document.
                 super::state().cursor_pos = 0;
                 super::state().goal_column = None;
+                super::state().goal_x = None;
+            } else if is_rich {
+                let rich_fonts = super::make_rich_fonts();
+                let pt_buf = super::documents::rich_buf_ref();
+                let s = super::state();
+                let rl = &s.rich_lines;
+                let line = super::layout::rich_byte_to_line(rl, s.cursor_pos);
+                // Trailing empty line: go to last real line end.
+                if line >= rl.len() {
+                    if !rl.is_empty() {
+                        let last = rl.len() - 1;
+                        s.cursor_pos = super::layout::rich_line_end(rl, last);
+                    }
+                } else {
+                    if s.goal_x.is_none() {
+                        s.goal_x = Some(super::layout::rich_cursor_x(
+                            rl, pt_buf, text, s.cursor_pos, &rich_fonts,
+                        ));
+                    }
+                    if line > 0 {
+                        let gx = s.goal_x.unwrap_or(0.0);
+                        s.cursor_pos = super::layout::rich_x_to_byte(
+                            rl, pt_buf, text, line - 1, gx, &rich_fonts,
+                        );
+                    }
+                }
             } else {
                 let s = super::state();
                 let (line, col) = super::layout::byte_to_line_col(text, s.cursor_pos, cols);
@@ -522,6 +584,30 @@ pub(crate) fn process_key_event(
                 // Cmd+Down: move to end of document.
                 super::state().cursor_pos = len;
                 super::state().goal_column = None;
+                super::state().goal_x = None;
+            } else if is_rich {
+                let rich_fonts = super::make_rich_fonts();
+                let pt_buf = super::documents::rich_buf_ref();
+                let s = super::state();
+                let rl = &s.rich_lines;
+                let line = super::layout::rich_byte_to_line(rl, s.cursor_pos);
+                // Past-end or last line: move to trailing position (len).
+                if line >= rl.len() {
+                    // Already past end — no-op.
+                } else if line + 1 >= rl.len() {
+                    // On last line: move to trailing position (past all text).
+                    s.cursor_pos = len;
+                } else {
+                    if s.goal_x.is_none() {
+                        s.goal_x = Some(super::layout::rich_cursor_x(
+                            rl, pt_buf, text, s.cursor_pos, &rich_fonts,
+                        ));
+                    }
+                    let gx = s.goal_x.unwrap_or(0.0);
+                    s.cursor_pos = super::layout::rich_x_to_byte(
+                        rl, pt_buf, text, line + 1, gx, &rich_fonts,
+                    );
+                }
             } else {
                 let s = super::state();
                 let (line, col) = super::layout::byte_to_line_col(text, s.cursor_pos, cols);
@@ -541,44 +627,113 @@ pub(crate) fn process_key_event(
         // ── Home ────────────────────────────────────────────────
         KEY_HOME => {
             nav_begin!();
-            super::state().cursor_pos = visual_line_start(text, super::state().cursor_pos, cols);
+            if is_rich {
+                let s = super::state();
+                let rl = &s.rich_lines;
+                let line = super::layout::rich_byte_to_line(rl, s.cursor_pos);
+                // Past-end: no-op (cursor is on trailing empty line).
+                if line < rl.len() {
+                    s.cursor_pos = super::layout::rich_line_start(rl, line);
+                }
+            } else {
+                super::state().cursor_pos =
+                    visual_line_start(text, super::state().cursor_pos, cols);
+            }
             nav_finish!(true)
         }
 
         // ── End ─────────────────────────────────────────────────
         KEY_END => {
             nav_begin!();
-            super::state().cursor_pos = visual_line_end(text, super::state().cursor_pos, cols);
+            if is_rich {
+                let s = super::state();
+                let rl = &s.rich_lines;
+                let line = super::layout::rich_byte_to_line(rl, s.cursor_pos);
+                // Past-end: no-op.
+                if line < rl.len() {
+                    s.cursor_pos = super::layout::rich_line_end(rl, line);
+                }
+            } else {
+                super::state().cursor_pos =
+                    visual_line_end(text, super::state().cursor_pos, cols);
+            }
             nav_finish!(true)
         }
 
         // ── Page Up ─────────────────────────────────────────────
         KEY_PAGEUP => {
             nav_begin!();
-            let s = super::state();
-            let (line, col) = super::layout::byte_to_line_col(text, s.cursor_pos, cols);
-            if s.goal_column.is_none() {
-                s.goal_column = Some(col);
+            if is_rich {
+                let rich_fonts = super::make_rich_fonts();
+                let pt_buf = super::documents::rich_buf_ref();
+                let s = super::state();
+                let rl = &s.rich_lines;
+                let mut line = super::layout::rich_byte_to_line(rl, s.cursor_pos);
+                // Clamp past-end sentinel to last real line.
+                if line >= rl.len() && !rl.is_empty() {
+                    line = rl.len() - 1;
+                }
+                if line < rl.len() {
+                    if s.goal_x.is_none() {
+                        s.goal_x = Some(super::layout::rich_cursor_x(
+                            rl, pt_buf, text, s.cursor_pos, &rich_fonts,
+                        ));
+                    }
+                    let vp_h = page_h.saturating_sub(2 * page_pad) as i32;
+                    let vp = super::layout::rich_viewport_lines(rl, vp_h);
+                    let target = line.saturating_sub(vp);
+                    let gx = s.goal_x.unwrap_or(0.0);
+                    s.cursor_pos =
+                        super::layout::rich_x_to_byte(rl, pt_buf, text, target, gx, &rich_fonts);
+                }
+            } else {
+                let s = super::state();
+                let (line, col) = super::layout::byte_to_line_col(text, s.cursor_pos, cols);
+                if s.goal_column.is_none() {
+                    s.goal_column = Some(col);
+                }
+                let gc = s.goal_column.unwrap_or(col);
+                let vp = viewport_lines(page_h, page_pad);
+                let target_line = line.saturating_sub(vp as usize);
+                super::state().cursor_pos = line_col_to_byte(text, target_line, gc, cols);
             }
-            let gc = s.goal_column.unwrap_or(col);
-            let vp = viewport_lines(page_h, page_pad);
-            let target_line = line.saturating_sub(vp as usize);
-            super::state().cursor_pos = line_col_to_byte(text, target_line, gc, cols);
             nav_finish!(false)
         }
 
         // ── Page Down ───────────────────────────────────────────
         KEY_PAGEDOWN => {
             nav_begin!();
-            let s = super::state();
-            let (line, col) = super::layout::byte_to_line_col(text, s.cursor_pos, cols);
-            if s.goal_column.is_none() {
-                s.goal_column = Some(col);
+            if is_rich {
+                let rich_fonts = super::make_rich_fonts();
+                let pt_buf = super::documents::rich_buf_ref();
+                let s = super::state();
+                let rl = &s.rich_lines;
+                let line = super::layout::rich_byte_to_line(rl, s.cursor_pos);
+                // Past-end: no-op.
+                if line < rl.len() {
+                    if s.goal_x.is_none() {
+                        s.goal_x = Some(super::layout::rich_cursor_x(
+                            rl, pt_buf, text, s.cursor_pos, &rich_fonts,
+                        ));
+                    }
+                    let vp_h = page_h.saturating_sub(2 * page_pad) as i32;
+                    let vp = super::layout::rich_viewport_lines(rl, vp_h);
+                    let target = (line + vp).min(rl.len().saturating_sub(1));
+                    let gx = s.goal_x.unwrap_or(0.0);
+                    s.cursor_pos =
+                        super::layout::rich_x_to_byte(rl, pt_buf, text, target, gx, &rich_fonts);
+                }
+            } else {
+                let s = super::state();
+                let (line, col) = super::layout::byte_to_line_col(text, s.cursor_pos, cols);
+                if s.goal_column.is_none() {
+                    s.goal_column = Some(col);
+                }
+                let gc = s.goal_column.unwrap_or(col);
+                let vp = viewport_lines(page_h, page_pad);
+                let target_line = line + vp as usize;
+                super::state().cursor_pos = line_col_to_byte(text, target_line, gc, cols);
             }
-            let gc = s.goal_column.unwrap_or(col);
-            let vp = viewport_lines(page_h, page_pad);
-            let target_line = line + vp as usize;
-            super::state().cursor_pos = line_col_to_byte(text, target_line, gc, cols);
             nav_finish!(false)
         }
 
@@ -612,6 +767,7 @@ pub(crate) fn process_key_event(
                 if boundary < cursor && delete_range_for_format(boundary, cursor) {
                     super::state().cursor_pos = boundary;
                     super::state().goal_column = None;
+                    super::state().goal_x = None;
                     doc_write_header();
                     sync_cursor_to_editor(editor_ch);
                     let _ = sys::channel_signal(EDITOR_HANDLE);
@@ -659,6 +815,7 @@ pub(crate) fn process_key_event(
                 let boundary = word_boundary_forward(text, cursor);
                 if boundary > cursor && delete_range_for_format(cursor, boundary) {
                     super::state().goal_column = None;
+                    super::state().goal_x = None;
                     doc_write_header();
                     sync_cursor_to_editor(editor_ch);
                     let _ = sys::channel_signal(EDITOR_HANDLE);
@@ -703,6 +860,7 @@ pub(crate) fn process_key_event(
             }
 
             super::state().goal_column = None;
+            super::state().goal_x = None;
 
             // Forward printable characters and tab to editor.
             if key.ascii != 0 || key.keycode == KEY_TAB {
@@ -729,6 +887,12 @@ pub(crate) fn forward_key_to_editor(key: &KeyEvent, editor_ch: &ipc::Channel) {
 }
 
 pub(crate) fn update_scroll_offset(page_w: u32, page_h: u32, page_pad: u32) {
+    let s = super::state();
+    if s.doc_format == super::DocumentFormat::Rich {
+        rich_scroll_for_cursor(page_h, page_pad);
+        return;
+    }
+
     let vp_lines = viewport_lines(page_h, page_pad);
 
     if vp_lines == 0 {
@@ -754,6 +918,55 @@ pub(crate) fn update_scroll_offset(page_w: u32, page_h: u32, page_pad: u32) {
     };
     let clamped = clamp_f32(new_scroll, 0.0, max_scroll);
 
+    s.scroll_offset = scene::f32_to_mpt(clamped);
+    s.scroll_target = scene::f32_to_mpt(clamped);
+    s.scroll_spring.reset_to(clamped);
+}
+
+/// Scroll offset for rich text — uses proportional line positions.
+fn rich_scroll_for_cursor(page_h: u32, page_pad: u32) {
+    let vp_h = page_h.saturating_sub(2 * page_pad) as i32;
+    if vp_h <= 0 {
+        return;
+    }
+
+    let s = super::state();
+    let rl = &s.rich_lines;
+    if rl.is_empty() {
+        return;
+    }
+    let cursor = s.cursor_pos;
+    let line_idx = super::layout::rich_byte_to_line(rl, cursor);
+
+    // Trailing empty line: use the position just below the last real line.
+    let last = &rl[rl.len() - 1];
+    let (cursor_y_top, cursor_y_bottom) = if line_idx >= rl.len() {
+        let y = (last.y + last.line_height) as f32;
+        (y, y + last.line_height as f32)
+    } else {
+        let line = &rl[line_idx];
+        let top = line.y as f32;
+        (top, top + line.line_height as f32)
+    };
+    let current = scene::mpt_to_f32(s.scroll_offset);
+
+    // Ensure cursor line is visible in viewport.
+    let new_scroll = if cursor_y_top < current {
+        // Cursor above viewport — scroll up.
+        cursor_y_top
+    } else if cursor_y_bottom > current + vp_h as f32 {
+        // Cursor below viewport — scroll down so cursor bottom is at viewport bottom.
+        cursor_y_bottom - vp_h as f32
+    } else {
+        current
+    };
+
+    // Compute max scroll from total content height.
+    let total_h = (last.y + last.line_height) as f32;
+    let max_scroll = (total_h - vp_h as f32).max(0.0);
+    let clamped = clamp_f32(new_scroll, 0.0, max_scroll);
+
+    let s = super::state();
     s.scroll_offset = scene::f32_to_mpt(clamped);
     s.scroll_target = scene::f32_to_mpt(clamped);
     s.scroll_spring.reset_to(clamped);
