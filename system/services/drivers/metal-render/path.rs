@@ -250,6 +250,7 @@ pub(crate) fn draw_path_stencil_cover(
     }
 
     let parsed = parse_path_to_points(&data_buf[offset..end], path_buf);
+
     if parsed.n < 3 {
         return;
     }
@@ -300,37 +301,33 @@ pub(crate) fn draw_path_stencil_cover(
         }
     }
 
-    // Pass 1: Stencil write (fan triangles, no color).
-    // Winding rule: two-sided INCR_WRAP/DECR_WRAP — correct for any polygon.
-    //   Front-facing triangles increment, back-facing decrement.
-    //   Stencil != 0 means inside (non-zero winding number).
-    // Even-odd rule: INVERT flips stencil bit on each triangle overlap,
-    //   so odd overlap count = 1 (inside), even = 0 (outside/hole).
+    // --- Pass 1: stencil write with fan triangles ---
     cmdbuf.set_render_pipeline(PIPE_STENCIL_WRITE);
-    match fill_rule {
-        scene::FillRule::Winding => {
-            cmdbuf.set_depth_stencil_state(DSS_STENCIL_WINDING);
-            cmdbuf.set_stencil_ref(0);
+    let dss_stencil = match fill_rule {
+        scene::FillRule::Winding => DSS_STENCIL_WINDING,
+        scene::FillRule::EvenOdd => DSS_STENCIL_INVERT,
+    };
+    cmdbuf.set_depth_stencil_state(dss_stencil);
+
+    // Submit fan triangles in MAX_INLINE_BYTES chunks.
+    let mut off = 0;
+    while off < fan_verts.len() {
+        let chunk = if fan_verts.len() - off > MAX_INLINE_BYTES {
+            MAX_INLINE_BYTES
+        } else {
+            fan_verts.len() - off
+        };
+        let tri_count = chunk / (3 * VERTEX_BYTES);
+        if tri_count == 0 {
+            break;
         }
-        scene::FillRule::EvenOdd => {
-            cmdbuf.set_depth_stencil_state(DSS_STENCIL_INVERT);
-            cmdbuf.set_stencil_ref(0); // ref unused for INVERT, but set for clarity
-        }
+        let actual = tri_count * 3 * VERTEX_BYTES;
+        cmdbuf.set_vertex_bytes(0, &fan_verts[off..off + actual]);
+        cmdbuf.draw_primitives(metal::PRIM_TRIANGLE, 0, (tri_count * 3) as u32);
+        off += actual;
     }
 
-    // Flush fan in 4KB chunks.
-    let mut sent = 0;
-    while sent < fan_verts.len() {
-        let chunk_end = core::cmp::min(sent + MAX_INLINE_BYTES, fan_verts.len());
-        let chunk = &fan_verts[sent..chunk_end];
-        let vc = chunk.len() / VERTEX_BYTES;
-        cmdbuf.set_vertex_bytes(0, chunk);
-        cmdbuf.draw_primitives(metal::PRIM_TRIANGLE, 0, vc as u32);
-        sent = chunk_end;
-    }
-
-    // Pass 2: Stencil test + cover (colored quad where stencil != 0).
-    // ref=0: NOT_EQUAL passes where stencil != 0 (i.e., inside the path).
+    // --- Pass 2: stencil test + cover quad ---
     cmdbuf.set_render_pipeline(PIPE_SOLID);
     cmdbuf.set_depth_stencil_state(DSS_STENCIL_TEST);
     cmdbuf.set_stencil_ref(0);
@@ -339,22 +336,9 @@ pub(crate) fn draw_path_stencil_cover(
     let g = color.g as f32 / 255.0;
     let b = color.b as f32 / 255.0;
     let a = (color.a as f32 / 255.0) * opacity;
-    emit_quad(
-        solid_verts,
-        node_x,
-        node_y,
-        node_w,
-        node_h,
-        vw,
-        vh,
-        scale,
-        r,
-        g,
-        b,
-        a,
-    );
+    emit_quad(solid_verts, node_x, node_y, node_w, node_h, vw, vh, scale, r, g, b, a);
     flush_solid_vertices(cmdbuf, solid_verts);
 
-    // Restore normal state.
+    // Restore default depth/stencil state.
     cmdbuf.set_depth_stencil_state(DSS_NONE);
 }

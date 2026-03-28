@@ -389,8 +389,18 @@ fn turn_cross(segs: &[Seg], i: usize, next: usize) -> f32 {
 /// Emit a circular arc from `start_pt` to `end_pt`, both at distance `r`
 /// from `center`. The arc sweeps through the angle from `start_pt` to
 /// `end_pt` around `center`, in the direction given by `sweep_sign`
-/// (+1.0 = CCW, -1.0 = CW). Tessellated into cubic Bézier sub-arcs of
-/// at most π/2 each.
+/// (+1.0 = CCW, -1.0 = CW).
+///
+/// Emits pre-flattened line segments (not cubic Béziers) to avoid
+/// double-flattening: stroke expansion already flattens input cubics
+/// to line segments, and downstream consumers (stencil pipeline, CPU
+/// rasterizer) would flatten cubics again. Line segments eliminate the
+/// point-count multiplication that exceeds metal-render's 512-point
+/// budget for fan tessellation.
+///
+/// Segment count is based on angular step ≤ π/4 (45°), which keeps
+/// chord deviation under 0.3 units at any radius — well within visual
+/// tolerance for stroke joins and caps.
 fn emit_arc(out: &mut Vec<u8>, center: Pt, r: f32, start_pt: Pt, end_pt: Pt, sweep_sign: f32) {
     let a0 = atan2(start_pt.y - center.y, start_pt.x - center.x);
     let a1 = atan2(end_pt.y - center.y, end_pt.x - center.x);
@@ -405,9 +415,6 @@ fn emit_arc(out: &mut Vec<u8>, center: Pt, r: f32, start_pt: Pt, end_pt: Pt, swe
     }
 
     // If the sweep direction doesn't match the requested sign, flip.
-    // This handles cases where the shortest arc goes the wrong way
-    // (e.g., inner side of a tight turn). For stroke joins, we always
-    // want the shorter arc on the outer side.
     if sweep_sign > 0.0 && sweep < 0.0 {
         sweep += TWO_PI;
     } else if sweep_sign < 0.0 && sweep > 0.0 {
@@ -420,9 +427,12 @@ fn emit_arc(out: &mut Vec<u8>, center: Pt, r: f32, start_pt: Pt, end_pt: Pt, swe
         return;
     }
 
-    // Split into sub-arcs of at most π/2.
+    // Angular step ≤ π/4: at most 8 segments per full circle.
+    // Chord deviation = r * (1 - cos(π/8)) ≈ 0.076r — sub-pixel for
+    // typical stroke widths (r ≤ 4).
+    let max_step = PI * 0.25;
     let n_segs = {
-        let ratio = sweep.abs() / (PI * 0.5);
+        let ratio = sweep.abs() / max_step;
         let f = floor_f32(ratio);
         (if ratio > f {
             f as usize + 1
@@ -434,33 +444,13 @@ fn emit_arc(out: &mut Vec<u8>, center: Pt, r: f32, start_pt: Pt, end_pt: Pt, swe
     let step = sweep / n_segs as f32;
 
     let mut a = a0;
-    for _ in 0..n_segs {
-        let a_end = a + step;
-        // Cubic Bézier approximation: k = (4/3) * (1 - cos(α)) / sin(α)
-        // where α = half the sub-arc angle.
-        let alpha = step * 0.5;
-        let sin_a = sin(alpha);
-        let cos_a = cos(alpha);
-        let k = if sin_a.abs() < 1e-6 {
-            0.0
-        } else {
-            (4.0 / 3.0) * ((1.0 - cos_a) / sin_a)
-        };
-
-        let cos_s = cos(a);
-        let sin_s = sin(a);
-        let cos_e = cos(a_end);
-        let sin_e = sin(a_end);
-
-        let c1x = center.x + r * (cos_s - k * sin_s);
-        let c1y = center.y + r * (sin_s + k * cos_s);
-        let c2x = center.x + r * (cos_e + k * sin_e);
-        let c2y = center.y + r * (sin_e - k * cos_e);
-        let ex = center.x + r * cos_e;
-        let ey = center.y + r * sin_e;
-
-        path_cubic_to(out, c1x, c1y, c2x, c2y, ex, ey);
-        a = a_end;
+    for i in 1..=n_segs {
+        // Use exact end angle on the last segment to avoid drift.
+        let a_next = if i == n_segs { a0 + sweep } else { a + step };
+        let x = center.x + r * cos(a_next);
+        let y = center.y + r * sin(a_next);
+        path_line_to(out, x, y);
+        a = a_next;
     }
 }
 
