@@ -12,9 +12,20 @@ use protocol::{
 use super::{
     clamp_f32, content_text_layout,
     documents::{doc_content, doc_delete_range, doc_write_header},
-    EDITOR_HANDLE, KEY_A, KEY_B, KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_HOME, KEY_I,
-    KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_TAB, KEY_UP,
+    EDITOR_HANDLE, KEY_1, KEY_2, KEY_A, KEY_B, KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END,
+    KEY_HOME, KEY_I, KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_TAB, KEY_UP,
 };
+
+/// Delete a byte range using the correct path for the current document format.
+/// Rich text documents route through the piece table; plain text through the flat buffer.
+fn delete_range_for_format(start: usize, end: usize) -> bool {
+    let s = super::state();
+    if s.doc_format == super::DocumentFormat::Rich {
+        super::documents::rich_delete_range(start, end)
+    } else {
+        doc_delete_range(start, end)
+    }
+}
 
 pub(crate) struct KeyAction {
     pub(crate) changed: bool,
@@ -201,8 +212,19 @@ pub(crate) fn process_key_event(
         return no_change;
     }
 
-    let text = doc_content();
-    let len = text.len();
+    // For rich text the raw buffer holds piece table bytes, not text.
+    // Use logical text length and extracted text for navigation.
+    let raw = doc_content();
+    let is_rich = super::state().doc_format == super::DocumentFormat::Rich;
+    let mut rich_scratch = alloc::vec::Vec::new();
+    let (text, len): (&[u8], usize) = if is_rich {
+        let tl = super::documents::rich_text_len();
+        rich_scratch.resize(tl, 0u8);
+        super::documents::rich_copy_text(&mut rich_scratch);
+        (&rich_scratch, tl)
+    } else {
+        (raw, raw.len())
+    };
     let layout = content_text_layout(page_w, page_pad);
     let cols = layout.cols();
 
@@ -242,6 +264,19 @@ pub(crate) fn process_key_event(
                 }
             }
             update_selection_from_anchor();
+            // Auto-update insertion style to match the style at the new cursor position
+            // so typed characters inherit the surrounding style.
+            if is_rich {
+                let buf = super::documents::rich_buf_ref();
+                let pos = super::state().cursor_pos;
+                // Use style at cursor, or at cursor-1 if cursor is at a boundary.
+                let at = if pos > 0 {
+                    piecetable::style_at(buf, (pos - 1) as u32).unwrap_or(0)
+                } else {
+                    piecetable::style_at(buf, 0).unwrap_or(0)
+                };
+                super::documents::rich_set_current_style(at);
+            }
             doc_write_header();
             sync_cursor_to_editor(editor_ch);
             let _ = sys::channel_signal(EDITOR_HANDLE);
@@ -282,20 +317,17 @@ pub(crate) fn process_key_event(
             if s.doc_format != super::DocumentFormat::Rich {
                 return no_change;
             }
+            let buf = super::documents::rich_buf_ref();
+            let bold_id = piecetable::find_style_by_role(buf, piecetable::ROLE_STRONG).unwrap_or(0);
             if s.has_selection {
                 let lo = s.sel_start;
                 let hi = s.sel_end;
-                // Toggle: if the selection start is already bold (style 3),
-                // revert to body (style 0); otherwise apply bold.
-                let buf = super::documents::rich_buf_ref();
                 let cur = piecetable::style_at(buf, lo as u32).unwrap_or(0);
-                let target = if cur == 3 { 0u8 } else { 3u8 };
+                let target = if cur == bold_id { 0u8 } else { bold_id };
                 super::documents::rich_apply_style(lo, hi, target);
             } else {
-                // Toggle insertion style.
-                let buf = super::documents::rich_buf_ref();
                 let cur = piecetable::current_style(buf);
-                let target = if cur == 3 { 0u8 } else { 3u8 };
+                let target = if cur == bold_id { 0u8 } else { bold_id };
                 super::documents::rich_set_current_style(target);
             }
             KeyAction {
@@ -313,17 +345,74 @@ pub(crate) fn process_key_event(
             if s.doc_format != super::DocumentFormat::Rich {
                 return no_change;
             }
+            let buf = super::documents::rich_buf_ref();
+            let italic_id =
+                piecetable::find_style_by_role(buf, piecetable::ROLE_EMPHASIS).unwrap_or(0);
             if s.has_selection {
                 let lo = s.sel_start;
                 let hi = s.sel_end;
-                let buf = super::documents::rich_buf_ref();
                 let cur = piecetable::style_at(buf, lo as u32).unwrap_or(0);
-                let target = if cur == 4 { 0u8 } else { 4u8 };
+                let target = if cur == italic_id { 0u8 } else { italic_id };
                 super::documents::rich_apply_style(lo, hi, target);
             } else {
-                let buf = super::documents::rich_buf_ref();
                 let cur = piecetable::current_style(buf);
-                let target = if cur == 4 { 0u8 } else { 4u8 };
+                let target = if cur == italic_id { 0u8 } else { italic_id };
+                super::documents::rich_set_current_style(target);
+            }
+            KeyAction {
+                changed: true,
+                text_changed: true,
+                selection_changed: false,
+                context_switched: false,
+                consumed: true,
+            }
+        }
+
+        // ── Cmd+1: toggle heading1 ──────────────────────────────
+        KEY_1 if cmd => {
+            let s = super::state();
+            if s.doc_format != super::DocumentFormat::Rich {
+                return no_change;
+            }
+            let buf = super::documents::rich_buf_ref();
+            let h1_id = piecetable::find_style_by_role(buf, piecetable::ROLE_HEADING1).unwrap_or(0);
+            if s.has_selection {
+                let lo = s.sel_start;
+                let hi = s.sel_end;
+                let cur = piecetable::style_at(buf, lo as u32).unwrap_or(0);
+                let target = if cur == h1_id { 0u8 } else { h1_id };
+                super::documents::rich_apply_style(lo, hi, target);
+            } else {
+                let cur = piecetable::current_style(buf);
+                let target = if cur == h1_id { 0u8 } else { h1_id };
+                super::documents::rich_set_current_style(target);
+            }
+            KeyAction {
+                changed: true,
+                text_changed: true,
+                selection_changed: false,
+                context_switched: false,
+                consumed: true,
+            }
+        }
+
+        // ── Cmd+2: toggle heading2 ──────────────────────────────
+        KEY_2 if cmd => {
+            let s = super::state();
+            if s.doc_format != super::DocumentFormat::Rich {
+                return no_change;
+            }
+            let buf = super::documents::rich_buf_ref();
+            let h2_id = piecetable::find_style_by_role(buf, piecetable::ROLE_HEADING2).unwrap_or(0);
+            if s.has_selection {
+                let lo = s.sel_start;
+                let hi = s.sel_end;
+                let cur = piecetable::style_at(buf, lo as u32).unwrap_or(0);
+                let target = if cur == h2_id { 0u8 } else { h2_id };
+                super::documents::rich_apply_style(lo, hi, target);
+            } else {
+                let cur = piecetable::current_style(buf);
+                let target = if cur == h2_id { 0u8 } else { h2_id };
                 super::documents::rich_set_current_style(target);
             }
             KeyAction {
@@ -501,7 +590,7 @@ pub(crate) fn process_key_event(
                 let lo = s.sel_start;
                 let hi = s.sel_end;
                 clear_selection();
-                if doc_delete_range(lo, hi) {
+                if delete_range_for_format(lo, hi) {
                     super::state().cursor_pos = lo;
                     doc_write_header();
                     sync_cursor_to_editor(editor_ch);
@@ -520,7 +609,7 @@ pub(crate) fn process_key_event(
                 // Opt+Backspace: word-delete backward.
                 let cursor = super::state().cursor_pos;
                 let boundary = word_boundary_backward(text, cursor);
-                if boundary < cursor && doc_delete_range(boundary, cursor) {
+                if boundary < cursor && delete_range_for_format(boundary, cursor) {
                     super::state().cursor_pos = boundary;
                     super::state().goal_column = None;
                     doc_write_header();
@@ -549,7 +638,7 @@ pub(crate) fn process_key_event(
                 let lo = s.sel_start;
                 let hi = s.sel_end;
                 clear_selection();
-                if doc_delete_range(lo, hi) {
+                if delete_range_for_format(lo, hi) {
                     super::state().cursor_pos = lo;
                     doc_write_header();
                     sync_cursor_to_editor(editor_ch);
@@ -568,7 +657,7 @@ pub(crate) fn process_key_event(
                 // Opt+Delete: word-delete forward.
                 let cursor = super::state().cursor_pos;
                 let boundary = word_boundary_forward(text, cursor);
-                if boundary > cursor && doc_delete_range(cursor, boundary) {
+                if boundary > cursor && delete_range_for_format(cursor, boundary) {
                     super::state().goal_column = None;
                     doc_write_header();
                     sync_cursor_to_editor(editor_ch);
@@ -597,7 +686,7 @@ pub(crate) fn process_key_event(
                 let lo = s.sel_start;
                 let hi = s.sel_end;
                 clear_selection();
-                if doc_delete_range(lo, hi) {
+                if delete_range_for_format(lo, hi) {
                     super::state().cursor_pos = lo;
                     doc_write_header();
                     sync_cursor_to_editor(editor_ch);

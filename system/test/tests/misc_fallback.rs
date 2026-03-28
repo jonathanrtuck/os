@@ -333,7 +333,7 @@ fn fallback_cache_key_includes_font_identifier() {
         coverage: vec![200; 30], // font B coverage - different!
     };
 
-    // Use font_id as part of the axis_hash parameter to distinguish fonts.
+    // Use font_id as part of the style_id parameter to distinguish fonts.
     // font_id 0 = primary font, font_id 1 = fallback font.
     let font_a_hash = fallback::font_identifier_hash(0, &[]);
     let font_b_hash = fallback::font_identifier_hash(1, &[]);

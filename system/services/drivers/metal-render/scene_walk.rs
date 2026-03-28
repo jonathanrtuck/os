@@ -6,14 +6,14 @@ use protocol::metal;
 use scene::{Content, Node, NodeFlags, NodeId, NULL};
 
 use crate::{
-    atlas::{GlyphAtlas, MAX_FONTS},
+    atlas::{GlyphAtlas, ATLAS_HEIGHT, ATLAS_WIDTH},
     dma::DmaBuf,
     path::{draw_path_stencil_cover, parse_path_to_points, PathPointsBuf},
+    round_font_size,
     virtio_helpers::send_setup,
-    ATLAS_HEIGHT, ATLAS_WIDTH, CURSOR_PLANE_NODE, DSS_CLIP_TEST, DSS_NONE, DSS_STENCIL_WRITE,
-    IMG_TEX_DIM, MAX_INLINE_BYTES, PIPE_GLYPH, PIPE_ROUNDED_RECT, PIPE_SHADOW, PIPE_SOLID,
-    PIPE_SOLID_NO_MSAA, PIPE_STENCIL_WRITE, PIPE_TEXTURED, SAMPLER_LINEAR, SAMPLER_NEAREST,
-    TEX_ATLAS, TEX_IMAGE, VERTEX_BYTES,
+    CURSOR_PLANE_NODE, DSS_CLIP_TEST, DSS_NONE, DSS_STENCIL_WRITE, IMG_TEX_DIM, MAX_INLINE_BYTES,
+    PIPE_GLYPH, PIPE_ROUNDED_RECT, PIPE_SHADOW, PIPE_SOLID, PIPE_SOLID_NO_MSAA, PIPE_STENCIL_WRITE,
+    PIPE_TEXTURED, SAMPLER_LINEAR, SAMPLER_NEAREST, TEX_ATLAS, TEX_IMAGE, VERTEX_BYTES,
 };
 
 // ── Clip rectangle ──────────────────────────────────────────────────────
@@ -126,7 +126,8 @@ pub(crate) struct RenderContext<'a> {
     pub(crate) solid_verts: &'a mut Vec<u8>,
     pub(crate) glyph_verts: &'a mut Vec<u8>,
     pub(crate) atlas: &'a GlyphAtlas,
-    pub(crate) font_ascent: u32,
+    pub(crate) style_registry: &'a [protocol::content::StyleRegistryEntry],
+    pub(crate) scale_factor: f32,
     pub(crate) blurs: &'a mut Vec<BlurReq>,
     pub(crate) device: &'a virtio::Device,
     pub(crate) setup_vq: &'a mut virtio::Virtqueue,
@@ -490,8 +491,8 @@ pub(crate) fn walk_scene(
             color,
             glyphs,
             glyph_count,
-            axis_hash,
-            ..
+            font_size,
+            style_id,
         } => {
             let shaped = reader.front_shaped_glyphs(glyphs, glyph_count);
             let r = color.r as f32 / 255.0;
@@ -505,7 +506,19 @@ pub(crate) fn walk_scene(
             // Walk glyphs with a pen cursor that accumulates x_advance.
             // x_advance and x_offset are in scaled points (NOT 26.6 fixed-point).
             let mut pen_x = abs_x;
-            let baseline_y = abs_y + ctx.font_ascent as f32;
+
+            // Per-node baseline from style registry.
+            let baseline_y =
+                if let Some(entry) = ctx.style_registry.iter().find(|e| e.style_id == style_id) {
+                    let upem = entry.upem as f32;
+                    if upem > 0.0 {
+                        abs_y + entry.ascent_fu as f32 * font_size as f32 / upem
+                    } else {
+                        abs_y + font_size as f32
+                    }
+                } else {
+                    abs_y + font_size as f32
+                };
 
             // Glyph atlas contains device-pixel-resolution bitmaps.
             // Divide bearing/width/height by scale to position in point space.
@@ -514,11 +527,11 @@ pub(crate) fn walk_scene(
             // 16.16 fixed-point to f32 conversion factor.
             let fp16 = 65536.0f32;
 
-            // Map axis_hash to font_id for atlas lookup (scene::FONT_MONO=0, scene::FONT_SANS=1).
-            let font_id = (axis_hash as u16).min((MAX_FONTS - 1) as u16);
+            // Per-node font_size_px for atlas lookup.
+            let node_font_size_px = round_font_size(font_size, ctx.scale_factor);
 
             for sg in shaped {
-                if let Some(entry) = ctx.atlas.lookup(sg.glyph_id, font_id) {
+                if let Some(entry) = ctx.atlas.lookup(sg.glyph_id, node_font_size_px, style_id) {
                     let gx =
                         pen_x + entry.bearing_x as f32 / glyph_scale + sg.x_offset as f32 / fp16;
                     let gy = baseline_y - entry.bearing_y as f32 / glyph_scale

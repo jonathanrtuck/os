@@ -10,10 +10,10 @@ use scene::{fnv1a, Border, Color, Content, FillRule, NodeFlags, NULL};
 
 use super::{
     allocate_line_nodes, allocate_selection_rects, byte_to_line_col, chars_per_line, dc, doc_width,
-    layout_mono_lines, layout_rich_lines, rich_axis_hash, scroll_runs, shape_chrome_text,
-    shape_rich_segment, shape_visible_runs, update_clock_inline, FontInfo, RichLine, SceneConfig,
-    FONT_SANS, N_CLOCK_TEXT, N_CONTENT, N_CURSOR, N_DOC_IMAGE, N_DOC_TEXT, N_PAGE, N_POINTER,
-    N_ROOT, N_SHADOW, N_STRIP, N_TITLE_BAR, N_TITLE_ICON, N_TITLE_TEXT, WELL_KNOWN_COUNT,
+    layout_mono_lines, layout_rich_lines, scroll_runs, shape_chrome_text, shape_rich_segment,
+    shape_visible_runs, update_clock_inline, FontInfo, RichLine, SceneConfig, N_CLOCK_TEXT,
+    N_CONTENT, N_CURSOR, N_DOC_IMAGE, N_DOC_TEXT, N_PAGE, N_POINTER, N_ROOT, N_SHADOW, N_STRIP,
+    N_TITLE_BAR, N_TITLE_ICON, N_TITLE_TEXT, WELL_KNOWN_COUNT,
 };
 use crate::icons;
 
@@ -107,6 +107,11 @@ pub fn build_full_scene(
     let has_selection = sel_lo < sel_hi;
 
     w.clear();
+
+    // ── Style registry (first item in data buffer) ───────────────────
+
+    let (style_table, mono_style_id, sans_style_id) = super::base_style_table(cfg);
+    super::write_style_registry(w, &style_table);
 
     // ── Push data ────────────────────────────────────────────────────
 
@@ -206,7 +211,7 @@ pub fn build_full_scene(
             glyphs: title_glyph_ref,
             glyph_count: title_glyphs.len() as u16,
             font_size: cfg.font_size,
-            axis_hash: FONT_SANS,
+            style_id: sans_style_id,
         };
         n.content_hash = fnv1a(title_label);
         n.flags = NodeFlags::VISIBLE;
@@ -224,7 +229,7 @@ pub fn build_full_scene(
             glyphs: clock_glyph_ref,
             glyph_count: clock_glyphs.len() as u16,
             font_size: cfg.font_size,
-            axis_hash: FONT_SANS,
+            style_id: sans_style_id,
         };
         n.content_hash = fnv1a(clock_text);
         n.flags = NodeFlags::VISIBLE;
@@ -299,6 +304,7 @@ pub fn build_full_scene(
         cfg.line_height,
         scene_text_color,
         cfg.font_size,
+        mono_style_id,
     );
 
     // Link cursor after line nodes.
@@ -422,7 +428,10 @@ pub fn build_full_scene(
 /// mark N_CLOCK_TEXT changed.
 pub fn build_clock_update(w: &mut scene::SceneWriter<'_>, cfg: &SceneConfig, clock_text: &[u8]) {
     let clock_node = w.node(N_CLOCK_TEXT);
-    if let Content::Glyphs { color, .. } = clock_node.content {
+    if let Content::Glyphs {
+        color, style_id, ..
+    } = clock_node.content
+    {
         let new_glyphs = shape_chrome_text(cfg, clock_text);
         let new_ref = w.push_shaped_glyphs(&new_glyphs);
         let new_count = new_glyphs.len() as u16;
@@ -433,7 +442,7 @@ pub fn build_clock_update(w: &mut scene::SceneWriter<'_>, cfg: &SceneConfig, clo
             glyphs: new_ref,
             glyph_count: new_count,
             font_size: cfg.font_size,
-            axis_hash: FONT_SANS,
+            style_id,
         };
         n.content_hash = fnv1a(clock_text);
         w.mark_dirty(N_CLOCK_TEXT);
@@ -572,6 +581,10 @@ pub fn build_document_content(
     // are re-pushed in build_full_scene on the next full rebuild.
     w.reset_data();
 
+    // ── Style registry (first item in data buffer) ───────────────────
+    let (style_table, mono_style_id, sans_style_id) = super::base_style_table(cfg);
+    super::write_style_registry(w, &style_table);
+
     // Re-push pointer cursor image data (invalidated by reset_data).
     {
         let cursor_px = CURSOR_SIZE_PT * 2;
@@ -649,7 +662,7 @@ pub fn build_document_content(
             glyphs: title_glyph_ref,
             glyph_count: title_glyphs.len() as u16,
             font_size: cfg.font_size,
-            axis_hash: FONT_SANS,
+            style_id: sans_style_id,
         };
         n.content_hash = fnv1a(title_label);
     }
@@ -662,7 +675,7 @@ pub fn build_document_content(
             glyphs: clock_glyph_ref,
             glyph_count: clock_glyphs.len() as u16,
             font_size: cfg.font_size,
-            axis_hash: FONT_SANS,
+            style_id: sans_style_id,
         };
         n.content_hash = fnv1a(clock_text);
     }
@@ -685,6 +698,7 @@ pub fn build_document_content(
         cfg.line_height,
         scene_text_color,
         cfg.font_size,
+        mono_style_id,
     );
 
     // Link cursor after line nodes.
@@ -740,27 +754,191 @@ pub fn build_document_content(
 pub struct RichFonts<'a> {
     pub mono_data: &'a [u8],
     pub mono_upem: u16,
+    pub mono_content_id: u32,
+    pub mono_ascender: i16,
+    pub mono_descender: i16,
+    pub mono_line_gap: i16,
+    pub mono_cap_height: i16,
     pub sans_data: &'a [u8],
     pub sans_upem: u16,
+    pub sans_content_id: u32,
+    pub sans_ascender: i16,
+    pub sans_descender: i16,
+    pub sans_line_gap: i16,
+    pub sans_cap_height: i16,
     pub serif_data: &'a [u8],
     pub serif_upem: u16,
+    pub serif_content_id: u32,
+    pub serif_ascender: i16,
+    pub serif_descender: i16,
+    pub serif_line_gap: i16,
+    pub serif_cap_height: i16,
+    pub mono_italic_data: &'a [u8],
+    pub mono_italic_upem: u16,
+    pub mono_italic_content_id: u32,
+    pub mono_italic_ascender: i16,
+    pub mono_italic_descender: i16,
+    pub mono_italic_line_gap: i16,
+    pub mono_italic_cap_height: i16,
+    pub sans_italic_data: &'a [u8],
+    pub sans_italic_upem: u16,
+    pub sans_italic_content_id: u32,
+    pub sans_italic_ascender: i16,
+    pub sans_italic_descender: i16,
+    pub sans_italic_line_gap: i16,
+    pub sans_italic_cap_height: i16,
+    pub serif_italic_data: &'a [u8],
+    pub serif_italic_upem: u16,
+    pub serif_italic_content_id: u32,
+    pub serif_italic_ascender: i16,
+    pub serif_italic_descender: i16,
+    pub serif_italic_line_gap: i16,
+    pub serif_italic_cap_height: i16,
 }
 
 impl<'a> RichFonts<'a> {
     /// Resolve a piecetable Style to font data + metrics.
+    /// When FLAG_ITALIC is set, returns the italic font variant.
     pub fn resolve(&self, style: &piecetable::Style) -> FontInfo<'_> {
-        match style.font_family {
-            piecetable::FONT_MONO => FontInfo {
+        let italic = style.flags & piecetable::FLAG_ITALIC != 0;
+        match (style.font_family, italic) {
+            (piecetable::FONT_MONO, false) => FontInfo {
                 data: self.mono_data,
                 upem: self.mono_upem,
+                content_id: self.mono_content_id,
+                ascender: self.mono_ascender,
+                descender: self.mono_descender,
+                line_gap: self.mono_line_gap,
+                cap_height: self.mono_cap_height,
             },
-            piecetable::FONT_SERIF => FontInfo {
+            (piecetable::FONT_MONO, true) => FontInfo {
+                data: if self.mono_italic_data.is_empty() {
+                    self.mono_data
+                } else {
+                    self.mono_italic_data
+                },
+                upem: if self.mono_italic_upem > 0 {
+                    self.mono_italic_upem
+                } else {
+                    self.mono_upem
+                },
+                content_id: if self.mono_italic_data.is_empty() {
+                    self.mono_content_id
+                } else {
+                    self.mono_italic_content_id
+                },
+                ascender: if self.mono_italic_upem > 0 {
+                    self.mono_italic_ascender
+                } else {
+                    self.mono_ascender
+                },
+                descender: if self.mono_italic_upem > 0 {
+                    self.mono_italic_descender
+                } else {
+                    self.mono_descender
+                },
+                line_gap: if self.mono_italic_upem > 0 {
+                    self.mono_italic_line_gap
+                } else {
+                    self.mono_line_gap
+                },
+                cap_height: if self.mono_italic_upem > 0 {
+                    self.mono_italic_cap_height
+                } else {
+                    self.mono_cap_height
+                },
+            },
+            (piecetable::FONT_SERIF, false) => FontInfo {
                 data: self.serif_data,
                 upem: self.serif_upem,
+                content_id: self.serif_content_id,
+                ascender: self.serif_ascender,
+                descender: self.serif_descender,
+                line_gap: self.serif_line_gap,
+                cap_height: self.serif_cap_height,
             },
-            _ => FontInfo {
+            (piecetable::FONT_SERIF, true) => FontInfo {
+                data: if self.serif_italic_data.is_empty() {
+                    self.serif_data
+                } else {
+                    self.serif_italic_data
+                },
+                upem: if self.serif_italic_upem > 0 {
+                    self.serif_italic_upem
+                } else {
+                    self.serif_upem
+                },
+                content_id: if self.serif_italic_data.is_empty() {
+                    self.serif_content_id
+                } else {
+                    self.serif_italic_content_id
+                },
+                ascender: if self.serif_italic_upem > 0 {
+                    self.serif_italic_ascender
+                } else {
+                    self.serif_ascender
+                },
+                descender: if self.serif_italic_upem > 0 {
+                    self.serif_italic_descender
+                } else {
+                    self.serif_descender
+                },
+                line_gap: if self.serif_italic_upem > 0 {
+                    self.serif_italic_line_gap
+                } else {
+                    self.serif_line_gap
+                },
+                cap_height: if self.serif_italic_upem > 0 {
+                    self.serif_italic_cap_height
+                } else {
+                    self.serif_cap_height
+                },
+            },
+            (_, false) => FontInfo {
                 data: self.sans_data,
                 upem: self.sans_upem,
+                content_id: self.sans_content_id,
+                ascender: self.sans_ascender,
+                descender: self.sans_descender,
+                line_gap: self.sans_line_gap,
+                cap_height: self.sans_cap_height,
+            },
+            (_, true) => FontInfo {
+                data: if self.sans_italic_data.is_empty() {
+                    self.sans_data
+                } else {
+                    self.sans_italic_data
+                },
+                upem: if self.sans_italic_upem > 0 {
+                    self.sans_italic_upem
+                } else {
+                    self.sans_upem
+                },
+                content_id: if self.sans_italic_data.is_empty() {
+                    self.sans_content_id
+                } else {
+                    self.sans_italic_content_id
+                },
+                ascender: if self.sans_italic_upem > 0 {
+                    self.sans_italic_ascender
+                } else {
+                    self.sans_ascender
+                },
+                descender: if self.sans_italic_upem > 0 {
+                    self.sans_italic_descender
+                } else {
+                    self.sans_descender
+                },
+                line_gap: if self.sans_italic_upem > 0 {
+                    self.sans_italic_line_gap
+                } else {
+                    self.sans_line_gap
+                },
+                cap_height: if self.sans_italic_upem > 0 {
+                    self.sans_italic_cap_height
+                } else {
+                    self.sans_cap_height
+                },
             },
         }
     }
@@ -775,6 +953,7 @@ fn allocate_rich_line_nodes(
     scratch: &[u8],
     pt_buf: &[u8],
     fonts: &RichFonts<'_>,
+    style_table: &mut super::StyleTable,
     doc_width: u32,
     line_height: u32,
     scroll_y: scene::Mpt,
@@ -785,14 +964,17 @@ fn allocate_rich_line_nodes(
     let scroll_pt = scroll_y >> 10;
 
     for line in rich_lines {
-        // Visibility culling.
-        let line_bottom = line.y + line_height as i32;
+        // Visibility culling using per-line height.
+        let line_bottom = line.y + line.line_height;
         if line_bottom <= scroll_pt {
             continue;
         }
         if line.y >= scroll_pt + viewport_height {
             continue;
         }
+
+        // Track running x position within the line (points, fractional).
+        let mut pen_x: f32 = 0.0;
 
         for seg in &line.segments {
             let seg_text = if seg.text_start + seg.text_len <= scratch.len() {
@@ -808,21 +990,43 @@ fn allocate_rich_line_nodes(
             let font_size = style.font_size_pt as u16;
             let italic = style.flags & piecetable::FLAG_ITALIC != 0;
 
-            let shaped = shape_rich_segment(
-                fi.data,
-                seg_text,
-                font_size,
-                fi.upem,
-                style.weight,
-                italic,
-            );
+            let shaped =
+                shape_rich_segment(fi.data, seg_text, font_size, fi.upem, style.weight, italic);
             if shaped.is_empty() {
                 continue;
             }
 
             let glyph_ref = w.push_shaped_glyphs(&shaped);
             let glyph_count = shaped.len() as u16;
-            let axis_hash = rich_axis_hash(style.font_family, style.weight, italic);
+
+            // Resolve style_id from the StyleTable using the font's
+            // content_id and the style's variation axes.
+            let mut axes_buf = [fonts::rasterize::AxisValue {
+                tag: *b"wght",
+                value: 0.0,
+            }; 3];
+            let mut axis_count = 0;
+            if style.weight != 400 {
+                axes_buf[axis_count] = fonts::rasterize::AxisValue {
+                    tag: *b"wght",
+                    value: style.weight as f32,
+                };
+                axis_count += 1;
+            }
+            // Italic uses a separate font file — no ital axis needed.
+            // Optical size for fonts that support it (Inter, Source Serif 4).
+            axes_buf[axis_count] = fonts::rasterize::AxisValue {
+                tag: *b"opsz",
+                value: style.font_size_pt as f32,
+            };
+            axis_count += 1;
+            let style_id = style_table.style_id_for(
+                fi.content_id,
+                &axes_buf[..axis_count],
+                fi.ascender as u16,
+                (-fi.descender) as u16,
+                fi.upem,
+            );
 
             let color = Color::rgba(
                 style.color[0],
@@ -833,15 +1037,16 @@ fn allocate_rich_line_nodes(
 
             if let Some(node_id) = w.alloc_node() {
                 let n = w.node_mut(node_id);
+                n.x = scene::pt(pen_x as i32);
                 n.y = scene::pt(seg.y);
                 n.width = scene::upt(doc_width);
-                n.height = scene::upt(line_height);
+                n.height = scene::upt(line.line_height as u32);
                 n.content = Content::Glyphs {
                     color,
                     glyphs: glyph_ref,
                     glyph_count,
                     font_size,
-                    axis_hash,
+                    style_id,
                 };
                 n.content_hash = scene::fnv1a(&glyph_ref.offset.to_le_bytes());
                 n.flags = NodeFlags::VISIBLE;
@@ -854,6 +1059,70 @@ fn allocate_rich_line_nodes(
                 }
                 prev_node = node_id;
             }
+
+            // Advance pen by segment width (x_advance is 16.16 fixed-point).
+            let seg_width: f32 = shaped.iter().map(|g| g.x_advance as f32 / 65536.0).sum();
+
+            // Underline: thin line at baseline + descent/4.
+            if style.flags & piecetable::FLAG_UNDERLINE != 0 && seg_width > 0.0 {
+                let asc_pt = if fi.upem > 0 {
+                    (fi.ascender as i32).abs() as f32 * font_size as f32 / fi.upem as f32
+                } else {
+                    font_size as f32 * 0.8
+                };
+                let desc_pt = if fi.upem > 0 {
+                    (fi.descender as i32).abs() as f32 * font_size as f32 / fi.upem as f32
+                } else {
+                    font_size as f32 * 0.2
+                };
+                let underline_y = seg.y as f32 + asc_pt + desc_pt * 0.3;
+                let thickness = (font_size as f32 / 14.0).max(1.0);
+                if let Some(ul_id) = w.alloc_node() {
+                    let n = w.node_mut(ul_id);
+                    n.x = scene::pt(pen_x as i32);
+                    n.y = scene::pt(underline_y as i32);
+                    n.width = scene::upt(seg_width as u32 + 1);
+                    n.height = scene::upt(thickness as u32);
+                    n.background = color;
+                    n.content = Content::None;
+                    n.flags = NodeFlags::VISIBLE;
+                    n.next_sibling = NULL;
+                    if prev_node != NULL {
+                        w.node_mut(prev_node).next_sibling = ul_id;
+                    }
+                    w.mark_dirty(ul_id);
+                    prev_node = ul_id;
+                }
+            }
+
+            // Strikethrough: thin line at mid-height of text.
+            if style.flags & piecetable::FLAG_STRIKETHROUGH != 0 && seg_width > 0.0 {
+                let asc_pt = if fi.upem > 0 {
+                    (fi.ascender as i32).abs() as f32 * font_size as f32 / fi.upem as f32
+                } else {
+                    font_size as f32 * 0.8
+                };
+                let strike_y = seg.y as f32 + asc_pt * 0.6;
+                let thickness = (font_size as f32 / 14.0).max(1.0);
+                if let Some(st_id) = w.alloc_node() {
+                    let n = w.node_mut(st_id);
+                    n.x = scene::pt(pen_x as i32);
+                    n.y = scene::pt(strike_y as i32);
+                    n.width = scene::upt(seg_width as u32 + 1);
+                    n.height = scene::upt(thickness as u32);
+                    n.background = color;
+                    n.content = Content::None;
+                    n.flags = NodeFlags::VISIBLE;
+                    n.next_sibling = NULL;
+                    if prev_node != NULL {
+                        w.node_mut(prev_node).next_sibling = st_id;
+                    }
+                    w.mark_dirty(st_id);
+                    prev_node = st_id;
+                }
+            }
+
+            pen_x += seg_width;
         }
     }
 
@@ -887,6 +1156,47 @@ pub fn build_rich_document_content(
     // Remove old dynamic nodes.
     w.set_node_count(WELL_KNOWN_COUNT);
     w.reset_data();
+
+    // ── Style registry (first item in data buffer) ───────────────────
+    // Start with base styles (mono=0, sans=1), then register styles
+    // from the piece table's style palette for rich text segments.
+    let (mut style_table, _mono_style_id, sans_style_id) = super::base_style_table(cfg);
+
+    // Register each unique style from the piece table palette.
+    let palette_count = piecetable::style_count(pt_buf);
+    for si in 0..palette_count {
+        if let Some(style) = piecetable::style(pt_buf, si as u8) {
+            let fi = fonts.resolve(style);
+            // Build axis values for variable font variations.
+            let mut axes_buf = [fonts::rasterize::AxisValue {
+                tag: *b"wght",
+                value: 0.0,
+            }; 3];
+            let mut axis_count = 0;
+            if style.weight != 400 {
+                axes_buf[axis_count] = fonts::rasterize::AxisValue {
+                    tag: *b"wght",
+                    value: style.weight as f32,
+                };
+                axis_count += 1;
+            }
+            // Italic uses a separate font file — no ital axis needed.
+            axes_buf[axis_count] = fonts::rasterize::AxisValue {
+                tag: *b"opsz",
+                value: style.font_size_pt as f32,
+            };
+            axis_count += 1;
+            let axes = &axes_buf[..axis_count];
+            let _ = style_table.style_id_for(
+                fi.content_id,
+                axes,
+                fi.ascender as u16,
+                (-fi.descender) as u16,
+                fi.upem,
+            );
+        }
+    }
+    super::write_style_registry(w, &style_table);
 
     // Re-push pointer cursor image data.
     {
@@ -938,7 +1248,7 @@ pub fn build_rich_document_content(
             glyphs: title_glyph_ref,
             glyph_count: title_glyphs.len() as u16,
             font_size: cfg.font_size,
-            axis_hash: FONT_SANS,
+            style_id: sans_style_id,
         };
         n.content_hash = fnv1a(title_label);
     }
@@ -949,7 +1259,7 @@ pub fn build_rich_document_content(
             glyphs: clock_glyph_ref,
             glyph_count: clock_glyphs.len() as u16,
             font_size: cfg.font_size,
-            axis_hash: FONT_SANS,
+            style_id: sans_style_id,
         };
         n.content_hash = fnv1a(clock_text);
     }
@@ -965,14 +1275,29 @@ pub fn build_rich_document_content(
     let mono_fi = FontInfo {
         data: fonts.mono_data,
         upem: fonts.mono_upem,
+        content_id: fonts.mono_content_id,
+        ascender: fonts.mono_ascender,
+        descender: fonts.mono_descender,
+        line_gap: fonts.mono_line_gap,
+        cap_height: fonts.mono_cap_height,
     };
     let sans_fi = FontInfo {
         data: fonts.sans_data,
         upem: fonts.sans_upem,
+        content_id: fonts.sans_content_id,
+        ascender: fonts.sans_ascender,
+        descender: fonts.sans_descender,
+        line_gap: fonts.sans_line_gap,
+        cap_height: fonts.sans_cap_height,
     };
     let serif_fi = FontInfo {
         data: fonts.serif_data,
         upem: fonts.serif_upem,
+        content_id: fonts.serif_content_id,
+        ascender: fonts.serif_ascender,
+        descender: fonts.serif_descender,
+        line_gap: fonts.serif_line_gap,
+        cap_height: fonts.serif_cap_height,
     };
     let rich_lines = layout_rich_lines(
         pt_buf,
@@ -998,6 +1323,7 @@ pub fn build_rich_document_content(
         &scratch[..text_len],
         pt_buf,
         fonts,
+        &mut style_table,
         doc_width,
         cfg.line_height,
         scroll_y,
@@ -1016,39 +1342,192 @@ pub fn build_rich_document_content(
     // Cursor positioning for rich text.
     // Use byte position in logical text. For now, use a simple approach:
     // walk the rich_lines to find which line/column the cursor is on.
-    let (cursor_x, cursor_y) = rich_cursor_position(
-        pt_buf,
-        &scratch[..text_len],
-        cursor_pos,
-        &rich_lines,
-        fonts,
-    );
+    let cursor_info =
+        rich_cursor_position(pt_buf, &scratch[..text_len], cursor_pos, &rich_lines, fonts);
 
     {
+        // Cursor width scales with font weight: 2pt at w400, 3pt at w700+.
+        let cursor_w = if cursor_info.style_weight >= 600 {
+            3u32
+        } else {
+            2u32
+        };
         let n = w.node_mut(N_CURSOR);
-        n.x = cursor_x;
-        n.y = cursor_y;
+        n.x = cursor_info.x;
+        n.y = cursor_info.y;
+        n.width = scene::upt(cursor_w);
+        n.height = scene::upt(cursor_info.height);
+        n.background = Color::rgba(
+            cursor_info.color[0],
+            cursor_info.color[1],
+            cursor_info.color[2],
+            cursor_info.color[3],
+        );
         n.opacity = cursor_opacity;
+        n.content = Content::None;
+        n.flags = NodeFlags::VISIBLE;
         n.next_sibling = NULL;
+        // Italic cursor: ~12° skew (standard italic angle).
+        n.content_transform = if cursor_info.italic {
+            scene::AffineTransform::skew_x(-0.21) // ~12° in radians
+        } else {
+            scene::AffineTransform::identity()
+        };
     }
     w.mark_dirty(N_CURSOR);
 
-    // Selection — not yet implemented for rich text (would need
-    // proportional column calculation). Skip for now.
-    let _ = (sel_start, sel_end);
+    // Selection rendering for rich text with proportional x-positioning.
+    let (sel_lo, sel_hi) = if sel_start <= sel_end {
+        (sel_start as usize, sel_end as usize)
+    } else {
+        (sel_end as usize, sel_start as usize)
+    };
+
+    if sel_lo < sel_hi {
+        let sel_color = dc(cfg.sel_color);
+        let scroll_pt = scroll_y >> 10;
+        let mut prev_sel_node: u16 = NULL;
+
+        for line in &rich_lines {
+            // Compute line's byte range from its segments.
+            let line_byte_start = line.segments.first().map_or(0, |s| s.text_start);
+            let line_byte_end = line
+                .segments
+                .last()
+                .map_or(0, |s| s.text_start + s.text_len);
+
+            // Skip lines outside the selection.
+            if line_byte_end <= sel_lo || line_byte_start >= sel_hi {
+                continue;
+            }
+
+            // Visibility culling.
+            let line_bottom = line.y + line.line_height;
+            if line_bottom <= scroll_pt || line.y >= scroll_pt + text_area_h as i32 {
+                continue;
+            }
+
+            // Walk segments to compute x_start and x_end of selection on this line.
+            let mut pen_x: f32 = 0.0;
+            let mut x_start: f32 = 0.0;
+            let mut x_end: f32 = 0.0;
+            let mut found_start = false;
+            let clamp_lo = sel_lo.max(line_byte_start);
+            let clamp_hi = sel_hi.min(line_byte_end);
+
+            for seg in &line.segments {
+                let seg_start = seg.text_start;
+                let seg_end = seg.text_start + seg.text_len;
+                let Some(style) = piecetable::style(pt_buf, seg.style_id) else {
+                    continue;
+                };
+                let fi = fonts.resolve(style);
+                let font_size = style.font_size_pt as u16;
+                let italic = style.flags & piecetable::FLAG_ITALIC != 0;
+
+                let seg_text_slice = &scratch[seg_start..seg_end.min(text_len)];
+                // Shape segment (same as renderer) for exact advance matching.
+                let shaped = shape_rich_segment(
+                    fi.data,
+                    seg_text_slice,
+                    font_size,
+                    fi.upem,
+                    style.weight,
+                    italic,
+                );
+
+                let seg_str = core::str::from_utf8(seg_text_slice).unwrap_or("");
+                let mut byte_pos = seg_start;
+                let mut glyph_idx = 0usize;
+                for ch in seg_str.chars() {
+                    if byte_pos == clamp_lo {
+                        x_start = pen_x;
+                        found_start = true;
+                    }
+                    let adv = if glyph_idx < shaped.len() {
+                        let a = shaped[glyph_idx].x_advance as f32 / 65536.0;
+                        glyph_idx += 1;
+                        a
+                    } else {
+                        0.0
+                    };
+                    byte_pos += ch.len_utf8();
+                    pen_x += adv;
+                    if byte_pos >= clamp_hi {
+                        x_end = pen_x;
+                        break;
+                    }
+                }
+
+                if byte_pos >= clamp_hi {
+                    break;
+                }
+            }
+
+            // If selection extends to end of line, use full pen_x.
+            if found_start && x_end <= x_start {
+                x_end = pen_x;
+            }
+            if !found_start {
+                continue;
+            }
+
+            let rect_w = x_end - x_start;
+            if rect_w <= 0.0 {
+                continue;
+            }
+
+            if let Some(sel_id) = w.alloc_node() {
+                let n = w.node_mut(sel_id);
+                n.x = scene::pt(x_start as i32);
+                n.y = scene::pt(line.y);
+                n.width = scene::upt(rect_w as u32 + 1);
+                n.height = scene::upt(line.line_height as u32);
+                n.background = sel_color;
+                n.content = Content::None;
+                n.flags = NodeFlags::VISIBLE;
+                n.next_sibling = NULL;
+
+                if prev_sel_node == NULL {
+                    // Link selection after cursor.
+                    w.node_mut(N_CURSOR).next_sibling = sel_id;
+                } else {
+                    w.node_mut(prev_sel_node).next_sibling = sel_id;
+                }
+                w.mark_dirty(sel_id);
+                prev_sel_node = sel_id;
+            }
+        }
+    }
 }
 
-/// Compute cursor (x, y) in millipoints for a rich text document.
+/// Cursor metrics for rich text: position, height, and style properties.
+struct RichCursorInfo {
+    x: scene::Mpt,
+    y: scene::Mpt,
+    height: u32,
+    /// Font weight at the cursor position (for cursor width scaling).
+    style_weight: u16,
+    /// Text color at the cursor position (cursor matches text color).
+    color: [u8; 4],
+    /// Whether the style at cursor is italic (cursor slants to match).
+    italic: bool,
+}
+
+/// Compute cursor position and height for a rich text document.
 ///
-/// Walks the styled runs to measure the cursor's x position using
-/// proportional font metrics.
+/// Returns baseline-aligned y and style-matched height. The cursor spans
+/// from (baseline - ascent) to (baseline + |descent|), aligned with the
+/// text at the cursor position.
 fn rich_cursor_position(
     pt_buf: &[u8],
     text: &[u8],
     cursor_pos: u32,
     rich_lines: &[RichLine],
     fonts: &RichFonts<'_>,
-) -> (scene::Mpt, scene::Mpt) {
+) -> RichCursorInfo {
+    let default_height = 18u32; // fallback
+
     // Find which line the cursor is on.
     for line in rich_lines {
         if line.segments.is_empty() {
@@ -1062,47 +1541,200 @@ fn rich_cursor_position(
             continue;
         }
 
-        // Cursor is on this line. Measure x by walking chars up to cursor_pos.
+        // Compute max ascent for this line (for baseline alignment).
+        let mut max_ascent_pt: f32 = 0.0;
+        for seg in &line.segments {
+            if let Some(style) = piecetable::style(pt_buf, seg.style_id) {
+                let fi = fonts.resolve(style);
+                if fi.upem > 0 {
+                    let asc = (fi.ascender as i32).abs() as f32 * style.font_size_pt as f32
+                        / fi.upem as f32;
+                    if asc > max_ascent_pt {
+                        max_ascent_pt = asc;
+                    }
+                }
+            }
+        }
+
+        // Cursor is on this line. Measure x using the same shaped advances as
+        // the renderer to guarantee exact alignment with rendered glyphs.
         let mut x_pt: f32 = 0.0;
+        let mut cursor_style_id: u8 = line.segments.first().map_or(0, |s| s.style_id);
         for seg in &line.segments {
             let seg_end = seg.text_start + seg.text_len;
-            if cursor_pos as usize <= seg.text_start {
+            if (cursor_pos as usize) < seg.text_start {
                 break;
             }
+            cursor_style_id = seg.style_id;
             let Some(style) = piecetable::style(pt_buf, seg.style_id) else {
                 continue;
             };
             let fi = fonts.resolve(style);
+            let font_size = style.font_size_pt as u16;
+            let italic = style.flags & piecetable::FLAG_ITALIC != 0;
 
             let seg_text = &text[seg.text_start..seg_end.min(text.len())];
+            // Shape the full segment (same call as the renderer) to get exact advances.
+            let shaped =
+                shape_rich_segment(fi.data, seg_text, font_size, fi.upem, style.weight, italic);
+
+            // Count how many characters to measure up to cursor_pos.
             let measure_end = (cursor_pos as usize).min(seg_end) - seg.text_start;
             let measure_text = &seg_text[..measure_end.min(seg_text.len())];
+            let char_count = core::str::from_utf8(measure_text)
+                .unwrap_or("")
+                .chars()
+                .count();
 
-            for ch in core::str::from_utf8(measure_text).unwrap_or("").chars() {
-                x_pt += super::char_advance_pt(
-                    fi.data,
-                    ch,
-                    style.font_size_pt as u16,
-                    fi.upem,
-                );
+            // Sum shaped glyph advances for exactly char_count glyphs.
+            // For simple text (no ligatures), glyph count == char count.
+            for g in shaped.iter().take(char_count) {
+                x_pt += g.x_advance as f32 / 65536.0;
             }
 
             if cursor_pos as usize <= seg_end {
                 break;
             }
+            // Cursor past this segment — add all remaining glyph advances.
+            for g in shaped.iter().skip(char_count) {
+                x_pt += g.x_advance as f32 / 65536.0;
+            }
         }
 
-        // Convert to 16.16 fixed-point millipoints (>> 6 converts 16.16 to Mpt).
+        // Compute cursor height and y from the style at cursor position.
+        // Height = cap height (baseline to top of capital letters).
+        let (cursor_h, cursor_cap_pt, cursor_weight, cursor_color, cursor_italic) =
+            if let Some(style) = piecetable::style(pt_buf, cursor_style_id) {
+                let fi = fonts.resolve(style);
+                let cap_h = if fi.upem > 0 {
+                    if fi.cap_height > 0 {
+                        fi.cap_height as f32 * style.font_size_pt as f32 / fi.upem as f32
+                    } else {
+                        (fi.ascender as i32).abs() as f32 * style.font_size_pt as f32
+                            / fi.upem as f32
+                            * 0.7
+                    }
+                } else {
+                    style.font_size_pt as f32 * 0.7
+                };
+                let is_italic = style.flags & piecetable::FLAG_ITALIC != 0;
+                (cap_h as u32, cap_h, style.weight, style.color, is_italic)
+            } else {
+                (
+                    default_height,
+                    default_height as f32 * 0.7,
+                    400,
+                    [32, 32, 32, 255],
+                    false,
+                )
+            };
+
+        // Baseline-aligned y: cursor top = baseline - cap_height.
+        // Baseline = line.y + max_ascent_pt.
+        // cursor_y = line.y + max_ascent_pt - cap_height_pt.
+        let baseline_offset = (max_ascent_pt - cursor_cap_pt) as i32;
+        let cursor_y = scene::pt(line.y + baseline_offset);
+
         let x_fx = (x_pt * 65536.0) as i64;
         let cursor_x = (x_fx >> 6) as scene::Mpt;
-        let cursor_y = scene::pt(line.y);
-        return (cursor_x, cursor_y);
+        return RichCursorInfo {
+            x: cursor_x,
+            y: cursor_y,
+            height: cursor_h.max(2),
+            style_weight: cursor_weight,
+            color: cursor_color,
+            italic: cursor_italic,
+        };
     }
 
     // Cursor past end — put it on the last line.
+    let fallback_color = [32, 32, 32, 255];
     if let Some(last_line) = rich_lines.last() {
-        (0, scene::pt(last_line.y))
+        RichCursorInfo {
+            x: 0,
+            y: scene::pt(last_line.y),
+            height: default_height,
+            style_weight: 400,
+            color: fallback_color,
+            italic: false,
+        }
     } else {
-        (0, 0)
+        RichCursorInfo {
+            x: 0,
+            y: 0,
+            height: default_height,
+            style_weight: 400,
+            color: fallback_color,
+            italic: false,
+        }
     }
+}
+
+/// Hit-test: map (x_pt, y_pt) in document coordinates to a byte offset
+/// in the logical text. Used for click-to-place-cursor in rich text.
+pub(crate) fn rich_xy_to_byte(
+    pt_buf: &[u8],
+    text: &[u8],
+    x_pt: f32,
+    y_pt: f32,
+    rich_lines: &[super::RichLine],
+    fonts: &RichFonts<'_>,
+) -> usize {
+    // Find which line the y coordinate falls on.
+    let mut target_line = None;
+    for (i, line) in rich_lines.iter().enumerate() {
+        let line_bottom = line.y + line.line_height;
+        if (y_pt as i32) < line_bottom {
+            target_line = Some(i);
+            break;
+        }
+    }
+    // If past all lines, use the last line.
+    let line_idx = target_line.unwrap_or(rich_lines.len().saturating_sub(1));
+    let Some(line) = rich_lines.get(line_idx) else {
+        return 0;
+    };
+    if line.segments.is_empty() {
+        return 0;
+    }
+
+    // Walk characters in this line to find the byte offset closest to x_pt.
+    let mut pen_x: f32 = 0.0;
+    let mut best_pos = line.segments[0].text_start;
+
+    for seg in &line.segments {
+        let seg_end = seg.text_start + seg.text_len;
+        let Some(style) = piecetable::style(pt_buf, seg.style_id) else {
+            continue;
+        };
+        let fi = fonts.resolve(style);
+        let font_size = style.font_size_pt as u16;
+        let italic = style.flags & piecetable::FLAG_ITALIC != 0;
+
+        let seg_text = &text[seg.text_start..seg_end.min(text.len())];
+        // Shape segment (same as renderer) for exact advance matching.
+        let shaped =
+            shape_rich_segment(fi.data, seg_text, font_size, fi.upem, style.weight, italic);
+
+        let seg_str = core::str::from_utf8(seg_text).unwrap_or("");
+        let mut byte_pos = seg.text_start;
+        let mut glyph_idx = 0usize;
+        for _ch in seg_str.chars() {
+            let adv = if glyph_idx < shaped.len() {
+                let a = shaped[glyph_idx].x_advance as f32 / 65536.0;
+                glyph_idx += 1;
+                a
+            } else {
+                0.0
+            };
+            if x_pt < pen_x + adv * 0.5 {
+                return byte_pos;
+            }
+            pen_x += adv;
+            byte_pos += _ch.len_utf8();
+            best_pos = byte_pos;
+        }
+    }
+
+    best_pos
 }

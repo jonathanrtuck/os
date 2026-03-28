@@ -291,11 +291,11 @@ fn walk_node(
             color,
             glyphs: glyph_ref,
             glyph_count,
-            axis_hash,
+            style_id,
             ..
         } => {
-            // Map axis_hash to font_id (scene::FONT_MONO=0, scene::FONT_SANS=1).
-            let font_id = (axis_hash as u16).min(1);
+            // Map style_id to font_id (0=mono, 1=sans).
+            let font_id = (style_id as u16).min(1);
             emit_glyphs(
                 text_batch,
                 glyphs_data,

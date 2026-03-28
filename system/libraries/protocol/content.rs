@@ -26,6 +26,12 @@ pub const CONTENT_ID_FONT_MONO: u32 = 1;
 pub const CONTENT_ID_FONT_SANS: u32 = 2;
 /// Serif font (Source Serif 4) — rendering data for body text.
 pub const CONTENT_ID_FONT_SERIF: u32 = 3;
+/// Monospace italic font (JetBrains Mono Italic).
+pub const CONTENT_ID_FONT_MONO_ITALIC: u32 = 4;
+/// Sans-serif italic font (Inter Italic).
+pub const CONTENT_ID_FONT_SANS_ITALIC: u32 = 5;
+/// Serif italic font (Source Serif 4 Italic).
+pub const CONTENT_ID_FONT_SERIF_ITALIC: u32 = 6;
 /// First dynamically assigned content ID (for decoded images, etc.).
 pub const CONTENT_ID_DYNAMIC_START: u32 = 16;
 
@@ -449,4 +455,171 @@ impl ContentAllocator {
         self.blocks[index] = block;
         self.count += 1;
     }
+}
+
+// ── Style registry (scene data buffer) ────────────────────────────
+
+/// Magic value: "STYL" as little-endian u32.
+pub const STYLE_REGISTRY_MAGIC: u32 = 0x4C59_5453;
+
+/// Maximum number of variation axes per style entry.
+pub const MAX_STYLE_AXES: usize = 8;
+
+/// Header at the start of the style registry in the scene data buffer.
+///
+/// The style registry lives at byte offset 0 of the scene data buffer.
+/// Written by core, read by the renderer to map style_id to rasterization
+/// parameters (font data location, axes, metrics).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct StyleRegistryHeader {
+    /// Magic number for validation (STYLE_REGISTRY_MAGIC).
+    pub magic: u32,
+    /// Number of style entries following this header.
+    pub entry_count: u16,
+    /// Maximum axes per entry (MAX_STYLE_AXES). Informational.
+    pub max_axes: u8,
+    pub _pad: u8,
+}
+
+const _: () = assert!(core::mem::size_of::<StyleRegistryHeader>() == 8);
+
+/// A single font variation axis value (e.g., `wght` = 700.0).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct StyleAxisValue {
+    /// OpenType axis tag (e.g., `b"wght"`, `b"ital"`).
+    pub tag: [u8; 4],
+    /// Axis value in design-space units.
+    pub value: f32,
+}
+
+const _: () = assert!(core::mem::size_of::<StyleAxisValue>() == 8);
+
+/// A single style entry mapping a style_id to font rasterization parameters.
+///
+/// The renderer uses these to select the correct font data from the Content
+/// Region, apply variation axes, and compute glyph metrics.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct StyleRegistryEntry {
+    /// Unique style identifier. Referenced by styled text runs in the scene.
+    pub style_id: u32,
+    /// Content Region content_id for the font data (TTF bytes).
+    pub content_id: u32,
+    /// Typographic ascent in font units.
+    pub ascent_fu: u16,
+    /// Typographic descent in font units (positive value).
+    pub descent_fu: u16,
+    /// Units per em from the font's head table.
+    pub upem: u16,
+    /// Number of active axes in `axes` (0..MAX_STYLE_AXES).
+    pub axis_count: u8,
+    pub _pad: u8,
+    /// Variation axis values. Only the first `axis_count` entries are meaningful.
+    pub axes: [StyleAxisValue; MAX_STYLE_AXES],
+}
+
+const _: () = assert!(core::mem::size_of::<StyleRegistryEntry>() == 80);
+
+/// Write a style registry into a byte buffer.
+///
+/// Serializes the header and entries contiguously at the start of `buf`.
+/// Returns the number of bytes written, or 0 if the buffer is too small.
+pub fn write_style_registry(buf: &mut [u8], entries: &[StyleRegistryEntry]) -> usize {
+    let header_size = core::mem::size_of::<StyleRegistryHeader>();
+    let entry_size = core::mem::size_of::<StyleRegistryEntry>();
+    let total = header_size + entries.len() * entry_size;
+
+    if buf.len() < total {
+        return 0;
+    }
+
+    let header = StyleRegistryHeader {
+        magic: STYLE_REGISTRY_MAGIC,
+        entry_count: entries.len() as u16,
+        max_axes: MAX_STYLE_AXES as u8,
+        _pad: 0,
+    };
+
+    // SAFETY: `buf` has at least `total` bytes (checked above). `header` is
+    // `#[repr(C)]` and `Copy`, so reading its bytes is safe. The destination
+    // is a `&mut [u8]` so alignment is irrelevant — we use `copy_nonoverlapping`
+    // to write raw bytes.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            &header as *const StyleRegistryHeader as *const u8,
+            buf.as_mut_ptr(),
+            header_size,
+        );
+    }
+
+    for (i, entry) in entries.iter().enumerate() {
+        let offset = header_size + i * entry_size;
+        // SAFETY: `offset + entry_size <= total <= buf.len()` (checked above).
+        // `entry` is `#[repr(C)]` and `Copy`.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                entry as *const StyleRegistryEntry as *const u8,
+                buf.as_mut_ptr().add(offset),
+                entry_size,
+            );
+        }
+    }
+
+    total
+}
+
+/// Read a style registry from a byte buffer.
+///
+/// Returns a slice of entries if the buffer contains a valid style registry
+/// (correct magic, sufficient length). Returns `None` if the magic is wrong
+/// or the buffer is too small for the declared entry count.
+///
+/// # Safety invariant
+///
+/// The scene data buffer is page-aligned shared memory, so the 4-byte
+/// alignment requirement of `StyleRegistryHeader` and the 4-byte alignment
+/// requirement of `StyleRegistryEntry` are satisfied. This function uses
+/// pointer casts that rely on this alignment guarantee.
+pub fn read_style_registry(buf: &[u8]) -> Option<&[StyleRegistryEntry]> {
+    let header_size = core::mem::size_of::<StyleRegistryHeader>();
+    if buf.len() < header_size {
+        return None;
+    }
+
+    // SAFETY: `buf.len() >= header_size` (checked above). The scene data buffer
+    // is page-aligned shared memory, satisfying the 4-byte alignment of
+    // `StyleRegistryHeader`. All fields are plain integers — any bit pattern
+    // is valid for the `#[repr(C)]` layout.
+    let header = unsafe { &*(buf.as_ptr() as *const StyleRegistryHeader) };
+
+    if header.magic != STYLE_REGISTRY_MAGIC {
+        return None;
+    }
+
+    let count = header.entry_count as usize;
+    if count == 0 {
+        return Some(&[]);
+    }
+
+    let entry_size = core::mem::size_of::<StyleRegistryEntry>();
+    let required = header_size + count * entry_size;
+    if buf.len() < required {
+        return None;
+    }
+
+    // SAFETY: `buf.len() >= required` (checked above). The entries start at
+    // `header_size` offset from a page-aligned base, and `header_size` is 8
+    // (aligned to 4), so the 4-byte alignment of `StyleRegistryEntry` is
+    // satisfied. Each entry is `#[repr(C)]` with only integer and f32 fields —
+    // any bit pattern is a valid value.
+    let entries = unsafe {
+        core::slice::from_raw_parts(
+            buf.as_ptr().add(header_size) as *const StyleRegistryEntry,
+            count,
+        )
+    };
+
+    Some(entries)
 }

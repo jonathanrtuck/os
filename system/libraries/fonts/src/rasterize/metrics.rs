@@ -10,7 +10,7 @@ use read_fonts::{tables::cmap::Cmap, FontRef, TableProvider};
 // Font metric helpers
 // ---------------------------------------------------------------------------
 
-/// Basic font metrics extracted from the hhea and head tables.
+/// Basic font metrics extracted from the hhea, head, and OS/2 tables.
 pub struct FontMetrics {
     pub units_per_em: u16,
     /// hhea ascent (positive above baseline, in font units).
@@ -19,6 +19,8 @@ pub struct FontMetrics {
     pub descent: i16,
     /// hhea line gap (in font units).
     pub line_gap: i16,
+    /// OS/2 sCapHeight (height of capital H above baseline, font units). 0 if unavailable.
+    pub cap_height: i16,
 }
 
 /// Extract basic font metrics from raw font data.
@@ -27,11 +29,19 @@ pub fn font_metrics(font_data: &[u8]) -> Option<FontMetrics> {
     let head = font.head().ok()?;
     let hhea = font.hhea().ok()?;
 
+    // Cap height from OS/2 table (version 2+). Falls back to 0.
+    let cap_height = font
+        .os2()
+        .ok()
+        .and_then(|os2| os2.s_cap_height())
+        .unwrap_or(0) as i16;
+
     Some(FontMetrics {
         units_per_em: head.units_per_em(),
         ascent: hhea.ascender().to_i16(),
         descent: hhea.descender().to_i16(),
         line_gap: hhea.line_gap().to_i16(),
+        cap_height,
     })
 }
 
@@ -156,6 +166,18 @@ pub struct RasterBuffer<'a> {
     pub data: &'a mut [u8],
     pub width: u32,
     pub height: u32,
+}
+
+/// Returns the horizontal advance width for a glyph, adjusted for variation axes.
+///
+/// Tries HVAR first (fast per-glyph delta lookup). Falls back to the plain
+/// hmtx advance when no axes are specified or the font has no HVAR table.
+pub fn glyph_h_advance_with_axes(
+    font_data: &[u8],
+    glyph_id: u16,
+    axes: &[AxisValue],
+) -> Option<i32> {
+    super::hvar::advance_with_delta(font_data, glyph_id, axes)
 }
 
 /// Compute a deterministic hash of axis values for use as a glyph cache key component.

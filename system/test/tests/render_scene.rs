@@ -13,7 +13,7 @@ struct TestLayoutRun {
     color: Color,
     advance: u16,
     font_size: u16,
-    axis_hash: u32,
+    style_id: u32,
 }
 
 /// Convert a byte offset to (visual_line, column) with monospace wrapping.
@@ -79,7 +79,7 @@ fn layout_mono_lines(
             color,
             advance,
             font_size,
-            axis_hash: 0,
+            style_id: 0,
         });
 
         line_y = line_y.saturating_add(line_height);
@@ -101,7 +101,7 @@ fn layout_mono_lines(
             color,
             advance,
             font_size,
-            axis_hash: 0,
+            style_id: 0,
         });
     }
 
@@ -180,7 +180,7 @@ fn make_mono_glyphs(
         glyphs: glyph_ref,
         glyph_count: glyphs.len() as u16,
         font_size,
-        axis_hash: 0,
+        style_id: 0,
     }
 }
 
@@ -2483,7 +2483,7 @@ fn glyphs_round_trip_scene_writer_reader() {
         glyphs: dref,
         glyph_count: 3,
         font_size: 18,
-        axis_hash: 0xDEAD_BEEF,
+        style_id: 0xDEAD_BEEF,
     };
     w.set_root(id);
     w.commit();
@@ -2496,12 +2496,12 @@ fn glyphs_round_trip_scene_writer_reader() {
             glyphs,
             glyph_count,
             font_size,
-            axis_hash,
+            style_id,
         } => {
             assert_eq!(color, Color::rgb(220, 220, 220));
             assert_eq!(glyph_count, 3);
             assert_eq!(font_size, 18);
-            assert_eq!(axis_hash, 0xDEAD_BEEF);
+            assert_eq!(style_id, 0xDEAD_BEEF);
             let read = r.shaped_glyphs(glyphs, glyph_count);
             assert_eq!(read.len(), 3);
             assert_eq!(read[0].glyph_id, 72);
@@ -2542,7 +2542,7 @@ fn glyphs_triple_buffer_round_trip() {
             glyphs: dref,
             glyph_count: 2,
             font_size: 16,
-            axis_hash: 0x1234,
+            style_id: 0x1234,
         };
         w.set_root(id);
     }
@@ -2554,12 +2554,12 @@ fn glyphs_triple_buffer_round_trip() {
             glyphs,
             glyph_count,
             font_size,
-            axis_hash,
+            style_id,
             ..
         } => {
             assert_eq!(glyph_count, 2);
             assert_eq!(font_size, 16);
-            assert_eq!(axis_hash, 0x1234);
+            assert_eq!(style_id, 0x1234);
             let read = tr.front_shaped_glyphs(glyphs, glyph_count);
             assert_eq!(read.len(), 2);
             assert_eq!(read[0].glyph_id, 65);
@@ -2590,7 +2590,7 @@ fn glyphs_acquire_copy_preserves_data() {
             glyphs: dref,
             glyph_count: 1,
             font_size: 24,
-            axis_hash: 0,
+            style_id: 0,
         };
         w.set_root(id);
     }
@@ -2638,7 +2638,7 @@ fn multiple_glyphs_nodes_coexist() {
             glyphs: dref,
             glyph_count: count,
             font_size: 16,
-            axis_hash: 0,
+            style_id: 0,
         };
         w.add_child(root, nid);
         expected_ids.push((i * 100, count));
@@ -2722,7 +2722,7 @@ fn mixed_background_glyphs_image_triple_buffer() {
             glyphs: gref,
             glyph_count: 1,
             font_size: 16,
-            axis_hash: 0,
+            style_id: 0,
         };
         w.add_child(root, glyph_id);
 
@@ -2786,7 +2786,7 @@ fn mark_dirty_works_for_background_and_glyphs_triple() {
             },
             glyph_count: 0,
             font_size: 16,
-            axis_hash: 0,
+            style_id: 0,
         };
         w.set_root(0);
     }
@@ -2810,10 +2810,10 @@ fn mark_dirty_works_for_background_and_glyphs_triple() {
     assert_eq!(popcount, 2);
 }
 
-// ── Glyphs axis_hash round-trip (VAL-SCENE-002) ────────────────────
+// ── Glyphs style_id round-trip (VAL-SCENE-002) ─────────────────────
 
 #[test]
-fn glyphs_axis_hash_round_trip() {
+fn glyphs_style_id_round_trip() {
     let mut buf = make_buf();
     let mut w = SceneWriter::new(&mut buf);
     let id = w.alloc_node().unwrap();
@@ -2825,15 +2825,15 @@ fn glyphs_axis_hash_round_trip() {
         },
         glyph_count: 0,
         font_size: 18,
-        axis_hash: 0xABCD_1234,
+        style_id: 0xABCD_1234,
     };
     w.set_root(id);
     w.commit();
 
     let r = SceneReader::new(&buf);
     match r.node(id).content {
-        Content::Glyphs { axis_hash, .. } => {
-            assert_eq!(axis_hash, 0xABCD_1234, "axis_hash must survive round-trip");
+        Content::Glyphs { style_id, .. } => {
+            assert_eq!(style_id, 0xABCD_1234, "style_id must survive round-trip");
         }
         _ => panic!("expected Glyphs"),
     }
@@ -2865,7 +2865,7 @@ fn content_enum_has_three_variants() {
         },
         glyph_count: 0,
         font_size: 0,
-        axis_hash: 0,
+        style_id: 0,
     };
     assert!(matches!(none, Content::None));
     assert!(matches!(img, Content::InlineImage { .. }));
@@ -2891,11 +2891,11 @@ fn make_mono_glyphs_produces_correct_content() {
             glyphs,
             glyph_count,
             font_size,
-            axis_hash,
+            style_id,
         } => {
             assert_eq!(glyph_count, 5);
             assert_eq!(font_size, 16);
-            assert_eq!(axis_hash, 0);
+            assert_eq!(style_id, 0);
             assert_eq!(color, Color::rgb(200, 200, 200));
             let read = r.shaped_glyphs(glyphs, glyph_count);
             assert_eq!(read.len(), 5);
@@ -3038,7 +3038,7 @@ fn build_test_editor_scene(
             glyphs: title_glyph_ref,
             glyph_count: title_glyphs.len() as u16,
             font_size,
-            axis_hash: 0,
+            style_id: 0,
         };
         n.content_hash = fnv1a(b"Text");
         n.flags = NodeFlags::VISIBLE;
@@ -3055,7 +3055,7 @@ fn build_test_editor_scene(
             glyphs: clock_glyph_ref,
             glyph_count: clock_glyphs.len() as u16,
             font_size,
-            axis_hash: 0,
+            style_id: 0,
         };
         n.content_hash = fnv1a(b"12:34:56");
         n.flags = NodeFlags::VISIBLE;
@@ -3105,7 +3105,7 @@ fn build_test_editor_scene(
                 glyphs: glyph_ref,
                 glyph_count,
                 font_size,
-                axis_hash: 0,
+                style_id: 0,
             };
             n.content_hash = fnv1a(&glyph_ref.offset.to_le_bytes());
             n.flags = NodeFlags::VISIBLE;
@@ -3726,7 +3726,7 @@ fn core_update_clock_in_place_glyph_overwrite() {
             glyphs: clock_ref,
             glyph_count: 8,
             font_size: 16,
-            axis_hash: 0,
+            style_id: 0,
         };
         w.node_mut(CORE_N_CLOCK_TEXT).content_hash = fnv1a(b"12:34:56");
         w.set_root(CORE_N_ROOT);
@@ -4373,7 +4373,7 @@ fn triple_buffer_background_glyphs_round_trip() {
             glyphs: gref,
             glyph_count: 1,
             font_size: 16,
-            axis_hash: 0,
+            style_id: 0,
         };
         w.add_child(root, glyph_id);
     }
@@ -4778,7 +4778,7 @@ fn incremental_data_push_preserves_old_data() {
             glyphs: original_ref,
             glyph_count: 3,
             font_size: 16,
-            axis_hash: 0,
+            style_id: 0,
         };
     }
     tw.publish();
@@ -4956,7 +4956,7 @@ fn incremental_update_marks_only_changed_nodes_dirty() {
             glyphs: new_ref,
             glyph_count: 3,
             font_size: 16,
-            axis_hash: 0,
+            style_id: 0,
         };
         w.mark_dirty(4); // Only mark the changed line.
         w.mark_dirty(2); // Mark cursor as dirty too.

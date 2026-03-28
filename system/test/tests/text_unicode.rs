@@ -276,7 +276,7 @@ fn unicode_scene_graph_naive_resume_round_trip() {
         glyphs: dref,
         glyph_count: scene_glyphs.len() as u16,
         font_size: 18,
-        axis_hash: 0,
+        style_id: 0,
     };
     w.set_root(id);
     w.commit();
@@ -343,7 +343,7 @@ fn unicode_scene_graph_write_read_round_trip() {
         glyphs: dref,
         glyph_count: scene_glyphs.len() as u16,
         font_size: 18,
-        axis_hash: 0,
+        style_id: 0,
     };
     w.set_root(id);
     w.commit();

@@ -192,7 +192,7 @@ fn apply_style_range() {
     assert_eq!(style_at(&buf, 2), Some(bold_id));
     assert_eq!(style_at(&buf, 3), Some(bold_id));
     assert_eq!(style_at(&buf, 4), Some(0)); // body
-    // Text should be unchanged.
+                                            // Text should be unchanged.
     assert_eq!(read_text(&buf), b"hello");
 }
 
@@ -553,4 +553,43 @@ fn large_utf8_text() {
     assert!(insert_bytes(&mut buf, 0, text.as_bytes()));
     assert_eq!(text_len(&buf), 21);
     assert_eq!(read_text(&buf), text.as_bytes());
+}
+
+// ── find_style_by_role ──────────────────────────────────────────────────
+
+#[test]
+fn find_style_by_role_finds_bold() {
+    let mut buf = make_with_text(b"hello", 4096);
+    // Add bold style (ROLE_STRONG) at index 1.
+    let bold = bold_style();
+    let id = add_style(&mut buf, &bold);
+    assert!(id.is_some());
+    let found = find_style_by_role(&buf, ROLE_STRONG);
+    assert_eq!(found, id);
+    let style = piecetable::style(&buf, found.unwrap()).unwrap();
+    assert_eq!(style.weight, 700);
+}
+
+#[test]
+fn find_style_by_role_returns_none_for_missing() {
+    let buf = make_with_text(b"hello", 4096);
+    // Default palette only has body (ROLE_BODY=0). ROLE_STRONG should not be found.
+    assert!(find_style_by_role(&buf, ROLE_STRONG).is_none());
+}
+
+#[test]
+fn find_style_by_role_finds_all_defaults() {
+    let mut buf = make_with_text(b"hello", 4096);
+    // Add all default styles.
+    assert!(add_style(&mut buf, &heading1_style()).is_some());
+    assert!(add_style(&mut buf, &heading2_style()).is_some());
+    assert!(add_style(&mut buf, &bold_style()).is_some());
+    assert!(add_style(&mut buf, &italic_style()).is_some());
+    assert!(add_style(&mut buf, &bold_italic_style()).is_some());
+    assert!(add_style(&mut buf, &code_style()).is_some());
+
+    assert!(find_style_by_role(&buf, ROLE_HEADING1).is_some());
+    assert!(find_style_by_role(&buf, ROLE_HEADING2).is_some());
+    assert!(find_style_by_role(&buf, ROLE_STRONG).is_some());
+    assert!(find_style_by_role(&buf, ROLE_EMPHASIS).is_some());
 }

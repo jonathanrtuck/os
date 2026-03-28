@@ -3604,7 +3604,7 @@ fn transformed_text_uses_axis_aligned_glyph_rendering() {
         },
         glyph_count: 5,
         font_size: 16,
-        axis_hash: 0,
+        style_id: 0,
     };
 
     let w = 200u32;
@@ -3936,7 +3936,7 @@ fn full_feature_composition() {
         },
         glyph_count: 3,
         font_size: 16,
-        axis_hash: 0,
+        style_id: 0,
     };
 
     // At 1.5x: 200→300 physical pixels.
@@ -4860,7 +4860,7 @@ fn all_content_types_render_in_one_scene() {
         },
         glyph_count: 0,
         font_size: 16,
-        axis_hash: 0,
+        style_id: 0,
     };
     w.add_child(root, glyphs_node);
 

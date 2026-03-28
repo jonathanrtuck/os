@@ -1,13 +1,17 @@
-//! Glyph texture atlas with row-based packing.
+//! Glyph texture atlas with open-addressed hash table lookup.
+//!
+//! Keyed by `(glyph_id, font_size_px, style_id)` — supports arbitrary
+//! font/size/style combinations unlike the previous flat-array design.
 
-use crate::{ATLAS_HEIGHT, ATLAS_WIDTH};
+/// Atlas texture width in pixels.
+pub(crate) const ATLAS_WIDTH: u32 = 2048;
+/// Atlas texture height in pixels.
+pub(crate) const ATLAS_HEIGHT: u32 = 2048;
 
-/// Maximum glyph ID per font in the atlas lookup table.
-pub(crate) const GLYPH_STRIDE: usize = 2048;
-/// Number of font slots in the atlas (0 = mono, 1 = sans).
-pub(crate) const MAX_FONTS: usize = 2;
-/// Total atlas entry capacity (GLYPH_STRIDE * MAX_FONTS).
-const MAX_GLYPH_ENTRIES: usize = GLYPH_STRIDE * MAX_FONTS;
+/// Hash table capacity (must be a power of 2).
+const CAPACITY: usize = 16384;
+/// Sentinel value for empty slots.
+const EMPTY: u64 = u64::MAX;
 
 /// Atlas entry for a single rasterized glyph.
 #[derive(Clone, Copy)]
@@ -20,12 +24,44 @@ pub(crate) struct AtlasEntry {
     pub(crate) bearing_y: i16,
 }
 
-/// Glyph texture atlas with row-based packing.
-/// Supports multiple fonts via `font_id` offset into the entries array:
-/// font 0 (mono) uses entries[0..GLYPH_STRIDE), font 1 (sans) uses
-/// entries[GLYPH_STRIDE..2*GLYPH_STRIDE), etc.
+/// A single slot in the open-addressed hash table.
+#[derive(Clone, Copy)]
+struct AtlasSlot {
+    key: u64,
+    entry: AtlasEntry,
+}
+
+/// Pack a `(glyph_id, font_size_px, style_id)` triple into a single `u64` key.
+///
+/// Layout: `glyph_id` in bits 0..15, `font_size_px` in bits 16..31,
+/// `style_id` in bits 32..63.
+fn pack_key(glyph_id: u16, font_size_px: u16, style_id: u32) -> u64 {
+    glyph_id as u64 | ((font_size_px as u64) << 16) | ((style_id as u64) << 32)
+}
+
+/// FNV-1a hash of a `u64` key, masked to the table size.
+fn hash_key(key: u64) -> usize {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0100_0000_01b3;
+
+    let bytes = key.to_le_bytes();
+    let mut h = FNV_OFFSET;
+    let mut i = 0;
+    while i < 8 {
+        h ^= bytes[i] as u64;
+        h = h.wrapping_mul(FNV_PRIME);
+        i += 1;
+    }
+    (h as usize) & (CAPACITY - 1)
+}
+
+/// Glyph texture atlas with open-addressed hash table and row-based packing.
+///
+/// Supports arbitrary font/size/style combinations via a `(glyph_id,
+/// font_size_px, style_id)` key. The hash table uses linear probing with
+/// FNV-1a hashing. Eviction is full-reset only (`reset()`).
 pub(crate) struct GlyphAtlas {
-    entries: [AtlasEntry; MAX_GLYPH_ENTRIES],
+    slots: [AtlasSlot; CAPACITY],
     pub(crate) pixels: [u8; (ATLAS_WIDTH * ATLAS_HEIGHT) as usize],
     pub(crate) row_y: u16,
     pub(crate) row_x: u16,
@@ -33,34 +69,93 @@ pub(crate) struct GlyphAtlas {
 }
 
 impl GlyphAtlas {
-    /// Flat index for a (glyph_id, font_id) pair.
-    fn effective_id(glyph_id: u16, font_id: u16) -> usize {
-        font_id as usize * GLYPH_STRIDE + glyph_id as usize
-    }
-
-    pub(crate) fn lookup(&self, glyph_id: u16, font_id: u16) -> Option<&AtlasEntry> {
-        let id = Self::effective_id(glyph_id, font_id);
-        if id < MAX_GLYPH_ENTRIES && self.entries[id].width > 0 {
-            Some(&self.entries[id])
-        } else {
-            None
+    /// Create a new empty atlas with all slots cleared.
+    pub(crate) fn new() -> Self {
+        let empty_slot = AtlasSlot {
+            key: EMPTY,
+            entry: AtlasEntry {
+                u: 0,
+                v: 0,
+                width: 0,
+                height: 0,
+                bearing_x: 0,
+                bearing_y: 0,
+            },
+        };
+        GlyphAtlas {
+            slots: [empty_slot; CAPACITY],
+            pixels: [0u8; (ATLAS_WIDTH * ATLAS_HEIGHT) as usize],
+            row_y: 0,
+            row_x: 0,
+            row_h: 0,
         }
     }
 
+    /// Look up a glyph entry by `(glyph_id, font_size_px, style_id)`.
+    ///
+    /// Returns `None` if the glyph is not in the atlas.
+    pub(crate) fn lookup(
+        &self,
+        glyph_id: u16,
+        font_size_px: u16,
+        style_id: u32,
+    ) -> Option<&AtlasEntry> {
+        let key = pack_key(glyph_id, font_size_px, style_id);
+        let mut idx = hash_key(key);
+        let mut probes = 0usize;
+        while probes < CAPACITY {
+            let slot = &self.slots[idx];
+            if slot.key == EMPTY {
+                return None;
+            }
+            if slot.key == key {
+                return Some(&slot.entry);
+            }
+            idx = (idx + 1) & (CAPACITY - 1);
+            probes += 1;
+        }
+        None
+    }
+
+    /// Insert a pre-built `AtlasEntry` into the hash table without touching
+    /// the pixel buffer or row packer. Returns `false` if the table is full.
+    pub(crate) fn insert(
+        &mut self,
+        glyph_id: u16,
+        font_size_px: u16,
+        style_id: u32,
+        entry: AtlasEntry,
+    ) -> bool {
+        let key = pack_key(glyph_id, font_size_px, style_id);
+        let mut idx = hash_key(key);
+        let mut probes = 0usize;
+        while probes < CAPACITY {
+            let slot = &self.slots[idx];
+            if slot.key == EMPTY || slot.key == key {
+                self.slots[idx] = AtlasSlot { key, entry };
+                return true;
+            }
+            idx = (idx + 1) & (CAPACITY - 1);
+            probes += 1;
+        }
+        false
+    }
+
+    /// Rasterize and pack a glyph into the atlas texture, then insert the
+    /// resulting entry into the hash table.
+    ///
+    /// Returns `false` if the atlas texture is full or the hash table is full.
     pub(crate) fn pack(
         &mut self,
         glyph_id: u16,
-        font_id: u16,
+        font_size_px: u16,
+        style_id: u32,
         w: u16,
         h: u16,
         bearing_x: i16,
         bearing_y: i16,
         data: &[u8],
     ) -> bool {
-        let id = Self::effective_id(glyph_id, font_id);
-        if id >= MAX_GLYPH_ENTRIES {
-            return false;
-        }
         // Check if we need a new row.
         if self.row_x + w > ATLAS_WIDTH as u16 {
             self.row_y += self.row_h;
@@ -68,24 +163,26 @@ impl GlyphAtlas {
             self.row_h = 0;
         }
         if self.row_y + h > ATLAS_HEIGHT as u16 {
-            return false; // Atlas full.
+            return false; // Atlas texture full.
         }
 
         let u = self.row_x;
         let v = self.row_y;
 
         // Copy glyph bitmap into atlas pixel buffer.
-        for row in 0..h as usize {
-            let src_start = row * w as usize;
-            let dst_start = (v as usize + row) * ATLAS_WIDTH as usize + u as usize;
+        let mut row = 0u16;
+        while row < h {
+            let src_start = row as usize * w as usize;
+            let dst_start = (v + row) as usize * ATLAS_WIDTH as usize + u as usize;
             let src_end = src_start + w as usize;
             let dst_end = dst_start + w as usize;
             if src_end <= data.len() && dst_end <= self.pixels.len() {
                 self.pixels[dst_start..dst_end].copy_from_slice(&data[src_start..src_end]);
             }
+            row += 1;
         }
 
-        self.entries[id] = AtlasEntry {
+        let entry = AtlasEntry {
             u,
             v,
             width: w,
@@ -98,6 +195,21 @@ impl GlyphAtlas {
         if h > self.row_h {
             self.row_h = h;
         }
-        true
+
+        self.insert(glyph_id, font_size_px, style_id, entry)
+    }
+
+    /// Clear all hash table slots and reset the row packer.
+    pub(crate) fn reset(&mut self) {
+        let mut i = 0;
+        while i < CAPACITY {
+            self.slots[i].key = EMPTY;
+            i += 1;
+        }
+        self.row_y = 0;
+        self.row_x = 0;
+        self.row_h = 0;
+        // Note: pixel buffer is not cleared — stale data is harmless since
+        // all lookups go through the hash table.
     }
 }
