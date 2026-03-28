@@ -179,59 +179,508 @@ fn main() {
         println!("  font  {:?}  {}  ({} bytes)", id, font.name, data.len());
     }
 
-    // Create a sample text/rich document showcasing all 7 styles.
+    // Create a comprehensive test document using all 32 style slots.
     {
-        let sample_text = b"Rich Text Demo\nTypography\nBody text. Bold text. Italic text. Bold italic. Inline code.\nParagraphs\nSecond paragraph to verify newline handling.\n";
-        //                   ^0            ^14          ^25       ^36        ^47          ^60             ^75
-        // Byte offsets:
-        //   "Rich Text Demo\n"          = 0..15   (15 bytes) → heading1 (style 1)
-        //   "Typography\n"              = 15..26  (11 bytes) → heading2 (style 2)
-        //   "Body text. "               = 26..37  (11 bytes) → body (style 0)
-        //   "Bold text. "               = 37..48  (11 bytes) → bold (style 3)
-        //   "Italic text. "             = 48..62  (14 bytes) → italic (style 4)
-        //   "Bold italic. "             = 62..76  (14 bytes) → bold-italic (style 5)
-        //   "Inline code."              = 76..88  (12 bytes) → code (style 6)
-        //   "\nParagraphs\n"            = 88..101 (13 bytes) → heading2 (style 2)
-        //   "Second paragraph...\n"     = 101..end          → body (style 0)
-        let mut pt_buf = vec![0u8; 4096];
+        use piecetable::{
+            Style, FLAG_ITALIC, FLAG_STRIKETHROUGH, FLAG_UNDERLINE, FONT_MONO, FONT_SANS,
+            FONT_SERIF, ROLE_BODY, ROLE_CODE, ROLE_EMPHASIS, ROLE_HEADING1, ROLE_HEADING2,
+            ROLE_HEADING3, ROLE_STRONG,
+        };
 
+        // -- Define all 32 styles --------------------------------------------------
+        // Style 0: default body (Sans 14pt Regular Black) — set via init_with_text.
+        // Styles 1–31: added via add_style after init.
+        let extra_styles: [Style; 31] = [
+            // 1: Title — Sans 48pt Bold Red
+            Style {
+                font_family: FONT_SANS,
+                role: ROLE_HEADING1,
+                weight: 700,
+                flags: 0,
+                font_size_pt: 48,
+                color: [0xFF, 0x00, 0x00, 0xFF],
+                _pad: [0; 2],
+            },
+            // 2: Subtitle — Serif 24pt Regular Blue
+            Style {
+                font_family: FONT_SERIF,
+                role: ROLE_HEADING2,
+                weight: 400,
+                flags: 0,
+                font_size_pt: 24,
+                color: [0x00, 0x00, 0xFF, 0xFF],
+                _pad: [0; 2],
+            },
+            // 3: Big Mixed — Sans 36pt Bold Green
+            Style {
+                font_family: FONT_SANS,
+                role: ROLE_BODY,
+                weight: 700,
+                flags: 0,
+                font_size_pt: 36,
+                color: [0x00, 0xAA, 0x00, 0xFF],
+                _pad: [0; 2],
+            },
+            // 4: Small Mixed — Mono 10pt Regular Orange
+            Style {
+                font_family: FONT_MONO,
+                role: ROLE_CODE,
+                weight: 400,
+                flags: 0,
+                font_size_pt: 10,
+                color: [0xFF, 0x88, 0x00, 0xFF],
+                _pad: [0; 2],
+            },
+            // 5: Medium Mixed — Serif 18pt Italic Purple
+            Style {
+                font_family: FONT_SERIF,
+                role: ROLE_EMPHASIS,
+                weight: 400,
+                flags: FLAG_ITALIC,
+                font_size_pt: 18,
+                color: [0x88, 0x00, 0xFF, 0xFF],
+                _pad: [0; 2],
+            },
+            // 6: Mono 16pt Regular Cyan
+            Style {
+                font_family: FONT_MONO,
+                role: ROLE_CODE,
+                weight: 400,
+                flags: 0,
+                font_size_pt: 16,
+                color: [0x00, 0xCC, 0xCC, 0xFF],
+                _pad: [0; 2],
+            },
+            // 7: Sans 20pt Bold Magenta
+            Style {
+                font_family: FONT_SANS,
+                role: ROLE_STRONG,
+                weight: 700,
+                flags: 0,
+                font_size_pt: 20,
+                color: [0xFF, 0x00, 0xFF, 0xFF],
+                _pad: [0; 2],
+            },
+            // 8: Serif 14pt Italic Red
+            Style {
+                font_family: FONT_SERIF,
+                role: ROLE_EMPHASIS,
+                weight: 400,
+                flags: FLAG_ITALIC,
+                font_size_pt: 14,
+                color: [0xFF, 0x00, 0x00, 0xFF],
+                _pad: [0; 2],
+            },
+            // 9: Sans 14pt Regular Red (color word)
+            Style {
+                font_family: FONT_SANS,
+                role: ROLE_BODY,
+                weight: 400,
+                flags: 0,
+                font_size_pt: 14,
+                color: [0xFF, 0x00, 0x00, 0xFF],
+                _pad: [0; 2],
+            },
+            // 10: Sans 14pt Regular Blue (color word)
+            Style {
+                font_family: FONT_SANS,
+                role: ROLE_BODY,
+                weight: 400,
+                flags: 0,
+                font_size_pt: 14,
+                color: [0x00, 0x00, 0xFF, 0xFF],
+                _pad: [0; 2],
+            },
+            // 11: Sans 14pt Regular Green (color word)
+            Style {
+                font_family: FONT_SANS,
+                role: ROLE_BODY,
+                weight: 400,
+                flags: 0,
+                font_size_pt: 14,
+                color: [0x00, 0xAA, 0x00, 0xFF],
+                _pad: [0; 2],
+            },
+            // 12: Sans 14pt Regular Orange (color word)
+            Style {
+                font_family: FONT_SANS,
+                role: ROLE_BODY,
+                weight: 400,
+                flags: 0,
+                font_size_pt: 14,
+                color: [0xFF, 0x88, 0x00, 0xFF],
+                _pad: [0; 2],
+            },
+            // 13: Sans 14pt Regular Purple (color word)
+            Style {
+                font_family: FONT_SANS,
+                role: ROLE_BODY,
+                weight: 400,
+                flags: 0,
+                font_size_pt: 14,
+                color: [0x88, 0x00, 0xFF, 0xFF],
+                _pad: [0; 2],
+            },
+            // 14: Sans 14pt Regular Cyan (color word)
+            Style {
+                font_family: FONT_SANS,
+                role: ROLE_BODY,
+                weight: 400,
+                flags: 0,
+                font_size_pt: 14,
+                color: [0x00, 0xCC, 0xCC, 0xFF],
+                _pad: [0; 2],
+            },
+            // 15: Sans 14pt Regular Magenta (color word)
+            Style {
+                font_family: FONT_SANS,
+                role: ROLE_BODY,
+                weight: 400,
+                flags: 0,
+                font_size_pt: 14,
+                color: [0xFF, 0x00, 0xFF, 0xFF],
+                _pad: [0; 2],
+            },
+            // 16: Sans 16pt Thin (w100)
+            Style {
+                font_family: FONT_SANS,
+                role: ROLE_BODY,
+                weight: 100,
+                flags: 0,
+                font_size_pt: 16,
+                color: [0x00, 0x00, 0x00, 0xFF],
+                _pad: [0; 2],
+            },
+            // 17: Sans 16pt ExtraLight (w200)
+            Style {
+                font_family: FONT_SANS,
+                role: ROLE_BODY,
+                weight: 200,
+                flags: 0,
+                font_size_pt: 16,
+                color: [0x22, 0x22, 0x22, 0xFF],
+                _pad: [0; 2],
+            },
+            // 18: Sans 16pt Light (w300)
+            Style {
+                font_family: FONT_SANS,
+                role: ROLE_BODY,
+                weight: 300,
+                flags: 0,
+                font_size_pt: 16,
+                color: [0x44, 0x44, 0x44, 0xFF],
+                _pad: [0; 2],
+            },
+            // 19: Sans 16pt Regular (w400)
+            Style {
+                font_family: FONT_SANS,
+                role: ROLE_BODY,
+                weight: 400,
+                flags: 0,
+                font_size_pt: 16,
+                color: [0x00, 0x00, 0x00, 0xFF],
+                _pad: [0; 2],
+            },
+            // 20: Sans 16pt Medium (w500)
+            Style {
+                font_family: FONT_SANS,
+                role: ROLE_BODY,
+                weight: 500,
+                flags: 0,
+                font_size_pt: 16,
+                color: [0x00, 0x00, 0x00, 0xFF],
+                _pad: [0; 2],
+            },
+            // 21: Sans 16pt SemiBold (w600)
+            Style {
+                font_family: FONT_SANS,
+                role: ROLE_BODY,
+                weight: 600,
+                flags: 0,
+                font_size_pt: 16,
+                color: [0x00, 0x00, 0x00, 0xFF],
+                _pad: [0; 2],
+            },
+            // 22: Sans 16pt Bold (w700)
+            Style {
+                font_family: FONT_SANS,
+                role: ROLE_STRONG,
+                weight: 700,
+                flags: 0,
+                font_size_pt: 16,
+                color: [0x00, 0x00, 0x00, 0xFF],
+                _pad: [0; 2],
+            },
+            // 23: Sans 16pt ExtraBold (w800)
+            Style {
+                font_family: FONT_SANS,
+                role: ROLE_BODY,
+                weight: 800,
+                flags: 0,
+                font_size_pt: 16,
+                color: [0x00, 0x00, 0x00, 0xFF],
+                _pad: [0; 2],
+            },
+            // 24: Sans 16pt Black (w900)
+            Style {
+                font_family: FONT_SANS,
+                role: ROLE_BODY,
+                weight: 900,
+                flags: 0,
+                font_size_pt: 16,
+                color: [0x00, 0x00, 0x00, 0xFF],
+                _pad: [0; 2],
+            },
+            // 25: Serif 22pt Bold Italic Underline — deep blue
+            Style {
+                font_family: FONT_SERIF,
+                role: ROLE_HEADING3,
+                weight: 700,
+                flags: FLAG_ITALIC | FLAG_UNDERLINE,
+                font_size_pt: 22,
+                color: [0x00, 0x44, 0xCC, 0xFF],
+                _pad: [0; 2],
+            },
+            // 26: Mono 12pt Italic Strikethrough — dark red
+            Style {
+                font_family: FONT_MONO,
+                role: ROLE_CODE,
+                weight: 400,
+                flags: FLAG_ITALIC | FLAG_STRIKETHROUGH,
+                font_size_pt: 12,
+                color: [0xCC, 0x00, 0x00, 0xFF],
+                _pad: [0; 2],
+            },
+            // 27: Sans 28pt Bold Green
+            Style {
+                font_family: FONT_SANS,
+                role: ROLE_HEADING2,
+                weight: 700,
+                flags: 0,
+                font_size_pt: 28,
+                color: [0x00, 0xAA, 0x00, 0xFF],
+                _pad: [0; 2],
+            },
+            // 28: Serif 12pt Regular Black
+            Style {
+                font_family: FONT_SERIF,
+                role: ROLE_BODY,
+                weight: 400,
+                flags: 0,
+                font_size_pt: 12,
+                color: [0x00, 0x00, 0x00, 0xFF],
+                _pad: [0; 2],
+            },
+            // 29: Mono 14pt Bold Cyan
+            Style {
+                font_family: FONT_MONO,
+                role: ROLE_CODE,
+                weight: 700,
+                flags: 0,
+                font_size_pt: 14,
+                color: [0x00, 0xCC, 0xCC, 0xFF],
+                _pad: [0; 2],
+            },
+            // 30: Sans 40pt Italic Magenta
+            Style {
+                font_family: FONT_SANS,
+                role: ROLE_HEADING1,
+                weight: 400,
+                flags: FLAG_ITALIC,
+                font_size_pt: 40,
+                color: [0xFF, 0x00, 0xFF, 0xFF],
+                _pad: [0; 2],
+            },
+            // 31: Serif 32pt Bold Underline Orange
+            Style {
+                font_family: FONT_SERIF,
+                role: ROLE_HEADING1,
+                weight: 700,
+                flags: FLAG_UNDERLINE,
+                font_size_pt: 32,
+                color: [0xFF, 0x88, 0x00, 0xFF],
+                _pad: [0; 2],
+            },
+        ];
+
+        // -- Build text with tracked byte ranges ----------------------------------
+        let mut text = Vec::new();
+        let mut ranges: Vec<(usize, usize, u8)> = Vec::new(); // (start, end, style_id)
+
+        // Line 1: Title (48pt bold red)
+        let s = text.len();
+        text.extend_from_slice(b"Style Stress Test");
+        ranges.push((s, text.len(), 1));
+        text.extend_from_slice(b"\n");
+
+        // Line 2: Subtitle (24pt serif blue)
+        let s = text.len();
+        text.extend_from_slice(b"32 Styles, 3 Fonts, 9 Weights, Vivid Colors");
+        ranges.push((s, text.len(), 2));
+        text.extend_from_slice(b"\n");
+
+        // Line 3: Baseline alignment — mixed sizes on ONE line
+        let s = text.len();
+        text.extend_from_slice(b"Sans 36pt Bold Green");
+        ranges.push((s, text.len(), 3));
+        let s = text.len();
+        text.extend_from_slice(b" Mono 10pt Orange");
+        ranges.push((s, text.len(), 4));
+        let s = text.len();
+        text.extend_from_slice(b" Serif 18pt Italic Purple");
+        ranges.push((s, text.len(), 5));
+        text.extend_from_slice(b"\n");
+
+        // Line 4: More mixed sizes
+        let s = text.len();
+        text.extend_from_slice(b"Sans 48pt Red");
+        ranges.push((s, text.len(), 1));
+        let s = text.len();
+        text.extend_from_slice(b" body 14pt");
+        // style 0 (default) — no push
+        let _ = s;
+        let s = text.len();
+        text.extend_from_slice(b" Mono 16pt Cyan");
+        ranges.push((s, text.len(), 6));
+        text.extend_from_slice(b"\n");
+
+        // Line 5: Font family showcase
+        let s = text.len();
+        text.extend_from_slice(b"Sans 20pt Bold Magenta");
+        ranges.push((s, text.len(), 7));
+        let s = text.len();
+        text.extend_from_slice(b" Serif 14pt Italic Red");
+        ranges.push((s, text.len(), 8));
+        let s = text.len();
+        text.extend_from_slice(b" Mono 16pt Cyan");
+        ranges.push((s, text.len(), 6));
+        text.extend_from_slice(b"\n");
+
+        // Line 6: Color parade — each word in its own color
+        let s = text.len();
+        text.extend_from_slice(b"Red");
+        ranges.push((s, text.len(), 9));
+        let s = text.len();
+        text.extend_from_slice(b" Blue");
+        ranges.push((s, text.len(), 10));
+        let s = text.len();
+        text.extend_from_slice(b" Green");
+        ranges.push((s, text.len(), 11));
+        let s = text.len();
+        text.extend_from_slice(b" Orange");
+        ranges.push((s, text.len(), 12));
+        let s = text.len();
+        text.extend_from_slice(b" Purple");
+        ranges.push((s, text.len(), 13));
+        let s = text.len();
+        text.extend_from_slice(b" Cyan");
+        ranges.push((s, text.len(), 14));
+        let s = text.len();
+        text.extend_from_slice(b" Magenta");
+        ranges.push((s, text.len(), 15));
+        text.extend_from_slice(b"\n");
+
+        // Line 7: Weight ramp (100–900) all at 16pt
+        let s = text.len();
+        text.extend_from_slice(b"Thin ");
+        ranges.push((s, text.len(), 16));
+        let s = text.len();
+        text.extend_from_slice(b"ExLight ");
+        ranges.push((s, text.len(), 17));
+        let s = text.len();
+        text.extend_from_slice(b"Light ");
+        ranges.push((s, text.len(), 18));
+        let s = text.len();
+        text.extend_from_slice(b"Regular ");
+        ranges.push((s, text.len(), 19));
+        let s = text.len();
+        text.extend_from_slice(b"Medium ");
+        ranges.push((s, text.len(), 20));
+        let s = text.len();
+        text.extend_from_slice(b"SemiBold ");
+        ranges.push((s, text.len(), 21));
+        let s = text.len();
+        text.extend_from_slice(b"Bold ");
+        ranges.push((s, text.len(), 22));
+        let s = text.len();
+        text.extend_from_slice(b"ExBold ");
+        ranges.push((s, text.len(), 23));
+        let s = text.len();
+        text.extend_from_slice(b"Black");
+        ranges.push((s, text.len(), 24));
+        text.extend_from_slice(b"\n");
+
+        // Line 8: Flag combinations
+        let s = text.len();
+        text.extend_from_slice(b"Serif 22pt Bold Italic Underline Blue");
+        ranges.push((s, text.len(), 25));
+        let s = text.len();
+        text.extend_from_slice(b" Mono 12pt Italic Strike Red");
+        ranges.push((s, text.len(), 26));
+        text.extend_from_slice(b"\n");
+
+        // Line 9: More size mixing
+        let s = text.len();
+        text.extend_from_slice(b"Sans 28pt Bold Green");
+        ranges.push((s, text.len(), 27));
+        let s = text.len();
+        text.extend_from_slice(b" Serif 12pt Regular");
+        ranges.push((s, text.len(), 28));
+        let s = text.len();
+        text.extend_from_slice(b" Mono 14pt Bold Cyan");
+        ranges.push((s, text.len(), 29));
+        text.extend_from_slice(b"\n");
+
+        // Line 10: Large italic + large bold underline
+        let s = text.len();
+        text.extend_from_slice(b"Sans 40pt Italic Magenta");
+        ranges.push((s, text.len(), 30));
+        text.extend_from_slice(b"\n");
+
+        // Line 11: Serif large bold underline orange
+        let s = text.len();
+        text.extend_from_slice(b"Serif 32pt Bold Underline Orange");
+        ranges.push((s, text.len(), 31));
+        text.extend_from_slice(b"\n");
+
+        // Line 12: Mixed paragraph with inline style changes
+        // default body (style 0) for plain words, inline colored/styled words
+        let s = text.len();
+        text.extend_from_slice(b"This is body text with ");
+        let _ = s; // stays style 0
+        let s = text.len();
+        text.extend_from_slice(b"bold magenta");
+        ranges.push((s, text.len(), 7));
+        text.extend_from_slice(b" and ");
+        let s = text.len();
+        text.extend_from_slice(b"italic red");
+        ranges.push((s, text.len(), 8));
+        text.extend_from_slice(b" and ");
+        let s = text.len();
+        text.extend_from_slice(b"mono cyan");
+        ranges.push((s, text.len(), 6));
+        text.extend_from_slice(b" inline.\n");
+
+        // -- Initialize piece table ------------------------------------------------
+        let mut pt_buf = vec![0u8; 8192];
         let cap = pt_buf.len();
-        if !piecetable::init_with_text(
-            &mut pt_buf,
-            cap,
-            sample_text,
-            &piecetable::default_body_style(),
-        ) {
+        if !piecetable::init_with_text(&mut pt_buf, cap, &text, &piecetable::default_body_style()) {
             eprintln!("error: failed to init piece table");
             process::exit(1);
         }
 
-        // Add styles 1-6 (body is already at index 0).
-        let extra_styles = [
-            piecetable::heading1_style(),
-            piecetable::heading2_style(),
-            piecetable::bold_style(),
-            piecetable::italic_style(),
-            piecetable::bold_italic_style(),
-            piecetable::code_style(),
-        ];
-        for s in &extra_styles {
+        // Add styles 1–31 (body is already at index 0).
+        for (i, s) in extra_styles.iter().enumerate() {
             if piecetable::add_style(&mut pt_buf, s).is_none() {
-                eprintln!("error: failed to add style to piece table");
+                eprintln!("error: failed to add style {} to piece table", i + 1);
                 process::exit(1);
             }
         }
 
-        // Apply styles to ranges (byte offsets verified by script).
-        piecetable::apply_style(&mut pt_buf, 0, 15, 1); // heading1
-        piecetable::apply_style(&mut pt_buf, 15, 26, 2); // heading2
-                                                         // 26..37 body (stays style 0)
-        piecetable::apply_style(&mut pt_buf, 37, 48, 3); // bold
-        piecetable::apply_style(&mut pt_buf, 48, 61, 4); // italic
-        piecetable::apply_style(&mut pt_buf, 61, 74, 5); // bold-italic
-        piecetable::apply_style(&mut pt_buf, 74, 86, 6); // code
-        piecetable::apply_style(&mut pt_buf, 86, 98, 2); // heading2
-                                                         // 98..143 body (stays style 0)
+        // Apply styles to tracked ranges.
+        for &(start, end, style_id) in &ranges {
+            piecetable::apply_style(&mut pt_buf, start as u32, end as u32, style_id);
+        }
 
         // Compute the actual used size from the header fields.
         let h = piecetable::header(&pt_buf);
@@ -248,10 +697,11 @@ fn main() {
 
         file_count += 1;
         println!(
-            "  rich  {:?}  welcome  ({} bytes, {} styles)",
+            "  rich  {:?}  welcome  ({} bytes, {} styles, {} ranges)",
             id,
             pt_bytes.len(),
-            7
+            h.style_count,
+            ranges.len()
         );
     }
 

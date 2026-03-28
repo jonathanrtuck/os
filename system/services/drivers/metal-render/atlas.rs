@@ -4,9 +4,9 @@
 //! font/size/style combinations unlike the previous flat-array design.
 
 /// Atlas texture width in pixels.
-pub(crate) const ATLAS_WIDTH: u32 = 512;
+pub(crate) const ATLAS_WIDTH: u32 = 2048;
 /// Atlas texture height in pixels.
-pub(crate) const ATLAS_HEIGHT: u32 = 512;
+pub(crate) const ATLAS_HEIGHT: u32 = 2048;
 
 /// Hash table capacity (must be a power of 2).
 const CAPACITY: usize = 16384;
