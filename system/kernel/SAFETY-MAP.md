@@ -498,3 +498,17 @@ Any change to `MAX_CORES` requires updating `exception.S` in sync.
 | 20  | W^X enforcement on all user pages                         | `segment_attrs` in address_space.rs    | Code injection                    |
 | 21  | Break-before-make on PTE updates                          | `map_inner` zeros + TLBI before write  | CONSTRAINED UNPREDICTABLE         |
 | 22  | `deferred_drops` prevents use-after-free on thread stacks | schedule_inner pattern                 | Stack corruption                  |
+| 23  | Eret guard validates ELR/SPSR system registers in asm     | exception.S `restore_context_and_eret` | EL1 eret to user VA (EC=0x21)     |
+| 24  | Handler return validated as kernel VA in exception.S      | All 3 handler call sites               | Corrupt context ptr → eret crash  |
+| 25  | Stack canaries in `schedule()` / `block_current`          | Volatile write-before / read-after     | Stack corruption during sched     |
+
+### Invariants 23–25: Exception return defense-in-depth (2026-03-28)
+
+Added after an unreproducible EC=0x21 crash (ELR=FAR=LR=0x4BBC, 6.6M ctx_sw). Investigation confirmed schedule()'s saved LR was corrupted on the kernel stack during schedule_inner. Root cause unconfirmed; disassembly audit of all stores in schedule_inner found no out-of-frame writes. Three layers now guard the exception return path:
+
+1. **Rust (existing):** `validate_context_before_eret` checks context struct ELR/SPSR before returning to exception.S.
+2. **Assembly — eret guard (#23):** After loading ELR/SPSR into system registers, re-reads them and validates EL1 returns target kernel VA. Catches TOCTOU between Rust validation and eret.
+3. **Assembly — handler return check (#24):** After `bl irq_handler` / `svc_handler` / `user_fault_handler`, verifies x0 is a kernel VA before using as context pointer.
+4. **Rust — stack canaries (#25):** `schedule()` and `block_current_unless_woken()` write a volatile canary (0xDEADBEEFCAFEBABE) before schedule_inner, verify after. Catches corruption of the caller's stack frame during scheduling.
+
+If the bug recurs, the canary panic message includes the corrupted value — this will identify the corruption source. See `design/journal.md` entry "Kernel EC=0x21 instruction abort" for full investigation notes.

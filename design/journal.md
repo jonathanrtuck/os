@@ -36,13 +36,19 @@ thread id=0 ctx.elr=0xFFFFFFF0400A1D28 (secondary_main idle loop)
 
 5. **SPSR = 0x800003c5 (EL1h, all DAIF masked):** The CPU was in exception handler context. Consistent with the fault occurring during irq_handler's or svc_handler's function epilogue.
 
-6. **Most likely mechanism:** The handler's stack frame had its saved LR slot corrupted to 0x4BBC. The function epilogue restored this value into x30, then `ret` branched to 0x4BBC. The Rust `validate_context_before_eret` ran successfully (the context it checked was valid) — the corruption was in the return address, not the context.
+6. **Most likely mechanism (refined via SP analysis):** Crash SP = 0xFFFFFFF04302FFC0 = stack_top - 0x40 = irq_handler's frame level. This means schedule()'s `ret` jumped to 0x4BBC — not irq_handler's. schedule()'s saved LR (at stack_top - 0x60) was corrupted during schedule_inner's execution. The Rust `validate_context_before_eret` ran successfully (the context it checked was valid) — the corruption was in schedule's return address, not the context.
 
 7. **Aliasing UB audit:** All instances of `*mut Context` dereference while `&mut State` is held use `addr_of!`/`addr_of_mut!` correctly. No active aliasing UB found. The known previous instance (documented in syscall.rs dispatch comment) was already fixed.
 
 8. **Shared memory safety:** `map_channel_page`/`map_shared_region` don't add to `owned_frames`, so `free_all()` won't free shared pages. No use-after-free via process cleanup.
 
-9. **Root cause unconfirmed.** Possible vectors: very rare hypervisor register save/restore bug, LLVM codegen issue at opt-level 3, or undetected kernel memory corruption. The 6.6M context switch count suggests a 1-in-millions probability event.
+9. **User confirmed navigation only** — no document edits, no `doc_commit` messages in the serial log. The hot path was purely: input event → core cursor/selection update → scene graph rebuild → metal-render draw. No heap allocations expected in steady state (Vecs already at capacity, no thread creation/destruction).
+
+10. **Disassembly audit of schedule_inner:** All 12 non-SP store instructions verified — every one targets thread fields (heap), State fields (global), or process fields (within State). No stores to arbitrary addresses or to the caller's frame. The generated code is correct.
+
+11. **Callees checked:** __udivti3 (0x30-byte frame), swap_ttbr0 (asm-only), select_best, charge_thread, replenish_contexts, park_old, reap_exited — all within their own frames. No callee writes above its frame boundary.
+
+12. **Root cause unconfirmed.** Not reproducible with synthetic events (~14 min dense navigation) or interactive use. Ruled out: aliasing UB, out-of-frame stores, heap/buddy corruption paths, shared memory corruption, hypervisor register handling (VCPU.swift reviewed). Remaining candidates: Apple Hypervisor.framework internal bug (register save/restore across 13.2M VM exits), LLVM aarch64 codegen bug at opt-level 3, or Apple Silicon hardware errata.
 
 **Fixes applied (defense in depth):**
 
@@ -50,7 +56,9 @@ thread id=0 ctx.elr=0xFFFFFFF0400A1D28 (secondary_main idle loop)
 
 2. **Handler return validation in exception.S:** After each `bl irq_handler`/`svc_handler`/`user_fault_handler`, verifies x0 (return value) is a kernel VA before using it as a context pointer. Fires `handler_returned_bad_ctx` with value, caller, TPIDR diagnostics + pvpanic.
 
-3. **Structural gap fixed:** Previously, validation was only in Rust (`validate_context_before_eret` reads the context struct). A corrupted return address could bypass validation entirely by preventing the handler from returning to exception.S. Now exception.S has its own guards at the assembly level, independent of the Rust handler.
+3. **Stack canaries in schedule() and block_current_unless_woken():** Volatile write of 0xDEADBEEFCAFEBABE to a stack-local before schedule_inner, volatile read after. If the stack frame is corrupted during schedule_inner, the canary fires with the corrupted value — turning a mystery EC=0x21 crash into an actionable panic that shows exactly what overwrote the stack.
+
+4. **Structural gap fixed:** Previously, validation was only in Rust (`validate_context_before_eret` reads the context struct). A corrupted return address could bypass validation entirely by preventing the handler from returning to exception.S. Now exception.S has its own guards, and the Rust callers have canaries. Three independent layers: context validation (Rust), stack integrity (canaries), system register validation (asm).
 
 **Crash log:** `/tmp/hypervisor-crash-2026-03-27-215813.log`
 
