@@ -288,6 +288,31 @@ exc_fatal:
   ldr x1, [x19, #CTX_SPSR]
   msr spsr_el1, x1
 
+  // ── Eret guard ──────────────────────────────────────────
+  // Validates the *actual system registers* just loaded.
+  // The Rust validate_context_before_eret reads the context struct;
+  // this checks the registers themselves, closing a TOCTOU gap
+  // (the struct could be modified between Rust validation and here).
+  // Uses x1/x2 as scratch — both overwritten during GPR restore below.
+  mrs x1, spsr_el1
+  and x2, x1, #0xF           // M[3:0]
+  cmp x2, #4                 // EL1t?
+  b.eq 8f
+  cmp x2, #5                 // EL1h?
+  b.ne 9f
+8:
+  // EL1 return — ELR must be in kernel VA range.
+  mrs x1, elr_el1
+  movz x2, #0xFFF0, lsl #32  // Build KERNEL_VA_OFFSET = 0xFFFFFFF000000000
+  movk x2, #0xFFFF, lsl #48  // x2 = 0xFFFF_FFF0_0000_0000
+  cmp x1, x2
+  b.hs 9f                    // ELR >= KERNEL_VA_OFFSET → OK
+  cbz x1, 9f                 // ELR == 0 → idle (allowed)
+  // BAD: EL1 eret to user VA. Crash with diagnostics.
+  b eret_guard_fail
+9:
+  // ── End eret guard ──────────────────────────────────────
+
   ldr x1, [x19, #CTX_SP_EL0]
   msr sp_el0, x1
   ldr x1, [x19, #CTX_TPIDR_EL0]
@@ -342,6 +367,12 @@ exc_irq:
   save_context
   bl irq_handler
   cbz x0, handler_returned_null
+  // Validate: returned context pointer must be a kernel VA.
+  // Catches corrupted return values from the handler.
+  movz x1, #0xFFF0, lsl #32
+  movk x1, #0xFFFF, lsl #48    // x1 = KERNEL_VA_OFFSET
+  cmp x0, x1
+  b.lo handler_returned_bad_ctx
   // TPIDR_EL1 already set by schedule_inner (before lock drop).
   // Redundant write here for defense-in-depth.
   msr tpidr_el1, x0
@@ -367,6 +398,10 @@ exc_lower_sync:
   save_context
   bl svc_handler
   cbz x0, handler_returned_null
+  movz x1, #0xFFF0, lsl #32
+  movk x1, #0xFFFF, lsl #48
+  cmp x0, x1
+  b.lo handler_returned_bad_ctx
   // TPIDR_EL1 already set by schedule_inner (before lock drop).
   // Redundant write here for defense-in-depth.
   msr tpidr_el1, x0
@@ -385,11 +420,58 @@ exc_user_fault:
   save_context
   bl user_fault_handler
   cbz x0, handler_returned_null
+  movz x1, #0xFFF0, lsl #32
+  movk x1, #0xFFFF, lsl #48
+  cmp x0, x1
+  b.lo handler_returned_bad_ctx
   // TPIDR_EL1 already set by schedule_inner (before lock drop).
   // Redundant write here for defense-in-depth.
   msr tpidr_el1, x0
   mov x19, x0
   restore_context_and_eret
+
+// --------------------------------------------------------------------------
+// Handler returned a non-kernel context pointer — fatal bug.
+// x0 = bad value, x30 = return address (which handler bl'd to).
+// If the handler's ret went to a bad address, we'd get an exc_fatal instead.
+// This catches the case where the handler returned normally but with a
+// corrupted x0 (e.g., a userspace value that leaked into x0).
+// --------------------------------------------------------------------------
+
+handler_returned_bad_ctx:
+  mov x20, x0               // Save bad context value
+  mov x6, sp
+  mov x7, x30               // Which handler returned
+  mrs x8, tpidr_el1
+
+  mrs x4, mpidr_el1
+  and x4, x4, #0xFF
+  add x4, x4, #1
+  lsl x4, x4, #14
+  ldr x5, =__exc_stacks
+  add sp, x5, x4
+
+  ldr x2, =UART0_BASE_VA
+  adr x0, .Lbad_ctx_msg
+  bl uart_puts
+  mov x0, x20
+  bl uart_puthex64
+  adr x0, .Lbad_ctx_caller
+  bl uart_puts
+  mov x0, x7
+  bl uart_puthex64
+  adr x0, .Ltpidr_msg
+  bl uart_puts
+  mov x0, x8
+  bl uart_puthex64
+  adr x0, .Lnl
+  bl uart_puts
+
+  ldr x0, =0x09020000        // pvpanic
+  mov w1, #1
+  str w1, [x0]
+
+  b .
 
 // --------------------------------------------------------------------------
 // Handler returned null context pointer — fatal bug.
@@ -425,6 +507,67 @@ handler_returned_null:
   adr x0, .Lnl
   bl uart_puts
   b .
+
+// --------------------------------------------------------------------------
+// Eret guard failure: EL1 eret to user VA detected in assembly.
+//
+// The Rust validate_context_before_eret checked the context struct, but the
+// actual system registers (set by restore_context_and_eret) have different
+// values — either a TOCTOU corruption or the handler's ret jumped here via
+// a corrupted return address (bypassing the eret entirely).
+// --------------------------------------------------------------------------
+
+eret_guard_fail:
+  mrs x20, elr_el1
+  mrs x21, spsr_el1
+  mov x22, sp
+  mrs x23, tpidr_el1
+
+  // Switch to per-core emergency stack.
+  mrs x4, mpidr_el1
+  and x4, x4, #0xFF
+  add x4, x4, #1
+  lsl x4, x4, #14
+  ldr x5, =__exc_stacks
+  add sp, x5, x4
+
+  ldr x2, =UART0_BASE_VA
+  adr x0, .Leret_msg
+  bl uart_puts
+  mov x0, x20
+  bl uart_puthex64
+  adr x0, .Leret_spsr_msg
+  bl uart_puts
+  mov x0, x21
+  bl uart_puthex64
+  adr x0, .Lsp_msg
+  bl uart_puts
+  mov x0, x22
+  bl uart_puthex64
+  adr x0, .Ltpidr_msg
+  bl uart_puts
+  mov x0, x23
+  bl uart_puthex64
+  adr x0, .Leret_ctx_msg
+  bl uart_puts
+  mov x0, x19
+  bl uart_puthex64
+  adr x0, .Lnl
+  bl uart_puts
+
+  // Trigger pvpanic so the hypervisor writes a crash report.
+  ldr x0, =0x09020000        // pvpanic MMIO address
+  mov w1, #1
+  str w1, [x0]
+
+  b .                         // Unreachable
+
+.Leret_msg:       .asciz "\nBUG: eret guard — EL1 to user VA! ELR=0x"
+.Leret_spsr_msg:  .asciz " SPSR=0x"
+.Leret_ctx_msg:   .asciz " CTX=0x"
+
+.Lbad_ctx_msg:    .asciz "\nBUG: handler returned non-kernel ctx! x0=0x"
+.Lbad_ctx_caller: .asciz " caller=0x"
 
 .Lnull_msg:   .asciz "\nBUG: handler returned null! caller=0x"
 .Lsp_msg:     .asciz " SP=0x"

@@ -11,7 +11,8 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 **Symptom:** Kernel panic after ~6.6M context switches and ~13.2M syscalls under normal interactive use (typing, scrolling in rich text editor). Crash is an instruction abort at EL1 with ELR=FAR=LR=0x4BBC — the kernel branched to a user-space address.
 
 **Crash signature:**
-```
+
+```console
 EC=0x21 ESR=0x86000006 ELR=0x4BBC FAR=0x4BBC
 SP=0xFFFFFFF04302FFC0 LR=0x4BBC TPIDR=0xFFFFFFF0420B6C00
 thread id=0 ctx.elr=0xFFFFFFF0400A1D28 (secondary_main idle loop)
@@ -23,11 +24,33 @@ thread id=0 ctx.elr=0xFFFFFFF0400A1D28 (secondary_main idle loop)
 
 **Relationship to prior TPIDR race (2026-03-14):** Same symptom class (EC=0x21, kernel jumps to user-space address) but different specifics. The prior bug was IFSC=4 (level 0 fault) at FAR=0x0A003A00 (virtio MMIO range) caused by a TPIDR_EL1 write ordering race in `schedule_inner`. That was fixed by moving the TPIDR write inside the scheduler lock. This new crash has IFSC=6 (level 2 fault) at FAR=0x4BBC, suggesting the page walk progresses further — possibly a different corruption vector. The `validate_context_before_eret` check added in the prior fix should catch this class, so either: (a) the validator was bypassed, (b) the corruption happened after validation, or (c) the validator doesn't cover this path.
 
-**Investigation needed:**
-1. Check if `validate_context_before_eret` is still active and covers the faulting path
-2. Determine what code generated the branch to 0x4BBC — was it an `eret` with corrupted ELR, or a corrupted function pointer / return address?
-3. Check if the scheduler lock drop → TPIDR write sequence has a remaining window under heavy single-core load
-4. Stress test: sustained input for 60+ seconds, verify no crash
+**Investigation (2026-03-27):**
+
+1. `validate_context_before_eret` IS active on all three eret paths (irq, svc, user_fault). Confirmed in both Rust source and generated disassembly.
+
+2. **Key finding:** 0x4BBC is NOT a valid address anywhere — user VA starts at 0x400000, kernel VA at 0xFFFFFFF000000000. It's a garbage value.
+
+3. **TPIDR/SP mismatch:** TPIDR points to idle thread (ctx.sp=0xFFFFFFF041097FE0) but faulting SP is 0xFFFFFFF04302FFC0 (a different thread's kernel stack). This means the fault happened AFTER schedule_inner set TPIDR to idle but BEFORE restore_context_and_eret changed SP — i.e., during the Rust handler return or the assembly glue.
+
+4. **ELR == LR == 0x4BBC:** Both the faulting PC and x30 are 0x4BBC. This is consistent with a `ret` instruction using a corrupted link register (ret branches to x30, doesn't modify it).
+
+5. **SPSR = 0x800003c5 (EL1h, all DAIF masked):** The CPU was in exception handler context. Consistent with the fault occurring during irq_handler's or svc_handler's function epilogue.
+
+6. **Most likely mechanism:** The handler's stack frame had its saved LR slot corrupted to 0x4BBC. The function epilogue restored this value into x30, then `ret` branched to 0x4BBC. The Rust `validate_context_before_eret` ran successfully (the context it checked was valid) — the corruption was in the return address, not the context.
+
+7. **Aliasing UB audit:** All instances of `*mut Context` dereference while `&mut State` is held use `addr_of!`/`addr_of_mut!` correctly. No active aliasing UB found. The known previous instance (documented in syscall.rs dispatch comment) was already fixed.
+
+8. **Shared memory safety:** `map_channel_page`/`map_shared_region` don't add to `owned_frames`, so `free_all()` won't free shared pages. No use-after-free via process cleanup.
+
+9. **Root cause unconfirmed.** Possible vectors: very rare hypervisor register save/restore bug, LLVM codegen issue at opt-level 3, or undetected kernel memory corruption. The 6.6M context switch count suggests a 1-in-millions probability event.
+
+**Fixes applied (defense in depth):**
+
+1. **Eret guard in exception.S:** After `msr elr_el1`/`msr spsr_el1` in `restore_context_and_eret`, reads system registers back and validates EL1 returns target kernel VA. Closes the TOCTOU gap between Rust validation and eret. Fires `eret_guard_fail` with ELR, SPSR, SP, TPIDR, CTX diagnostics + pvpanic.
+
+2. **Handler return validation in exception.S:** After each `bl irq_handler`/`svc_handler`/`user_fault_handler`, verifies x0 (return value) is a kernel VA before using it as a context pointer. Fires `handler_returned_bad_ctx` with value, caller, TPIDR diagnostics + pvpanic.
+
+3. **Structural gap fixed:** Previously, validation was only in Rust (`validate_context_before_eret` reads the context struct). A corrupted return address could bypass validation entirely by preventing the handler from returning to exception.S. Now exception.S has its own guards at the assembly level, independent of the Rust handler.
 
 **Crash log:** `/tmp/hypervisor-crash-2026-03-27-215813.log`
 

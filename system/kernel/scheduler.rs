@@ -771,6 +771,12 @@ pub fn bind_scheduling_context(ctx_id: SchedulingContextId) -> bool {
 /// a thread that isn't blocked yet.
 #[inline(never)]
 pub fn block_current_unless_woken(ctx: *mut Context) -> BlockResult {
+    let mut canary: u64 = 0;
+
+    unsafe {
+        core::ptr::write_volatile(&mut canary, 0xDEAD_BEEF_CAFE_BABE_u64);
+    }
+
     let mut s = STATE.lock();
     let core = per_core::core_id() as usize;
     let thread = s.cores[core].current.as_mut().expect("no current thread");
@@ -801,7 +807,14 @@ pub fn block_current_unless_woken(ctx: *mut Context) -> BlockResult {
 
     thread.block();
 
-    BlockResult::Blocked(schedule_inner(&mut s, ctx, core))
+    let result = schedule_inner(&mut s, ctx, core);
+    let check = unsafe { core::ptr::read_volatile(&canary) };
+
+    if check != 0xDEAD_BEEF_CAFE_BABE {
+        panic!("block_current: stack canary corrupt (got {check:#018x})");
+    }
+
+    BlockResult::Blocked(result)
 }
 /// Borrow another thread's scheduling context (context donation).
 ///
@@ -1381,10 +1394,31 @@ pub fn return_scheduling_context() -> bool {
 }
 #[inline(never)]
 pub fn schedule(ctx: *mut Context) -> *const Context {
+    // Stack canary: detect corruption of this function's stack frame during
+    // schedule_inner. Write a known value to a stack slot BEFORE schedule_inner,
+    // verify it AFTER. The volatile writes/reads prevent the compiler from
+    // reordering them past schedule_inner.
+    let mut canary: u64 = 0;
+
+    // SAFETY: volatile write to a stack-local. Ensures the canary is physically
+    // written to the stack before schedule_inner runs. No aliasing concern —
+    // canary is a local variable owned by this function.
+    unsafe {
+        core::ptr::write_volatile(&mut canary, 0xDEAD_BEEF_CAFE_BABE_u64);
+    }
+
     let mut s = STATE.lock();
     let core = per_core::core_id() as usize;
+    let result = schedule_inner(&mut s, ctx, core);
+    // SAFETY: volatile read of our stack-local canary. If schedule_inner
+    // (or anything it calls) corrupted our stack frame, this value will differ.
+    let check = unsafe { core::ptr::read_volatile(&canary) };
 
-    schedule_inner(&mut s, ctx, core)
+    if check != 0xDEAD_BEEF_CAFE_BABE {
+        panic!("schedule: stack canary corrupt (got {check:#018x})");
+    }
+
+    result
 }
 /// Store a timeout timer ID on the current thread for deferred cleanup.
 #[inline(never)]
