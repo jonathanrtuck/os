@@ -353,6 +353,8 @@ pub struct FontInfo<'a> {
     pub descender: i16,
     /// Typographic line gap in font units.
     pub line_gap: i16,
+    /// OS/2 sCapHeight (height of capital H above baseline, font units). 0 if unavailable.
+    pub cap_height: i16,
 }
 
 // ── Style table (sequential ID assignment) ──────────────────────────

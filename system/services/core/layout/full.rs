@@ -758,36 +758,42 @@ pub struct RichFonts<'a> {
     pub mono_ascender: i16,
     pub mono_descender: i16,
     pub mono_line_gap: i16,
+    pub mono_cap_height: i16,
     pub sans_data: &'a [u8],
     pub sans_upem: u16,
     pub sans_content_id: u32,
     pub sans_ascender: i16,
     pub sans_descender: i16,
     pub sans_line_gap: i16,
+    pub sans_cap_height: i16,
     pub serif_data: &'a [u8],
     pub serif_upem: u16,
     pub serif_content_id: u32,
     pub serif_ascender: i16,
     pub serif_descender: i16,
     pub serif_line_gap: i16,
+    pub serif_cap_height: i16,
     pub mono_italic_data: &'a [u8],
     pub mono_italic_upem: u16,
     pub mono_italic_content_id: u32,
     pub mono_italic_ascender: i16,
     pub mono_italic_descender: i16,
     pub mono_italic_line_gap: i16,
+    pub mono_italic_cap_height: i16,
     pub sans_italic_data: &'a [u8],
     pub sans_italic_upem: u16,
     pub sans_italic_content_id: u32,
     pub sans_italic_ascender: i16,
     pub sans_italic_descender: i16,
     pub sans_italic_line_gap: i16,
+    pub sans_italic_cap_height: i16,
     pub serif_italic_data: &'a [u8],
     pub serif_italic_upem: u16,
     pub serif_italic_content_id: u32,
     pub serif_italic_ascender: i16,
     pub serif_italic_descender: i16,
     pub serif_italic_line_gap: i16,
+    pub serif_italic_cap_height: i16,
 }
 
 impl<'a> RichFonts<'a> {
@@ -803,6 +809,7 @@ impl<'a> RichFonts<'a> {
                 ascender: self.mono_ascender,
                 descender: self.mono_descender,
                 line_gap: self.mono_line_gap,
+                cap_height: self.mono_cap_height,
             },
             (piecetable::FONT_MONO, true) => FontInfo {
                 data: if self.mono_italic_data.is_empty() {
@@ -835,6 +842,11 @@ impl<'a> RichFonts<'a> {
                 } else {
                     self.mono_line_gap
                 },
+                cap_height: if self.mono_italic_upem > 0 {
+                    self.mono_italic_cap_height
+                } else {
+                    self.mono_cap_height
+                },
             },
             (piecetable::FONT_SERIF, false) => FontInfo {
                 data: self.serif_data,
@@ -843,6 +855,7 @@ impl<'a> RichFonts<'a> {
                 ascender: self.serif_ascender,
                 descender: self.serif_descender,
                 line_gap: self.serif_line_gap,
+                cap_height: self.serif_cap_height,
             },
             (piecetable::FONT_SERIF, true) => FontInfo {
                 data: if self.serif_italic_data.is_empty() {
@@ -875,6 +888,11 @@ impl<'a> RichFonts<'a> {
                 } else {
                     self.serif_line_gap
                 },
+                cap_height: if self.serif_italic_upem > 0 {
+                    self.serif_italic_cap_height
+                } else {
+                    self.serif_cap_height
+                },
             },
             (_, false) => FontInfo {
                 data: self.sans_data,
@@ -883,6 +901,7 @@ impl<'a> RichFonts<'a> {
                 ascender: self.sans_ascender,
                 descender: self.sans_descender,
                 line_gap: self.sans_line_gap,
+                cap_height: self.sans_cap_height,
             },
             (_, true) => FontInfo {
                 data: if self.sans_italic_data.is_empty() {
@@ -914,6 +933,11 @@ impl<'a> RichFonts<'a> {
                     self.sans_italic_line_gap
                 } else {
                     self.sans_line_gap
+                },
+                cap_height: if self.sans_italic_upem > 0 {
+                    self.sans_italic_cap_height
+                } else {
+                    self.sans_cap_height
                 },
             },
         }
@@ -1255,6 +1279,7 @@ pub fn build_rich_document_content(
         ascender: fonts.mono_ascender,
         descender: fonts.mono_descender,
         line_gap: fonts.mono_line_gap,
+        cap_height: fonts.mono_cap_height,
     };
     let sans_fi = FontInfo {
         data: fonts.sans_data,
@@ -1263,6 +1288,7 @@ pub fn build_rich_document_content(
         ascender: fonts.sans_ascender,
         descender: fonts.sans_descender,
         line_gap: fonts.sans_line_gap,
+        cap_height: fonts.sans_cap_height,
     };
     let serif_fi = FontInfo {
         data: fonts.serif_data,
@@ -1271,6 +1297,7 @@ pub fn build_rich_document_content(
         ascender: fonts.serif_ascender,
         descender: fonts.serif_descender,
         line_gap: fonts.serif_line_gap,
+        cap_height: fonts.serif_cap_height,
     };
     let rich_lines = layout_rich_lines(
         pt_buf,
@@ -1319,10 +1346,16 @@ pub fn build_rich_document_content(
         rich_cursor_position(pt_buf, &scratch[..text_len], cursor_pos, &rich_lines, fonts);
 
     {
+        // Cursor width scales with font weight: 2pt at w400, 3pt at w700+.
+        let cursor_w = if cursor_info.style_weight >= 600 {
+            3u32
+        } else {
+            2u32
+        };
         let n = w.node_mut(N_CURSOR);
         n.x = cursor_info.x;
         n.y = cursor_info.y;
-        n.width = scene::upt(2);
+        n.width = scene::upt(cursor_w);
         n.height = scene::upt(cursor_info.height);
         n.background = dc(cfg.cursor_color);
         n.opacity = cursor_opacity;
@@ -1452,11 +1485,13 @@ pub fn build_rich_document_content(
     }
 }
 
-/// Cursor metrics for rich text: position, height, and baseline offset.
+/// Cursor metrics for rich text: position, height, baseline offset, and style weight.
 struct RichCursorInfo {
     x: scene::Mpt,
     y: scene::Mpt,
     height: u32,
+    /// Font weight at the cursor position (for cursor width scaling).
+    style_weight: u16,
 }
 
 /// Compute cursor position and height for a rich text document.
@@ -1547,23 +1582,31 @@ fn rich_cursor_position(
         }
 
         // Compute cursor height and y from the style at cursor position.
-        // Height = ascent only (baseline to top of ascenders, not including descender).
-        let (cursor_h, cursor_ascent_pt) =
+        // Height = cap height (baseline to top of capital letters).
+        let (cursor_h, cursor_cap_pt, cursor_weight) =
             if let Some(style) = piecetable::style(pt_buf, cursor_style_id) {
                 let fi = fonts.resolve(style);
-                if fi.upem > 0 {
-                    let asc = (fi.ascender as i32).abs() as f32 * style.font_size_pt as f32
-                        / fi.upem as f32;
-                    (asc as u32, asc)
+                let cap_h = if fi.upem > 0 {
+                    if fi.cap_height > 0 {
+                        fi.cap_height as f32 * style.font_size_pt as f32 / fi.upem as f32
+                    } else {
+                        // Fallback: approximate cap height as 70% of ascent.
+                        (fi.ascender as i32).abs() as f32 * style.font_size_pt as f32
+                            / fi.upem as f32
+                            * 0.7
+                    }
                 } else {
-                    (style.font_size_pt as u32, style.font_size_pt as f32 * 0.8)
-                }
+                    style.font_size_pt as f32 * 0.7
+                };
+                (cap_h as u32, cap_h, style.weight)
             } else {
-                (default_height, default_height as f32 * 0.8)
+                (default_height, default_height as f32 * 0.7, 400)
             };
 
-        // Baseline-aligned y: line.y + (max_ascent - cursor_ascent).
-        let baseline_offset = (max_ascent_pt - cursor_ascent_pt) as i32;
+        // Baseline-aligned y: cursor top = baseline - cap_height.
+        // Baseline = line.y + max_ascent_pt.
+        // cursor_y = line.y + max_ascent_pt - cap_height_pt.
+        let baseline_offset = (max_ascent_pt - cursor_cap_pt) as i32;
         let cursor_y = scene::pt(line.y + baseline_offset);
 
         let x_fx = (x_pt * 65536.0) as i64;
@@ -1572,6 +1615,7 @@ fn rich_cursor_position(
             x: cursor_x,
             y: cursor_y,
             height: cursor_h.max(2),
+            style_weight: cursor_weight,
         };
     }
 
@@ -1581,12 +1625,14 @@ fn rich_cursor_position(
             x: 0,
             y: scene::pt(last_line.y),
             height: default_height,
+            style_weight: 400,
         }
     } else {
         RichCursorInfo {
             x: 0,
             y: 0,
             height: default_height,
+            style_weight: 400,
         }
     }
 }

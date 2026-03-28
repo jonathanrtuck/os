@@ -239,6 +239,8 @@ pub(crate) struct CoreState {
     pub(crate) font_descender: i16,
     /// Mono font line gap (font units).
     pub(crate) font_line_gap: i16,
+    /// Mono font cap height (font units, from OS/2 sCapHeight). 0 if unavailable.
+    pub(crate) font_cap_height: i16,
     pub(crate) sans_font_data_ptr: *const u8,
     pub(crate) sans_font_data_len: usize,
     pub(crate) sans_font_upem: u16,
@@ -248,6 +250,8 @@ pub(crate) struct CoreState {
     pub(crate) sans_font_descender: i16,
     /// Sans font line gap (font units).
     pub(crate) sans_font_line_gap: i16,
+    /// Sans font cap height (font units). 0 if unavailable.
+    pub(crate) sans_font_cap_height: i16,
     pub(crate) serif_font_data_ptr: *const u8,
     pub(crate) serif_font_data_len: usize,
     pub(crate) serif_font_upem: u16,
@@ -257,6 +261,8 @@ pub(crate) struct CoreState {
     pub(crate) serif_font_descender: i16,
     /// Serif font line gap (font units).
     pub(crate) serif_font_line_gap: i16,
+    /// Serif font cap height (font units). 0 if unavailable.
+    pub(crate) serif_font_cap_height: i16,
     // Mono italic font.
     pub(crate) mono_italic_font_data_ptr: *const u8,
     pub(crate) mono_italic_font_data_len: usize,
@@ -264,6 +270,7 @@ pub(crate) struct CoreState {
     pub(crate) mono_italic_font_ascender: i16,
     pub(crate) mono_italic_font_descender: i16,
     pub(crate) mono_italic_font_line_gap: i16,
+    pub(crate) mono_italic_font_cap_height: i16,
     // Sans italic font.
     pub(crate) sans_italic_font_data_ptr: *const u8,
     pub(crate) sans_italic_font_data_len: usize,
@@ -271,6 +278,7 @@ pub(crate) struct CoreState {
     pub(crate) sans_italic_font_ascender: i16,
     pub(crate) sans_italic_font_descender: i16,
     pub(crate) sans_italic_font_line_gap: i16,
+    pub(crate) sans_italic_font_cap_height: i16,
     // Serif italic font.
     pub(crate) serif_italic_font_data_ptr: *const u8,
     pub(crate) serif_italic_font_data_len: usize,
@@ -278,6 +286,7 @@ pub(crate) struct CoreState {
     pub(crate) serif_italic_font_ascender: i16,
     pub(crate) serif_italic_font_descender: i16,
     pub(crate) serif_italic_font_line_gap: i16,
+    pub(crate) serif_italic_font_cap_height: i16,
     /// Content Region base VA and size (for PNG decode output).
     pub(crate) content_va: usize,
     pub(crate) content_size: usize,
@@ -368,36 +377,42 @@ impl CoreState {
             font_ascender: 800,
             font_descender: -200,
             font_line_gap: 0,
+            font_cap_height: 0,
             sans_font_data_ptr: core::ptr::null(),
             sans_font_data_len: 0,
             sans_font_upem: 1000,
             sans_font_ascender: 800,
             sans_font_descender: -200,
             sans_font_line_gap: 0,
+            sans_font_cap_height: 0,
             serif_font_data_ptr: core::ptr::null(),
             serif_font_data_len: 0,
             serif_font_upem: 1000,
             serif_font_ascender: 800,
             serif_font_descender: -200,
             serif_font_line_gap: 0,
+            serif_font_cap_height: 0,
             mono_italic_font_data_ptr: core::ptr::null(),
             mono_italic_font_data_len: 0,
             mono_italic_font_upem: 0,
             mono_italic_font_ascender: 0,
             mono_italic_font_descender: 0,
             mono_italic_font_line_gap: 0,
+            mono_italic_font_cap_height: 0,
             sans_italic_font_data_ptr: core::ptr::null(),
             sans_italic_font_data_len: 0,
             sans_italic_font_upem: 0,
             sans_italic_font_ascender: 0,
             sans_italic_font_descender: 0,
             sans_italic_font_line_gap: 0,
+            sans_italic_font_cap_height: 0,
             serif_italic_font_data_ptr: core::ptr::null(),
             serif_italic_font_data_len: 0,
             serif_italic_font_upem: 0,
             serif_italic_font_ascender: 0,
             serif_italic_font_descender: 0,
             serif_italic_font_line_gap: 0,
+            serif_italic_font_cap_height: 0,
             content_va: 0,
             content_size: 0,
             content_alloc: protocol::content::ContentAllocator::empty(),
@@ -839,6 +854,7 @@ pub extern "C" fn _start() -> ! {
                     s.font_ascender = fm.ascent;
                     s.font_descender = fm.descent;
                     s.font_line_gap = fm.line_gap;
+                    s.font_cap_height = fm.cap_height;
                 }
 
                 sys::print(b"     font metrics loaded\n");
@@ -862,6 +878,7 @@ pub extern "C" fn _start() -> ! {
                 s.sans_font_ascender = fm.ascent;
                 s.sans_font_descender = fm.descent;
                 s.sans_font_line_gap = fm.line_gap;
+                s.sans_font_cap_height = fm.cap_height;
                 sys::print(b"     sans font (Inter) loaded\n");
             } else {
                 sys::print(b"     warning: sans font parse failed\n");
@@ -884,6 +901,7 @@ pub extern "C" fn _start() -> ! {
                 s.serif_font_ascender = fm.ascent;
                 s.serif_font_descender = fm.descent;
                 s.serif_font_line_gap = fm.line_gap;
+                s.serif_font_cap_height = fm.cap_height;
                 sys::print(b"     serif font loaded\n");
             } else {
                 sys::print(b"     warning: serif font parse failed\n");
@@ -905,6 +923,7 @@ pub extern "C" fn _start() -> ! {
                 s.mono_italic_font_ascender = fm.ascent;
                 s.mono_italic_font_descender = fm.descent;
                 s.mono_italic_font_line_gap = fm.line_gap;
+                s.mono_italic_font_cap_height = fm.cap_height;
             }
         }
 
@@ -923,6 +942,7 @@ pub extern "C" fn _start() -> ! {
                 s.sans_italic_font_ascender = fm.ascent;
                 s.sans_italic_font_descender = fm.descent;
                 s.sans_italic_font_line_gap = fm.line_gap;
+                s.sans_italic_font_cap_height = fm.cap_height;
             }
         }
 
@@ -941,6 +961,7 @@ pub extern "C" fn _start() -> ! {
                 s.serif_italic_font_ascender = fm.ascent;
                 s.serif_italic_font_descender = fm.descent;
                 s.serif_italic_font_line_gap = fm.line_gap;
+                s.serif_italic_font_cap_height = fm.cap_height;
             }
         }
     }
@@ -1380,36 +1401,42 @@ pub extern "C" fn _start() -> ! {
                 mono_ascender: s.font_ascender,
                 mono_descender: s.font_descender,
                 mono_line_gap: s.font_line_gap,
+                mono_cap_height: s.font_cap_height,
                 sans_data: sans_font_data(),
                 sans_upem: s.sans_font_upem,
                 sans_content_id: protocol::content::CONTENT_ID_FONT_SANS,
                 sans_ascender: s.sans_font_ascender,
                 sans_descender: s.sans_font_descender,
                 sans_line_gap: s.sans_font_line_gap,
+                sans_cap_height: s.sans_font_cap_height,
                 serif_data: serif_font_data(),
                 serif_upem: s.serif_font_upem,
                 serif_content_id: protocol::content::CONTENT_ID_FONT_SERIF,
                 serif_ascender: s.serif_font_ascender,
                 serif_descender: s.serif_font_descender,
                 serif_line_gap: s.serif_font_line_gap,
+                serif_cap_height: s.serif_font_cap_height,
                 mono_italic_data: mono_italic_font_data(),
                 mono_italic_upem: s.mono_italic_font_upem,
                 mono_italic_content_id: protocol::content::CONTENT_ID_FONT_MONO_ITALIC,
                 mono_italic_ascender: s.mono_italic_font_ascender,
                 mono_italic_descender: s.mono_italic_font_descender,
                 mono_italic_line_gap: s.mono_italic_font_line_gap,
+                mono_italic_cap_height: s.mono_italic_font_cap_height,
                 sans_italic_data: sans_italic_font_data(),
                 sans_italic_upem: s.sans_italic_font_upem,
                 sans_italic_content_id: protocol::content::CONTENT_ID_FONT_SANS_ITALIC,
                 sans_italic_ascender: s.sans_italic_font_ascender,
                 sans_italic_descender: s.sans_italic_font_descender,
                 sans_italic_line_gap: s.sans_italic_font_line_gap,
+                sans_italic_cap_height: s.sans_italic_font_cap_height,
                 serif_italic_data: serif_italic_font_data(),
                 serif_italic_upem: s.serif_italic_font_upem,
                 serif_italic_content_id: protocol::content::CONTENT_ID_FONT_SERIF_ITALIC,
                 serif_italic_ascender: s.serif_italic_font_ascender,
                 serif_italic_descender: s.serif_italic_font_descender,
                 serif_italic_line_gap: s.serif_italic_font_line_gap,
+                serif_italic_cap_height: s.serif_italic_font_cap_height,
             };
             scene.update_rich_document_content(
                 &scene_cfg,
@@ -1683,18 +1710,21 @@ pub extern "C" fn _start() -> ! {
                                         mono_ascender: s2.font_ascender,
                                         mono_descender: s2.font_descender,
                                         mono_line_gap: s2.font_line_gap,
+                                        mono_cap_height: s2.font_cap_height,
                                         sans_data: sans_font_data(),
                                         sans_upem: s2.sans_font_upem,
                                         sans_content_id: protocol::content::CONTENT_ID_FONT_SANS,
                                         sans_ascender: s2.sans_font_ascender,
                                         sans_descender: s2.sans_font_descender,
                                         sans_line_gap: s2.sans_font_line_gap,
+                                        sans_cap_height: s2.sans_font_cap_height,
                                         serif_data: serif_font_data(),
                                         serif_upem: s2.serif_font_upem,
                                         serif_content_id: protocol::content::CONTENT_ID_FONT_SERIF,
                                         serif_ascender: s2.serif_font_ascender,
                                         serif_descender: s2.serif_font_descender,
                                         serif_line_gap: s2.serif_font_line_gap,
+                                        serif_cap_height: s2.serif_font_cap_height,
                                         mono_italic_data: mono_italic_font_data(),
                                         mono_italic_upem: s2.mono_italic_font_upem,
                                         mono_italic_content_id:
@@ -1702,6 +1732,7 @@ pub extern "C" fn _start() -> ! {
                                         mono_italic_ascender: s2.mono_italic_font_ascender,
                                         mono_italic_descender: s2.mono_italic_font_descender,
                                         mono_italic_line_gap: s2.mono_italic_font_line_gap,
+                                        mono_italic_cap_height: s2.mono_italic_font_cap_height,
                                         sans_italic_data: sans_italic_font_data(),
                                         sans_italic_upem: s2.sans_italic_font_upem,
                                         sans_italic_content_id:
@@ -1709,6 +1740,7 @@ pub extern "C" fn _start() -> ! {
                                         sans_italic_ascender: s2.sans_italic_font_ascender,
                                         sans_italic_descender: s2.sans_italic_font_descender,
                                         sans_italic_line_gap: s2.sans_italic_font_line_gap,
+                                        sans_italic_cap_height: s2.sans_italic_font_cap_height,
                                         serif_italic_data: serif_italic_font_data(),
                                         serif_italic_upem: s2.serif_italic_font_upem,
                                         serif_italic_content_id:
@@ -1716,6 +1748,7 @@ pub extern "C" fn _start() -> ! {
                                         serif_italic_ascender: s2.serif_italic_font_ascender,
                                         serif_italic_descender: s2.serif_italic_font_descender,
                                         serif_italic_line_gap: s2.serif_italic_font_line_gap,
+                                        serif_italic_cap_height: s2.serif_italic_font_cap_height,
                                     };
                                     let mono_fi = layout::FontInfo {
                                         data: font_data(),
@@ -1724,6 +1757,7 @@ pub extern "C" fn _start() -> ! {
                                         ascender: s2.font_ascender,
                                         descender: s2.font_descender,
                                         line_gap: s2.font_line_gap,
+                                        cap_height: s2.font_cap_height,
                                     };
                                     let sans_fi = layout::FontInfo {
                                         data: sans_font_data(),
@@ -1732,6 +1766,7 @@ pub extern "C" fn _start() -> ! {
                                         ascender: s2.sans_font_ascender,
                                         descender: s2.sans_font_descender,
                                         line_gap: s2.sans_font_line_gap,
+                                        cap_height: s2.sans_font_cap_height,
                                     };
                                     let serif_fi = layout::FontInfo {
                                         data: serif_font_data(),
@@ -1740,6 +1775,7 @@ pub extern "C" fn _start() -> ! {
                                         ascender: s2.serif_font_ascender,
                                         descender: s2.serif_font_descender,
                                         line_gap: s2.serif_font_line_gap,
+                                        cap_height: s2.serif_font_cap_height,
                                     };
                                     let rich_lines = layout::layout_rich_lines(
                                         pt_buf,
@@ -2559,36 +2595,42 @@ pub extern "C" fn _start() -> ! {
                         mono_ascender: s.font_ascender,
                         mono_descender: s.font_descender,
                         mono_line_gap: s.font_line_gap,
+                        mono_cap_height: s.font_cap_height,
                         sans_data: sans_font_data(),
                         sans_upem: s.sans_font_upem,
                         sans_content_id: protocol::content::CONTENT_ID_FONT_SANS,
                         sans_ascender: s.sans_font_ascender,
                         sans_descender: s.sans_font_descender,
                         sans_line_gap: s.sans_font_line_gap,
+                        sans_cap_height: s.sans_font_cap_height,
                         serif_data: serif_font_data(),
                         serif_upem: s.serif_font_upem,
                         serif_content_id: protocol::content::CONTENT_ID_FONT_SERIF,
                         serif_ascender: s.serif_font_ascender,
                         serif_descender: s.serif_font_descender,
                         serif_line_gap: s.serif_font_line_gap,
+                        serif_cap_height: s.serif_font_cap_height,
                         mono_italic_data: mono_italic_font_data(),
                         mono_italic_upem: s.mono_italic_font_upem,
                         mono_italic_content_id: protocol::content::CONTENT_ID_FONT_MONO_ITALIC,
                         mono_italic_ascender: s.mono_italic_font_ascender,
                         mono_italic_descender: s.mono_italic_font_descender,
                         mono_italic_line_gap: s.mono_italic_font_line_gap,
+                        mono_italic_cap_height: s.mono_italic_font_cap_height,
                         sans_italic_data: sans_italic_font_data(),
                         sans_italic_upem: s.sans_italic_font_upem,
                         sans_italic_content_id: protocol::content::CONTENT_ID_FONT_SANS_ITALIC,
                         sans_italic_ascender: s.sans_italic_font_ascender,
                         sans_italic_descender: s.sans_italic_font_descender,
                         sans_italic_line_gap: s.sans_italic_font_line_gap,
+                        sans_italic_cap_height: s.sans_italic_font_cap_height,
                         serif_italic_data: serif_italic_font_data(),
                         serif_italic_upem: s.serif_italic_font_upem,
                         serif_italic_content_id: protocol::content::CONTENT_ID_FONT_SERIF_ITALIC,
                         serif_italic_ascender: s.serif_italic_font_ascender,
                         serif_italic_descender: s.serif_italic_font_descender,
                         serif_italic_line_gap: s.serif_italic_font_line_gap,
+                        serif_italic_cap_height: s.serif_italic_font_cap_height,
                     };
                     scene.update_rich_document_content(
                         &scene_cfg,
@@ -2617,36 +2659,42 @@ pub extern "C" fn _start() -> ! {
                     mono_ascender: s.font_ascender,
                     mono_descender: s.font_descender,
                     mono_line_gap: s.font_line_gap,
+                    mono_cap_height: s.font_cap_height,
                     sans_data: sans_font_data(),
                     sans_upem: s.sans_font_upem,
                     sans_content_id: protocol::content::CONTENT_ID_FONT_SANS,
                     sans_ascender: s.sans_font_ascender,
                     sans_descender: s.sans_font_descender,
                     sans_line_gap: s.sans_font_line_gap,
+                    sans_cap_height: s.sans_font_cap_height,
                     serif_data: serif_font_data(),
                     serif_upem: s.serif_font_upem,
                     serif_content_id: protocol::content::CONTENT_ID_FONT_SERIF,
                     serif_ascender: s.serif_font_ascender,
                     serif_descender: s.serif_font_descender,
                     serif_line_gap: s.serif_font_line_gap,
+                    serif_cap_height: s.serif_font_cap_height,
                     mono_italic_data: mono_italic_font_data(),
                     mono_italic_upem: s.mono_italic_font_upem,
                     mono_italic_content_id: protocol::content::CONTENT_ID_FONT_MONO_ITALIC,
                     mono_italic_ascender: s.mono_italic_font_ascender,
                     mono_italic_descender: s.mono_italic_font_descender,
                     mono_italic_line_gap: s.mono_italic_font_line_gap,
+                    mono_italic_cap_height: s.mono_italic_font_cap_height,
                     sans_italic_data: sans_italic_font_data(),
                     sans_italic_upem: s.sans_italic_font_upem,
                     sans_italic_content_id: protocol::content::CONTENT_ID_FONT_SANS_ITALIC,
                     sans_italic_ascender: s.sans_italic_font_ascender,
                     sans_italic_descender: s.sans_italic_font_descender,
                     sans_italic_line_gap: s.sans_italic_font_line_gap,
+                    sans_italic_cap_height: s.sans_italic_font_cap_height,
                     serif_italic_data: serif_italic_font_data(),
                     serif_italic_upem: s.serif_italic_font_upem,
                     serif_italic_content_id: protocol::content::CONTENT_ID_FONT_SERIF_ITALIC,
                     serif_italic_ascender: s.serif_italic_font_ascender,
                     serif_italic_descender: s.serif_italic_font_descender,
                     serif_italic_line_gap: s.serif_italic_font_line_gap,
+                    serif_italic_cap_height: s.serif_italic_font_cap_height,
                 };
                 scene.update_rich_document_content(
                     &scene_cfg,
@@ -2769,36 +2817,42 @@ pub extern "C" fn _start() -> ! {
                     mono_ascender: s.font_ascender,
                     mono_descender: s.font_descender,
                     mono_line_gap: s.font_line_gap,
+                    mono_cap_height: s.font_cap_height,
                     sans_data: sans_font_data(),
                     sans_upem: s.sans_font_upem,
                     sans_content_id: protocol::content::CONTENT_ID_FONT_SANS,
                     sans_ascender: s.sans_font_ascender,
                     sans_descender: s.sans_font_descender,
                     sans_line_gap: s.sans_font_line_gap,
+                    sans_cap_height: s.sans_font_cap_height,
                     serif_data: serif_font_data(),
                     serif_upem: s.serif_font_upem,
                     serif_content_id: protocol::content::CONTENT_ID_FONT_SERIF,
                     serif_ascender: s.serif_font_ascender,
                     serif_descender: s.serif_font_descender,
                     serif_line_gap: s.serif_font_line_gap,
+                    serif_cap_height: s.serif_font_cap_height,
                     mono_italic_data: mono_italic_font_data(),
                     mono_italic_upem: s.mono_italic_font_upem,
                     mono_italic_content_id: protocol::content::CONTENT_ID_FONT_MONO_ITALIC,
                     mono_italic_ascender: s.mono_italic_font_ascender,
                     mono_italic_descender: s.mono_italic_font_descender,
                     mono_italic_line_gap: s.mono_italic_font_line_gap,
+                    mono_italic_cap_height: s.mono_italic_font_cap_height,
                     sans_italic_data: sans_italic_font_data(),
                     sans_italic_upem: s.sans_italic_font_upem,
                     sans_italic_content_id: protocol::content::CONTENT_ID_FONT_SANS_ITALIC,
                     sans_italic_ascender: s.sans_italic_font_ascender,
                     sans_italic_descender: s.sans_italic_font_descender,
                     sans_italic_line_gap: s.sans_italic_font_line_gap,
+                    sans_italic_cap_height: s.sans_italic_font_cap_height,
                     serif_italic_data: serif_italic_font_data(),
                     serif_italic_upem: s.serif_italic_font_upem,
                     serif_italic_content_id: protocol::content::CONTENT_ID_FONT_SERIF_ITALIC,
                     serif_italic_ascender: s.serif_italic_font_ascender,
                     serif_italic_descender: s.serif_italic_font_descender,
                     serif_italic_line_gap: s.serif_italic_font_line_gap,
+                    serif_italic_cap_height: s.serif_italic_font_cap_height,
                 };
                 scene.update_rich_document_content(
                     &scene_cfg,
@@ -2845,36 +2899,42 @@ pub extern "C" fn _start() -> ! {
                     mono_ascender: s.font_ascender,
                     mono_descender: s.font_descender,
                     mono_line_gap: s.font_line_gap,
+                    mono_cap_height: s.font_cap_height,
                     sans_data: sans_font_data(),
                     sans_upem: s.sans_font_upem,
                     sans_content_id: protocol::content::CONTENT_ID_FONT_SANS,
                     sans_ascender: s.sans_font_ascender,
                     sans_descender: s.sans_font_descender,
                     sans_line_gap: s.sans_font_line_gap,
+                    sans_cap_height: s.sans_font_cap_height,
                     serif_data: serif_font_data(),
                     serif_upem: s.serif_font_upem,
                     serif_content_id: protocol::content::CONTENT_ID_FONT_SERIF,
                     serif_ascender: s.serif_font_ascender,
                     serif_descender: s.serif_font_descender,
                     serif_line_gap: s.serif_font_line_gap,
+                    serif_cap_height: s.serif_font_cap_height,
                     mono_italic_data: mono_italic_font_data(),
                     mono_italic_upem: s.mono_italic_font_upem,
                     mono_italic_content_id: protocol::content::CONTENT_ID_FONT_MONO_ITALIC,
                     mono_italic_ascender: s.mono_italic_font_ascender,
                     mono_italic_descender: s.mono_italic_font_descender,
                     mono_italic_line_gap: s.mono_italic_font_line_gap,
+                    mono_italic_cap_height: s.mono_italic_font_cap_height,
                     sans_italic_data: sans_italic_font_data(),
                     sans_italic_upem: s.sans_italic_font_upem,
                     sans_italic_content_id: protocol::content::CONTENT_ID_FONT_SANS_ITALIC,
                     sans_italic_ascender: s.sans_italic_font_ascender,
                     sans_italic_descender: s.sans_italic_font_descender,
                     sans_italic_line_gap: s.sans_italic_font_line_gap,
+                    sans_italic_cap_height: s.sans_italic_font_cap_height,
                     serif_italic_data: serif_italic_font_data(),
                     serif_italic_upem: s.serif_italic_font_upem,
                     serif_italic_content_id: protocol::content::CONTENT_ID_FONT_SERIF_ITALIC,
                     serif_italic_ascender: s.serif_italic_font_ascender,
                     serif_italic_descender: s.serif_italic_font_descender,
                     serif_italic_line_gap: s.serif_italic_font_line_gap,
+                    serif_italic_cap_height: s.serif_italic_font_cap_height,
                 };
                 scene.update_rich_document_content(
                     &scene_cfg,
