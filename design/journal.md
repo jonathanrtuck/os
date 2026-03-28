@@ -4,6 +4,114 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Icon Library API Design (2026-03-28)
+
+**Status:** Settled. Ready to implement as `libraries/icons/`.
+
+### The question
+
+Decision #18 settled the _mechanism_ (icons are `Content::Path`, runtime stroke rendering, Tabler source set, build-time SVG conversion). This discussion settles the _API_ — how callers look up and use icons — and curates the initial icon set.
+
+### API design
+
+**Single lookup function, name-primary, mimetype-optional:**
+
+```rust
+pub fn get(name: &str, mimetype: Option<&str>) -> &'static Icon
+```
+
+Infallible — always returns an icon. Fallback chain: exact name + exact mimetype → exact name + mimetype category (e.g., `image/*`) → base icon for name → universal fallback (base `document` icon).
+
+**Name = UI semantic, mimetype = content refinement.** The name identifies what _role_ the icon plays in the UI — `"document"` in the title bar, `"alert"` in a notification, `"play"` in media controls. The mimetype optionally refines the visual within that role. Both axes apply to all icons: `document` uses mimetype variants heavily today; system UI icons like `plus` or `search` could gain variants later (e.g., `get("plus", Some("image/*"))` → Tabler `photo-plus`). No API change needed — unregistered variants fall back to the base icon automatically.
+
+**Semantic OS names, not Tabler names:** Icon identifiers use the OS's vocabulary (`"document"`, not `"file-text"`; `"play"`, not `"player-play"`). This decouples the API from the source icon set. A mapping table in the build config connects OS names to source SVG files — that table is the curation artifact.
+
+**Layered sub-paths for hierarchical rendering:**
+
+```rust
+pub enum Layer { Primary, Secondary }
+pub struct IconPath {
+    pub commands: &'static [u8],  // native path commands
+    pub layer: Layer,
+}
+pub struct Icon {
+    pub name: &'static str,
+    pub label: &'static str,       // a11y text
+    pub paths: &'static [IconPath],
+    pub viewbox: f32,              // 24.0 for Tabler
+    pub stroke_width: f32,         // 2.0 = Tabler default, 0.0 = filled
+}
+```
+
+Each sub-path is tagged Primary or Secondary by the designer during curation. Primary = main shape (full visual weight), Secondary = interior detail (reduced opacity). Layer assignment is a one-time design decision per icon, not a caller concern.
+
+**Rendering helper in core, not per-caller:** A single `emit_icon()` function in core maps layers to theme colors and emits `Content::Path` scene nodes. Callers never touch `Layer` directly — they call `emit_icon(writer, icon, x, y, size)` and get correctly themed output. The icon library is pure data; core owns the rendering bridge.
+
+### Initial icon set (25 icons)
+
+**`document` — 9 mimetype variants:**
+
+| Mimetype match      | Tabler source       | Label              | Layer breakdown                    |
+| ------------------- | ------------------- | ------------------ | ---------------------------------- |
+| (base / None)       | `file`              | Document           | P: blank page + fold               |
+| text/\*             | `file-text`         | Text document      | P: page + fold; S: text lines      |
+| text/rich           | `file-typography`   | Rich text document | P: page + fold; S: typography mark |
+| text/markdown       | `markdown`          | Markdown document  | P: page + fold; S: markdown mark   |
+| text/x-\*, app/json | `file-code`         | Source code        | P: page + fold; S: code brackets   |
+| image/\*            | `photo`             | Image              | P: frame; S: landscape + sun       |
+| audio/\*            | `device-audio-tape` | Audio              | P: tape body; S: reels             |
+| video/\*            | `movie`             | Video              | P: clapperboard; S: detail lines   |
+| structured data     | `table`             | Data table         | P: grid outline; S: grid lines     |
+
+**System UI — 16 base icons (no mimetype variants initially):**
+
+| OS name       | Tabler source      | Label          |
+| ------------- | ------------------ | -------------- |
+| `search`      | `search`           | Search         |
+| `settings`    | `settings`         | Settings       |
+| `alert`       | `alert-triangle`   | Alert          |
+| `info`        | `info-circle`      | Information    |
+| `check`       | `check`            | Confirm        |
+| `close`       | `x`                | Close          |
+| `plus`        | `plus`             | Add            |
+| `minus`       | `minus`            | Remove         |
+| `arrow-left`  | `arrow-left`       | Navigate left  |
+| `arrow-right` | `arrow-right`      | Navigate right |
+| `arrow-up`    | `arrow-up`         | Navigate up    |
+| `arrow-down`  | `arrow-down`       | Navigate down  |
+| `undo`        | `arrow-back-up`    | Undo           |
+| `redo`        | `arrow-forward-up` | Redo           |
+| `menu`        | `menu-2`           | Menu           |
+| `loading`     | `loader-2`         | Loading        |
+
+**Growth plan:** Icons are added per-milestone as needed. v0.6 (Media) adds transport controls (play, pause, stop). v0.7 (Design Decisions) adds clipboard. v0.9 (Realtime) adds communication (mail, calendar, message). v0.12 (Web) adds globe, link, bookmark. The architecture makes adding an icon a one-line mapping change.
+
+### What this replaces
+
+The current implementation in `services/core/icons.rs` stores SVG `d` strings, CPU-pre-rasterizes to BGRA pixels at boot, and displays as `Content::InlineImage`. This was a workaround for the metal-render stencil pipeline not handling stroked path geometry. With the stroke expansion fix (commit 8917312), icons can go through `Content::Path` directly — the workaround is no longer needed.
+
+### Architecture
+
+```text
+resources/icons/*.svg          Source SVGs (Tabler, host-side only)
+    ↓ build.rs
+libraries/icons/               Shared library (pure data, no_std)
+  ├── mod.rs                   pub fn get(name, mimetype) -> &Icon
+  ├── types.rs                 Icon, IconPath, Layer
+  └── data.rs                  Generated const arrays + lookup tables
+    ↓ used by
+services/core/                 emit_icon() helper, theme color mapping
+```
+
+### Deferred
+
+- Tertiary layer (two levels cover all current icons; add if needed)
+- Tags/categories on icons (future icon picker, theming)
+- Build-time incremental rebuild (optimize later with general build system work)
+- Mimetype variants for system UI icons (API supports it; curate when needed)
+
+---
+
 ## Three core service bug fixes (2026-03-28)
 
 **Status: DONE — all three verified**

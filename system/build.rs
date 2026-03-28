@@ -27,6 +27,10 @@ mod system_config {
     include!("system_config.rs");
 }
 
+/// Build-time icon converter: SVG → native path commands → generated Rust.
+#[path = "build_icons.rs"]
+mod build_icons;
+
 /// Output of building a Cargo-managed library for the bare-metal target.
 #[allow(dead_code)]
 struct CargoLibOutput {
@@ -171,6 +175,20 @@ fn main() {
 
     rustc_rlib(&rustc, &scene_src, &scene_rlib, "scene", &[]);
 
+    // Step 1c: Generate icon data from SVGs and compile icons library.
+    let icons_svg_dir = manifest_dir.join("resources/icons");
+    let icons_data_rs = manifest_dir.join("libraries/icons/data.rs");
+    build_icons::generate_icon_data(&icons_svg_dir, &icons_data_rs);
+    println!(
+        "cargo:rerun-if-changed={}",
+        icons_svg_dir.display()
+    );
+
+    let icons_src = manifest_dir.join("libraries/icons/lib.rs");
+    let icons_rlib = out_dir.join("libicons.rlib");
+
+    rustc_rlib(&rustc, &icons_src, &icons_rlib, "icons", &[]);
+
     let ipc_src = manifest_dir.join("libraries/ipc/lib.rs");
     let ipc_rlib = out_dir.join("libipc.rlib");
 
@@ -257,6 +275,7 @@ fn main() {
             externs.push(("animation", animation_rlib.clone()));
             externs.push(("layout", layout_rlib.clone()));
             externs.push(("piecetable", piecetable_rlib.clone()));
+            externs.push(("icons", icons_rlib.clone()));
         }
         if name == "rich-editor" {
             externs.push(("piecetable", piecetable_rlib.clone()));
@@ -390,6 +409,7 @@ fn main() {
     println!("cargo:rerun-if-changed={}", animation_src.display());
     println!("cargo:rerun-if-changed={}", layout_src.display());
     println!("cargo:rerun-if-changed={}", scene_src.display());
+    println!("cargo:rerun-if-changed={}", icons_src.display());
     println!("cargo:rerun-if-changed={}", render_src.display());
     for render_mod in &[
         "scene_render.rs",

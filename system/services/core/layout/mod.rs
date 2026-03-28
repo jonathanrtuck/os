@@ -11,6 +11,8 @@ mod loading;
 
 use alloc::vec::Vec;
 
+use icon_lib as icons;
+
 pub(crate) use full::rich_xy_to_byte;
 // Re-export all public items from submodules.
 pub use full::{
@@ -131,6 +133,113 @@ pub struct SceneConfig<'a> {
     pub sans_descender: i16,
     /// Sans font line gap (font units).
     pub sans_line_gap: i16,
+}
+
+// ── Icon rendering ─────────────────────────────────────────────────
+
+/// Scale pre-compiled icon path data from viewbox space to point space
+/// and push to the scene writer's data buffer. Returns the DataRef for
+/// use in `Content::Path`.
+///
+/// Concatenates all sub-paths from the icon into a single contour blob.
+/// Color is applied uniformly (monochrome). For layered rendering with
+/// per-layer opacity, use separate nodes per layer group.
+fn scale_icon_paths(
+    w: &mut scene::SceneWriter<'_>,
+    icon: &icons::Icon,
+    size_pt: u32,
+) -> (DataRef, u32) {
+    let scale = size_pt as f32 / icon.viewbox;
+    let mut buf = Vec::new();
+
+    for icon_path in icon.paths {
+        let cmds = icon_path.commands;
+        let mut pos = 0;
+        while pos + 4 <= cmds.len() {
+            let tag = u32::from_le_bytes([cmds[pos], cmds[pos + 1], cmds[pos + 2], cmds[pos + 3]]);
+            match tag {
+                0 => {
+                    // MoveTo: tag(4) + x(4) + y(4) = 12
+                    if pos + 12 > cmds.len() { break; }
+                    let x = f32::from_le_bytes([cmds[pos+4], cmds[pos+5], cmds[pos+6], cmds[pos+7]]) * scale;
+                    let y = f32::from_le_bytes([cmds[pos+8], cmds[pos+9], cmds[pos+10], cmds[pos+11]]) * scale;
+                    buf.extend_from_slice(&0u32.to_le_bytes());
+                    buf.extend_from_slice(&x.to_le_bytes());
+                    buf.extend_from_slice(&y.to_le_bytes());
+                    pos += 12;
+                }
+                1 => {
+                    // LineTo: tag(4) + x(4) + y(4) = 12
+                    if pos + 12 > cmds.len() { break; }
+                    let x = f32::from_le_bytes([cmds[pos+4], cmds[pos+5], cmds[pos+6], cmds[pos+7]]) * scale;
+                    let y = f32::from_le_bytes([cmds[pos+8], cmds[pos+9], cmds[pos+10], cmds[pos+11]]) * scale;
+                    buf.extend_from_slice(&1u32.to_le_bytes());
+                    buf.extend_from_slice(&x.to_le_bytes());
+                    buf.extend_from_slice(&y.to_le_bytes());
+                    pos += 12;
+                }
+                2 => {
+                    // CubicTo: tag(4) + c1x(4) + c1y(4) + c2x(4) + c2y(4) + x(4) + y(4) = 28
+                    if pos + 28 > cmds.len() { break; }
+                    let mut coords = [0f32; 6];
+                    for ci in 0..6 {
+                        let off = pos + 4 + ci * 4;
+                        coords[ci] = f32::from_le_bytes([cmds[off], cmds[off+1], cmds[off+2], cmds[off+3]]) * scale;
+                    }
+                    buf.extend_from_slice(&2u32.to_le_bytes());
+                    for c in &coords {
+                        buf.extend_from_slice(&c.to_le_bytes());
+                    }
+                    pos += 28;
+                }
+                3 => {
+                    // Close: tag(4) = 4
+                    buf.extend_from_slice(&3u32.to_le_bytes());
+                    pos += 4;
+                }
+                _ => break,
+            }
+        }
+    }
+
+    let hash = scene::fnv1a(&buf);
+    let data_ref = w.push_data(&buf);
+    (data_ref, hash)
+}
+
+/// Set up a scene node as an icon using Content::Path.
+///
+/// This is the single rendering helper that maps icon layers to theme
+/// colors. Currently monochrome (all layers get the same color).
+/// Layered rendering (Primary/Secondary opacity) is a future enhancement.
+pub(crate) fn emit_icon(
+    w: &mut scene::SceneWriter<'_>,
+    node_id: u16,
+    icon: &icons::Icon,
+    x: i32,
+    y: i32,
+    size_pt: u32,
+    color: Color,
+) {
+    let (data_ref, hash) = scale_icon_paths(w, icon, size_pt);
+
+    // Stroke width: scale from viewbox units to points, encode as 8.8 fixed-point.
+    let sw_pt = icon.stroke_width * (size_pt as f32 / icon.viewbox);
+    let sw_fixed = (sw_pt * 256.0) as u16;
+
+    let n = w.node_mut(node_id);
+    n.x = scene::pt(x);
+    n.y = scene::pt(y as i32);
+    n.width = scene::upt(size_pt);
+    n.height = scene::upt(size_pt);
+    n.content = Content::Path {
+        color,
+        fill_rule: scene::FillRule::Winding,
+        stroke_width: sw_fixed,
+        contours: data_ref,
+    };
+    n.content_hash = hash;
+    n.flags = NodeFlags::VISIBLE;
 }
 
 // ── Layout types ────────────────────────────────────────────────────

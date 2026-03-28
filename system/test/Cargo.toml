@@ -20,3 +20,4 @@ layout = { path = "../libraries/layout" }
 fs = { path = "../libraries/fs" }
 store = { path = "../libraries/store" }
 piecetable = { path = "../libraries/piecetable" }
+icons = { path = "../libraries/icons" }

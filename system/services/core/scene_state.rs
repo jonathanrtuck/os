@@ -222,6 +222,7 @@ impl SceneState {
         scroll_y: scene::Mpt,
         timer_fired: bool,
         cursor_opacity: u8,
+        active_space: u8,
     ) {
         let mut tw = self.triple();
         {
@@ -252,6 +253,7 @@ impl SceneState {
                     scroll_y,
                     timer_fired,
                     cursor_opacity,
+                    active_space,
                 );
             }
         }
@@ -273,6 +275,7 @@ impl SceneState {
         scroll_y: scene::Mpt,
         timer_fired: bool,
         cursor_opacity: u8,
+        active_space: u8,
     ) {
         let mut tw = self.triple();
         {
@@ -301,6 +304,7 @@ impl SceneState {
                     scroll_y,
                     timer_fired,
                     cursor_opacity,
+                    active_space,
                 );
             }
         }
@@ -322,6 +326,7 @@ impl SceneState {
         scroll_y: scene::Mpt,
         timer_fired: bool,
         cursor_opacity: u8,
+        active_space: u8,
     ) {
         let mut tw = self.triple();
         {
@@ -350,6 +355,7 @@ impl SceneState {
                     scroll_y,
                     timer_fired,
                     cursor_opacity,
+                    active_space,
                 );
             }
         }
@@ -401,6 +407,7 @@ impl SceneState {
         scroll_y: scene::Mpt,
         mark_clock_changed: bool,
         cursor_opacity: u8,
+        active_space: u8,
     ) {
         let mut tw = self.triple();
         {
@@ -417,6 +424,7 @@ impl SceneState {
                 scroll_y,
                 mark_clock_changed,
                 cursor_opacity,
+                active_space,
             );
         }
         tw.publish();
@@ -438,6 +446,7 @@ impl SceneState {
         scroll_y: scene::Mpt,
         mark_clock_changed: bool,
         cursor_opacity: u8,
+        active_space: u8,
     ) -> alloc::vec::Vec<super::layout::RichLine> {
         let mut tw = self.triple();
         let lines = {
@@ -455,6 +464,7 @@ impl SceneState {
                 scroll_y,
                 mark_clock_changed,
                 cursor_opacity,
+                active_space,
             );
             lines
         };

@@ -13,6 +13,7 @@ Shared `#![no_std]` libraries used by userspace services and programs.
 | `ipc/`       | Lock-free SPSC ring buffer for 64-byte IPC messages, `recv_blocking` for synchronous RPC                       | Foundational |
 | `layout/`    | Unified text layout engine: one function for mono + proportional via `FontMetrics` trait                       | Foundational |
 | `render/`    | Render backend (CpuBackend, scene tree walk, incremental rendering, damage, frame scheduler)                   | Foundational |
+| `icons/`     | Named vector icons: `get(name, mimetype)` lookup, pre-compiled Tabler SVGs, layer annotations                  | Foundational |
 | `scene/`     | Scene graph types, triple-buffered shared memory layout, writer/reader APIs for core ↔ render services         | Foundational |
 | `fs/`        | COW filesystem: BlockDevice trait, superblock ring, free-extent allocator, inodes, snapshots, two-flush commit | Foundational |
 | `store/`     | Document store metadata layer: catalog, media types, attributes, queries. Wraps `Box<dyn Files>`               | Foundational |

@@ -30,6 +30,7 @@ extern crate drawing;
 extern crate fonts;
 extern crate layout as layout_lib;
 extern crate piecetable;
+extern crate icons as icon_lib;
 extern crate render;
 extern crate scene;
 
@@ -1715,6 +1716,7 @@ pub extern "C" fn _start() -> ! {
                 0,
                 true,
                 s.cursor_opacity,
+                s.active_space,
             );
             state().rich_lines = lines;
         }
@@ -2924,12 +2926,14 @@ pub extern "C" fn _start() -> ! {
                         s.scroll_offset,
                         true,
                         s.cursor_opacity,
+                        s.active_space,
                     );
                     state().rich_lines = lines;
                 }
             } else if text_changed && is_rich_doc {
                 // Rich text content changed — always full rebuild.
                 let s = state();
+                let title: &[u8] = if s.active_space != 0 { b"Image" } else { b"Rich Text" };
                 let rich_fonts = scene_state::RichFonts {
                     mono_data: font_data(),
                     mono_upem: s.font_upem,
@@ -2981,11 +2985,12 @@ pub extern "C" fn _start() -> ! {
                     s.cursor_pos as u32,
                     s.sel_start as u32,
                     s.sel_end as u32,
-                    b"Rich Text",
+                    title,
                     &time_buf,
                     s.scroll_offset,
                     clock_changed,
                     s.cursor_opacity,
+                    s.active_space,
                 );
                 state().rich_lines = lines;
             } else if text_changed {
@@ -3006,6 +3011,7 @@ pub extern "C" fn _start() -> ! {
                         s.scroll_offset,
                         clock_changed,
                         s.cursor_opacity,
+                        s.active_space,
                     );
                 } else if new_line_count == prev_line_count {
                     let s = state();
@@ -3033,6 +3039,7 @@ pub extern "C" fn _start() -> ! {
                         s.scroll_offset,
                         clock_changed,
                         s.cursor_opacity,
+                        s.active_space,
                     );
                 } else if new_line_count == prev_line_count + 1 {
                     let s = state();
@@ -3047,6 +3054,7 @@ pub extern "C" fn _start() -> ! {
                         s.scroll_offset,
                         clock_changed,
                         s.cursor_opacity,
+                        s.active_space,
                     );
                 } else if new_line_count + 1 == prev_line_count {
                     let s = state();
@@ -3061,6 +3069,7 @@ pub extern "C" fn _start() -> ! {
                         s.scroll_offset,
                         clock_changed,
                         s.cursor_opacity,
+                        s.active_space,
                     );
                 } else {
                     let s = state();
@@ -3075,6 +3084,7 @@ pub extern "C" fn _start() -> ! {
                         s.scroll_offset,
                         clock_changed,
                         s.cursor_opacity,
+                        s.active_space,
                     );
                 }
 
@@ -3082,6 +3092,7 @@ pub extern "C" fn _start() -> ! {
             } else if selection_changed && is_rich_doc {
                 // Rich text selection — full rebuild (proportional positioning).
                 let s = state();
+                let title: &[u8] = if s.active_space != 0 { b"Image" } else { b"Rich Text" };
                 let rich_fonts = scene_state::RichFonts {
                     mono_data: font_data(),
                     mono_upem: s.font_upem,
@@ -3133,11 +3144,12 @@ pub extern "C" fn _start() -> ! {
                     s.cursor_pos as u32,
                     s.sel_start as u32,
                     s.sel_end as u32,
-                    b"Rich Text",
+                    title,
                     &time_buf,
                     s.scroll_offset,
                     clock_changed,
                     s.cursor_opacity,
+                    s.active_space,
                 );
                 state().rich_lines = lines;
             } else if selection_changed {
@@ -3162,6 +3174,7 @@ pub extern "C" fn _start() -> ! {
                 // Rich text cursor-only update — full rebuild needed because
                 // proportional cursor positioning requires the styled layout.
                 let s = state();
+                let title: &[u8] = if s.active_space != 0 { b"Image" } else { b"Rich Text" };
                 let rich_fonts = scene_state::RichFonts {
                     mono_data: font_data(),
                     mono_upem: s.font_upem,
@@ -3213,11 +3226,12 @@ pub extern "C" fn _start() -> ! {
                     s.cursor_pos as u32,
                     s.sel_start as u32,
                     s.sel_end as u32,
-                    b"Rich Text",
+                    title,
                     &time_buf,
                     s.scroll_offset,
                     clock_changed,
                     s.cursor_opacity,
+                    s.active_space,
                 );
                 state().rich_lines = lines;
             } else if changed {

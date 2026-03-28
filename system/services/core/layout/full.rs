@@ -10,10 +10,10 @@ use scene::{fnv1a, Border, Color, Content, FillRule, NodeFlags, NULL};
 
 use super::{
     allocate_line_nodes, allocate_selection_rects, byte_to_line_col, chars_per_line, dc, doc_width,
-    layout_mono_lines, layout_rich_lines, scroll_runs, shape_chrome_text, shape_rich_segment,
-    shape_visible_runs, update_clock_inline, FontInfo, RichLine, SceneConfig, N_CLOCK_TEXT,
-    N_CONTENT, N_CURSOR, N_DOC_IMAGE, N_DOC_TEXT, N_PAGE, N_POINTER, N_ROOT, N_SHADOW, N_STRIP,
-    N_TITLE_BAR, N_TITLE_ICON, N_TITLE_TEXT, WELL_KNOWN_COUNT,
+    emit_icon, layout_mono_lines, layout_rich_lines, scroll_runs, shape_chrome_text,
+    shape_rich_segment, shape_visible_runs, update_clock_inline, FontInfo, RichLine, SceneConfig,
+    N_CLOCK_TEXT, N_CONTENT, N_CURSOR, N_DOC_IMAGE, N_DOC_TEXT, N_PAGE, N_POINTER, N_ROOT,
+    N_SHADOW, N_STRIP, N_TITLE_BAR, N_TITLE_ICON, N_TITLE_TEXT, WELL_KNOWN_COUNT,
 };
 use crate::icons;
 
@@ -167,38 +167,25 @@ pub fn build_full_scene(
 
     let text_y_offset = (cfg.title_bar_h.saturating_sub(cfg.line_height)) / 2;
 
-    // Title bar icon.
-    let icon_size_pt = cfg.line_height * 3 / 4;
-    let icon_size_px = icon_size_pt * 2;
-    let icon_paths = if active_space != 0 {
-        icons::PHOTO
+    // Title bar icon — sized slightly larger than line_height to compensate
+    // for Tabler's ~2-unit internal viewbox padding (24×24 viewbox, visual
+    // content in ~3..21). Offset upward by 1pt to align visual center with
+    // text center (the padding is not symmetric — bottom content like pencil
+    // tips extends further than top padding).
+    let icon_size_pt = cfg.line_height + 2;
+    let mimetype = if active_space != 0 {
+        Some("image/png")
     } else {
-        icons::FILE_TEXT
+        Some("text/plain")
     };
-    let icon_pixels =
-        icons::rasterize_icon(icon_paths, icon_size_px, dc(cfg.chrome_title_color), 1.5);
-    let icon_data_ref = w.push_data(&icon_pixels);
-    let icon_hash = fnv1a(&icon_pixels);
+    let icon = icon_lib::get("document", mimetype);
 
-    let icon_x: i32 = 10;
-    let icon_y = (cfg.title_bar_h.saturating_sub(icon_size_pt)) / 2;
-    let title_text_x = icon_x + icon_size_pt as i32 + 6;
+    let icon_x: i32 = 6;
+    let icon_y = ((cfg.title_bar_h.saturating_sub(icon_size_pt)) / 2).saturating_sub(1);
+    let title_text_x = icon_x + icon_size_pt as i32 + 8;
 
-    {
-        let n = w.node_mut(N_TITLE_ICON);
-        n.next_sibling = N_TITLE_TEXT;
-        n.x = scene::pt(icon_x);
-        n.y = scene::pt(icon_y as i32);
-        n.width = scene::upt(icon_size_pt);
-        n.height = scene::upt(icon_size_pt);
-        n.content = Content::InlineImage {
-            data: icon_data_ref,
-            src_width: icon_size_px as u16,
-            src_height: icon_size_px as u16,
-        };
-        n.content_hash = icon_hash;
-        n.flags = NodeFlags::VISIBLE;
-    }
+    emit_icon(w, N_TITLE_ICON, icon, icon_x, icon_y as i32, icon_size_pt, dc(cfg.chrome_title_color));
+    w.node_mut(N_TITLE_ICON).next_sibling = N_TITLE_TEXT;
     {
         let n = w.node_mut(N_TITLE_TEXT);
         n.next_sibling = N_CLOCK_TEXT;
@@ -559,6 +546,7 @@ pub fn build_document_content(
     scroll_y: scene::Mpt,
     mark_clock_changed: bool,
     cursor_opacity: u8,
+    active_space: u8,
 ) {
     let scene_text_color = dc(cfg.text_color);
     let doc_width = doc_width(cfg);
@@ -600,25 +588,15 @@ pub fn build_document_content(
         n.content_hash = cursor_hash;
     }
 
-    // Re-push title icon pixel data (invalidated by reset_data).
+    // Re-push title icon path data (invalidated by reset_data).
     {
-        let icon_size_pt = cfg.line_height * 3 / 4;
-        let icon_size_px = icon_size_pt * 2;
-        let icon_pixels = icons::rasterize_icon(
-            icons::FILE_TEXT,
-            icon_size_px,
-            dc(cfg.chrome_title_color),
-            1.5,
-        );
-        let icon_data_ref = w.push_data(&icon_pixels);
-        let icon_hash = fnv1a(&icon_pixels);
-        let n = w.node_mut(N_TITLE_ICON);
-        n.content = Content::InlineImage {
-            data: icon_data_ref,
-            src_width: icon_size_px as u16,
-            src_height: icon_size_px as u16,
-        };
-        n.content_hash = icon_hash;
+        let icon_size_pt = cfg.line_height + 2;
+        let mimetype = if active_space != 0 { Some("image/png") } else { Some("text/plain") };
+        let icon = icon_lib::get("document", mimetype);
+        let icon_x: i32 = 6;
+        let icon_y = ((cfg.title_bar_h.saturating_sub(icon_size_pt)) / 2).saturating_sub(1);
+        emit_icon(w, N_TITLE_ICON, icon, icon_x, icon_y as i32, icon_size_pt, dc(cfg.chrome_title_color));
+        w.node_mut(N_TITLE_ICON).next_sibling = N_TITLE_TEXT;
     }
 
     // Content::Image nodes reference the Content Region (not the scene data buffer),
@@ -1147,6 +1125,7 @@ pub fn build_rich_document_content(
     scroll_y: scene::Mpt,
     mark_clock_changed: bool,
     cursor_opacity: u8,
+    active_space: u8,
 ) -> Vec<RichLine> {
     let doc_width = doc_width(cfg);
     let page_padding = cfg.text_inset_x;
@@ -1213,25 +1192,15 @@ pub fn build_rich_document_content(
         n.content_hash = cursor_hash;
     }
 
-    // Re-push title icon.
+    // Re-push title icon path data.
     {
-        let icon_size_pt = cfg.line_height * 3 / 4;
-        let icon_size_px = icon_size_pt * 2;
-        let icon_pixels = icons::rasterize_icon(
-            icons::FILE_TEXT,
-            icon_size_px,
-            dc(cfg.chrome_title_color),
-            1.5,
-        );
-        let icon_data_ref = w.push_data(&icon_pixels);
-        let icon_hash = fnv1a(&icon_pixels);
-        let n = w.node_mut(N_TITLE_ICON);
-        n.content = Content::InlineImage {
-            data: icon_data_ref,
-            src_width: icon_size_px as u16,
-            src_height: icon_size_px as u16,
-        };
-        n.content_hash = icon_hash;
+        let icon_size_pt = cfg.line_height + 2;
+        let mimetype = if active_space != 0 { Some("image/png") } else { Some("text/rich") };
+        let icon = icon_lib::get("document", mimetype);
+        let icon_x: i32 = 6;
+        let icon_y = ((cfg.title_bar_h.saturating_sub(icon_size_pt)) / 2).saturating_sub(1);
+        emit_icon(w, N_TITLE_ICON, icon, icon_x, icon_y as i32, icon_size_pt, dc(cfg.chrome_title_color));
+        w.node_mut(N_TITLE_ICON).next_sibling = N_TITLE_TEXT;
     }
 
     // Re-push chrome text.
