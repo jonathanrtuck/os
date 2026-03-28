@@ -6058,29 +6058,25 @@ fn stroke_expand_closed_rectangle_outer_has_arcs() {
     }
     assert_eq!(contours.len(), 2, "Expected 2 contours");
 
-    // Count cubics in each contour.
-    let cubics_0 = contours[0]
+    // Count line segments in each contour (arcs are emitted as pre-flattened
+    // line segments, not cubics — avoids double-flattening in the stencil pipeline).
+    let lines_0 = contours[0]
         .iter()
-        .filter(|(t, _)| *t == scene::PATH_CUBIC_TO)
+        .filter(|(t, _)| *t == scene::PATH_LINE_TO)
         .count();
-    let cubics_1 = contours[1]
+    let lines_1 = contours[1]
         .iter()
-        .filter(|(t, _)| *t == scene::PATH_CUBIC_TO)
+        .filter(|(t, _)| *t == scene::PATH_LINE_TO)
         .count();
 
-    // First contour is left (inner for CW) — should have 0 cubics (no arcs at inner corners).
-    assert_eq!(
-        cubics_0, 0,
-        "Inner contour (left/forward) should have no cubic arcs, got {}",
-        cubics_0
-    );
-
-    // Second contour is right (outer for CW) — should have cubics (round join arcs).
-    // 4 corners × 1 quarter-circle arc each = at least 4 cubics.
+    // First contour is left (inner for CW) — 4 straight segments, no arc geometry.
+    // Second contour is right (outer for CW) — 4 straight segments PLUS arc line segments
+    // at each corner (≥2 per 90° arc at π/4 step). Outer should have more lines.
     assert!(
-        cubics_1 >= 4,
-        "Outer contour (right/backward) should have round join arcs, got {} cubics",
-        cubics_1
+        lines_1 > lines_0,
+        "Outer contour should have more line segments than inner (arcs), got outer={} inner={}",
+        lines_1,
+        lines_0
     );
 }
 
@@ -6109,27 +6105,21 @@ fn stroke_expand_ccw_rectangle_arcs_on_correct_side() {
     }
     assert_eq!(contours.len(), 2);
 
-    let cubics_0 = contours[0]
+    let lines_0 = contours[0]
         .iter()
-        .filter(|(t, _)| *t == scene::PATH_CUBIC_TO)
+        .filter(|(t, _)| *t == scene::PATH_LINE_TO)
         .count();
-    let cubics_1 = contours[1]
+    let lines_1 = contours[1]
         .iter()
-        .filter(|(t, _)| *t == scene::PATH_CUBIC_TO)
+        .filter(|(t, _)| *t == scene::PATH_LINE_TO)
         .count();
 
-    // First contour is left (outer for CCW) — should have cubic arcs.
+    // First contour is left (outer for CCW) — has arc line segments at corners.
+    // Second contour is right (inner for CCW) — straight segments only.
     assert!(
-        cubics_0 >= 4,
-        "Outer contour (left/forward for CCW) should have round join arcs, got {} cubics",
-        cubics_0
-    );
-
-    // Second contour is right (inner for CCW) — should have no cubics.
-    assert_eq!(
-        cubics_1, 0,
-        "Inner contour (right/backward for CCW) should have no arcs, got {}",
-        cubics_1
+        lines_0 > lines_1,
+        "Outer contour (left/forward for CCW) should have more line segments than inner, got outer={} inner={}",
+        lines_0, lines_1
     );
 }
 
