@@ -1357,7 +1357,12 @@ pub fn build_rich_document_content(
         n.y = cursor_info.y;
         n.width = scene::upt(cursor_w);
         n.height = scene::upt(cursor_info.height);
-        n.background = dc(cfg.cursor_color);
+        n.background = Color::rgba(
+            cursor_info.color[0],
+            cursor_info.color[1],
+            cursor_info.color[2],
+            cursor_info.color[3],
+        );
         n.opacity = cursor_opacity;
         n.content = Content::None;
         n.flags = NodeFlags::VISIBLE;
@@ -1417,7 +1422,12 @@ pub fn build_rich_document_content(
                 let seg_text_slice = &scratch[seg_start..seg_end.min(text_len)];
                 // Shape segment (same as renderer) for exact advance matching.
                 let shaped = shape_rich_segment(
-                    fi.data, seg_text_slice, font_size, fi.upem, style.weight, italic,
+                    fi.data,
+                    seg_text_slice,
+                    font_size,
+                    fi.upem,
+                    style.weight,
+                    italic,
                 );
 
                 let seg_str = core::str::from_utf8(seg_text_slice).unwrap_or("");
@@ -1492,6 +1502,8 @@ struct RichCursorInfo {
     height: u32,
     /// Font weight at the cursor position (for cursor width scaling).
     style_weight: u16,
+    /// Text color at the cursor position (cursor matches text color).
+    color: [u8; 4],
 }
 
 /// Compute cursor position and height for a rich text document.
@@ -1583,25 +1595,29 @@ fn rich_cursor_position(
 
         // Compute cursor height and y from the style at cursor position.
         // Height = cap height (baseline to top of capital letters).
-        let (cursor_h, cursor_cap_pt, cursor_weight) =
-            if let Some(style) = piecetable::style(pt_buf, cursor_style_id) {
-                let fi = fonts.resolve(style);
-                let cap_h = if fi.upem > 0 {
-                    if fi.cap_height > 0 {
-                        fi.cap_height as f32 * style.font_size_pt as f32 / fi.upem as f32
-                    } else {
-                        // Fallback: approximate cap height as 70% of ascent.
-                        (fi.ascender as i32).abs() as f32 * style.font_size_pt as f32
-                            / fi.upem as f32
-                            * 0.7
-                    }
+        let (cursor_h, cursor_cap_pt, cursor_weight, cursor_color) = if let Some(style) =
+            piecetable::style(pt_buf, cursor_style_id)
+        {
+            let fi = fonts.resolve(style);
+            let cap_h = if fi.upem > 0 {
+                if fi.cap_height > 0 {
+                    fi.cap_height as f32 * style.font_size_pt as f32 / fi.upem as f32
                 } else {
-                    style.font_size_pt as f32 * 0.7
-                };
-                (cap_h as u32, cap_h, style.weight)
+                    (fi.ascender as i32).abs() as f32 * style.font_size_pt as f32 / fi.upem as f32
+                        * 0.7
+                }
             } else {
-                (default_height, default_height as f32 * 0.7, 400)
+                style.font_size_pt as f32 * 0.7
             };
+            (cap_h as u32, cap_h, style.weight, style.color)
+        } else {
+            (
+                default_height,
+                default_height as f32 * 0.7,
+                400,
+                [32, 32, 32, 255],
+            )
+        };
 
         // Baseline-aligned y: cursor top = baseline - cap_height.
         // Baseline = line.y + max_ascent_pt.
@@ -1616,16 +1632,19 @@ fn rich_cursor_position(
             y: cursor_y,
             height: cursor_h.max(2),
             style_weight: cursor_weight,
+            color: cursor_color,
         };
     }
 
     // Cursor past end — put it on the last line.
+    let fallback_color = [32, 32, 32, 255];
     if let Some(last_line) = rich_lines.last() {
         RichCursorInfo {
             x: 0,
             y: scene::pt(last_line.y),
             height: default_height,
             style_weight: 400,
+            color: fallback_color,
         }
     } else {
         RichCursorInfo {
@@ -1633,6 +1652,7 @@ fn rich_cursor_position(
             y: 0,
             height: default_height,
             style_weight: 400,
+            color: fallback_color,
         }
     }
 }
@@ -1680,7 +1700,8 @@ pub(crate) fn rich_xy_to_byte(
 
         let seg_text = &text[seg.text_start..seg_end.min(text.len())];
         // Shape segment (same as renderer) for exact advance matching.
-        let shaped = shape_rich_segment(fi.data, seg_text, font_size, fi.upem, style.weight, italic);
+        let shaped =
+            shape_rich_segment(fi.data, seg_text, font_size, fi.upem, style.weight, italic);
 
         let seg_str = core::str::from_utf8(seg_text).unwrap_or("");
         let mut byte_pos = seg.text_start;
