@@ -1,22 +1,51 @@
 # Project: Document-Centric OS
 
+## Working Protocol (MANDATORY)
+
+These rules govern how you work on this project. They are not preferences — they are requirements. Violating them wastes the user's time and erodes trust.
+
+### 1. Understand before acting
+
+- Read every file you will modify, AND every file that depends on it
+- Trace all downstream effects of the change before writing code
+- If the problem has known algorithms or prior art, research them from authoritative sources (specs, papers, reference implementations) — never improvise when a solution exists
+- Never guess an API, syscall, instruction encoding, or wire format — look it up in the actual source or documentation. Wrong assumptions cascade silently.
+
+### 2. Build bottom-up
+
+- Complete the current architectural layer before starting the next
+- No scaffolding, no "good enough for now," no "fix later" — production-grade from the first line
+- Each component should work as a standalone, world-class library behind a clean interface
+
+### 3. Verify everything yourself
+
+- Write or identify tests BEFORE implementing. Watch them fail. Implement. Watch them pass.
+- Run the FULL test suite, not just tests you think are relevant
+- For display changes: capture screenshots, run imgdiff.py, report numbers — never eyeball
+- Trace every affected code path. Finding A bug is not the same as finding THE bug.
+- Never declare "done" without evidence.
+- If verification tooling doesn't exist for a change, STOP. Building the tooling becomes the immediate priority. Push the original task onto the stack, build what's needed to verify, then resume. Unverifiable work does not ship — no exceptions.
+
+### 4. Fix root causes, not symptoms
+
+- When something breaks, diagnose the actual cause — don't patch the surface
+- When fixing a bug, check for the same class of bug in related code
+- If an interface is confusing enough to cause a bug, STOP and flag it — interfaces are architectural decisions in this project. Propose the fix, don't silently apply it.
+
+Read `STATUS.md` at session start for current project state and session resume context.
+
 ## What This Is
 
-A personal project exploring an alternative operating system design where documents (files) are first-class citizens and applications are interchangeable tools that attach to content. This is a learning/exploration project, not a product.
-
-## Project Phase
-
-**Design phase with research spikes.** Primarily working through architecture and design decisions. Code is written selectively — either to validate uncertain assumptions (research spikes) or to flesh out components backed by settled decisions. The designer alternates between design exploration and coding based on interest, not a linear plan.
+A personal project exploring an alternative operating system design where documents (files) are first-class citizens and applications are interchangeable tools that attach to content. This is a learning/exploration project, not a product. Currently in the design phase with research spikes — code is written selectively to validate assumptions or flesh out settled decisions.
 
 ## Working Mode
 
 This is a long-running exploration project with no deadline. Sessions may be days or months apart. The designer wants a **thinking partner**, not a project manager:
 
 - **Explore, don't push.** Help think through ideas, poke holes, surface tradeoffs. Don't rush toward decisions or implementation.
-- **Hold context across sessions.** Use MEMORY.md, the exploration journal, and "Where We Left Off" to resume seamlessly.
+- **Hold context across sessions.** Use MEMORY.md, the exploration journal, and STATUS.md to resume seamlessly.
 - **Connect the dots.** Flag similarities, inconsistencies, or connections to previous discussions. Remind when something was already explored or rejected.
 - **Guide gently.** Suggest topics that would address gaps in the emerging design. Ask for clarity when needed. Flag dead ends or common traps.
-- **Research partner.** Help investigate historical OSes, prior art, and existing approaches. Bring relevant examples into design discussions.
 - **Respect the pace.** The designer may want to deep-dive a topic, switch to coding, or just chat loosely. Follow their energy.
 
 ## Key Design Documents
@@ -70,79 +99,6 @@ Read these before making any design suggestions:
 5. File understanding + Rendering technology + Complexity → Iconography
 
 **Most influential decision:** #2 (Data Model). If document-centric is confirmed, most other decisions are constrained in useful ways.
-
-## Where We Left Off
-
-**Current state (2026-03-26):** v0.4 Document Store COMPLETE (all phases A–G). Every document has identity (FileId), media type, queryable metadata, and version history (COW snapshots). Document service replaces filesystem service. Undo/redo (Cmd+Z / Cmd+Shift+Z) wired to COW snapshots — 64-entry undo ring, character-level granularity. 2,257 tests pass.
-
-**Content Pipeline Architecture (2026-03-25):** IMPLEMENTED. Three memory regions: File Store (1 MiB, shared with decoder services), Content Region (4 MiB, shared decoded content with registry + free-list allocator + generation-based GC), Scene Graph (per-frame visual primitives). Init allocates both, loads fonts into Content Region + PNG into File Store. Core sends decode requests to sandboxed decoder services via generic IPC protocol (`protocol/decode.rs`). Decoder services read File Store (RO), write decoded BGRA pixels into Content Region (RW). Core manages Content Region registry and allocator. Render services find fonts and images via `protocol::content` registry lookup. Compositor never sees encoded files. Generic decoder harness (`services/decoders/harness.rs`) handles all IPC plumbing; format-specific code is just header + decode functions. See `design/journal.md` "Image Decoding as a Service Interface" entry.
-
-**Phase 4 (Visual Polish, 2026-03-23–25):**
-
-- **Blank slate + three-font stack:** Dark desk (#202020) / white page palette. JetBrains Mono (mono), Inter (sans), Source Serif 4 (serif) loaded via 9p. On-demand glyph atlas in metal-render (fixes ligature drops).
-- **Font rendering quality sprint (5 changes to match macOS Core Text):** (1) Outline dilation via symmetric miter-join (macOS formula, Pathfinder coefficients × 1.3 boost). (2) Analytic area coverage rasterizer (exact signed-area trapezoids, not quantized). (3) Device-pixel rasterization (atlas at `font_size_pt × scale_factor`). (4) Subpixel glyph positioning (ShapedGlyph widened 8→16 bytes, 16.16 fixed-point advances). (5) Single `char_w_fx` source of truth (eliminates cursor drift from truncation).
-- **Icon pipeline (2026-03-23):** SVG path parser, stroke expansion engine, arc-to-cubic conversion, build-time SVG→path compilation. Tabler file-text/photo icons in title bar. Pointer cursor redesigned to Tabler proportions.
-- **Page surface + document strip (2026-03-23):** White A4-proportioned page centered on dark desk. Dark text/cursor. Horizontal strip of N document spaces with spring-based slide transition (Ctrl+Tab). Both documents always in scene — no teardown/rebuild on switch.
-- **Shared pointer state register (2026-03-23):** Replaced MSG_POINTER_ABS IPC ring messages with atomic u64 in init-allocated shared memory. Eliminates input ring overflow for pointer events. State vs event distinction at the IPC level (see journal).
-- **Cursor-only frames (2026-03-23):** Pointer state register shared with metal-render (init allocates in Phase 1, before render service start). Core skips scene publish for position-only moves. Metal-render detects `!scene_changed && cursor_moved` → sends lightweight cursor-plane-only command (no scene walk). Hardware cursor plane pattern: fully decoupled from content rendering.
-- **Spring substep fix (2026-03-23):** Semi-implicit Euler diverged at dt > 33ms (stiffness=600). Root cause: switch from hardcoded 1/60 dt to actual frame_dt (capped at 50ms). Fix: 4ms fixed substeps inside `Spring::tick()`. Default settle threshold raised to 0.5 (f32 precision limit at large values).
-- **Headless visual testing (2026-03-23):** Hypervisor background mode (`--events` uses `.accessory` activation policy — no focus stealing, no Dock icon). `move x y` event script command. `system/test/imgdiff.py` for numerical screenshot verification (page edges, colored regions, pixel diffs).
-- **Millipoint coordinates (2026-03-23):** 1/1024 pt fixed-point coordinate unit (Mpt/Umpt). Unified animation tick at actual display refresh rate (120 Hz ProMotion). See journal.
-- **Content pipeline (2026-03-24):** PNG decoder in `libraries/drawing/png.rs`. Content Region types in `protocol/content.rs`. `ContentRegionHeader` with 64-entry registry. `Content::InlineImage` (per-frame scene data) vs `Content::Image` (Content Region persistent data via content_id). All 3 render services use registry-based font lookup. File Store (core-only) holds raw file bytes; Content Region (shared) holds fonts + decoded pixels. `test_gen.rs` deleted.
-- **Dark desk + document shadows (2026-03-24):** Desktop background #202020 (was pure black). Drop shadows on page and image documents (blur=64pt, spread=36pt, black). Scene tree restructured: `N_CONTENT → N_TITLE_BAR → N_POINTER` z-order so shadows extend into title bar region. `N_CONTENT` full-height, `N_STRIP` offset below title bar.
-- **Float16 rendering pipeline (2026-03-24):** All rendering now in RGBA16Float. MSAA resolves to float16 `TEX_RESOLVE`, then single `fragment_dither` pass blits to 8-bit sRGB drawable with 4×4 Bayer ordered dither at the quantization boundary. Protocol `create_render_pipeline` extended with mandatory `pixel_format` field (hypervisor updated). Eliminates shadow banding and provides correct dithering for all future visual effects. See journal.
-- **Content Region allocator + GC (2026-03-25):** `ContentAllocator` in `protocol/content.rs` — free-list with first-fit, coalescing, 16-byte alignment. Generation-based deferred reclamation (`defer_free` + `sweep`) leveraging triple-buffer generation counter. `remove_entry()` for registry cleanup. 36 tests.
-- **Decoder service restructuring (2026-03-25):** PNG decoder factored from in-process library call to sandboxed IPC service. Generic decode protocol (`protocol/decode.rs`): `DecodeRequest`/`DecodeResponse`, header-only flag, format-agnostic. Generic decoder harness (`services/decoders/harness.rs`): config, IPC loop, bounds checks, responses. PNG-specific code: just `header()` + `decode()` functions in `services/decoders/png/png.rs`. `drawing/png.rs` deleted. Core sends IPC requests; decoder writes pixels to shared memory. `ipc::Channel::recv_blocking()` helper for spurious-wakeup-safe synchronous RPC.
-- **PNG decoder hardening (2026-03-25):** CRC32 validation on every chunk (compile-time 256-entry lookup table, IEEE 802.3 polynomial). `CrcMismatch` error variant. Chunk-walking `BitReader` replaces fixed 64-entry IDAT offset arrays — unlimited IDAT chunks with O(1) memory. 162/162 PngSuite conformance (all color types, bit depths, filters, interlacing, palettes, transparency). ASID test isolation bug fixed (real `std::sync::Mutex` stub + `SERIAL` lock + per-test `reset()`). Bad `tbwn0g16` reference regenerated (was bKGD-composited + wrong PIL endianness). 68 PNG tests, 7 ASID tests, 2,236 total.
-- **Deferred to future milestones:** AA transition softness tuning, italic rendering (in journal). JPEG decoder blocked on mimetype-based decoder routing (requires filesystem/metadata layer).
-
-**Completed phases (see git log for details):**
-
-- Phase 3 (Text & Interaction, 2026-03-22): Unified layout library (`FontMetrics` trait, CharBreaker/WordBreaker). All navigation/selection in core (not editor). Full macOS key combos. Editor slimmed to ~195 lines. Hypervisor event scripts + fixed resolution for visual regression testing.
-- Phase 2 (Composition, 2026-03-20): Clip masks, backdrop blur (3-pass box blur), pointer cursor. All three render backends.
-- Phase 1 (Motion, 2026-03-20): Animation library (easing, springs, timeline). Smooth scroll, cursor blink, transitions.
-- Rendering architecture redesign (2026-03-16): `RenderBackend` trait, geometric content types, compositor minimized to 174 lines.
-- Virgl driver + cpu-render merge (2026-03-17-18): Three single-process render backends. Init auto-detects GPU.
-- GICv3 + tickless idle (2026-03-16): Full GICv2→GICv3 migration, IPI wakeup, tickless scheduling.
-- Rendering correctness (2026-03-21): Analytical shadows, sRGB render targets, alpha compositing fix. Hypervisor extracted to `~/Sites/hypervisor/`.
-
-**Architecture (settled 2026-03-18):**
-
-```text
-Core (shaping, layout, scene building) → Scene Graph (shared memory) → Render Service → Display
-```
-
-Content types: `None`, `InlineImage` (per-frame scene data), `Image` (Content Region via content_id), `Path`, `Glyphs`. Three render services: `metal-render` (default), `cpu-render`, `virgil-render`.
-
-**IPC:** Two mechanisms, matched to data semantics. Event rings (64-byte SPSC messages over shared memory) for discrete events where order/count matter (keys, clicks, config). State registers (atomic shared memory) for continuous data where only the latest value matters (pointer position). Both signaled via `channel_signal` syscall. **Content Region** (4 MiB shared memory with registry) for persistent decoded content (font TTF data, decoded image pixels) — init allocates, core writes, render services read. **Document IPC** (`protocol::document`): 13 message types. Core sends `MSG_DOC_COMMIT` at operation boundaries; document service reads doc buffer from shared memory. `MSG_DOC_SNAPSHOT`/`MSG_DOC_RESTORE` for undo/redo. `MSG_DOC_QUERY` for media-type/attribute queries. See `system/DESIGN.md` §0 for full details.
-
-**Crash reporting:** Kernel panic → diagnostic output via UART → `pvpanic_signal()` (MMIO write to 0x0902_0000) → hypervisor captures vCPU registers + serial log → crash report at `/tmp/hypervisor-crash-<ts>.log` → `exit(1)`. Fallback: `system_off()` (PSCI SYSTEM_OFF). pvpanic device discovered from DTB at boot, address stored in `PVPANIC_ADDR` AtomicUsize.
-
-**Open design questions (from earlier sessions):**
-
-- Trust/complexity orthogonality (solid), blue-wraps-all-sides (solid), shell is blue-layer (leaning), one-document-at-a-time (leaning), compound document editing (unresolved)
-- Decision #14: Mimetype of whole document, manifest format, FS organization of manifests + content files
-- Decision #16: COW on-disk design (deferred via prototype-on-host), snapshot scope (punted)
-
-**v0.4 Document Store (2026-03-25–26): ALL PHASES COMPLETE (A–G).** Seven-layer fs stack: `BlockDevice` trait → superblock ring → free-extent allocator → inodes → COW write path → snapshots → `Files` trait. Store library adds metadata layer: catalog (media types, attributes), queries, wraps `Box<dyn Files>`. Document service (`services/document/`) replaces filesystem service — thin IPC translator over store library. Factory disk image builder (`tools/mkdisk/`) pre-populates fonts. Boot loads fonts from native filesystem (no 9p dependency). Multi-document persistence (text + image spaces). Undo/redo via COW snapshots: `UndoState` in core, Cmd+Z/Cmd+Shift+Z, 64-entry ring, character-level granularity. Protocol: `protocol::document` (13 message types). IPC: `MSG_DOC_COMMIT` at operation boundaries, `MSG_DOC_SNAPSHOT`/`MSG_DOC_RESTORE` for undo.
-
-**16 KiB page migration (2026-03-25): DONE.** Kernel page granule changed from 4K to 16K. 2-level page tables (L2+L3, T0SZ/T1SZ=28, 64 GiB VA). KERNEL_VA_OFFSET changed to 0xFFFF_FFF0_0000_0000 (T1SZ=28 consequence). Boot tables: 2 L2 roots with 32 MiB block entries. Address space: simplified 4-level→2-level walk. Userspace: 16K section alignment in link.ld, PAGE_SIZE updated in ipc/sys/protocol/virtio libraries. Key bug found and fixed: ELF segments sharing 16K pages caused permission conflicts (last-segment-wins overwrote RX with RO). All 2,236 tests pass.
-
-**Milestone roadmap** (see `design/roadmap.md` for full details and rationale):
-
-- v0.5: Rich text (multi-style runs, operation coalescing)
-- v0.6: Media (JPEG, audio, video) — swappable with v0.7
-- v0.7: Design decisions (settle #10, #15, #17 as interfaces, clipboard)
-- v0.8: Compound documents & layout engine
-- v0.9: Realtime & streaming (conversations/presence as document types)
-- v0.10: CLI / TUI (fundamental OS interface, not an app)
-- v0.11: Network (TCP/IP, DNS, TLS)
-- v0.12: Web (browser-as-translator)
-- v0.13: Real hardware (bare-metal target)
-- v0.14+: UX iteration (GUI + CLI, document browse/search, look & feel — multiple passes)
-- v1.0: Ship
-
-**System code:** `system/kernel/` (33 .rs + 2 .S), `system/services/{init,core,document,drivers/{cpu-render,virgil-render,metal-render,virtio-blk,virtio-console,virtio-input,virtio-9p},decoders/{png}}/`, `system/libraries/{sys,virtio,drawing,fonts,animation,layout,scene,ipc,protocol,render,fs,store}/`, `system/user/{echo,text-editor,stress,fuzz,fuzz-helper}/`, `system/test/`, `tools/mkdisk/`. 28 syscalls. 4 SMP cores, EEVDF scheduler.
 
 ## Design Discussion Rules
 
