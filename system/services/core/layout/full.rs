@@ -1038,6 +1038,66 @@ fn allocate_rich_line_nodes(
 
             // Advance pen by segment width (x_advance is 16.16 fixed-point).
             let seg_width: f32 = shaped.iter().map(|g| g.x_advance as f32 / 65536.0).sum();
+
+            // Underline: thin line at baseline + descent/4.
+            if style.flags & piecetable::FLAG_UNDERLINE != 0 && seg_width > 0.0 {
+                let asc_pt = if fi.upem > 0 {
+                    (fi.ascender as i32).abs() as f32 * font_size as f32 / fi.upem as f32
+                } else {
+                    font_size as f32 * 0.8
+                };
+                let desc_pt = if fi.upem > 0 {
+                    (fi.descender as i32).abs() as f32 * font_size as f32 / fi.upem as f32
+                } else {
+                    font_size as f32 * 0.2
+                };
+                let underline_y = seg.y as f32 + asc_pt + desc_pt * 0.3;
+                let thickness = (font_size as f32 / 14.0).max(1.0);
+                if let Some(ul_id) = w.alloc_node() {
+                    let n = w.node_mut(ul_id);
+                    n.x = scene::pt(pen_x as i32);
+                    n.y = scene::pt(underline_y as i32);
+                    n.width = scene::upt(seg_width as u32 + 1);
+                    n.height = scene::upt(thickness as u32);
+                    n.background = color;
+                    n.content = Content::None;
+                    n.flags = NodeFlags::VISIBLE;
+                    n.next_sibling = NULL;
+                    if prev_node != NULL {
+                        w.node_mut(prev_node).next_sibling = ul_id;
+                    }
+                    w.mark_dirty(ul_id);
+                    prev_node = ul_id;
+                }
+            }
+
+            // Strikethrough: thin line at mid-height of text.
+            if style.flags & piecetable::FLAG_STRIKETHROUGH != 0 && seg_width > 0.0 {
+                let asc_pt = if fi.upem > 0 {
+                    (fi.ascender as i32).abs() as f32 * font_size as f32 / fi.upem as f32
+                } else {
+                    font_size as f32 * 0.8
+                };
+                let strike_y = seg.y as f32 + asc_pt * 0.6;
+                let thickness = (font_size as f32 / 14.0).max(1.0);
+                if let Some(st_id) = w.alloc_node() {
+                    let n = w.node_mut(st_id);
+                    n.x = scene::pt(pen_x as i32);
+                    n.y = scene::pt(strike_y as i32);
+                    n.width = scene::upt(seg_width as u32 + 1);
+                    n.height = scene::upt(thickness as u32);
+                    n.background = color;
+                    n.content = Content::None;
+                    n.flags = NodeFlags::VISIBLE;
+                    n.next_sibling = NULL;
+                    if prev_node != NULL {
+                        w.node_mut(prev_node).next_sibling = st_id;
+                    }
+                    w.mark_dirty(st_id);
+                    prev_node = st_id;
+                }
+            }
+
             pen_x += seg_width;
         }
     }
@@ -1255,14 +1315,19 @@ pub fn build_rich_document_content(
     // Cursor positioning for rich text.
     // Use byte position in logical text. For now, use a simple approach:
     // walk the rich_lines to find which line/column the cursor is on.
-    let (cursor_x, cursor_y) =
+    let cursor_info =
         rich_cursor_position(pt_buf, &scratch[..text_len], cursor_pos, &rich_lines, fonts);
 
     {
         let n = w.node_mut(N_CURSOR);
-        n.x = cursor_x;
-        n.y = cursor_y;
+        n.x = cursor_info.x;
+        n.y = cursor_info.y;
+        n.width = scene::upt(2);
+        n.height = scene::upt(cursor_info.height);
+        n.background = dc(cfg.cursor_color);
         n.opacity = cursor_opacity;
+        n.content = Content::None;
+        n.flags = NodeFlags::VISIBLE;
         n.next_sibling = NULL;
     }
     w.mark_dirty(N_CURSOR);
@@ -1398,17 +1463,27 @@ pub fn build_rich_document_content(
     }
 }
 
-/// Compute cursor (x, y) in millipoints for a rich text document.
+/// Cursor metrics for rich text: position, height, and baseline offset.
+struct RichCursorInfo {
+    x: scene::Mpt,
+    y: scene::Mpt,
+    height: u32,
+}
+
+/// Compute cursor position and height for a rich text document.
 ///
-/// Walks the styled runs to measure the cursor's x position using
-/// proportional font metrics.
+/// Returns baseline-aligned y and style-matched height. The cursor spans
+/// from (baseline - ascent) to (baseline + |descent|), aligned with the
+/// text at the cursor position.
 fn rich_cursor_position(
     pt_buf: &[u8],
     text: &[u8],
     cursor_pos: u32,
     rich_lines: &[RichLine],
     fonts: &RichFonts<'_>,
-) -> (scene::Mpt, scene::Mpt) {
+) -> RichCursorInfo {
+    let default_height = 18u32; // fallback
+
     // Find which line the cursor is on.
     for line in rich_lines {
         if line.segments.is_empty() {
@@ -1422,13 +1497,31 @@ fn rich_cursor_position(
             continue;
         }
 
+        // Compute max ascent for this line (for baseline alignment).
+        let mut max_ascent_pt: f32 = 0.0;
+        for seg in &line.segments {
+            if let Some(style) = piecetable::style(pt_buf, seg.style_id) {
+                let fi = fonts.resolve(style);
+                if fi.upem > 0 {
+                    let asc = (fi.ascender as i32).abs() as f32 * style.font_size_pt as f32
+                        / fi.upem as f32;
+                    if asc > max_ascent_pt {
+                        max_ascent_pt = asc;
+                    }
+                }
+            }
+        }
+
         // Cursor is on this line. Measure x by walking chars up to cursor_pos.
+        // Also track the style at the cursor for height computation.
         let mut x_pt: f32 = 0.0;
+        let mut cursor_style_id: u8 = 0;
         for seg in &line.segments {
             let seg_end = seg.text_start + seg.text_len;
             if cursor_pos as usize <= seg.text_start {
                 break;
             }
+            cursor_style_id = seg.style_id;
             let Some(style) = piecetable::style(pt_buf, seg.style_id) else {
                 continue;
             };
@@ -1447,7 +1540,6 @@ fn rich_cursor_position(
                 };
                 axis_count += 1;
             }
-            // Italic uses a separate font file — no ital axis needed.
             axes_buf[axis_count] = fonts::rasterize::AxisValue {
                 tag: *b"opsz",
                 value: style.font_size_pt as f32,
@@ -1469,17 +1561,48 @@ fn rich_cursor_position(
             }
         }
 
-        // Convert to 16.16 fixed-point millipoints (>> 6 converts 16.16 to Mpt).
+        // Compute cursor height and y from the style at cursor position.
+        let (cursor_h, cursor_ascent_pt) =
+            if let Some(style) = piecetable::style(pt_buf, cursor_style_id) {
+                let fi = fonts.resolve(style);
+                if fi.upem > 0 {
+                    let asc = (fi.ascender as i32).abs() as f32 * style.font_size_pt as f32
+                        / fi.upem as f32;
+                    let desc = (fi.descender as i32).abs() as f32 * style.font_size_pt as f32
+                        / fi.upem as f32;
+                    ((asc + desc) as u32, asc)
+                } else {
+                    (style.font_size_pt as u32, style.font_size_pt as f32 * 0.8)
+                }
+            } else {
+                (default_height, default_height as f32 * 0.8)
+            };
+
+        // Baseline-aligned y: line.y + (max_ascent - cursor_ascent).
+        let baseline_offset = (max_ascent_pt - cursor_ascent_pt) as i32;
+        let cursor_y = scene::pt(line.y + baseline_offset);
+
         let x_fx = (x_pt * 65536.0) as i64;
         let cursor_x = (x_fx >> 6) as scene::Mpt;
-        let cursor_y = scene::pt(line.y);
-        return (cursor_x, cursor_y);
+        return RichCursorInfo {
+            x: cursor_x,
+            y: cursor_y,
+            height: cursor_h.max(2),
+        };
     }
 
     // Cursor past end — put it on the last line.
     if let Some(last_line) = rich_lines.last() {
-        (0, scene::pt(last_line.y))
+        RichCursorInfo {
+            x: 0,
+            y: scene::pt(last_line.y),
+            height: default_height,
+        }
     } else {
-        (0, 0)
+        RichCursorInfo {
+            x: 0,
+            y: 0,
+            height: default_height,
+        }
     }
 }
