@@ -1686,7 +1686,13 @@ fn rich_cursor_position(
                     (style.weight, style.color, cap_h, is_italic, asc)
                 })
             })
-            .unwrap_or((400, [32, 32, 32, 255], default_height as f32 * 0.7, false, 0.0));
+            .unwrap_or((
+                400,
+                [32, 32, 32, 255],
+                default_height as f32 * 0.7,
+                false,
+                0.0,
+            ));
 
     // Baseline-aligned y, same as the non-fallback path.
     let mpt = scene::MPT_PER_PT as f32;

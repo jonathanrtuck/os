@@ -848,7 +848,8 @@ pub(crate) fn rich_cursor_x(
         let font_size = style.font_size_pt as u16;
         let italic = style.flags & piecetable::FLAG_ITALIC != 0;
         let seg_text = &text[seg.text_start..seg_end.min(text.len())];
-        let shaped = shape_rich_segment(fi.data, seg_text, font_size, fi.upem, style.weight, italic);
+        let shaped =
+            shape_rich_segment(fi.data, seg_text, font_size, fi.upem, style.weight, italic);
 
         // Count characters to measure up to cursor_pos within this segment.
         let measure_end = cursor_pos.min(seg_end) - seg.text_start;
@@ -908,11 +909,16 @@ pub(crate) fn rich_x_to_byte(
         let font_size = style.font_size_pt as u16;
         let italic = style.flags & piecetable::FLAG_ITALIC != 0;
         let seg_text = &text[seg.text_start..seg_end.min(text.len())];
-        let shaped = shape_rich_segment(fi.data, seg_text, font_size, fi.upem, style.weight, italic);
+        let shaped =
+            shape_rich_segment(fi.data, seg_text, font_size, fi.upem, style.weight, italic);
 
         // Walk characters and glyphs together to find the closest position.
         let mut char_byte_offset = seg.text_start;
-        for (gi, ch) in core::str::from_utf8(seg_text).unwrap_or("").chars().enumerate() {
+        for (gi, ch) in core::str::from_utf8(seg_text)
+            .unwrap_or("")
+            .chars()
+            .enumerate()
+        {
             let advance = if gi < shaped.len() {
                 shaped[gi].x_advance as f32 / 65536.0
             } else {

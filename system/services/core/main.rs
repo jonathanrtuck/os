@@ -763,8 +763,14 @@ fn create_clock_timer() -> bool {
     let freq = s.counter_freq;
     let timeout_ns = if freq > 0 {
         let now = sys::counter();
-        let boot = s.boot_counter;
-        let elapsed_ticks = now - boot;
+        // Align to the same epoch as clock_seconds() so the timer fires
+        // exactly when the displayed second ticks over.
+        let epoch = if s.boot_counter_at_rtc_read != 0 {
+            s.boot_counter_at_rtc_read
+        } else {
+            s.boot_counter
+        };
+        let elapsed_ticks = now - epoch;
         let ticks_this_second = elapsed_ticks % freq;
         let remaining_ticks = freq - ticks_this_second;
 
@@ -2611,31 +2617,30 @@ pub extern "C" fn _start() -> ! {
         // 1. context_switched → full rebuild
         // 2. text_changed     → update_document_content (+ clock if timer)
         // 3. selection_changed → update_selection (+ clock if timer)
-        // 4. changed (cursor/pointer only) → update_cursor (+ clock if timer)
-        // 5. timer_fired only → update_clock
+        // 4. changed (cursor/pointer only) → update_cursor (+ clock if changed)
+        // 5. clock_changed only → update_clock
         //
-        // When timer_fired coincides with an input change, the clock
-        // is updated alongside the primary change within the same
-        // copy/swap cycle — no full rebuild needed. The clock is just
-        // another node to mark_dirty alongside the document nodes.
+        // Clock text is formatted at the top of every scene update so the
+        // displayed time is always current. clock_changed is true when the
+        // timer fired OR when the formatted second differs from the previous
+        // frame (catches blink wakeups that land right after a second boundary).
 
         let needs_scene_update =
             changed || text_changed || selection_changed || timer_fired || slide_changed;
 
         if needs_scene_update {
-            // Prepare clock text if timer fired (needed by any path).
-            if timer_fired {
-                documents::format_time_hms(clock_seconds(), &mut time_buf);
-            }
+            // Always format the current time so every scene rebuild shows the
+            // correct clock — not just when the timer fires. Detect whether the
+            // displayed second actually changed so we mark the clock node dirty.
+            let prev_time = time_buf;
+            documents::format_time_hms(clock_seconds(), &mut time_buf);
+            let clock_changed = timer_fired || time_buf != prev_time;
 
             // Only context_switched requires a full rebuild. Timer+input
             // coincidence is handled incrementally by each targeted method.
             let is_rich_doc = state().doc_format == DocumentFormat::Rich;
 
             if context_switched {
-                if !timer_fired {
-                    documents::format_time_hms(clock_seconds(), &mut time_buf);
-                }
 
                 let s = state();
                 let title: &[u8] = if s.active_space != 0 {
@@ -2730,9 +2735,6 @@ pub extern "C" fn _start() -> ! {
                 }
             } else if text_changed && is_rich_doc {
                 // Rich text content changed — always full rebuild.
-                if !timer_fired {
-                    documents::format_time_hms(clock_seconds(), &mut time_buf);
-                }
                 let s = state();
                 let rich_fonts = scene_state::RichFonts {
                     mono_data: font_data(),
@@ -2788,16 +2790,12 @@ pub extern "C" fn _start() -> ! {
                     b"Rich Text",
                     &time_buf,
                     s.scroll_offset,
-                    timer_fired,
+                    clock_changed,
                     s.cursor_opacity,
                 );
                 state().rich_lines = lines;
             } else if text_changed {
                 // Plain text content changed (insert/delete/scroll).
-                if !timer_fired {
-                    documents::format_time_hms(clock_seconds(), &mut time_buf);
-                }
-
                 let doc = documents::doc_content();
                 let new_line_count = scene_state::count_lines(doc);
 
@@ -2812,7 +2810,7 @@ pub extern "C" fn _start() -> ! {
                         b"Text",
                         &time_buf,
                         s.scroll_offset,
-                        timer_fired,
+                        clock_changed,
                         s.cursor_opacity,
                     );
                 } else if new_line_count == prev_line_count {
@@ -2839,7 +2837,7 @@ pub extern "C" fn _start() -> ! {
                         b"Text",
                         &time_buf,
                         s.scroll_offset,
-                        timer_fired,
+                        clock_changed,
                         s.cursor_opacity,
                     );
                 } else if new_line_count == prev_line_count + 1 {
@@ -2853,7 +2851,7 @@ pub extern "C" fn _start() -> ! {
                         b"Text",
                         &time_buf,
                         s.scroll_offset,
-                        timer_fired,
+                        clock_changed,
                         s.cursor_opacity,
                     );
                 } else if new_line_count + 1 == prev_line_count {
@@ -2867,7 +2865,7 @@ pub extern "C" fn _start() -> ! {
                         b"Text",
                         &time_buf,
                         s.scroll_offset,
-                        timer_fired,
+                        clock_changed,
                         s.cursor_opacity,
                     );
                 } else {
@@ -2881,7 +2879,7 @@ pub extern "C" fn _start() -> ! {
                         b"Text",
                         &time_buf,
                         s.scroll_offset,
-                        timer_fired,
+                        clock_changed,
                         s.cursor_opacity,
                     );
                 }
@@ -2889,9 +2887,6 @@ pub extern "C" fn _start() -> ! {
                 prev_line_count = new_line_count;
             } else if selection_changed && is_rich_doc {
                 // Rich text selection — full rebuild (proportional positioning).
-                if !timer_fired {
-                    documents::format_time_hms(clock_seconds(), &mut time_buf);
-                }
                 let s = state();
                 let rich_fonts = scene_state::RichFonts {
                     mono_data: font_data(),
@@ -2947,7 +2942,7 @@ pub extern "C" fn _start() -> ! {
                     b"Rich Text",
                     &time_buf,
                     s.scroll_offset,
-                    timer_fired,
+                    clock_changed,
                     s.cursor_opacity,
                 );
                 state().rich_lines = lines;
@@ -2972,9 +2967,6 @@ pub extern "C" fn _start() -> ! {
             } else if changed && is_rich_doc {
                 // Rich text cursor-only update — full rebuild needed because
                 // proportional cursor positioning requires the styled layout.
-                if !timer_fired {
-                    documents::format_time_hms(clock_seconds(), &mut time_buf);
-                }
                 let s = state();
                 let rich_fonts = scene_state::RichFonts {
                     mono_data: font_data(),
@@ -3030,7 +3022,7 @@ pub extern "C" fn _start() -> ! {
                     b"Rich Text",
                     &time_buf,
                     s.scroll_offset,
-                    timer_fired,
+                    clock_changed,
                     s.cursor_opacity,
                 );
                 state().rich_lines = lines;
@@ -3051,11 +3043,11 @@ pub extern "C" fn _start() -> ! {
                     s.cursor_pos as u32,
                     documents::doc_content(),
                     chars_per_line,
-                    if timer_fired { Some(&time_buf) } else { None },
+                    if clock_changed { Some(&time_buf) } else { None },
                     s.cursor_opacity,
                 );
-            } else if timer_fired {
-                // Timer only — just update the clock text.
+            } else if clock_changed {
+                // Clock changed without any other scene change — just update the clock text.
                 scene.update_clock(&scene_cfg, &time_buf);
             }
 

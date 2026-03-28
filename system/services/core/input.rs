@@ -553,13 +553,22 @@ pub(crate) fn process_key_event(
                 } else {
                     if s.goal_x.is_none() {
                         s.goal_x = Some(super::layout::rich_cursor_x(
-                            rl, pt_buf, text, s.cursor_pos, &rich_fonts,
+                            rl,
+                            pt_buf,
+                            text,
+                            s.cursor_pos,
+                            &rich_fonts,
                         ));
                     }
                     if line > 0 {
                         let gx = s.goal_x.unwrap_or(0.0);
                         s.cursor_pos = super::layout::rich_x_to_byte(
-                            rl, pt_buf, text, line - 1, gx, &rich_fonts,
+                            rl,
+                            pt_buf,
+                            text,
+                            line - 1,
+                            gx,
+                            &rich_fonts,
                         );
                     }
                 }
@@ -600,13 +609,16 @@ pub(crate) fn process_key_event(
                 } else {
                     if s.goal_x.is_none() {
                         s.goal_x = Some(super::layout::rich_cursor_x(
-                            rl, pt_buf, text, s.cursor_pos, &rich_fonts,
+                            rl,
+                            pt_buf,
+                            text,
+                            s.cursor_pos,
+                            &rich_fonts,
                         ));
                     }
                     let gx = s.goal_x.unwrap_or(0.0);
-                    s.cursor_pos = super::layout::rich_x_to_byte(
-                        rl, pt_buf, text, line + 1, gx, &rich_fonts,
-                    );
+                    s.cursor_pos =
+                        super::layout::rich_x_to_byte(rl, pt_buf, text, line + 1, gx, &rich_fonts);
                 }
             } else {
                 let s = super::state();
@@ -654,8 +666,7 @@ pub(crate) fn process_key_event(
                     s.cursor_pos = super::layout::rich_line_end(rl, line);
                 }
             } else {
-                super::state().cursor_pos =
-                    visual_line_end(text, super::state().cursor_pos, cols);
+                super::state().cursor_pos = visual_line_end(text, super::state().cursor_pos, cols);
             }
             nav_finish!(true)
         }
@@ -676,7 +687,11 @@ pub(crate) fn process_key_event(
                 if line < rl.len() {
                     if s.goal_x.is_none() {
                         s.goal_x = Some(super::layout::rich_cursor_x(
-                            rl, pt_buf, text, s.cursor_pos, &rich_fonts,
+                            rl,
+                            pt_buf,
+                            text,
+                            s.cursor_pos,
+                            &rich_fonts,
                         ));
                     }
                     let vp_h = page_h.saturating_sub(2 * page_pad) as i32;
@@ -713,7 +728,11 @@ pub(crate) fn process_key_event(
                 if line < rl.len() {
                     if s.goal_x.is_none() {
                         s.goal_x = Some(super::layout::rich_cursor_x(
-                            rl, pt_buf, text, s.cursor_pos, &rich_fonts,
+                            rl,
+                            pt_buf,
+                            text,
+                            s.cursor_pos,
+                            &rich_fonts,
                         ));
                     }
                     let vp_h = page_h.saturating_sub(2 * page_pad) as i32;
