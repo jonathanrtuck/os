@@ -1667,9 +1667,118 @@ pub extern "C" fn _start() -> ! {
                                 let rel_y = click_y.saturating_sub(text_origin_y);
                                 let adjusted_y =
                                     rel_y + (s.scroll_offset / scene::MPT_PER_PT) as u32;
+                                let is_rich = state().doc_format == DocumentFormat::Rich;
+                                let byte_pos = if is_rich {
+                                    // Rich text: proportional hit test using styled layout.
+                                    let tl = documents::rich_text_len();
+                                    let mut scratch = alloc::vec![0u8; tl];
+                                    documents::rich_copy_text(&mut scratch);
+                                    let pt_buf = documents::rich_buf_ref();
+                                    let s2 = state();
+                                    let dw = page_width.saturating_sub(2 * page_padding);
+                                    let rich_fonts = scene_state::RichFonts {
+                                        mono_data: font_data(),
+                                        mono_upem: s2.font_upem,
+                                        mono_content_id: protocol::content::CONTENT_ID_FONT_MONO,
+                                        mono_ascender: s2.font_ascender,
+                                        mono_descender: s2.font_descender,
+                                        mono_line_gap: s2.font_line_gap,
+                                        sans_data: sans_font_data(),
+                                        sans_upem: s2.sans_font_upem,
+                                        sans_content_id: protocol::content::CONTENT_ID_FONT_SANS,
+                                        sans_ascender: s2.sans_font_ascender,
+                                        sans_descender: s2.sans_font_descender,
+                                        sans_line_gap: s2.sans_font_line_gap,
+                                        serif_data: serif_font_data(),
+                                        serif_upem: s2.serif_font_upem,
+                                        serif_content_id: protocol::content::CONTENT_ID_FONT_SERIF,
+                                        serif_ascender: s2.serif_font_ascender,
+                                        serif_descender: s2.serif_font_descender,
+                                        serif_line_gap: s2.serif_font_line_gap,
+                                        mono_italic_data: mono_italic_font_data(),
+                                        mono_italic_upem: s2.mono_italic_font_upem,
+                                        mono_italic_content_id:
+                                            protocol::content::CONTENT_ID_FONT_MONO_ITALIC,
+                                        mono_italic_ascender: s2.mono_italic_font_ascender,
+                                        mono_italic_descender: s2.mono_italic_font_descender,
+                                        mono_italic_line_gap: s2.mono_italic_font_line_gap,
+                                        sans_italic_data: sans_italic_font_data(),
+                                        sans_italic_upem: s2.sans_italic_font_upem,
+                                        sans_italic_content_id:
+                                            protocol::content::CONTENT_ID_FONT_SANS_ITALIC,
+                                        sans_italic_ascender: s2.sans_italic_font_ascender,
+                                        sans_italic_descender: s2.sans_italic_font_descender,
+                                        sans_italic_line_gap: s2.sans_italic_font_line_gap,
+                                        serif_italic_data: serif_italic_font_data(),
+                                        serif_italic_upem: s2.serif_italic_font_upem,
+                                        serif_italic_content_id:
+                                            protocol::content::CONTENT_ID_FONT_SERIF_ITALIC,
+                                        serif_italic_ascender: s2.serif_italic_font_ascender,
+                                        serif_italic_descender: s2.serif_italic_font_descender,
+                                        serif_italic_line_gap: s2.serif_italic_font_line_gap,
+                                    };
+                                    let mono_fi = layout::FontInfo {
+                                        data: font_data(),
+                                        upem: s2.font_upem,
+                                        content_id: protocol::content::CONTENT_ID_FONT_MONO,
+                                        ascender: s2.font_ascender,
+                                        descender: s2.font_descender,
+                                        line_gap: s2.font_line_gap,
+                                    };
+                                    let sans_fi = layout::FontInfo {
+                                        data: sans_font_data(),
+                                        upem: s2.sans_font_upem,
+                                        content_id: protocol::content::CONTENT_ID_FONT_SANS,
+                                        ascender: s2.sans_font_ascender,
+                                        descender: s2.sans_font_descender,
+                                        line_gap: s2.sans_font_line_gap,
+                                    };
+                                    let serif_fi = layout::FontInfo {
+                                        data: serif_font_data(),
+                                        upem: s2.serif_font_upem,
+                                        content_id: protocol::content::CONTENT_ID_FONT_SERIF,
+                                        ascender: s2.serif_font_ascender,
+                                        descender: s2.serif_font_descender,
+                                        line_gap: s2.serif_font_line_gap,
+                                    };
+                                    let rich_lines = layout::layout_rich_lines(
+                                        pt_buf,
+                                        &mut scratch,
+                                        dw as f32,
+                                        scene_cfg.line_height as i32,
+                                        &mono_fi,
+                                        &sans_fi,
+                                        &serif_fi,
+                                    );
+                                    layout::rich_xy_to_byte(
+                                        pt_buf,
+                                        &scratch,
+                                        rel_x as f32,
+                                        adjusted_y as f32,
+                                        &rich_lines,
+                                        &rich_fonts,
+                                    )
+                                } else {
+                                    let li = content_text_layout(page_width, page_padding);
+                                    let t = documents::doc_content();
+                                    li.xy_to_byte(t, rel_x, adjusted_y)
+                                };
+
+                                // Extract text for double/triple-click word/line boundary ops.
+                                let click_text_buf: alloc::vec::Vec<u8>;
+                                let text: &[u8] = if is_rich {
+                                    let tl = documents::rich_text_len();
+                                    click_text_buf = {
+                                        let mut v = alloc::vec![0u8; tl];
+                                        documents::rich_copy_text(&mut v);
+                                        v
+                                    };
+                                    &click_text_buf
+                                } else {
+                                    click_text_buf = alloc::vec::Vec::new();
+                                    documents::doc_content()
+                                };
                                 let layout_info = content_text_layout(page_width, page_padding);
-                                let text = documents::doc_content();
-                                let byte_pos = layout_info.xy_to_byte(text, rel_x, adjusted_y);
 
                                 // Double/triple-click detection.
                                 // 400ms window, within 4pt of previous click.

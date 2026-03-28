@@ -1562,15 +1562,14 @@ fn rich_cursor_position(
         }
 
         // Compute cursor height and y from the style at cursor position.
+        // Height = ascent only (baseline to top of ascenders, not including descender).
         let (cursor_h, cursor_ascent_pt) =
             if let Some(style) = piecetable::style(pt_buf, cursor_style_id) {
                 let fi = fonts.resolve(style);
                 if fi.upem > 0 {
                     let asc = (fi.ascender as i32).abs() as f32 * style.font_size_pt as f32
                         / fi.upem as f32;
-                    let desc = (fi.descender as i32).abs() as f32 * style.font_size_pt as f32
-                        / fi.upem as f32;
-                    ((asc + desc) as u32, asc)
+                    (asc as u32, asc)
                 } else {
                     (style.font_size_pt as u32, style.font_size_pt as f32 * 0.8)
                 }
@@ -1605,4 +1604,79 @@ fn rich_cursor_position(
             height: default_height,
         }
     }
+}
+
+/// Hit-test: map (x_pt, y_pt) in document coordinates to a byte offset
+/// in the logical text. Used for click-to-place-cursor in rich text.
+pub(crate) fn rich_xy_to_byte(
+    pt_buf: &[u8],
+    text: &[u8],
+    x_pt: f32,
+    y_pt: f32,
+    rich_lines: &[super::RichLine],
+    fonts: &RichFonts<'_>,
+) -> usize {
+    // Find which line the y coordinate falls on.
+    let mut target_line = None;
+    for (i, line) in rich_lines.iter().enumerate() {
+        let line_bottom = line.y + line.line_height;
+        if (y_pt as i32) < line_bottom {
+            target_line = Some(i);
+            break;
+        }
+    }
+    // If past all lines, use the last line.
+    let line_idx = target_line.unwrap_or(rich_lines.len().saturating_sub(1));
+    let Some(line) = rich_lines.get(line_idx) else {
+        return 0;
+    };
+    if line.segments.is_empty() {
+        return 0;
+    }
+
+    // Walk characters in this line to find the byte offset closest to x_pt.
+    let mut pen_x: f32 = 0.0;
+    let mut best_pos = line.segments[0].text_start;
+
+    for seg in &line.segments {
+        let seg_end = seg.text_start + seg.text_len;
+        let Some(style) = piecetable::style(pt_buf, seg.style_id) else {
+            continue;
+        };
+        let fi = fonts.resolve(style);
+
+        let mut axes_buf = [fonts::rasterize::AxisValue {
+            tag: [0; 4],
+            value: 0.0,
+        }; 3];
+        let mut axis_count = 0;
+        if style.weight != 400 {
+            axes_buf[axis_count] = fonts::rasterize::AxisValue {
+                tag: *b"wght",
+                value: style.weight as f32,
+            };
+            axis_count += 1;
+        }
+        axes_buf[axis_count] = fonts::rasterize::AxisValue {
+            tag: *b"opsz",
+            value: style.font_size_pt as f32,
+        };
+        axis_count += 1;
+        let axes = &axes_buf[..axis_count];
+
+        let seg_text = &text[seg.text_start..seg_end.min(text.len())];
+        let mut byte_pos = seg.text_start;
+        for ch in core::str::from_utf8(seg_text).unwrap_or("").chars() {
+            let adv = super::char_advance_pt(fi.data, ch, style.font_size_pt as u16, fi.upem, axes);
+            // If the click x is before the midpoint of this character, place cursor before it.
+            if x_pt < pen_x + adv * 0.5 {
+                return byte_pos;
+            }
+            pen_x += adv;
+            byte_pos += ch.len_utf8();
+            best_pos = byte_pos;
+        }
+    }
+
+    best_pos
 }
