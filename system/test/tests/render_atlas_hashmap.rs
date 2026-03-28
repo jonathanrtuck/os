@@ -1,5 +1,7 @@
 //! Host-side unit tests for the hash-map glyph atlas.
 
+extern crate alloc;
+
 #[path = "../../services/drivers/metal-render/atlas.rs"]
 mod atlas;
 
@@ -7,7 +9,7 @@ use atlas::{AtlasEntry, GlyphAtlas};
 
 #[test]
 fn empty_lookup_returns_none() {
-    let atlas = GlyphAtlas::new();
+    let atlas = GlyphAtlas::new_boxed();
     assert!(atlas.lookup(42, 16, 0).is_none());
     assert!(atlas.lookup(0, 0, 0).is_none());
     assert!(atlas.lookup(100, 32, 7).is_none());
@@ -15,7 +17,7 @@ fn empty_lookup_returns_none() {
 
 #[test]
 fn insert_and_lookup() {
-    let mut atlas = GlyphAtlas::new();
+    let mut atlas = GlyphAtlas::new_boxed();
     let entry = AtlasEntry {
         u: 10,
         v: 20,
@@ -40,7 +42,7 @@ fn insert_and_lookup() {
 
 #[test]
 fn different_style_id_different_entry() {
-    let mut atlas = GlyphAtlas::new();
+    let mut atlas = GlyphAtlas::new_boxed();
     let entry_a = AtlasEntry {
         u: 0,
         v: 0,
@@ -69,7 +71,7 @@ fn different_style_id_different_entry() {
 
 #[test]
 fn different_font_size_different_entry() {
-    let mut atlas = GlyphAtlas::new();
+    let mut atlas = GlyphAtlas::new_boxed();
     let entry_small = AtlasEntry {
         u: 0,
         v: 0,
@@ -101,7 +103,7 @@ fn different_font_size_different_entry() {
 
 #[test]
 fn reset_clears_all() {
-    let mut atlas = GlyphAtlas::new();
+    let mut atlas = GlyphAtlas::new_boxed();
     let entry = AtlasEntry {
         u: 0,
         v: 0,
@@ -130,7 +132,7 @@ fn reset_clears_all() {
 
 #[test]
 fn handles_many_inserts() {
-    let mut atlas = GlyphAtlas::new();
+    let mut atlas = GlyphAtlas::new_boxed();
     for i in 0..1000u32 {
         let glyph_id = (i & 0xFFFF) as u16;
         let entry = AtlasEntry {
@@ -155,7 +157,7 @@ fn handles_many_inserts() {
 fn collision_handling() {
     // 100 entries with the same glyph_id and font_size_px but different style_ids.
     // These will hash to nearby (or identical) initial slots, exercising linear probing.
-    let mut atlas = GlyphAtlas::new();
+    let mut atlas = GlyphAtlas::new_boxed();
     for style in 0..100u32 {
         let entry = AtlasEntry {
             u: style as u16,
@@ -181,7 +183,7 @@ fn collision_handling() {
 
 #[test]
 fn pack_and_lookup_by_style_id() {
-    let mut atlas = GlyphAtlas::new();
+    let mut atlas = GlyphAtlas::new_boxed();
     let data = [128u8; 4]; // 2x2 glyph
     assert!(atlas.pack(65, 16, 0, 2, 2, 0, 2, &data));
     assert!(atlas.pack(65, 16, 1, 2, 2, 0, 2, &data));
@@ -199,7 +201,7 @@ fn pack_and_lookup_by_style_id() {
 
 #[test]
 fn pack_writes_pixels_and_creates_entry() {
-    let mut atlas = GlyphAtlas::new();
+    let mut atlas = GlyphAtlas::new_boxed();
     let data = [0xAA, 0xBB, 0xCC, 0xDD]; // 2x2 glyph
     assert!(atlas.pack(100, 16, 0, 2, 2, 1, 10, &data));
 
@@ -226,7 +228,7 @@ fn pack_writes_pixels_and_creates_entry() {
 
 #[test]
 fn pack_advances_row_packer() {
-    let mut atlas = GlyphAtlas::new();
+    let mut atlas = GlyphAtlas::new_boxed();
 
     // Pack a 4x6 glyph.
     let data_a = [0u8; 24]; // 4*6
@@ -251,7 +253,7 @@ fn pack_advances_row_packer() {
 
 #[test]
 fn insert_overwrites_existing_key() {
-    let mut atlas = GlyphAtlas::new();
+    let mut atlas = GlyphAtlas::new_boxed();
     let entry_a = AtlasEntry {
         u: 0,
         v: 0,

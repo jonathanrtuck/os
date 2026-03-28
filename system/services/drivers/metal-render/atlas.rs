@@ -69,25 +69,25 @@ pub(crate) struct GlyphAtlas {
 }
 
 impl GlyphAtlas {
-    /// Create a new empty atlas with all slots cleared.
-    pub(crate) fn new() -> Self {
-        let empty_slot = AtlasSlot {
-            key: EMPTY,
-            entry: AtlasEntry {
-                u: 0,
-                v: 0,
-                width: 0,
-                height: 0,
-                bearing_x: 0,
-                bearing_y: 0,
-            },
-        };
-        GlyphAtlas {
-            slots: [empty_slot; CAPACITY],
-            pixels: [0u8; (ATLAS_WIDTH * ATLAS_HEIGHT) as usize],
-            row_y: 0,
-            row_x: 0,
-            row_h: 0,
+    /// Create a new empty atlas, heap-allocated.
+    ///
+    /// `GlyphAtlas` is ~4.5 MiB (4 MiB pixel buffer + 320 KiB hash table) —
+    /// far too large for any stack. This method allocates directly on the heap
+    /// via `alloc_zeroed` and then writes the EMPTY sentinels via `reset()`.
+    pub(crate) fn new_boxed() -> alloc::boxed::Box<Self> {
+        // SAFETY: Layout::new::<Self>() is always valid. alloc_zeroed returns
+        // a properly aligned, zero-initialized block. Box::from_raw takes
+        // ownership. reset() writes EMPTY sentinels (alloc_zeroed produces
+        // key=0 in every slot, but the hash table uses u64::MAX as empty).
+        unsafe {
+            let layout = alloc::alloc::Layout::new::<Self>();
+            let ptr = alloc::alloc::alloc_zeroed(layout) as *mut Self;
+            if ptr.is_null() {
+                alloc::alloc::handle_alloc_error(layout);
+            }
+            let mut b = alloc::boxed::Box::from_raw(ptr);
+            b.reset();
+            b
         }
     }
 

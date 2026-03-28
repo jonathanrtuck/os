@@ -239,18 +239,7 @@ pub extern "C" fn _start() -> ! {
     );
 
     // ── Glyph atlas initialization ──────────────────────────────────────
-    // Heap-allocate atlas (~280 KiB: 2048 entries + 256 KiB pixel buffer).
-    let atlas_layout = alloc::alloc::Layout::from_size_align(
-        core::mem::size_of::<GlyphAtlas>(),
-        core::mem::align_of::<GlyphAtlas>(),
-    )
-    .unwrap();
-    let atlas_ptr = unsafe { alloc::alloc::alloc_zeroed(atlas_layout) as *mut GlyphAtlas };
-    // SAFETY: atlas_ptr is valid, properly aligned, and zeroed. We must call
-    // reset() because alloc_zeroed produces key=0 in every slot, but the
-    // hash-map atlas uses u64::MAX as the empty sentinel.
-    let glyph_atlas = unsafe { &mut *atlas_ptr };
-    glyph_atlas.reset();
+    let mut glyph_atlas = GlyphAtlas::new_boxed();
 
     // Parse Content Region header to find font data.
     // SAFETY: content_va..+content_size is mapped read-only by init before starting us.
@@ -811,7 +800,7 @@ pub extern "C" fn _start() -> ! {
                 cmdbuf: &mut cmdbuf,
                 solid_verts: &mut vertex_buf,
                 glyph_verts: &mut glyph_vertex_buf,
-                atlas: glyph_atlas,
+                atlas: &glyph_atlas,
                 style_registry,
                 scale_factor,
                 blurs: &mut blurs,
