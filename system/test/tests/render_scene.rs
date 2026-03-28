@@ -6383,3 +6383,227 @@ fn mpt_spring_settle_roundtrip() {
     // Must round-trip to the same point value
     assert_eq!(settled_mpt >> 10, 200);
 }
+
+// ── Stroked path pipeline tests ─────────────────────────────────────
+//
+// End-to-end verification that stroke expansion + rendering produces
+// correct output. Exercises the same expand_stroke → render_path_data
+// pipeline used by both metal-render (stencil) and cpu-render (scanline).
+
+/// Count path commands by type in expanded output (reuses parse_path_commands).
+fn count_points_after_flatten(data: &[u8]) -> usize {
+    // Replicate metal-render's parse_path_to_points logic: each MoveTo/LineTo
+    // = 1 point, each CubicTo flattens to ~8-16 points. For line-segment arcs
+    // (our fix), there should be zero cubics, so point count = command count.
+    let cmds = parse_path_commands(data);
+    let mut points = 0;
+    for (tag, _) in &cmds {
+        match *tag {
+            PATH_MOVE_TO | PATH_LINE_TO | PATH_CLOSE => points += 1,
+            PATH_CUBIC_TO => points += 12, // conservative estimate per cubic
+            _ => {}
+        }
+    }
+    points
+}
+
+#[test]
+fn stroke_expand_spinner_arc_within_point_budget() {
+    // The loading spinner is a 270° arc (3 cubic Bézier quarter-circles)
+    // in a 24×24 viewbox with stroke width 2.0. Before the line-segment
+    // fix, stroke expansion emitted cubics for round joins/caps, causing
+    // double-flattening that exceeded the 512-point budget. Verify the
+    // expanded output now stays well within budget.
+    let kappa: f32 = 0.5522847498;
+    let r: f32 = 9.0;
+    let k = kappa * r;
+    let cx: f32 = 12.0;
+    let cy: f32 = 12.0;
+
+    let mut path = Vec::new();
+    path_move_to(&mut path, cx, cy - r); // Top: (12, 3)
+                                         // Top → Left
+    path_cubic_to(&mut path, cx - k, cy - r, cx - r, cy - k, cx - r, cy);
+    // Left → Bottom
+    path_cubic_to(&mut path, cx - r, cy + k, cx - k, cy + r, cx, cy + r);
+    // Bottom → Right
+    path_cubic_to(&mut path, cx + k, cy + r, cx + r, cy + k, cx + r, cy);
+
+    let expanded = scene::stroke::expand_stroke(&path, 2.0);
+    assert!(
+        !expanded.is_empty(),
+        "Stroke expansion should produce output"
+    );
+
+    let points = count_points_after_flatten(&expanded);
+    assert!(
+        points < 512,
+        "Expanded spinner arc should fit in 512-point budget, got {}",
+        points
+    );
+
+    // Verify no cubics remain (arcs should be pre-flattened line segments).
+    let cmds = parse_path_commands(&expanded);
+    let cubic_count = cmds.iter().filter(|(t, _)| *t == PATH_CUBIC_TO).count();
+    assert_eq!(
+        cubic_count, 0,
+        "Stroke expansion should emit line segments, not cubics (got {} cubics)",
+        cubic_count
+    );
+}
+
+#[test]
+fn stroke_expand_tabler_icon_within_point_budget() {
+    // Tabler file-text icon has 5 sub-paths with various cubics.
+    // Verify stroke expansion stays within budget for icon-complexity paths.
+    let icon_paths: &[&str] = &[
+        "M14 3v4a1 1 0 0 0 1 1h4",
+        "M17 21h-10a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2h7l5 5v11a2 2 0 0 1 -2 2z",
+        "M9 9l1 0",
+        "M9 13l6 0",
+        "M9 17l6 0",
+    ];
+
+    for (i, d) in icon_paths.iter().enumerate() {
+        let cmds = scene::svg_path::parse_svg_path(d);
+        let expanded = scene::stroke::expand_stroke(&cmds, 2.0);
+        if expanded.is_empty() {
+            continue;
+        }
+        let points = count_points_after_flatten(&expanded);
+        assert!(
+            points < 512,
+            "Icon sub-path {} should fit in 512-point budget, got {}",
+            i,
+            points
+        );
+    }
+}
+
+#[test]
+fn stroke_expand_renders_filled_pixels() {
+    // Render a stroked horizontal line and verify interior pixels are filled.
+    // This exercises the full pipeline: path commands → expand_stroke →
+    // render_path_data (same code path as both GPU and CPU backends).
+    let mut path = Vec::new();
+    path_move_to(&mut path, 10.0, 50.0);
+    path_line_to(&mut path, 90.0, 50.0);
+
+    let stroke_width = 6.0_f32;
+    let expanded = scene::stroke::expand_stroke(&path, stroke_width);
+    assert!(!expanded.is_empty());
+
+    let w: u32 = 100;
+    let h: u32 = 100;
+    let stride = w * 4;
+    let mut pixels = vec![0u8; (stride * h) as usize];
+
+    let mut surface = drawing::Surface {
+        data: &mut pixels,
+        width: w,
+        height: h,
+        stride,
+        format: drawing::PixelFormat::Bgra8888,
+    };
+
+    let color = Color::rgba(255, 0, 0, 255);
+    render::scene_render::path_raster::render_path_data(
+        &mut surface,
+        &expanded,
+        1.0, // scale
+        color,
+        FillRule::Winding,
+        0,
+        0,
+        w as i32,
+        h as i32,
+    );
+
+    // Check center of the stroke (50, 50) — should be filled red.
+    let idx = (50 * stride + 50 * 4) as usize;
+    let (b, g, r, a) = (
+        pixels[idx],
+        pixels[idx + 1],
+        pixels[idx + 2],
+        pixels[idx + 3],
+    );
+    assert!(
+        r > 200 && a > 200,
+        "Center of stroked line should be filled red, got BGRA=({},{},{},{})",
+        b,
+        g,
+        r,
+        a
+    );
+
+    // Check well outside the stroke (50, 10) — should be empty.
+    let idx_out = (10 * stride + 50 * 4) as usize;
+    let a_out = pixels[idx_out + 3];
+    assert_eq!(
+        a_out, 0,
+        "Point far from stroke should be empty, got alpha={}",
+        a_out
+    );
+}
+
+#[test]
+fn stroke_expand_arc_renders_correct_shape() {
+    // Render a stroked quarter-circle arc and verify the stroke covers
+    // the expected region (arc center empty, arc path filled).
+    let mut path = Vec::new();
+    let r = 30.0_f32;
+    let cx = 50.0_f32;
+    let cy = 50.0_f32;
+    let k = 0.5522847498_f32 * r;
+
+    // Quarter circle from right (cx+r, cy) to bottom (cx, cy+r).
+    path_move_to(&mut path, cx + r, cy);
+    path_cubic_to(&mut path, cx + r, cy + k, cx + k, cy + r, cx, cy + r);
+
+    let expanded = scene::stroke::expand_stroke(&path, 4.0);
+    assert!(!expanded.is_empty());
+
+    let w: u32 = 100;
+    let h: u32 = 100;
+    let stride = w * 4;
+    let mut pixels = vec![0u8; (stride * h) as usize];
+
+    let mut surface = drawing::Surface {
+        data: &mut pixels,
+        width: w,
+        height: h,
+        stride,
+        format: drawing::PixelFormat::Bgra8888,
+    };
+
+    render::scene_render::path_raster::render_path_data(
+        &mut surface,
+        &expanded,
+        1.0,
+        Color::rgba(255, 255, 255, 255),
+        FillRule::Winding,
+        0,
+        0,
+        w as i32,
+        h as i32,
+    );
+
+    // The arc passes through approximately (cx+r, cy) = (80, 50).
+    // The stroke should be filled there.
+    let idx_on_arc = (50 * stride + 80 * 4) as usize;
+    let a_on = pixels[idx_on_arc + 3];
+    assert!(
+        a_on > 100,
+        "Point on arc should be filled, got alpha={}",
+        a_on
+    );
+
+    // Center of the arc (50, 50) should be empty (not inside the stroke).
+    let idx_center = (50 * stride + 50 * 4) as usize;
+    let a_center = pixels[idx_center + 3];
+    assert_eq!(
+        a_center, 0,
+        "Arc center should be empty (stroke is a ring), got alpha={}",
+        a_center
+    );
+}
