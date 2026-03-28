@@ -1512,8 +1512,8 @@ fn rich_cursor_position(
             }
         }
 
-        // Cursor is on this line. Measure x by walking chars up to cursor_pos.
-        // Also track the style at the cursor for height computation.
+        // Cursor is on this line. Measure x using the same shaped advances as
+        // the renderer to guarantee exact alignment with rendered glyphs.
         let mut x_pt: f32 = 0.0;
         let mut cursor_style_id: u8 = 0;
         for seg in &line.segments {
@@ -1526,38 +1526,34 @@ fn rich_cursor_position(
                 continue;
             };
             let fi = fonts.resolve(style);
-
-            // Build variation axes for this segment's style.
-            let mut axes_buf = [fonts::rasterize::AxisValue {
-                tag: [0; 4],
-                value: 0.0,
-            }; 3];
-            let mut axis_count = 0;
-            if style.weight != 400 {
-                axes_buf[axis_count] = fonts::rasterize::AxisValue {
-                    tag: *b"wght",
-                    value: style.weight as f32,
-                };
-                axis_count += 1;
-            }
-            axes_buf[axis_count] = fonts::rasterize::AxisValue {
-                tag: *b"opsz",
-                value: style.font_size_pt as f32,
-            };
-            axis_count += 1;
-            let axes = &axes_buf[..axis_count];
+            let font_size = style.font_size_pt as u16;
+            let italic = style.flags & piecetable::FLAG_ITALIC != 0;
 
             let seg_text = &text[seg.text_start..seg_end.min(text.len())];
+            // Shape the full segment (same call as the renderer) to get exact advances.
+            let shaped =
+                shape_rich_segment(fi.data, seg_text, font_size, fi.upem, style.weight, italic);
+
+            // Count how many characters to measure up to cursor_pos.
             let measure_end = (cursor_pos as usize).min(seg_end) - seg.text_start;
             let measure_text = &seg_text[..measure_end.min(seg_text.len())];
+            let char_count = core::str::from_utf8(measure_text)
+                .unwrap_or("")
+                .chars()
+                .count();
 
-            for ch in core::str::from_utf8(measure_text).unwrap_or("").chars() {
-                x_pt +=
-                    super::char_advance_pt(fi.data, ch, style.font_size_pt as u16, fi.upem, axes);
+            // Sum shaped glyph advances for exactly char_count glyphs.
+            // For simple text (no ligatures), glyph count == char count.
+            for g in shaped.iter().take(char_count) {
+                x_pt += g.x_advance as f32 / 65536.0;
             }
 
             if cursor_pos as usize <= seg_end {
                 break;
+            }
+            // Cursor past this segment — add all remaining glyph advances.
+            for g in shaped.iter().skip(char_count) {
+                x_pt += g.x_advance as f32 / 65536.0;
             }
         }
 
