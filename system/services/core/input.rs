@@ -264,6 +264,19 @@ pub(crate) fn process_key_event(
                 }
             }
             update_selection_from_anchor();
+            // Auto-update insertion style to match the style at the new cursor position
+            // so typed characters inherit the surrounding style.
+            if is_rich {
+                let buf = super::documents::rich_buf_ref();
+                let pos = super::state().cursor_pos;
+                // Use style at cursor, or at cursor-1 if cursor is at a boundary.
+                let at = if pos > 0 {
+                    piecetable::style_at(buf, (pos - 1) as u32).unwrap_or(0)
+                } else {
+                    piecetable::style_at(buf, 0).unwrap_or(0)
+                };
+                super::documents::rich_set_current_style(at);
+            }
             doc_write_header();
             sync_cursor_to_editor(editor_ch);
             let _ = sys::channel_signal(EDITOR_HANDLE);
@@ -362,8 +375,7 @@ pub(crate) fn process_key_event(
                 return no_change;
             }
             let buf = super::documents::rich_buf_ref();
-            let h1_id =
-                piecetable::find_style_by_role(buf, piecetable::ROLE_HEADING1).unwrap_or(0);
+            let h1_id = piecetable::find_style_by_role(buf, piecetable::ROLE_HEADING1).unwrap_or(0);
             if s.has_selection {
                 let lo = s.sel_start;
                 let hi = s.sel_end;
@@ -391,8 +403,7 @@ pub(crate) fn process_key_event(
                 return no_change;
             }
             let buf = super::documents::rich_buf_ref();
-            let h2_id =
-                piecetable::find_style_by_role(buf, piecetable::ROLE_HEADING2).unwrap_or(0);
+            let h2_id = piecetable::find_style_by_role(buf, piecetable::ROLE_HEADING2).unwrap_or(0);
             if s.has_selection {
                 let lo = s.sel_start;
                 let hi = s.sel_end;
