@@ -642,9 +642,19 @@ pub fn layout_rich_lines(
         (h + 0.5) as i32
     };
 
+    // Helper: compute ascent in points for a style.
+    let style_ascent_pt = |style: &piecetable::Style, fi: &FontInfo<'_>| -> f32 {
+        if fi.upem == 0 {
+            return 0.0;
+        }
+        let asc = (fi.ascender as i32).abs();
+        (asc as f32 * style.font_size_pt as f32) / fi.upem as f32
+    };
+
     for lb in &line_breaks {
         let mut segments: Vec<RichSegment> = Vec::new();
         let mut max_line_h = line_height; // fallback to global line_height
+        let mut max_ascent_pt: f32 = 0.0;
 
         // Find MeasuredChars in this line's byte range.
         for mc in &measured {
@@ -673,7 +683,7 @@ pub fn layout_rich_lines(
                 }
             }
 
-            // Compute this segment's line height contribution.
+            // Compute this segment's line height and ascent contribution.
             if let Some(style) = piecetable::style(pt_buf, run.style_id) {
                 let fi = match style.font_family {
                     piecetable::FONT_MONO => mono_font,
@@ -684,14 +694,34 @@ pub fn layout_rich_lines(
                 if h > max_line_h {
                     max_line_h = h;
                 }
+                let asc = style_ascent_pt(style, fi);
+                if asc > max_ascent_pt {
+                    max_ascent_pt = asc;
+                }
             }
 
+            // y will be corrected in the baseline alignment pass below.
             segments.push(RichSegment {
                 style_id: run.style_id,
                 text_start: mc.byte_offset as usize,
                 text_len: mc.byte_len as usize,
                 y,
             });
+        }
+
+        // Baseline alignment: offset each segment so all baselines match.
+        // Each segment's baseline = seg.y + seg_ascent. We want all baselines
+        // at line_y + max_ascent, so seg.y = line_y + (max_ascent - seg_ascent).
+        for seg in &mut segments {
+            if let Some(style) = piecetable::style(pt_buf, seg.style_id) {
+                let fi = match style.font_family {
+                    piecetable::FONT_MONO => mono_font,
+                    piecetable::FONT_SERIF => serif_font,
+                    _ => sans_font,
+                };
+                let seg_asc = style_ascent_pt(style, fi);
+                seg.y = y + (max_ascent_pt - seg_asc) as i32;
+            }
         }
 
         result.push(RichLine {
