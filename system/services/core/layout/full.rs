@@ -1367,6 +1367,12 @@ pub fn build_rich_document_content(
         n.content = Content::None;
         n.flags = NodeFlags::VISIBLE;
         n.next_sibling = NULL;
+        // Italic cursor: ~12° skew (standard italic angle).
+        n.content_transform = if cursor_info.italic {
+            scene::AffineTransform::skew_x(-0.21) // ~12° in radians
+        } else {
+            scene::AffineTransform::identity()
+        };
     }
     w.mark_dirty(N_CURSOR);
 
@@ -1495,7 +1501,7 @@ pub fn build_rich_document_content(
     }
 }
 
-/// Cursor metrics for rich text: position, height, baseline offset, and style weight.
+/// Cursor metrics for rich text: position, height, and style properties.
 struct RichCursorInfo {
     x: scene::Mpt,
     y: scene::Mpt,
@@ -1504,6 +1510,8 @@ struct RichCursorInfo {
     style_weight: u16,
     /// Text color at the cursor position (cursor matches text color).
     color: [u8; 4],
+    /// Whether the style at cursor is italic (cursor slants to match).
+    italic: bool,
 }
 
 /// Compute cursor position and height for a rich text document.
@@ -1595,29 +1603,31 @@ fn rich_cursor_position(
 
         // Compute cursor height and y from the style at cursor position.
         // Height = cap height (baseline to top of capital letters).
-        let (cursor_h, cursor_cap_pt, cursor_weight, cursor_color) = if let Some(style) =
-            piecetable::style(pt_buf, cursor_style_id)
-        {
-            let fi = fonts.resolve(style);
-            let cap_h = if fi.upem > 0 {
-                if fi.cap_height > 0 {
-                    fi.cap_height as f32 * style.font_size_pt as f32 / fi.upem as f32
+        let (cursor_h, cursor_cap_pt, cursor_weight, cursor_color, cursor_italic) =
+            if let Some(style) = piecetable::style(pt_buf, cursor_style_id) {
+                let fi = fonts.resolve(style);
+                let cap_h = if fi.upem > 0 {
+                    if fi.cap_height > 0 {
+                        fi.cap_height as f32 * style.font_size_pt as f32 / fi.upem as f32
+                    } else {
+                        (fi.ascender as i32).abs() as f32 * style.font_size_pt as f32
+                            / fi.upem as f32
+                            * 0.7
+                    }
                 } else {
-                    (fi.ascender as i32).abs() as f32 * style.font_size_pt as f32 / fi.upem as f32
-                        * 0.7
-                }
+                    style.font_size_pt as f32 * 0.7
+                };
+                let is_italic = style.flags & piecetable::FLAG_ITALIC != 0;
+                (cap_h as u32, cap_h, style.weight, style.color, is_italic)
             } else {
-                style.font_size_pt as f32 * 0.7
+                (
+                    default_height,
+                    default_height as f32 * 0.7,
+                    400,
+                    [32, 32, 32, 255],
+                    false,
+                )
             };
-            (cap_h as u32, cap_h, style.weight, style.color)
-        } else {
-            (
-                default_height,
-                default_height as f32 * 0.7,
-                400,
-                [32, 32, 32, 255],
-            )
-        };
 
         // Baseline-aligned y: cursor top = baseline - cap_height.
         // Baseline = line.y + max_ascent_pt.
@@ -1633,6 +1643,7 @@ fn rich_cursor_position(
             height: cursor_h.max(2),
             style_weight: cursor_weight,
             color: cursor_color,
+            italic: cursor_italic,
         };
     }
 
@@ -1645,6 +1656,7 @@ fn rich_cursor_position(
             height: default_height,
             style_weight: 400,
             color: fallback_color,
+            italic: false,
         }
     } else {
         RichCursorInfo {
@@ -1653,6 +1665,7 @@ fn rich_cursor_position(
             height: default_height,
             style_weight: 400,
             color: fallback_color,
+            italic: false,
         }
     }
 }
