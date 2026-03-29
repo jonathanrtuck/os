@@ -4,6 +4,70 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Scene Graph Hit-Testing — Design Decision (2026-03-29)
+
+**Status:** Decided. Not yet implemented.
+
+### The problem
+
+Cursor shape (arrow vs I-beam) only updates when the pointer moves. When content changes underneath a stationary cursor — switching documents, scrolling, animations — the cursor shows a stale shape. The current implementation evaluates cursor shape inside the pointer-moved branch of the event loop, coupling it to hardware input events.
+
+Fixing only document switching would be whack-a-mole. Every new content change (scroll, animation, drag, resize) would need its own "also re-evaluate the cursor" patch.
+
+### The insight
+
+The real question isn't "what cursor should I show?" — it's **"what is the user pointing at?"** Hit-testing is the general operation: given a point, find the topmost scene node at that position. Cursor shape is the first consumer of that answer, but it's the same operation needed for click targeting, hover effects, tooltips, drag targets, and anything else that needs to know what's under the pointer.
+
+The answer to "what's under the pointer?" is a function of two independent inputs:
+
+```text
+hit_test(pointer_position, scene_graph) -> NodeId
+```
+
+Either input changing should trigger re-evaluation. The fix has two parts:
+
+1. **Decouple timing:** Extract hit-testing into a standalone `hit_test(x, y)` function. Call it once at the end of the event loop whenever _anything_ changed (content, pointer position, animation, context switch). The cost is trivial — a scene walk with bounding box tests, run at most once per event loop iteration.
+
+2. **Make hit-testing general:** The evaluator should work for any shape, not just hardcoded rectangles. Circles, paths, compound shapes — anything the drawing system can express, the hit-test system should understand.
+
+### Decision: scene-graph-driven hit-testing in core
+
+**Where:** Core, in millipoints, using the scene graph it already owns.
+
+**Why not the render driver?** The render driver is a translator — it converts scene commands to GPU operations. It doesn't know what content means. Hit-testing is a content-level question ("what is the user pointing at?"), not a rendering question ("how do I draw this pixel?"). Pushing it to the render driver would violate "services as translators."
+
+**Why not a separate hit region list?** A flat list of (rect, cursor_shape) entries is simpler than scene graph traversal, but only if all interactive regions are rectangles. The moment you need a circle or arbitrary path, the region list needs the same geometry the scene graph already has. It collapses into a parallel copy of the scene graph for no benefit.
+
+**Mechanism:**
+
+- `hit_test(x_mpt, y_mpt) -> NodeId` walks the scene graph back-to-front
+- Coarse phase: test point against node bounding box (cheap, rejects most nodes)
+- Fine phase: for path nodes, do point-in-path test (winding number)
+- Returns the topmost node whose geometry contains the point
+- Consumers read properties off the hit node: cursor shape, click handler, tooltip, etc.
+
+**Cursor shape as first consumer:**
+
+- Scene nodes carry a cursor shape declaration (what cursor to show when the mouse is over this node)
+- After `hit_test`, read the cursor shape from the hit node (or fall back to default pointer/arrow if the node declares none)
+- This replaces the current hardcoded page-rectangle check
+
+**Performance:** The scene graph is small (tens to low hundreds of nodes). One back-to-front walk with bounding-box early exit, at most once per event loop iteration. Not a concern.
+
+**Coordinates:** Core works in millipoints, render driver works in pixels. Both would identify the same node — the coordinate transform is a uniform scale. Core is the right place because it already owns the scene graph and the layout state.
+
+### Implementation plan
+
+1. Extract current cursor logic into a `hit_test(x, y)` function — same hardcoded rectangle logic initially, but callable from anywhere and returning a node identity rather than a cursor shape directly
+2. Call it at end of event loop whenever `changed || pointer_position_changed || context_switched || slide_changed`
+3. Map hit result to cursor shape (first consumer)
+4. Add cursor shape declaration to scene nodes, replace hardcoded rectangle check with scene graph walk
+5. Add point-in-path test for non-rectangular nodes (winding number, with bounding box early exit)
+
+Steps 1–3 fix the immediate bug. Steps 4–5 make it general.
+
+---
+
 ## Cursor as Icon — Implementation In Progress (2026-03-28)
 
 **Status:** Architecture complete, rendering verified (2026-03-28). Two bugs found and fixed during verification:
