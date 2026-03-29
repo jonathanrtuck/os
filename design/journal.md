@@ -4,6 +4,150 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Init & Core Redesign — Design Decisions (2026-03-29)
+
+**Status:** All 12 decisions settled.
+
+### Context
+
+Init and core evolved as scaffolding — never deliberately designed. This session stepped back to examine their responsibilities, decide what they should be, and make all the architectural decisions needed before implementation.
+
+### Decision 1: Init orchestration model — cleaned-up imperative code
+
+Init's topology is currently encoded in ~1,000 lines of imperative code. Evaluated declarative manifests (Fuchsia-style `.cml`), a wiring table (const data + imperative interpreter), and cleaned-up imperative code. At ~10 services with no dynamic spawning, a manifest or table adds concepts without solving a real problem. Init's boot sequence runs once and has no runtime performance impact.
+
+**Settled:** Option B — break `_start` into named phase functions, move handle constants to protocol library, extract Content Region work. Init remains "a script that boots the system." Simplest conceptually, easiest to debug, readable top-to-bottom.
+
+### Decision 2: Handle assignment protocol — config message
+
+Handle indices are currently duplicated: init has comments (`// handle 2 = COMPOSITOR_HANDLE in core`) and core has matching constants. Both sides must agree silently.
+
+Evaluated shared constants (single source of truth in protocol library, both sides import), config messages (init tells each service what its handles mean), and a name-based registry (Mach/Fuchsia-style lookup).
+
+Shared constants are simple but still encode topology knowledge in the service. Services should be parameterized, not opinionated — the same principle that makes editors content-type translators applies here. Every other config (MMIO address, shared memory VA, display resolution) is already communicated via message. Handles should work the same way.
+
+**Settled:** Handles communicated via config message. Init is the sole owner of topology. Each service's config struct includes handle indices for all its channels. Optional channels use a sentinel value (0 = not present). Five extra `u8` fields in `CoreConfig`.
+
+### Decision 3: Content Region ownership — document service
+
+Init currently constructs the Content Region header, loads fonts (via document service or 9P), writes font entries into shared memory. This is content pipeline implementation detail — init shouldn't know about font filenames, TTF data, or ContentRegionHeader layout.
+
+Evaluated: core owns it (already has async boot, but muddies core's "compiler" role), a dedicated content service (clean but adds a process that's only active at boot), document service expands (already manages persistent files and has the Content Region mapped RW).
+
+**Settled:** Document service owns the Content Region lifecycle. Init allocates the physical memory and shares it with appropriate processes (that's topology — init's job). The document service populates fonts, builds the registry, manages content entries. Core's async boot waits for a "content ready" signal.
+
+### Decision 4: Init post-boot role — monitor with restart path
+
+Evaluated: init exits after boot (seL4 model — simplest, but crashes are silent), monitor and log (current behavior — observability without recovery), monitor and restart (supervisor model — requires re-wiring protocol, state recovery, system-wide design).
+
+Service restart is a system-wide concern (IPC protocols, shared memory, service initialization paths) — not something to bolt onto init alone. But init should be structured so restart is additive later.
+
+**Settled:** Init monitors and logs (current behavior), but retains service descriptors (ELF reference, config, memory mappings) after boot rather than discarding them. Future restart path has the information it needs. No restart logic now.
+
+### Decision 5: Embedded ELFs — acceptable scaffolding
+
+All 14 service binaries are baked into init via `include_bytes!`. Replacing this requires a two-stage boot (init embeds only the block driver and document service, loads remaining ELFs from disk). That's real infrastructure for a capability (boot from filesystem) that doesn't serve any other goal yet.
+
+**Settled:** Keep embedded ELFs as documented scaffolding. Not wrong, just temporary. Replace when boot filesystem or self-hosting exists. The build coupling (rebuild init when any service changes) is minor.
+
+### Decision 6: Core decomposition — separate processes
+
+Core currently conflates three roles: document model (buffer, edits, undo), layout engine (line-breaking, positioning, typography), and window/view management (input routing, focus, cursor, scroll, animation, scene building). 470+ fields in one struct.
+
+Evaluated separate processes vs separate modules within one process. The shared memory architecture (document buffer, scene graph, Content Region, pointer state) already enables process decomposition at low cost — one writer, multiple readers, no copies. Modules give zero-cost function calls but don't enforce interface cleanliness. Processes force clean interfaces and enable future compound document layout engines (different content types → different layout engine processes).
+
+**Settled:** Separate processes. Shared memory absorbs the IPC cost. Process boundaries force the interfaces to be defined precisely now. The compound document vision naturally maps to multiple layout engine instances.
+
+### Decision 7: Where the cuts go — three processes, desktop is a compound document
+
+**Critical reframing:** The desktop is a compound document (`application/x-os-workspace`). Title bar, document strip, page shadow — all workspace layout, not special-cased chrome. System chrome doesn't exist as a concept. There's only content (at various levels of the compound document tree) and view state (transient session state).
+
+This eliminated the "window manager" concept. The three processes are:
+
+- **A — Document Model.** Owns the document buffer (including the workspace document). Applies edits, manages undo. Exposes buffer as RO shared memory. Pure data service.
+- **B — Layout Engine.** Reads document buffer (RO). Computes layout for any content type (text line-breaking, image placement, workspace arrangement of sub-documents, view-mode affordances for focused content). Pure function: document content + viewport + focus → positioned elements.
+- **C — View Engine.** Owns view state (cursor, selection, scroll, focus, animation). Orchestrates B. Builds the scene graph by merging B's layout results with view state. Sole writer to the scene graph.
+
+The "window manager" is just what happens when B runs the workspace content type's layout engine. No special case in C.
+
+Data flow: User input → C → Editor → A (writes) → buffer updated in shared memory → C sends viewport to B → B computes layout → layout results in shared memory → C reads results + own view state → scene graph → Compositor.
+
+Multiple B instances (one per content type) producing layout results into different shared memory regions, all consumed by one C — this is the compound document future.
+
+### Decision 8: CoreState explosion — resolved by decomposition
+
+The 470 fields partition naturally across three processes. A gets ~15-20 (document buffer, piece table, undo ring). B gets ~30-40 (font metrics, typography, line map). C gets the rest (~400), with natural sub-structs: CursorState, SelectionState, ScrollState, AnimationState, PointerState, BootState.
+
+**Settled:** Falls out of Decision 7. No separate decision needed.
+
+### Decision 9: Animation ownership — View Engine (C)
+
+Timer-driven animations (blink, spring settling, slide transitions) change autonomously between frames without external input. That's view state. C owns the timer, the view state, the scene graph builder, and hit-testing. Animation must be co-located with hit-testing because animations can move content under a stationary pointer, requiring cursor shape re-evaluation (the scene graph hit-testing insight from the same session).
+
+**Settled:** C owns all animation. The animation library remains shared infrastructure.
+
+### Decision 10: Boot coordination — dissolves into per-process init
+
+The current monolithic boot state machine (`BootState`, `DecodePhase`, `DocPhase`) exists because one process does everything. With three processes, each has a trivial boot: "wait for my inputs, then start."
+
+- A: waits for document service, makes buffer available, signals readiness
+- B: waits for A + Content Region (fonts), computes layout, signals readiness
+- C: shows spinner immediately, waits for B, transitions to full scene
+
+**Settled:** No central boot orchestrator. Per-process initialization. The boot state machine goes away entirely.
+
+### Decision 11: Scene graph builder — C is sole writer; editing is a layer above viewing
+
+**Key insight:** The scene graph contains two things: content (from B's layout) and view state (from C). There is no "chrome" — what looks like chrome is workspace content type layout.
+
+**Sub-insight — editing vs viewing:** Layout/viewing is the base layer. Editing is layered on top. B produces the complete viewing experience (content positioned + view-mode affordances for focused content types like audio transport controls). B doesn't know about editors. Documents are fully viewable without editors. Editing is an optional, modal addition.
+
+C is the sole scene writer because content and view state are interleaved (selection renders behind text, cursor on top). B produces layout metadata into shared memory. C reads it, merges with view state, writes the complete scene graph.
+
+**Editor UI:** Editors describe their UI needs semantically ("I need these actions available"), not visually. C passes the description to B as a layout parameter. B positions it within the workspace layout. C writes the scene. Same pipeline, no special case.
+
+**Editor preview / pending operations:** Editors don't draw to the screen. Editors describe operations via the edit protocol. For real-time preview (slider drags, typing), pending operations go through the normal pipeline:
+
+- `beginOperation(streaming)` — start a visible transaction. A snapshots. Each pending write is applied to the buffer immediately and rendered via B → C → compositor.
+- `beginOperation(batched)` — start an invisible transaction. A snapshots. Writes accumulate but are not rendered until endOperation. For multi-part structural edits (find-replace-all, paste compound content) where intermediate states are meaningless or visually broken.
+- `endOperation` — commit. Snapshot becomes the undo point. If batched, triggers render.
+- `cancelOperation` — rollback. Restore to beginOperation snapshot. No undo entry. As if it never happened.
+
+This is database transaction semantics (BEGIN/COMMIT/ROLLBACK) applied to document editing. COW snapshots serve both undo and cancel. The editor decides operation boundaries (granularity → undo granularity) and mode (streaming vs batched → whether user sees intermediate states). A applies writes and manages snapshots. Clean separation.
+
+For text: each character is a pending write (streaming mode). Commit at word boundaries or on pause. Undo coalesces automatically.
+
+For computational operations (image color adjustment): the editor does the content-type-specific computation (color math) and sends the result as a pending write (replace pixels in shared memory). The OS renders the result. "OS always renders" is preserved — editors compute, the OS renders.
+
+**Settled:** C is sole scene writer. B produces layout metadata. Editing is an independent layer above viewing. Edit protocol refined with streaming/batched modes and cancelOperation.
+
+### Decision 12: Protocol library redesign — simultaneous with decomposition
+
+The protocol library follows "one module per protocol boundary." The architecture changes, so the modules must change. Redesigning after the process split would leave the code contradicting the design — a source of confusion and bugs.
+
+Current state: 17 modules (including deprecated) mirroring the monolithic topology. Some modules (`core_config`, `compose`, `editor`, `gpu`) are all "init → specific service" boundaries that should be one module. Others (`virgl`, `blkfs`, `fs`) are deprecated/replaced.
+
+New module structure (10 modules, one per boundary):
+
+| Module     | Boundary                | Key messages                                                                                             |
+| ---------- | ----------------------- | -------------------------------------------------------------------------------------------------------- |
+| `init`     | init → any service      | Per-service config structs with handle assignments (collapses `core_config`, `compose`, `editor`, `gpu`) |
+| `device`   | init → drivers          | Device config (PA, IRQ) — unchanged                                                                      |
+| `input`    | input driver → C        | Key events, pointer buttons — unchanged content, redirected to View Engine                               |
+| `edit`     | editor ↔ A, editor ↔ C  | beginOp(streaming/batched), endOp, cancelOp, pending writes, input forwarding                            |
+| `layout`   | C ↔ B                   | Viewport params (C→B), layout ready signal (B→C), shared memory layout for results                       |
+| `view`     | C → compositor          | Scene update signal, cursor state — merges current `present` + `cursor`                                  |
+| `document` | A ↔ document service    | Commit, query, read, snapshot, restore — unchanged                                                       |
+| `decode`   | A ↔ decoders            | Decode requests/responses — redirected from core to A                                                    |
+| `content`  | shared memory layout    | Content Region — unchanged                                                                               |
+| `metal`    | compositor → hypervisor | Metal wire format — unchanged                                                                            |
+
+Removed: `virgl` (deprecated), `blkfs` (replaced), `fs` (9P — folded into init or removed).
+
+**Settled:** Redesign protocol simultaneously. 10 modules matching the new three-process architecture.
+
+---
+
 ## Scene Graph Hit-Testing — Design Decision (2026-03-29)
 
 **Status:** Implemented (2026-03-29). All 5 steps complete.

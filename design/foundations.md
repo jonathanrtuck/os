@@ -295,15 +295,23 @@ Editors don't own files directly. They issue **operations** through a protocol. 
 
 **Tools are modal.** Only one editor is active on a document at a time — the "pen on the desk" metaphor. You put one tool down before picking up another. This eliminates concurrent-editor composition as a protocol concern and makes the operation log a simple sequential list.
 
-**The protocol is thin:**
+**The protocol is a transaction model:**
 
-- Editor sends write requests to the OS service via IPC.
-- The OS service applies writes to the document (it is the sole writer).
-- The OS service takes snapshots at operation boundaries (COW makes this cheap).
-- The operation log records: which editor, when, which document, human-readable description.
-- Operation boundaries are determined automatically (e.g., idle-gap detection). Editors may optionally send `beginOperation`/`endOperation` hints to group writes and attach descriptions — this improves undo granularity but is not required.
+- Editor sends `beginOperation` to open a transaction. The OS takes a COW snapshot.
+- Editor sends write requests. The OS applies each write to the document immediately (it is the sole writer).
+- Editor sends `endOperation` to commit. The snapshot becomes an undo point. The operation log records: which editor, when, which document, human-readable description.
+- Editor sends `cancelOperation` to roll back. The OS restores the snapshot taken at `beginOperation`. No undo entry is created. As if the operation never happened.
 
-**Editors are read-only consumers.** Editors receive a read-only memory mapping of the document for fast zero-copy reads. All modifications go through the OS service via IPC. This makes undo automatic and non-circumventable. A lazy editor that just sends writes gets correct undo. A diligent editor that groups writes into named operations gets better undo. The wrong path is never the easy path.
+**Two transaction modes** control whether intermediate writes are visible:
+
+- **Streaming** (default): each pending write is rendered immediately. The user sees continuous feedback. For typing, slider drags, brush strokes — any operation where real-time preview matters.
+- **Batched**: writes accumulate in the document but are not rendered until `endOperation`. For multi-part structural edits (find-replace-all, paste compound content, format conversion) where intermediate states are meaningless or visually broken.
+
+The editor decides both the boundaries (what constitutes one undoable operation) and the mode (whether the user sees intermediate states). This is database transaction semantics — BEGIN, COMMIT, ROLLBACK — applied to document editing.
+
+**Fallback for lazy editors:** If an editor sends writes without explicit `beginOperation`/`endOperation`, the OS detects operation boundaries automatically via idle-gap detection (e.g., a pause in write activity). A lazy editor gets correct (if coarser) undo. A diligent editor gets precise undo. The wrong path is never the easy path.
+
+**Editors are read-only consumers.** Editors receive a read-only memory mapping of the document for fast zero-copy reads. All modifications go through the OS service via IPC. This makes undo automatic and non-circumventable.
 
 The OS is logistics — it doesn't understand what operations mean, it just tracks boundaries, ordering, and attribution. This keeps the protocol as simple connective tissue.
 
@@ -319,9 +327,9 @@ The OS is logistics — it doesn't understand what operations mean, it just trac
 
 ### Sequential Undo (Base Case) — Implemented
 
-Every edit operation boundary creates a COW snapshot. Core maintains an `UndoState` ring (64 entries) of snapshot IDs. Undo (Cmd+Z) restores the previous snapshot; redo (Cmd+Shift+Z) restores the next. The restore is synchronous: core sends `MSG_DOC_RESTORE` to the document service, waits for confirmation, then reloads the document content via `MSG_DOC_READ`. Editing after undo truncates the redo history.
+Every `endOperation` creates a COW snapshot as an undo point. The Document Model (A) maintains an undo ring (64 entries) of snapshot IDs. Undo (Cmd+Z) restores the previous snapshot; redo (Cmd+Shift+Z) restores the next. Editing after undo truncates the redo history.
 
-Currently, each keystroke is a separate operation boundary (character-level undo). Coalescing rapid edits into larger undo steps (e.g., by time proximity) is a future enhancement — the snapshot infrastructure supports it without changes.
+Undo granularity is controlled by the editor's transaction boundaries. A text editor that calls `beginOperation` when typing starts and `endOperation` on word boundary or pause gets word-level undo. An image editor that wraps each tool gesture in a transaction gets gesture-level undo. `cancelOperation` rolls back to the `beginOperation` snapshot without creating an undo entry — this handles Escape during a drag, errors mid-operation, etc.
 
 Undo is global — the OS undoes the most recent operation regardless of which editor produced it. The originating editor does not need to be active.
 
