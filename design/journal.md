@@ -4,6 +4,59 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Cursor as Icon — Fill+Stroke Prerequisite (2026-03-28)
+
+**Status:** Design settled. Blocked on fill+stroke support for `Content::Path`.
+
+### The question
+
+How should the mouse cursor change shape (arrow over chrome, I-beam over text)? Initial implementation worked but revealed an architectural gap.
+
+### What we tried
+
+Built a working cursor shape switcher: `CursorShape` enum, Tabler `cursor-text` geometry rasterized in core, shape determined by hit-testing mouse position against the page content area. Worked mechanically but had three architectural problems:
+
+1. **Core was rasterizing pixels.** Core deals in points — it shouldn't produce BGRA pixel data. Cursor rasterization belongs in the render driver.
+2. **Cursor data traveled through the scene graph.** N_POINTER was a "mailbox" node (skipped during scene walk, used only to transport pixel data to the render driver). The cursor plane is a hardware rendering concept, not a scene graph concept.
+3. **The hotspot was smuggled as pixel metadata.** Stored in `shadow_offset_x/y` on the scene node — pixel values in a millipoint-based scene graph.
+
+### The insight
+
+A cursor IS just an icon. Tabler's `pointer` icon is a single closed stroked path. Rendered with `fill: black, stroke: white`, it looks exactly like a standard OS arrow cursor. Same for `cursor-text` — fill the interior black, stroke the outline white, and you have a standard I-beam cursor. No special cursor rendering code needed.
+
+But our `Content::Path` currently supports only one color — fill OR stroke, not both. SVG supports `fill="black" stroke="white"` on the same element. We need that capability first.
+
+### Design: Cursors as icons with fill+stroke
+
+**Prerequisites:**
+- `Content::Path` gains separate fill color and stroke color (like SVG)
+- Render backends handle fill+stroke rendering (fill interior, then stroke outline)
+
+**Then:**
+- Cursor icons (`pointer`, `cursor-text`) are regular entries in the icon library — same SVG build pipeline, same path data, same lookup API
+- Core tells the render driver: icon name + size (pt) + offset (pt) + opacity + colors
+- The **offset** is the hotspot expressed in points: for `cursor-text`, the meaningful point is at viewbox center (12, 12) in a 24×24 viewbox, so at 24pt display size the offset is (-12pt, -12pt). Core computes this in points — no pixel knowledge.
+- The render driver owns all pixel concerns: rasterizes the icon at the correct DPI, computes the hotspot in pixels, manages the hardware cursor plane, reads position from the atomic register
+- The scene graph is not involved. Cursor state travels via a small shared-memory register (shape + offset + opacity), analogous to the existing `PointerState` register for position
+
+**What changes:**
+- `Content::Path` → add `stroke_color: Color` alongside existing `color` (fill) and `stroke_width`
+- Icon library → add `pointer` and `cursor-text` entries (SVGs already in `resources/icons/`)
+- Core → cursor shape determination (hit-test mouse position), write cursor state register
+- Metal-render → read cursor state, rasterize icon, manage hardware cursor plane
+- Remove N_POINTER from the scene graph entirely
+
+**What stays the same:**
+- Position via atomic `PointerState` register (input driver → core + render driver)
+- Hardware cursor plane in the hypervisor (`set_cursor_image`, `set_cursor_position`)
+- Icon library as pure data (`no_std`, build-time SVG conversion)
+
+### Stashed work
+
+The initial implementation (working but architecturally wrong) is in `git stash`. Contains: `CursorShape` enum, Tabler cursor-text path geometry with arc-to-cubic conversion, shape switching based on mouse position over page content area, tests for stroke expansion and rasterization. The cursor shape determination logic and SVG path geometry are reusable; the rendering plumbing should be rebuilt on the new architecture.
+
+---
+
 ## Icon Library API Design (2026-03-28)
 
 **Status:** Settled. Ready to implement as `libraries/icons/`.
