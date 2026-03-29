@@ -491,7 +491,7 @@ fn compute_rich_layout(vp: &ViewportState, doc_buf: &[u8]) {
 
     // Shape visible runs (segments within visible lines).
     let mut shaped_runs: Vec<(Vec<scene::ShapedGlyph>, i32)> = Vec::new();
-    let mut visible_run_metas: Vec<(u32, u32)> = Vec::new(); // (style_id, color)
+    let mut visible_run_metas: Vec<RichRunMeta> = Vec::new();
 
     for (line_idx, run) in all_runs.iter().enumerate() {
         if run.y + line_height as i32 <= scroll_pt || run.y > scroll_pt + viewport_h {
@@ -501,6 +501,7 @@ fn compute_rich_layout(vp: &ViewportState, doc_buf: &[u8]) {
         // Find segments in this line.
         let lb = &line_breaks[line_idx];
         let mut seg_start: Option<(usize, u8)> = None; // (byte_start, style_id)
+        let mut pen_x_mpt: i32 = 0; // reset pen per line
 
         for mc in &measured {
             if mc.byte_offset < lb.byte_start || mc.byte_offset >= lb.byte_end {
@@ -527,6 +528,7 @@ fn compute_rich_layout(vp: &ViewportState, doc_buf: &[u8]) {
                     let seg_end = mc.byte_offset as usize;
                     shape_rich_segment_into(
                         doc_buf, fonts, text, start, seg_end, sid, run.y,
+                        &mut pen_x_mpt,
                         &mut shaped_runs, &mut visible_run_metas,
                     );
                     seg_start = Some((mc.byte_offset as usize, styled_run.style_id));
@@ -548,6 +550,7 @@ fn compute_rich_layout(vp: &ViewportState, doc_buf: &[u8]) {
             if end > start {
                 shape_rich_segment_into(
                     doc_buf, fonts, text, start, end, sid, run.y,
+                    &mut pen_x_mpt,
                     &mut shaped_runs, &mut visible_run_metas,
                 );
             }
@@ -611,8 +614,9 @@ fn shape_rich_segment_into(
     end: usize,
     style_id: u8,
     y: i32,
+    pen_x_mpt: &mut i32,
     shaped_runs: &mut Vec<(Vec<scene::ShapedGlyph>, i32)>,
-    metas: &mut Vec<(u32, u32)>,
+    metas: &mut Vec<RichRunMeta>,
 ) {
     let Some(style) = piecetable::style(doc_buf, style_id) else {
         return;
@@ -662,8 +666,27 @@ fn shape_rich_segment_into(
     let sid = if fi_content_id == fonts.mono_content_id { 0u32 } else { 1u32 };
     let color = pack_style_color(style);
 
+    // Compute pen advance for this run (sum of glyph x_advances).
+    let run_x_mpt = *pen_x_mpt;
+    let advance_mpt: i32 = glyphs
+        .iter()
+        .map(|g| {
+            // x_advance is 16.16 fixed-point → convert to millipoints (>> 6).
+            g.x_advance >> 6
+        })
+        .sum();
+    *pen_x_mpt += advance_mpt;
+
     shaped_runs.push((glyphs, y));
-    metas.push((sid, color));
+    metas.push(RichRunMeta {
+        style_id: sid,
+        color_rgba: color,
+        byte_offset: start as u32,
+        byte_length: (end - start) as u16,
+        flags: style.flags,
+        font_size,
+        x_mpt: run_x_mpt,
+    });
 }
 
 fn pack_style_color(style: &piecetable::Style) -> u32 {
@@ -810,14 +833,25 @@ fn write_layout_results(
     // Write visible runs + glyph data.
     let mut glyph_cursor: u32 = 0;
     for (i, (glyphs, y)) in shaped_runs.iter().enumerate() {
+        // For plain text, byte_offset matches the corresponding LineInfo entry.
+        let (bo, bl) = if i < all_runs.len() {
+            (all_runs[i].byte_offset, all_runs[i].byte_length as u16)
+        } else {
+            (0, 0)
+        };
         let run_off = vr_off + i * core::mem::size_of::<VisibleRun>();
         let vr = VisibleRun {
             glyph_data_offset: glyph_cursor,
             glyph_count: glyphs.len() as u16,
-            font_size: 0, // Will be filled from viewport state
+            font_size: 0, // mono: font_size comes from viewport state
             y_pt: *y,
             style_id: 0, // mono style
             color_rgba: text_color_rgba,
+            byte_offset: bo,
+            byte_length: bl,
+            flags: 0,
+            _pad: 0,
+            x_mpt: 0, // plain text always starts at x=0
         };
         // SAFETY: offset within allocated region.
         unsafe {
@@ -880,10 +914,21 @@ fn write_layout_results(
     }
 }
 
+/// Per-run metadata for rich text visible runs.
+struct RichRunMeta {
+    style_id: u32,
+    color_rgba: u32,
+    byte_offset: u32,
+    byte_length: u16,
+    flags: u8,
+    font_size: u16,
+    x_mpt: i32,
+}
+
 fn write_rich_layout_results(
     all_runs: &[LayoutRun],
     shaped_runs: &[(Vec<scene::ShapedGlyph>, i32)],
-    metas: &[(u32, u32)], // (style_id, color_rgba)
+    metas: &[RichRunMeta],
     total_line_count: u32,
     content_height: i32,
     doc_width: u32,
@@ -935,19 +980,32 @@ fn write_rich_layout_results(
     // Write visible runs + glyph data.
     let mut glyph_cursor: u32 = 0;
     for (i, (glyphs, y)) in shaped_runs.iter().enumerate() {
-        let (sid, color) = if i < metas.len() {
-            metas[i]
+        let meta = if i < metas.len() {
+            &metas[i]
         } else {
-            (0, 0x000000FF)
+            &RichRunMeta {
+                style_id: 0,
+                color_rgba: 0x000000FF,
+                byte_offset: 0,
+                byte_length: 0,
+                flags: 0,
+                font_size: 0,
+                x_mpt: 0,
+            }
         };
         let run_off = vr_off + i * core::mem::size_of::<VisibleRun>();
         let vr = VisibleRun {
             glyph_data_offset: glyph_cursor,
             glyph_count: glyphs.len() as u16,
-            font_size: 0,
+            font_size: meta.font_size,
             y_pt: *y,
-            style_id: sid,
-            color_rgba: color,
+            style_id: meta.style_id,
+            color_rgba: meta.color_rgba,
+            byte_offset: meta.byte_offset,
+            byte_length: meta.byte_length,
+            flags: meta.flags,
+            _pad: 0,
+            x_mpt: meta.x_mpt,
         };
         // SAFETY: within allocated region.
         unsafe {

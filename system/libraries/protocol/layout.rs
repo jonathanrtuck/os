@@ -155,9 +155,18 @@ pub struct VisibleRun {
     pub style_id: u32,
     /// RGBA color packed as `(r << 24) | (g << 16) | (b << 8) | a`.
     pub color_rgba: u32,
+    /// Byte offset into the document text where this run starts.
+    pub byte_offset: u32,
+    /// Byte length of this run's text content.
+    pub byte_length: u16,
+    /// Style flags (underline, strikethrough, italic) from the piece table.
+    pub flags: u8,
+    pub _pad: u8,
+    /// Pen X position at the start of this run (millipoints).
+    pub x_mpt: i32,
 }
 
-const _: () = assert!(core::mem::size_of::<VisibleRun>() == 20);
+const _: () = assert!(core::mem::size_of::<VisibleRun>() == 32);
 
 /// Compute the byte offset of the LineInfo array.
 #[inline]

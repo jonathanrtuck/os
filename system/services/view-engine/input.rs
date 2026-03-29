@@ -440,10 +440,10 @@ pub(crate) fn process_key_event(
             if cmd {
                 // Cmd+Left: move to start of visual line.
                 if is_rich {
-                    let rl = &s.rich_lines;
-                    let line = super::layout::rich_byte_to_line(rl, s.cursor.pos);
+                    let rl = &s.cached_lines;
+                    let line = super::layout::line_info_byte_to_line(rl, s.cursor.pos);
                     if line < rl.len() {
-                        s.cursor.pos = super::layout::rich_line_start(rl, line);
+                        s.cursor.pos = super::layout::line_info_start(rl, line);
                     }
                 } else {
                     s.cursor.pos = visual_line_start(text, s.cursor.pos, cols);
@@ -493,10 +493,10 @@ pub(crate) fn process_key_event(
             if cmd {
                 // Cmd+Right: move to end of visual line.
                 if is_rich {
-                    let rl = &s.rich_lines;
-                    let line = super::layout::rich_byte_to_line(rl, s.cursor.pos);
+                    let rl = &s.cached_lines;
+                    let line = super::layout::line_info_byte_to_line(rl, s.cursor.pos);
                     if line < rl.len() {
-                        s.cursor.pos = super::layout::rich_line_end(rl, line);
+                        s.cursor.pos = super::layout::line_info_end(rl, line);
                     }
                 } else {
                     s.cursor.pos = visual_line_end(text, s.cursor.pos, cols);
@@ -548,36 +548,27 @@ pub(crate) fn process_key_event(
                 super::state().cursor.goal_column = None;
                 super::state().cursor.goal_x = None;
             } else if is_rich {
-                let rich_fonts = super::make_rich_fonts();
-                let pt_buf = super::documents::rich_buf_ref();
                 let s = super::state();
-                let rl = &s.rich_lines;
-                let line = super::layout::rich_byte_to_line(rl, s.cursor.pos);
+                let rl = &s.cached_lines;
+                let line = super::layout::line_info_byte_to_line(rl, s.cursor.pos);
                 // Trailing empty line: go to last real line end.
                 if line >= rl.len() {
                     if !rl.is_empty() {
                         let last = rl.len() - 1;
-                        s.cursor.pos = super::layout::rich_line_end(rl, last);
+                        s.cursor.pos = super::layout::line_info_end(rl, last);
                     }
                 } else {
                     if s.cursor.goal_x.is_none() {
-                        s.cursor.goal_x = Some(super::layout::rich_cursor_x(
-                            rl,
-                            pt_buf,
-                            text,
-                            s.cursor.pos,
-                            &rich_fonts,
-                        ));
+                        let x_mpt = super::layout::line_info_cursor_x_mpt(rl, s.cursor.pos);
+                        s.cursor.goal_x = Some((x_mpt as f32) / 1024.0);
                     }
                     if line > 0 {
                         let gx = s.cursor.goal_x.unwrap_or(0.0);
-                        s.cursor.pos = super::layout::rich_x_to_byte(
+                        let target_x_mpt = (gx * 1024.0) as i32;
+                        s.cursor.pos = super::layout::line_info_x_to_byte(
                             rl,
-                            pt_buf,
-                            text,
                             line - 1,
-                            gx,
-                            &rich_fonts,
+                            target_x_mpt,
                         );
                     }
                 }
@@ -604,11 +595,9 @@ pub(crate) fn process_key_event(
                 super::state().cursor.goal_column = None;
                 super::state().cursor.goal_x = None;
             } else if is_rich {
-                let rich_fonts = super::make_rich_fonts();
-                let pt_buf = super::documents::rich_buf_ref();
                 let s = super::state();
-                let rl = &s.rich_lines;
-                let line = super::layout::rich_byte_to_line(rl, s.cursor.pos);
+                let rl = &s.cached_lines;
+                let line = super::layout::line_info_byte_to_line(rl, s.cursor.pos);
                 // Past-end or last line: move to trailing position (len).
                 if line >= rl.len() {
                     // Already past end — no-op.
@@ -617,17 +606,13 @@ pub(crate) fn process_key_event(
                     s.cursor.pos = len;
                 } else {
                     if s.cursor.goal_x.is_none() {
-                        s.cursor.goal_x = Some(super::layout::rich_cursor_x(
-                            rl,
-                            pt_buf,
-                            text,
-                            s.cursor.pos,
-                            &rich_fonts,
-                        ));
+                        let x_mpt = super::layout::line_info_cursor_x_mpt(rl, s.cursor.pos);
+                        s.cursor.goal_x = Some((x_mpt as f32) / 1024.0);
                     }
                     let gx = s.cursor.goal_x.unwrap_or(0.0);
+                    let target_x_mpt = (gx * 1024.0) as i32;
                     s.cursor.pos =
-                        super::layout::rich_x_to_byte(rl, pt_buf, text, line + 1, gx, &rich_fonts);
+                        super::layout::line_info_x_to_byte(rl, line + 1, target_x_mpt);
                 }
             } else {
                 let s = super::state();
@@ -650,11 +635,11 @@ pub(crate) fn process_key_event(
             nav_begin!();
             if is_rich {
                 let s = super::state();
-                let rl = &s.rich_lines;
-                let line = super::layout::rich_byte_to_line(rl, s.cursor.pos);
+                let rl = &s.cached_lines;
+                let line = super::layout::line_info_byte_to_line(rl, s.cursor.pos);
                 // Past-end: no-op (cursor is on trailing empty line).
                 if line < rl.len() {
-                    s.cursor.pos = super::layout::rich_line_start(rl, line);
+                    s.cursor.pos = super::layout::line_info_start(rl, line);
                 }
             } else {
                 super::state().cursor.pos =
@@ -668,11 +653,11 @@ pub(crate) fn process_key_event(
             nav_begin!();
             if is_rich {
                 let s = super::state();
-                let rl = &s.rich_lines;
-                let line = super::layout::rich_byte_to_line(rl, s.cursor.pos);
+                let rl = &s.cached_lines;
+                let line = super::layout::line_info_byte_to_line(rl, s.cursor.pos);
                 // Past-end: no-op.
                 if line < rl.len() {
-                    s.cursor.pos = super::layout::rich_line_end(rl, line);
+                    s.cursor.pos = super::layout::line_info_end(rl, line);
                 }
             } else {
                 super::state().cursor.pos = visual_line_end(text, super::state().cursor.pos, cols);
@@ -684,31 +669,25 @@ pub(crate) fn process_key_event(
         KEY_PAGEUP => {
             nav_begin!();
             if is_rich {
-                let rich_fonts = super::make_rich_fonts();
-                let pt_buf = super::documents::rich_buf_ref();
                 let s = super::state();
-                let rl = &s.rich_lines;
-                let mut line = super::layout::rich_byte_to_line(rl, s.cursor.pos);
+                let rl = &s.cached_lines;
+                let mut line = super::layout::line_info_byte_to_line(rl, s.cursor.pos);
                 // Clamp past-end sentinel to last real line.
                 if line >= rl.len() && !rl.is_empty() {
                     line = rl.len() - 1;
                 }
                 if line < rl.len() {
                     if s.cursor.goal_x.is_none() {
-                        s.cursor.goal_x = Some(super::layout::rich_cursor_x(
-                            rl,
-                            pt_buf,
-                            text,
-                            s.cursor.pos,
-                            &rich_fonts,
-                        ));
+                        let x_mpt = super::layout::line_info_cursor_x_mpt(rl, s.cursor.pos);
+                        s.cursor.goal_x = Some((x_mpt as f32) / 1024.0);
                     }
                     let vp_h = page_h.saturating_sub(2 * page_pad) as i32;
-                    let vp = super::layout::rich_viewport_lines(rl, vp_h);
+                    let vp = super::layout::line_info_viewport_lines(rl, vp_h);
                     let target = line.saturating_sub(vp);
                     let gx = s.cursor.goal_x.unwrap_or(0.0);
+                    let target_x_mpt = (gx * 1024.0) as i32;
                     s.cursor.pos =
-                        super::layout::rich_x_to_byte(rl, pt_buf, text, target, gx, &rich_fonts);
+                        super::layout::line_info_x_to_byte(rl, target, target_x_mpt);
                 }
             } else {
                 let s = super::state();
@@ -728,28 +707,22 @@ pub(crate) fn process_key_event(
         KEY_PAGEDOWN => {
             nav_begin!();
             if is_rich {
-                let rich_fonts = super::make_rich_fonts();
-                let pt_buf = super::documents::rich_buf_ref();
                 let s = super::state();
-                let rl = &s.rich_lines;
-                let line = super::layout::rich_byte_to_line(rl, s.cursor.pos);
+                let rl = &s.cached_lines;
+                let line = super::layout::line_info_byte_to_line(rl, s.cursor.pos);
                 // Past-end: no-op.
                 if line < rl.len() {
                     if s.cursor.goal_x.is_none() {
-                        s.cursor.goal_x = Some(super::layout::rich_cursor_x(
-                            rl,
-                            pt_buf,
-                            text,
-                            s.cursor.pos,
-                            &rich_fonts,
-                        ));
+                        let x_mpt = super::layout::line_info_cursor_x_mpt(rl, s.cursor.pos);
+                        s.cursor.goal_x = Some((x_mpt as f32) / 1024.0);
                     }
                     let vp_h = page_h.saturating_sub(2 * page_pad) as i32;
-                    let vp = super::layout::rich_viewport_lines(rl, vp_h);
+                    let vp = super::layout::line_info_viewport_lines(rl, vp_h);
                     let target = (line + vp).min(rl.len().saturating_sub(1));
                     let gx = s.cursor.goal_x.unwrap_or(0.0);
+                    let target_x_mpt = (gx * 1024.0) as i32;
                     s.cursor.pos =
-                        super::layout::rich_x_to_byte(rl, pt_buf, text, target, gx, &rich_fonts);
+                        super::layout::line_info_x_to_byte(rl, target, target_x_mpt);
                 }
             } else {
                 let s = super::state();
@@ -957,22 +930,22 @@ fn rich_scroll_for_cursor(page_h: u32, page_pad: u32) {
     }
 
     let s = super::state();
-    let rl = &s.rich_lines;
+    let rl = &s.cached_lines;
     if rl.is_empty() {
         return;
     }
     let cursor = s.cursor.pos;
-    let line_idx = super::layout::rich_byte_to_line(rl, cursor);
+    let line_idx = super::layout::line_info_byte_to_line(rl, cursor);
 
     // Trailing empty line: use the position just below the last real line.
     let last = &rl[rl.len() - 1];
     let (cursor_y_top, cursor_y_bottom) = if line_idx >= rl.len() {
-        let y = (last.y + last.line_height) as f32;
-        (y, y + last.line_height as f32)
+        let y = (last.y_pt + last.line_height_pt as i32) as f32;
+        (y, y + last.line_height_pt as f32)
     } else {
         let line = &rl[line_idx];
-        let top = line.y as f32;
-        (top, top + line.line_height as f32)
+        let top = line.y_pt as f32;
+        (top, top + line.line_height_pt as f32)
     };
     let current = scene::mpt_to_f32(s.scroll.offset);
 
@@ -988,7 +961,7 @@ fn rich_scroll_for_cursor(page_h: u32, page_pad: u32) {
     };
 
     // Compute max scroll from total content height.
-    let total_h = (last.y + last.line_height) as f32;
+    let total_h = (last.y_pt + last.line_height_pt as i32) as f32;
     let max_scroll = (total_h - vp_h as f32).max(0.0);
     let clamped = clamp_f32(new_scroll, 0.0, max_scroll);
 

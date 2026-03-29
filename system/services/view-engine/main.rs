@@ -42,7 +42,7 @@ mod blink;
 mod documents;
 #[path = "input.rs"]
 mod input_handling;
-#[path = "layout/mod.rs"]
+#[path = "scene/mod.rs"]
 mod layout;
 #[path = "scene_state.rs"]
 mod scene_state;
@@ -301,8 +301,8 @@ pub(crate) struct ViewState {
     pub(crate) rtc_epoch_at_boot: u64,
     /// CNTVCT value at the moment PL031 was read (for elapsed computation).
     pub(crate) boot_counter_at_rtc_read: u64,
-    /// Cached rich text line layout from the last scene build.
-    pub(crate) rich_lines: alloc::vec::Vec<layout::RichLine>,
+    /// Cached line info from B's layout results (for navigation/hit-testing).
+    pub(crate) cached_lines: alloc::vec::Vec<protocol::layout::LineInfo>,
     // ── Channel handles (populated from CoreLayoutConfig at boot) ────
     pub(crate) input_handle: sys::ChannelHandle,
     pub(crate) compositor_handle: sys::ChannelHandle,
@@ -435,7 +435,7 @@ impl ViewState {
             rtc_mmio_va: 0,
             rtc_epoch_at_boot: 0,
             boot_counter_at_rtc_read: 0,
-            rich_lines: alloc::vec::Vec::new(),
+            cached_lines: alloc::vec::Vec::new(),
             input_handle: sys::ChannelHandle(u8::MAX),
             compositor_handle: sys::ChannelHandle(u8::MAX),
             editor_handle: sys::ChannelHandle(u8::MAX),
@@ -744,56 +744,6 @@ fn serif_italic_font_data() -> &'static [u8] {
     }
 }
 
-/// Construct `RichFonts` from current ViewState font pointers.
-/// Used by both scene building (main.rs) and navigation (input.rs).
-pub(crate) fn make_rich_fonts() -> scene_state::RichFonts<'static> {
-    let s = state();
-    scene_state::RichFonts {
-        mono_data: font_data(),
-        mono_upem: s.font_upem,
-        mono_content_id: protocol::content::CONTENT_ID_FONT_MONO,
-        mono_ascender: s.font_ascender,
-        mono_descender: s.font_descender,
-        mono_line_gap: s.font_line_gap,
-        mono_cap_height: s.font_cap_height,
-        sans_data: sans_font_data(),
-        sans_upem: s.sans_font_upem,
-        sans_content_id: protocol::content::CONTENT_ID_FONT_SANS,
-        sans_ascender: s.sans_font_ascender,
-        sans_descender: s.sans_font_descender,
-        sans_line_gap: s.sans_font_line_gap,
-        sans_cap_height: s.sans_font_cap_height,
-        serif_data: serif_font_data(),
-        serif_upem: s.serif_font_upem,
-        serif_content_id: protocol::content::CONTENT_ID_FONT_SERIF,
-        serif_ascender: s.serif_font_ascender,
-        serif_descender: s.serif_font_descender,
-        serif_line_gap: s.serif_font_line_gap,
-        serif_cap_height: s.serif_font_cap_height,
-        mono_italic_data: mono_italic_font_data(),
-        mono_italic_upem: s.mono_italic_font_upem,
-        mono_italic_content_id: protocol::content::CONTENT_ID_FONT_MONO_ITALIC,
-        mono_italic_ascender: s.mono_italic_font_ascender,
-        mono_italic_descender: s.mono_italic_font_descender,
-        mono_italic_line_gap: s.mono_italic_font_line_gap,
-        mono_italic_cap_height: s.mono_italic_font_cap_height,
-        sans_italic_data: sans_italic_font_data(),
-        sans_italic_upem: s.sans_italic_font_upem,
-        sans_italic_content_id: protocol::content::CONTENT_ID_FONT_SANS_ITALIC,
-        sans_italic_ascender: s.sans_italic_font_ascender,
-        sans_italic_descender: s.sans_italic_font_descender,
-        sans_italic_line_gap: s.sans_italic_font_line_gap,
-        sans_italic_cap_height: s.sans_italic_font_cap_height,
-        serif_italic_data: serif_italic_font_data(),
-        serif_italic_upem: s.serif_italic_font_upem,
-        serif_italic_content_id: protocol::content::CONTENT_ID_FONT_SERIF_ITALIC,
-        serif_italic_ascender: s.serif_italic_font_ascender,
-        serif_italic_descender: s.serif_italic_font_descender,
-        serif_italic_line_gap: s.serif_italic_font_line_gap,
-        serif_italic_cap_height: s.serif_italic_font_cap_height,
-    }
-}
-
 // ── Layout engine (B) communication ─────────────────────────────────
 
 /// Write viewport state to the shared register so B can read it.
@@ -911,6 +861,49 @@ fn read_layout_style_registry(header: &LayoutResultsHeader) -> &'static [u8] {
     }
     // SAFETY: within mapped region.
     unsafe { core::slice::from_raw_parts(ptr, len) }
+}
+
+/// Get a slice of document text for a given byte range.
+/// For plain text, slices doc_content(). For rich text, extracts from
+/// the piece table into a static scratch buffer (single-threaded, safe).
+fn doc_text_for_range(start: usize, end: usize) -> &'static [u8] {
+    if state().doc_format == DocumentFormat::Rich {
+        // Rich text: extract into a static scratch buffer.
+        // SAFETY: Single-threaded userspace process.
+        static mut SCRATCH: [u8; 4096] = [0u8; 4096];
+        let needed = end.saturating_sub(start);
+        if needed == 0 || needed > 4096 {
+            return &[];
+        }
+        let buf = documents::rich_buf_ref();
+        // SAFETY: single-threaded, SCRATCH only used within this function scope.
+        unsafe {
+            let copied = piecetable::text_slice(buf, start as u32, needed as u32, &mut SCRATCH);
+            &SCRATCH[..copied]
+        }
+    } else {
+        let doc = documents::doc_content();
+        if start >= doc.len() {
+            return &[];
+        }
+        let actual_end = end.min(doc.len());
+        &doc[start..actual_end]
+    }
+}
+
+/// Get cached LineInfo entries from B's layout results.
+fn cached_line_info() -> &'static [protocol::layout::LineInfo] {
+    &state().cached_lines
+}
+
+/// Refresh cached LineInfo from B's shared memory.
+fn refresh_cached_lines(header: &LayoutResultsHeader) {
+    let s = state();
+    s.cached_lines.clear();
+    for i in 0..header.total_line_count as usize {
+        let li = read_line_info(i);
+        s.cached_lines.push(li);
+    }
 }
 
 fn clock_seconds() -> u64 {
@@ -1636,54 +1629,9 @@ pub extern "C" fn _start() -> ! {
         );
         // For rich text, immediately rebuild document content with styled layout.
         if is_rich_doc {
-            let rich_fonts = scene_state::RichFonts {
-                mono_data: font_data(),
-                mono_upem: s.font_upem,
-                mono_content_id: protocol::content::CONTENT_ID_FONT_MONO,
-                mono_ascender: s.font_ascender,
-                mono_descender: s.font_descender,
-                mono_line_gap: s.font_line_gap,
-                mono_cap_height: s.font_cap_height,
-                sans_data: sans_font_data(),
-                sans_upem: s.sans_font_upem,
-                sans_content_id: protocol::content::CONTENT_ID_FONT_SANS,
-                sans_ascender: s.sans_font_ascender,
-                sans_descender: s.sans_font_descender,
-                sans_line_gap: s.sans_font_line_gap,
-                sans_cap_height: s.sans_font_cap_height,
-                serif_data: serif_font_data(),
-                serif_upem: s.serif_font_upem,
-                serif_content_id: protocol::content::CONTENT_ID_FONT_SERIF,
-                serif_ascender: s.serif_font_ascender,
-                serif_descender: s.serif_font_descender,
-                serif_line_gap: s.serif_font_line_gap,
-                serif_cap_height: s.serif_font_cap_height,
-                mono_italic_data: mono_italic_font_data(),
-                mono_italic_upem: s.mono_italic_font_upem,
-                mono_italic_content_id: protocol::content::CONTENT_ID_FONT_MONO_ITALIC,
-                mono_italic_ascender: s.mono_italic_font_ascender,
-                mono_italic_descender: s.mono_italic_font_descender,
-                mono_italic_line_gap: s.mono_italic_font_line_gap,
-                mono_italic_cap_height: s.mono_italic_font_cap_height,
-                sans_italic_data: sans_italic_font_data(),
-                sans_italic_upem: s.sans_italic_font_upem,
-                sans_italic_content_id: protocol::content::CONTENT_ID_FONT_SANS_ITALIC,
-                sans_italic_ascender: s.sans_italic_font_ascender,
-                sans_italic_descender: s.sans_italic_font_descender,
-                sans_italic_line_gap: s.sans_italic_font_line_gap,
-                sans_italic_cap_height: s.sans_italic_font_cap_height,
-                serif_italic_data: serif_italic_font_data(),
-                serif_italic_upem: s.serif_italic_font_upem,
-                serif_italic_content_id: protocol::content::CONTENT_ID_FONT_SERIF_ITALIC,
-                serif_italic_ascender: s.serif_italic_font_ascender,
-                serif_italic_descender: s.serif_italic_font_descender,
-                serif_italic_line_gap: s.serif_italic_font_line_gap,
-                serif_italic_cap_height: s.serif_italic_font_cap_height,
-            };
-            let lines = scene.update_rich_document_content(
+            scene.update_rich_document_content(
                 &scene_cfg,
                 documents::rich_buf_ref(),
-                &rich_fonts,
                 s.cursor.pos as u32,
                 s.selection.start as u32,
                 s.selection.end as u32,
@@ -1694,7 +1642,9 @@ pub extern "C" fn _start() -> ! {
                 s.cursor.opacity,
                 s.animation.active_space,
             );
-            state().rich_lines = lines;
+            if let Some(header) = read_layout_header() {
+                refresh_cached_lines(&header);
+            }
         }
     }
 
@@ -1949,104 +1899,8 @@ pub extern "C" fn _start() -> ! {
                                     rel_y + (s.scroll.offset / scene::MPT_PER_PT) as u32;
                                 let is_rich = state().doc_format == DocumentFormat::Rich;
                                 let byte_pos = if is_rich {
-                                    // Rich text: proportional hit test using styled layout.
-                                    let tl = documents::rich_text_len();
-                                    let mut scratch = alloc::vec![0u8; tl];
-                                    documents::rich_copy_text(&mut scratch);
-                                    let pt_buf = documents::rich_buf_ref();
-                                    let s2 = state();
-                                    let dw = page_width.saturating_sub(2 * page_padding);
-                                    let rich_fonts = scene_state::RichFonts {
-                                        mono_data: font_data(),
-                                        mono_upem: s2.font_upem,
-                                        mono_content_id: protocol::content::CONTENT_ID_FONT_MONO,
-                                        mono_ascender: s2.font_ascender,
-                                        mono_descender: s2.font_descender,
-                                        mono_line_gap: s2.font_line_gap,
-                                        mono_cap_height: s2.font_cap_height,
-                                        sans_data: sans_font_data(),
-                                        sans_upem: s2.sans_font_upem,
-                                        sans_content_id: protocol::content::CONTENT_ID_FONT_SANS,
-                                        sans_ascender: s2.sans_font_ascender,
-                                        sans_descender: s2.sans_font_descender,
-                                        sans_line_gap: s2.sans_font_line_gap,
-                                        sans_cap_height: s2.sans_font_cap_height,
-                                        serif_data: serif_font_data(),
-                                        serif_upem: s2.serif_font_upem,
-                                        serif_content_id: protocol::content::CONTENT_ID_FONT_SERIF,
-                                        serif_ascender: s2.serif_font_ascender,
-                                        serif_descender: s2.serif_font_descender,
-                                        serif_line_gap: s2.serif_font_line_gap,
-                                        serif_cap_height: s2.serif_font_cap_height,
-                                        mono_italic_data: mono_italic_font_data(),
-                                        mono_italic_upem: s2.mono_italic_font_upem,
-                                        mono_italic_content_id:
-                                            protocol::content::CONTENT_ID_FONT_MONO_ITALIC,
-                                        mono_italic_ascender: s2.mono_italic_font_ascender,
-                                        mono_italic_descender: s2.mono_italic_font_descender,
-                                        mono_italic_line_gap: s2.mono_italic_font_line_gap,
-                                        mono_italic_cap_height: s2.mono_italic_font_cap_height,
-                                        sans_italic_data: sans_italic_font_data(),
-                                        sans_italic_upem: s2.sans_italic_font_upem,
-                                        sans_italic_content_id:
-                                            protocol::content::CONTENT_ID_FONT_SANS_ITALIC,
-                                        sans_italic_ascender: s2.sans_italic_font_ascender,
-                                        sans_italic_descender: s2.sans_italic_font_descender,
-                                        sans_italic_line_gap: s2.sans_italic_font_line_gap,
-                                        sans_italic_cap_height: s2.sans_italic_font_cap_height,
-                                        serif_italic_data: serif_italic_font_data(),
-                                        serif_italic_upem: s2.serif_italic_font_upem,
-                                        serif_italic_content_id:
-                                            protocol::content::CONTENT_ID_FONT_SERIF_ITALIC,
-                                        serif_italic_ascender: s2.serif_italic_font_ascender,
-                                        serif_italic_descender: s2.serif_italic_font_descender,
-                                        serif_italic_line_gap: s2.serif_italic_font_line_gap,
-                                        serif_italic_cap_height: s2.serif_italic_font_cap_height,
-                                    };
-                                    let mono_fi = layout::FontInfo {
-                                        data: font_data(),
-                                        upem: s2.font_upem,
-                                        content_id: protocol::content::CONTENT_ID_FONT_MONO,
-                                        ascender: s2.font_ascender,
-                                        descender: s2.font_descender,
-                                        line_gap: s2.font_line_gap,
-                                        cap_height: s2.font_cap_height,
-                                    };
-                                    let sans_fi = layout::FontInfo {
-                                        data: sans_font_data(),
-                                        upem: s2.sans_font_upem,
-                                        content_id: protocol::content::CONTENT_ID_FONT_SANS,
-                                        ascender: s2.sans_font_ascender,
-                                        descender: s2.sans_font_descender,
-                                        line_gap: s2.sans_font_line_gap,
-                                        cap_height: s2.sans_font_cap_height,
-                                    };
-                                    let serif_fi = layout::FontInfo {
-                                        data: serif_font_data(),
-                                        upem: s2.serif_font_upem,
-                                        content_id: protocol::content::CONTENT_ID_FONT_SERIF,
-                                        ascender: s2.serif_font_ascender,
-                                        descender: s2.serif_font_descender,
-                                        line_gap: s2.serif_font_line_gap,
-                                        cap_height: s2.serif_font_cap_height,
-                                    };
-                                    let rich_lines = layout::break_rich_segments(
-                                        pt_buf,
-                                        &mut scratch,
-                                        dw as f32,
-                                        scene_cfg.line_height as i32,
-                                        &mono_fi,
-                                        &sans_fi,
-                                        &serif_fi,
-                                    );
-                                    layout::rich_xy_to_byte(
-                                        pt_buf,
-                                        &scratch,
-                                        rel_x as f32,
-                                        adjusted_y as f32,
-                                        &rich_lines,
-                                        &rich_fonts,
-                                    )
+                                    // Rich text: proportional hit test using cached layout.
+                                    layout::rich_xy_to_byte(rel_x as f32, adjusted_y as f32)
                                 } else {
                                     let li = content_text_layout(page_width, page_padding);
                                     let t = documents::doc_content();
@@ -2558,54 +2412,9 @@ pub extern "C" fn _start() -> ! {
                 );
                 // Immediately rebuild document content with rich text layout.
                 if is_rich_doc {
-                    let rich_fonts = scene_state::RichFonts {
-                        mono_data: font_data(),
-                        mono_upem: s.font_upem,
-                        mono_content_id: protocol::content::CONTENT_ID_FONT_MONO,
-                        mono_ascender: s.font_ascender,
-                        mono_descender: s.font_descender,
-                        mono_line_gap: s.font_line_gap,
-                        mono_cap_height: s.font_cap_height,
-                        sans_data: sans_font_data(),
-                        sans_upem: s.sans_font_upem,
-                        sans_content_id: protocol::content::CONTENT_ID_FONT_SANS,
-                        sans_ascender: s.sans_font_ascender,
-                        sans_descender: s.sans_font_descender,
-                        sans_line_gap: s.sans_font_line_gap,
-                        sans_cap_height: s.sans_font_cap_height,
-                        serif_data: serif_font_data(),
-                        serif_upem: s.serif_font_upem,
-                        serif_content_id: protocol::content::CONTENT_ID_FONT_SERIF,
-                        serif_ascender: s.serif_font_ascender,
-                        serif_descender: s.serif_font_descender,
-                        serif_line_gap: s.serif_font_line_gap,
-                        serif_cap_height: s.serif_font_cap_height,
-                        mono_italic_data: mono_italic_font_data(),
-                        mono_italic_upem: s.mono_italic_font_upem,
-                        mono_italic_content_id: protocol::content::CONTENT_ID_FONT_MONO_ITALIC,
-                        mono_italic_ascender: s.mono_italic_font_ascender,
-                        mono_italic_descender: s.mono_italic_font_descender,
-                        mono_italic_line_gap: s.mono_italic_font_line_gap,
-                        mono_italic_cap_height: s.mono_italic_font_cap_height,
-                        sans_italic_data: sans_italic_font_data(),
-                        sans_italic_upem: s.sans_italic_font_upem,
-                        sans_italic_content_id: protocol::content::CONTENT_ID_FONT_SANS_ITALIC,
-                        sans_italic_ascender: s.sans_italic_font_ascender,
-                        sans_italic_descender: s.sans_italic_font_descender,
-                        sans_italic_line_gap: s.sans_italic_font_line_gap,
-                        sans_italic_cap_height: s.sans_italic_font_cap_height,
-                        serif_italic_data: serif_italic_font_data(),
-                        serif_italic_upem: s.serif_italic_font_upem,
-                        serif_italic_content_id: protocol::content::CONTENT_ID_FONT_SERIF_ITALIC,
-                        serif_italic_ascender: s.serif_italic_font_ascender,
-                        serif_italic_descender: s.serif_italic_font_descender,
-                        serif_italic_line_gap: s.serif_italic_font_line_gap,
-                        serif_italic_cap_height: s.serif_italic_font_cap_height,
-                    };
-                    let lines = scene.update_rich_document_content(
+                    scene.update_rich_document_content(
                         &scene_cfg,
                         documents::rich_buf_ref(),
-                        &rich_fonts,
                         s.cursor.pos as u32,
                         s.selection.start as u32,
                         s.selection.end as u32,
@@ -2616,7 +2425,9 @@ pub extern "C" fn _start() -> ! {
                         s.cursor.opacity,
                         s.animation.active_space,
                     );
-                    state().rich_lines = lines;
+                    if let Some(header) = read_layout_header() {
+                        refresh_cached_lines(&header);
+                    }
                 }
             } else if text_changed && is_rich_doc {
                 // Rich text content changed — always full rebuild.
@@ -2626,54 +2437,9 @@ pub extern "C" fn _start() -> ! {
                 } else {
                     b"Rich Text"
                 };
-                let rich_fonts = scene_state::RichFonts {
-                    mono_data: font_data(),
-                    mono_upem: s.font_upem,
-                    mono_content_id: protocol::content::CONTENT_ID_FONT_MONO,
-                    mono_ascender: s.font_ascender,
-                    mono_descender: s.font_descender,
-                    mono_line_gap: s.font_line_gap,
-                    mono_cap_height: s.font_cap_height,
-                    sans_data: sans_font_data(),
-                    sans_upem: s.sans_font_upem,
-                    sans_content_id: protocol::content::CONTENT_ID_FONT_SANS,
-                    sans_ascender: s.sans_font_ascender,
-                    sans_descender: s.sans_font_descender,
-                    sans_line_gap: s.sans_font_line_gap,
-                    sans_cap_height: s.sans_font_cap_height,
-                    serif_data: serif_font_data(),
-                    serif_upem: s.serif_font_upem,
-                    serif_content_id: protocol::content::CONTENT_ID_FONT_SERIF,
-                    serif_ascender: s.serif_font_ascender,
-                    serif_descender: s.serif_font_descender,
-                    serif_line_gap: s.serif_font_line_gap,
-                    serif_cap_height: s.serif_font_cap_height,
-                    mono_italic_data: mono_italic_font_data(),
-                    mono_italic_upem: s.mono_italic_font_upem,
-                    mono_italic_content_id: protocol::content::CONTENT_ID_FONT_MONO_ITALIC,
-                    mono_italic_ascender: s.mono_italic_font_ascender,
-                    mono_italic_descender: s.mono_italic_font_descender,
-                    mono_italic_line_gap: s.mono_italic_font_line_gap,
-                    mono_italic_cap_height: s.mono_italic_font_cap_height,
-                    sans_italic_data: sans_italic_font_data(),
-                    sans_italic_upem: s.sans_italic_font_upem,
-                    sans_italic_content_id: protocol::content::CONTENT_ID_FONT_SANS_ITALIC,
-                    sans_italic_ascender: s.sans_italic_font_ascender,
-                    sans_italic_descender: s.sans_italic_font_descender,
-                    sans_italic_line_gap: s.sans_italic_font_line_gap,
-                    sans_italic_cap_height: s.sans_italic_font_cap_height,
-                    serif_italic_data: serif_italic_font_data(),
-                    serif_italic_upem: s.serif_italic_font_upem,
-                    serif_italic_content_id: protocol::content::CONTENT_ID_FONT_SERIF_ITALIC,
-                    serif_italic_ascender: s.serif_italic_font_ascender,
-                    serif_italic_descender: s.serif_italic_font_descender,
-                    serif_italic_line_gap: s.serif_italic_font_line_gap,
-                    serif_italic_cap_height: s.serif_italic_font_cap_height,
-                };
-                let lines = scene.update_rich_document_content(
+                scene.update_rich_document_content(
                     &scene_cfg,
                     documents::rich_buf_ref(),
-                    &rich_fonts,
                     s.cursor.pos as u32,
                     s.selection.start as u32,
                     s.selection.end as u32,
@@ -2684,7 +2450,9 @@ pub extern "C" fn _start() -> ! {
                     s.cursor.opacity,
                     s.animation.active_space,
                 );
-                state().rich_lines = lines;
+                if let Some(header) = read_layout_header() {
+                    refresh_cached_lines(&header);
+                }
             } else if text_changed {
                 // Plain text content changed (insert/delete/scroll).
                 let doc = documents::doc_content();
@@ -2789,54 +2557,9 @@ pub extern "C" fn _start() -> ! {
                 } else {
                     b"Rich Text"
                 };
-                let rich_fonts = scene_state::RichFonts {
-                    mono_data: font_data(),
-                    mono_upem: s.font_upem,
-                    mono_content_id: protocol::content::CONTENT_ID_FONT_MONO,
-                    mono_ascender: s.font_ascender,
-                    mono_descender: s.font_descender,
-                    mono_line_gap: s.font_line_gap,
-                    mono_cap_height: s.font_cap_height,
-                    sans_data: sans_font_data(),
-                    sans_upem: s.sans_font_upem,
-                    sans_content_id: protocol::content::CONTENT_ID_FONT_SANS,
-                    sans_ascender: s.sans_font_ascender,
-                    sans_descender: s.sans_font_descender,
-                    sans_line_gap: s.sans_font_line_gap,
-                    sans_cap_height: s.sans_font_cap_height,
-                    serif_data: serif_font_data(),
-                    serif_upem: s.serif_font_upem,
-                    serif_content_id: protocol::content::CONTENT_ID_FONT_SERIF,
-                    serif_ascender: s.serif_font_ascender,
-                    serif_descender: s.serif_font_descender,
-                    serif_line_gap: s.serif_font_line_gap,
-                    serif_cap_height: s.serif_font_cap_height,
-                    mono_italic_data: mono_italic_font_data(),
-                    mono_italic_upem: s.mono_italic_font_upem,
-                    mono_italic_content_id: protocol::content::CONTENT_ID_FONT_MONO_ITALIC,
-                    mono_italic_ascender: s.mono_italic_font_ascender,
-                    mono_italic_descender: s.mono_italic_font_descender,
-                    mono_italic_line_gap: s.mono_italic_font_line_gap,
-                    mono_italic_cap_height: s.mono_italic_font_cap_height,
-                    sans_italic_data: sans_italic_font_data(),
-                    sans_italic_upem: s.sans_italic_font_upem,
-                    sans_italic_content_id: protocol::content::CONTENT_ID_FONT_SANS_ITALIC,
-                    sans_italic_ascender: s.sans_italic_font_ascender,
-                    sans_italic_descender: s.sans_italic_font_descender,
-                    sans_italic_line_gap: s.sans_italic_font_line_gap,
-                    sans_italic_cap_height: s.sans_italic_font_cap_height,
-                    serif_italic_data: serif_italic_font_data(),
-                    serif_italic_upem: s.serif_italic_font_upem,
-                    serif_italic_content_id: protocol::content::CONTENT_ID_FONT_SERIF_ITALIC,
-                    serif_italic_ascender: s.serif_italic_font_ascender,
-                    serif_italic_descender: s.serif_italic_font_descender,
-                    serif_italic_line_gap: s.serif_italic_font_line_gap,
-                    serif_italic_cap_height: s.serif_italic_font_cap_height,
-                };
-                let lines = scene.update_rich_document_content(
+                scene.update_rich_document_content(
                     &scene_cfg,
                     documents::rich_buf_ref(),
-                    &rich_fonts,
                     s.cursor.pos as u32,
                     s.selection.start as u32,
                     s.selection.end as u32,
@@ -2847,7 +2570,9 @@ pub extern "C" fn _start() -> ! {
                     s.cursor.opacity,
                     s.animation.active_space,
                 );
-                state().rich_lines = lines;
+                if let Some(header) = read_layout_header() {
+                    refresh_cached_lines(&header);
+                }
             } else if selection_changed {
                 // Mono text selection changed.
                 let s = state();
@@ -2875,54 +2600,9 @@ pub extern "C" fn _start() -> ! {
                 } else {
                     b"Rich Text"
                 };
-                let rich_fonts = scene_state::RichFonts {
-                    mono_data: font_data(),
-                    mono_upem: s.font_upem,
-                    mono_content_id: protocol::content::CONTENT_ID_FONT_MONO,
-                    mono_ascender: s.font_ascender,
-                    mono_descender: s.font_descender,
-                    mono_line_gap: s.font_line_gap,
-                    mono_cap_height: s.font_cap_height,
-                    sans_data: sans_font_data(),
-                    sans_upem: s.sans_font_upem,
-                    sans_content_id: protocol::content::CONTENT_ID_FONT_SANS,
-                    sans_ascender: s.sans_font_ascender,
-                    sans_descender: s.sans_font_descender,
-                    sans_line_gap: s.sans_font_line_gap,
-                    sans_cap_height: s.sans_font_cap_height,
-                    serif_data: serif_font_data(),
-                    serif_upem: s.serif_font_upem,
-                    serif_content_id: protocol::content::CONTENT_ID_FONT_SERIF,
-                    serif_ascender: s.serif_font_ascender,
-                    serif_descender: s.serif_font_descender,
-                    serif_line_gap: s.serif_font_line_gap,
-                    serif_cap_height: s.serif_font_cap_height,
-                    mono_italic_data: mono_italic_font_data(),
-                    mono_italic_upem: s.mono_italic_font_upem,
-                    mono_italic_content_id: protocol::content::CONTENT_ID_FONT_MONO_ITALIC,
-                    mono_italic_ascender: s.mono_italic_font_ascender,
-                    mono_italic_descender: s.mono_italic_font_descender,
-                    mono_italic_line_gap: s.mono_italic_font_line_gap,
-                    mono_italic_cap_height: s.mono_italic_font_cap_height,
-                    sans_italic_data: sans_italic_font_data(),
-                    sans_italic_upem: s.sans_italic_font_upem,
-                    sans_italic_content_id: protocol::content::CONTENT_ID_FONT_SANS_ITALIC,
-                    sans_italic_ascender: s.sans_italic_font_ascender,
-                    sans_italic_descender: s.sans_italic_font_descender,
-                    sans_italic_line_gap: s.sans_italic_font_line_gap,
-                    sans_italic_cap_height: s.sans_italic_font_cap_height,
-                    serif_italic_data: serif_italic_font_data(),
-                    serif_italic_upem: s.serif_italic_font_upem,
-                    serif_italic_content_id: protocol::content::CONTENT_ID_FONT_SERIF_ITALIC,
-                    serif_italic_ascender: s.serif_italic_font_ascender,
-                    serif_italic_descender: s.serif_italic_font_descender,
-                    serif_italic_line_gap: s.serif_italic_font_line_gap,
-                    serif_italic_cap_height: s.serif_italic_font_cap_height,
-                };
-                let lines = scene.update_rich_document_content(
+                scene.update_rich_document_content(
                     &scene_cfg,
                     documents::rich_buf_ref(),
-                    &rich_fonts,
                     s.cursor.pos as u32,
                     s.selection.start as u32,
                     s.selection.end as u32,
@@ -2933,7 +2613,9 @@ pub extern "C" fn _start() -> ! {
                     s.cursor.opacity,
                     s.animation.active_space,
                 );
-                state().rich_lines = lines;
+                if let Some(header) = read_layout_header() {
+                    refresh_cached_lines(&header);
+                }
             } else if changed {
                 // Mono text cursor-only update.
                 let s = state();
