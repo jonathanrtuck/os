@@ -6,7 +6,7 @@
 //! results (line breaks, shaped glyphs, content dimensions) to a
 //! dedicated shared memory region.
 //!
-//! No knowledge of cursors, selection, blink state, animation, or editors.
+//! Pure data transformation — no view state, no input handling, no UI concerns.
 //!
 //! # IPC channels (handle indices)
 //!
