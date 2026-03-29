@@ -47,6 +47,33 @@ pub struct IconPath {
     pub layer: Layer,
 }
 
+/// Path command tag for Close (must match `scene::primitives::PATH_CLOSE`).
+const PATH_CLOSE_TAG: u32 = 3;
+/// Size of a Close command in bytes.
+const PATH_CLOSE_SIZE: usize = 4;
+
+impl IconPath {
+    /// Whether this contour ends with a Close command.
+    ///
+    /// Open contours (no Close) should be stroked only — filling them
+    /// implicitly closes with a straight line from end to start, which
+    /// creates visual artifacts (wedge shapes from arcs, etc.).
+    pub const fn is_closed(&self) -> bool {
+        let len = self.commands.len();
+        if len < PATH_CLOSE_SIZE {
+            return false;
+        }
+        // Last 4 bytes should be the Close tag (u32 LE).
+        let b = self.commands;
+        let i = len - PATH_CLOSE_SIZE;
+        let tag = b[i] as u32
+            | (b[i + 1] as u32) << 8
+            | (b[i + 2] as u32) << 16
+            | (b[i + 3] as u32) << 24;
+        tag == PATH_CLOSE_TAG
+    }
+}
+
 /// A named icon: vector path data with rendering hints and a11y label.
 ///
 /// All fields are `'static` — icons live in `.rodata`, no heap allocation.
@@ -63,6 +90,25 @@ pub struct Icon {
     /// Default stroke width in viewbox units.
     /// 0.0 = filled geometry. 2.0 = Tabler outline default.
     pub stroke_width: f32,
+}
+
+impl Icon {
+    /// Whether all contours in this icon end with a Close command.
+    ///
+    /// Icons with all-closed paths can be rendered with fill+stroke
+    /// (solid body + outline). Icons with any open path should be
+    /// rendered stroke-only — filling open paths creates visual
+    /// artifacts from implicit closure.
+    pub fn all_paths_closed(&self) -> bool {
+        let mut i = 0;
+        while i < self.paths.len() {
+            if !self.paths[i].is_closed() {
+                return false;
+            }
+            i += 1;
+        }
+        !self.paths.is_empty()
+    }
 }
 
 // ── Lookup ─────────────────────────────────────────────────────────

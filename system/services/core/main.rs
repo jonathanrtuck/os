@@ -589,6 +589,14 @@ fn write_cursor_shape(cursor_state_va: usize, generation: &mut u32, icon_name: &
         _ => (0.0_f32, 0.0_f32),
     };
 
+    // Icons with open paths must be rendered stroke-only — filling them
+    // implicitly closes arcs with straight lines, creating solid wedges.
+    let flags = if icon.all_paths_closed() {
+        0
+    } else {
+        CursorState::FLAG_STROKE_ONLY
+    };
+
     // Write header fields (non-atomic — protected by generation protocol).
     // SAFETY: cursor_state_va points to a valid CursorState page.
     unsafe {
@@ -597,9 +605,10 @@ fn write_cursor_shape(cursor_state_va: usize, generation: &mut u32, icon_name: &
         (*header).stroke_width = icon.stroke_width;
         (*header).hotspot_x = hotspot_x;
         (*header).hotspot_y = hotspot_y;
-        (*header).fill_color = CursorState::pack_color(0, 0, 0, 255); // black fill
-        (*header).stroke_color = CursorState::pack_color(255, 255, 255, 255); // white stroke
+        (*header).fill_color = CursorState::pack_color(0, 0, 0, 255); // black body
+        (*header).stroke_color = CursorState::pack_color(255, 255, 255, 255); // white outline
         (*header).data_len = data_len;
+        (*header).flags = flags;
     }
 
     // Bump generation with store-release.
@@ -2297,18 +2306,20 @@ pub extern "C" fn _start() -> ! {
 
                 // Determine cursor shape from mouse position.
                 if s.cursor_state_va != 0 {
-                    let page_w = {
-                        let ch = fb_height.saturating_sub(TITLE_BAR_H + SHADOW_DEPTH);
-                        let ph = ch.saturating_sub(2 * 16); // page_margin_v
-                        (ph as u64 * 210 / 297) as u32
-                    };
+                    let content_y = TITLE_BAR_H + SHADOW_DEPTH;
+                    let content_h = fb_height.saturating_sub(content_y);
+                    let page_margin_v: u32 = 16;
+                    let page_h = content_h.saturating_sub(2 * page_margin_v);
+                    let page_w = (page_h as u64 * 210 / 297) as u32;
                     let page_x_start = (fb_width.saturating_sub(page_w)) / 2;
                     let page_x_end = page_x_start + page_w;
-                    let over_content = s.mouse_y >= TITLE_BAR_H;
-                    let over_page = over_content
-                        && s.active_space == 0
+                    let page_y_start = content_y + page_margin_v;
+                    let page_y_end = page_y_start + page_h;
+                    let over_page = s.active_space == 0
                         && s.mouse_x >= page_x_start
-                        && s.mouse_x < page_x_end;
+                        && s.mouse_x < page_x_end
+                        && s.mouse_y >= page_y_start
+                        && s.mouse_y < page_y_end;
                     let new_shape = if over_page {
                         "cursor-text"
                     } else {

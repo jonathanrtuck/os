@@ -1052,17 +1052,19 @@ pub extern "C" fn _start() -> ! {
             // Read cursor metadata from the shared page header.
             // SAFETY: cursor_state_va is a valid shared page, shape_generation
             // was load-acquired above so all header fields are visible.
-            let (viewbox, stroke_w, hot_x, hot_y, fill_rgba, stroke_rgba, data_len) = unsafe {
-                let base = cursor_state_va as *const u8;
-                let viewbox = (base.add(8) as *const f32).read_unaligned();
-                let stroke_w = (base.add(12) as *const f32).read_unaligned();
-                let hot_x = (base.add(16) as *const f32).read_unaligned();
-                let hot_y = (base.add(20) as *const f32).read_unaligned();
-                let fill_rgba = (base.add(24) as *const u32).read_unaligned();
-                let stroke_rgba = (base.add(28) as *const u32).read_unaligned();
-                let data_len = (base.add(32) as *const u32).read_unaligned();
-                (viewbox, stroke_w, hot_x, hot_y, fill_rgba, stroke_rgba, data_len)
-            };
+            let (viewbox, stroke_w, hot_x, hot_y, fill_rgba, stroke_rgba, data_len, flags) =
+                unsafe {
+                    let base = cursor_state_va as *const u8;
+                    let viewbox = (base.add(8) as *const f32).read_unaligned();
+                    let stroke_w = (base.add(12) as *const f32).read_unaligned();
+                    let hot_x = (base.add(16) as *const f32).read_unaligned();
+                    let hot_y = (base.add(20) as *const f32).read_unaligned();
+                    let fill_rgba = (base.add(24) as *const u32).read_unaligned();
+                    let stroke_rgba = (base.add(28) as *const u32).read_unaligned();
+                    let data_len = (base.add(32) as *const u32).read_unaligned();
+                    let flags = (base.add(36) as *const u32).read_unaligned();
+                    (viewbox, stroke_w, hot_x, hot_y, fill_rgba, stroke_rgba, data_len, flags)
+                };
 
             if data_len > 0 && viewbox > 0.0 {
                 // Read path command bytes from the data area.
@@ -1117,17 +1119,41 @@ pub extern "C" fn _start() -> ! {
                     );
                 }
 
-                // Fill pass: original paths with fill color.
-                path::draw_path_stencil_cover(
-                    &mut cmdbuf, &mut cursor_verts,
-                    path_data, contours,
-                    fill_color, scene::FillRule::Winding,
-                    margin_vb, margin_vb,
-                    viewbox, viewbox,
-                    tex_sz, tex_sz,
-                    px_scale, 1.0,
-                    path_buf,
-                );
+                // Body pass: fill for closed shapes, narrow inner stroke for
+                // stroke-only cursors (open paths where fill would create wedges).
+                let stroke_only =
+                    flags & protocol::cursor::CursorState::FLAG_STROKE_ONLY != 0;
+                if stroke_only {
+                    let inner_w = stroke_w * 0.45;
+                    let inner = scene::stroke::expand_stroke(path_data, inner_w);
+                    if !inner.is_empty() {
+                        let inner_contours = scene::DataRef {
+                            offset: 0,
+                            length: inner.len() as u32,
+                        };
+                        path::draw_path_stencil_cover(
+                            &mut cmdbuf, &mut cursor_verts,
+                            &inner, inner_contours,
+                            fill_color, scene::FillRule::Winding,
+                            margin_vb, margin_vb,
+                            viewbox, viewbox,
+                            tex_sz, tex_sz,
+                            px_scale, 1.0,
+                            path_buf,
+                        );
+                    }
+                } else {
+                    path::draw_path_stencil_cover(
+                        &mut cmdbuf, &mut cursor_verts,
+                        path_data, contours,
+                        fill_color, scene::FillRule::Winding,
+                        margin_vb, margin_vb,
+                        viewbox, viewbox,
+                        tex_sz, tex_sz,
+                        px_scale, 1.0,
+                        path_buf,
+                    );
+                }
                 flush_solid_vertices(&mut cmdbuf, &mut cursor_verts);
 
                 cmdbuf.end_render_pass();

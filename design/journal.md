@@ -6,7 +6,14 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ## Cursor as Icon — Implementation In Progress (2026-03-28)
 
-**Status:** Architecture implemented, rendering unverified. All code compiles, 2,375 tests pass. Needs interactive visual verification.
+**Status:** Architecture complete, rendering verified (2026-03-28). Two bugs found and fixed during verification:
+
+1. **I-beam rendering:** The cursor-text icon has open paths (arcs without close). The fill pass implicitly closed them, creating solid wedges. Fixed via `FLAG_STROKE_ONLY` in CursorState — when set, the renderer uses a narrow inner stroke instead of fill. The flag is derived from `Icon::all_paths_closed()` (data-driven, no name matching).
+2. **Hit-testing vertical bounds:** The `over_page` check only tested horizontal bounds. Mouse positions above or below the page (but within its horizontal span) incorrectly triggered the text cursor. Fixed by adding `page_y_start`/`page_y_end` bounds.
+
+**Build pipeline fix:** Many Tabler SVGs have geometrically closed paths (end point = start point) but omit the explicit "Z" command. `build_icons.rs` now auto-emits `PATH_CLOSE` when end ≈ start (within 0.01 viewbox units). This makes `is_closed()` data-driven — no per-icon special cases needed.
+
+**Verification gap found:** `cursor_shape_is` uses IoU mask matching to distinguish pointer from I-beam, but can't distinguish solid vs wireframe rendering of the same shape. A broken pointer (stroke-only, no fill) still matched "pointer" at IoU=0.477 (threshold=0.35). Need a render-quality assertion (e.g., fill density) to catch this class of regression. Tracked as backlog.
 
 ### What's done
 
@@ -44,16 +51,19 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 - `MetalProtocol.swift`: setCursorFromTexture enum case
 - `VirtioMetal.swift`: deferred cursor readback (blit on currentCommandBuffer, pixel read after commit)
 
+### What's verified (2026-03-28)
+
+1. **Cursor rendering** — fill+stroke (pointer) and stroke-only (I-beam) both render correctly through the MSAA pipeline. Visually verified via hypervisor captures.
+2. **Cursor shape determination** — hit-testing works: pointer on dark desk, I-beam on page, pointer above/below/left/right of page. All verified via captures.
+
 ### What's not verified
 
-1. **Cursor rendering correctness** — fill+stroke rendering through the full MSAA pipeline hasn't been visually confirmed. The blit timing fix (deferred readback) is in place but untested.
-2. **Cursor shape determination** — hit-testing logic looks correct on paper but user reported shapes were swapped in an earlier (broken) build. Needs retest.
-3. **Hotspot accuracy** — offset fixed from pixels to viewbox units, but pixel-level correctness unverified.
-4. **Cursor size** — changed to 24pt to match old visual size, unverified.
+1. **Hotspot accuracy** — offset fixed from pixels to viewbox units, but pixel-level correctness unverified.
+2. **Cursor size** — changed to 24pt to match old visual size, unverified.
 
-### Known verification gap
+### Backlog: cursor render-quality assertion
 
-The hardware cursor (NSCursor) is composited by macOS's WindowServer above the Metal drawable. Hypervisor frame captures (`--capture`) don't include it. macOS `screencapture -C` includes the host cursor but the event script's `move` command only positions the GUEST cursor (via virtio tablet), not the host cursor. To verify: run interactively with `cargo run -r` and move the real mouse over the window.
+`cursor_shape_is` (IoU mask matching) identifies which shape is present but can't verify render correctness. A wireframe pointer (stroke-only, no fill) passes as "pointer" because the silhouette matches. Need a `cursor_fill_density` or similar assertion that checks interior fill ratio — would distinguish solid (correct) from wireframe (broken) rendering. `Status: backlog`
 
 ### Design decisions made during implementation
 

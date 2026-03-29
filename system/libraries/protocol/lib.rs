@@ -352,10 +352,16 @@ pub mod cursor {
         pub stroke_color: u32,
         /// Number of bytes of path command data at `CURSOR_DATA_OFFSET`.
         pub data_len: u32,
-        pub _pad: u32,
+        /// Bit 0 (`FLAG_STROKE_ONLY`): render body as narrow stroke, not fill.
+        pub flags: u32,
     }
 
     impl CursorState {
+        /// Stroke-only mode: render body as a narrower inner stroke instead of
+        /// filling the path interior. Used for open-path cursors like the I-beam
+        /// where fill would implicitly close arcs and create solid wedges.
+        pub const FLAG_STROKE_ONLY: u32 = 1;
+
         /// Pack RGBA into a u32 for `fill_color` / `stroke_color`.
         pub const fn pack_color(r: u8, g: u8, b: u8, a: u8) -> u32 {
             ((r as u32) << 24) | ((g as u32) << 16) | ((b as u32) << 8) | (a as u32)

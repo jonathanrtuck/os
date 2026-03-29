@@ -467,6 +467,29 @@ fn parse_svg_path(d: &str) -> Vec<u8> {
         last_cmd = cmd;
     }
 
+    // Auto-close: if the current point is within tolerance of the subpath
+    // start, emit PATH_CLOSE even without an explicit Z in the SVG.
+    // Many icon sets (including Tabler) omit Z when the path traces back
+    // to its origin. Without this, is_closed() returns false and the
+    // cursor renderer can't distinguish filled from stroke-only shapes.
+    if !out.is_empty() {
+        let dx = cx - subpath_x;
+        let dy = cy - subpath_y;
+        // 0.01 in viewbox units ≈ 0.04% of a 24-unit viewbox.
+        if dx * dx + dy * dy < 0.01 {
+            // Only emit if last command isn't already Close.
+            let last_tag = u32::from_le_bytes([
+                out[out.len() - 4],
+                out[out.len() - 3],
+                out[out.len() - 2],
+                out[out.len() - 1],
+            ]);
+            if last_tag != PATH_CLOSE {
+                emit_close(&mut out);
+            }
+        }
+    }
+
     out
 }
 
