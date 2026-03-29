@@ -4,6 +4,143 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Service Pack & Incremental Build — Design Discussion (2026-03-29)
+
+**Status:** Design settled. Implementation deferred (not blocking current work).
+
+### The problem
+
+The build system has no incrementality. `build.rs` orchestrates ~31 rustc invocations (13 rlibs + 18 ELF binaries) sequentially. When cargo reruns it, everything rebuilds from scratch. But the deeper problem is architectural: the `include_bytes!` embedding chain creates a compile-time monolith.
+
+```text
+18 service ELFs → include_bytes! → init.elf → include_bytes! → kernel (19MB)
+```
+
+Changing any single service forces relinking init (all 16 embedded ELFs) and relinking the kernel (19MB). Even with a perfect incremental build system (ninja, content-hashing), this cascade can't be avoided — the inputs genuinely changed. The embedding chain makes the linking cost proportional to the total system size, not the change size.
+
+### Approaches evaluated
+
+**Incremental build system (ninja / xtask / content-hashing in build.rs):** Solves per-artifact compilation staleness — only recompile libraries and services whose sources changed. But doesn't solve the linking cascade. Without decoupling the embedding chain, you save compile time but still pay full relinking cost for any service change.
+
+**Cargo workspace:** Each library and service becomes a workspace member. Cargo handles incrementality natively. But the project invokes rustc manually for precise control over bare-metal cross-compilation, custom linker scripts, and the ELF embedding chain. The `fonts` library (with host proc-macro deps + aarch64 rlibs) is particularly awkward. Fighting cargo's model for 18 bare-metal binaries with custom linking is more work than the current build.rs.
+
+**Service pack (memory-mapped module):** A flat archive of service ELFs loaded as a separate memory region by the hypervisor/QEMU. Init reads from the mapped region instead of compiled-in statics. Breaks the embedding chain — changing a service repacks the archive without recompiling init or the kernel. But requires the boot environment to load a second file. On real hardware, the bootloader must cooperate (like Linux's initramfs). This is a contract between OS and bootloader that the current single-binary approach avoids.
+
+**Service pack with post-link splice (chosen):** Combines the single-binary property with decoupled compilation. Services are compiled independently, packed into a flat archive, then spliced into the kernel ELF as a LOAD segment by a post-link tool. The bootloader loads one file (standard ELF), same as today. The kernel finds the pack at linker-defined symbols and maps it into init's address space.
+
+### Decision: Service pack with post-link splice
+
+**What it is:**
+
+1. Services compile to individual ELFs (same as today)
+2. `mkservices` packs them into a flat binary archive (header + concatenated ELFs)
+3. The archive is spliced into the kernel ELF as an additional LOAD segment
+4. The kernel maps the pack's physical frames into init's address space (read-only)
+5. Init looks up ELFs by role ID, passes pointers to `process_create` (unchanged syscall)
+
+The kernel binary is still one file. Any ELF-loading bootloader handles it. On real hardware, QEMU, or the hypervisor — same binary, no protocol changes.
+
+**The post-link splice** has two implementation strategies:
+
+- **Start with objcopy (safe):** `llvm-objcopy -I binary -O elf64-littleaarch64 services.pack services.o`, then link `services.o` into the kernel. Uses standard toolchain, guaranteed correct ELF. Requires relinking the kernel (fast — object code is cached, just the linker runs), but not recompiling.
+- **Graduate to custom patcher (fast):** Reserve a PHDR slot in the linker script. A custom `pack-kernel` tool fills in the PHDR fields and appends the pack data. Pure binary manipulation, milliseconds. No recompilation, no relinking. Higher risk (custom ELF manipulation must be correct), but the mechanisms are well-specified.
+
+**Build pipeline:**
+
+```text
+                    ┌─ libsys.rlib ──┐
+    Libraries ──────┤  ...           ├──→ rlibs (cached when sources unchanged)
+                    └─ librender ────┘
+                           │
+              ┌────────────┼────────────┐
+              ▼            ▼            ▼
+        metal-render   view-engine    ...        ← individual ELFs (parallelizable)
+              │            │            │
+              └────────────┼────────────┘
+                           ▼
+                    mkservices ─────→ services.pack   ← fast concatenation
+
+    kernel + init ─────────────────→ kernel.elf       ← only recompiles when
+                                         │               kernel/init code changes
+                                         ▼
+                              post-link splice ────→ kernel-final.elf
+```
+
+**What changes vs. today:**
+
+| Component      | Before                                           | After                                                         |
+| -------------- | ------------------------------------------------ | ------------------------------------------------------------- |
+| Init           | Embeds 16 service ELFs via include_bytes! (~5MB) | Reads from memory-mapped pack region (~50KB without services) |
+| Kernel         | 19MB (embeds init which embeds everything)       | ~200KB code + ~5MB pack section                               |
+| build.rs       | Generates init_embedded.rs, embeds all ELFs      | Compiles init without services; separate pack step            |
+| run.sh         | Builds disk.img if stale, boots                  | Also packs services + splices if stale, then boots            |
+| Linker script  | Two LOAD segments (text, data)                   | Three (text, data, services — reserved PHDR)                  |
+| Kernel main.rs | Spawns init                                      | Also maps pack region into init's address space (~30 lines)   |
+
+**What stays the same:**
+
+- `process_create` syscall — unchanged (elf_ptr, elf_len)
+- IPC topology — unchanged
+- Microkernel boundary — kernel spawns only init
+- Boot sequence — kernel → init → services
+- The kernel still embeds init via include_bytes! (init changes rarely)
+
+### Service discovery: role IDs
+
+Init currently hard-codes `VIRTIO_DEVICE_BLK => DOCUMENT_ELF`. With the pack, init looks up ELFs by a role identifier. Not all services are device drivers (view-engine, document-model, layout-engine, text-editor, rich-editor, png-decode have no virtio device ID), so the pack uses a role enum rather than device IDs:
+
+```text
+Pack header: [magic, version, count, pad]
+Per entry:   [role_id: u32, offset: u32, length: u32, pad: u32]
+Followed by: concatenated ELFs (page-aligned)
+```
+
+The role enum lives in `protocol/` (shared between build tools and init). Init does a linear scan of the entry table (16 entries, trivial).
+
+### Kernel → init mapping
+
+The kernel finds the pack via linker symbols (`_services_start`, `_services_end`). It converts kernel VAs to physical addresses (subtract `KERNEL_VA_OFFSET`), maps those frames into init's TTBR0 at a dedicated user VA (`SERVICE_PACK_BASE` in system_config.rs), and communicates the address/length via the existing device manifest channel page.
+
+The mapping is read-only (`AP_RO | AP_EL0 | PXN | UXN`). The physical frames are part of the kernel image and already reserved by the page allocator (between `_kernel_start` and `_kernel_end`). No new memory management needed.
+
+### Interaction with incremental builds
+
+The service pack is the **prerequisite** — without it, no build system can avoid the init→kernel relinking cascade. With it, the two concerns decouple:
+
+- **Service pack** (architectural): breaks the linking chain. Changing one service doesn't touch init or the kernel.
+- **Build system** (tooling): tracks per-artifact staleness. Changing one source file recompiles only that artifact.
+
+Together: edit `metal-render/main.rs` → rebuild one ELF → repack services.pack (ms) → splice into kernel (ms) → boot. Init and kernel code untouched.
+
+The build system change (ninja, content-hashing, or xtask) can proceed independently. The most natural path: add content-hash checking to build.rs first (skip unchanged rlibs/ELFs), then evaluate ninja if parallelism becomes valuable.
+
+### Holes investigated and resolved
+
+1. **Post-link ELF correctness** — mitigated by starting with objcopy (standard toolchain). Custom patcher deferred.
+2. **Kernel→init mapping** — uses existing mechanisms (same as channel shared pages, ~30 lines).
+3. **Init address space layout** — one new constant (`SERVICE_PACK_BASE`) in the gap between `USER_CODE_BASE` (4 MiB) and `CHANNEL_SHM_BASE` (1 GiB).
+4. **Service discovery** — role enum in protocol/, linear scan of pack entries.
+5. **Fuzz→fuzz-helper embedding** — fuzz-helper goes into the pack. Same lookup mechanism.
+6. **MAX_ELF_SIZE (4 MiB)** — pre-existing constraint, not changed by this approach.
+7. **Real hardware compatibility** — single ELF binary, works with any ELF-loading bootloader. No bootloader protocol changes needed.
+8. **fonts crate (cargo-managed)** — build.rs still compiles it via cargo. Not affected by the pack architecture.
+
+### Relationship to Decision 5 (Embedded ELFs)
+
+Decision 5 (earlier in this journal) settled on keeping `include_bytes!` as acceptable scaffolding: "Replace when boot filesystem or self-hosting exists. The build coupling is minor."
+
+This discussion revisits that assessment from the build system angle. The coupling turned out to not be minor — the 19MB relinking cascade dominates rebuild time. The service pack replaces the scaffolding without requiring a boot filesystem or self-hosting. Decision 5's core insight was correct (don't add a two-stage boot just to decouple), and the post-link splice achieves decoupling without a two-stage boot.
+
+**Decision 5 updated status:** Superseded by service pack design. The embedded ELF pattern for init→services is replaced. The kernel→init embedding remains (init changes rarely, and embedding keeps the microkernel contract simple).
+
+### Open threads
+
+- **Build system tooling:** Content-hash checking in build.rs vs. ninja vs. xtask. Independent of the pack architecture. Evaluate when the pack is implemented and rebuild times are measurable.
+- **Parallelism ceiling:** The dependency graph allows ~4-5 libraries and ~6 services to build in parallel. Whether that's worth a ninja migration depends on measured compile times.
+- **Hot-reload potential:** With the pack mapped as a separate memory region, future work could remap the region and respawn individual services without rebooting. Not a goal now, but the architecture doesn't foreclose it.
+
+---
+
 ## Init & Core Redesign — Design Decisions (2026-03-29)
 
 **Status:** All 12 decisions settled.
