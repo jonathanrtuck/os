@@ -228,30 +228,60 @@ kill -USR1 $(pgrep hypervisor)
 
 **Background mode:** Always use `--background` for automated invocations (captures, event scripts, CI). It sets `.accessory` activation policy: no Dock icon, no window activation, no focus stealing. Metal rendering still works (window exists in compositing tree but ordered behind). Previously background mode was implicit with `--events`; now it's an explicit flag.
 
-### Numerical image verification (MANDATORY)
+### Visual assertion tool (verify.py) — MANDATORY
 
-**Never eyeball screenshots to judge correctness.** Downscaled images in the conversation are unreliable — you WILL hallucinate pixel differences. Always use `system/test/imgdiff.py` for hard numbers.
+**Never eyeball screenshots to judge correctness.** Downscaled images in the conversation are unreliable — you WILL hallucinate pixel differences. Use `system/test/verify.py` for PASS/FAIL verdicts. **Never interpret raw measurements** — the tool makes the judgment call, not you.
 
 ```sh
-# Measure a single screenshot: page position, colored region
-python3 system/test/imgdiff.py /tmp/screenshot.png
+PYTHON=system/test/.venv/bin/python3
 
-# Compare two screenshots: positions + pixel diff count
-python3 system/test/imgdiff.py /tmp/before.png /tmp/after.png
+# Run assertions against a capture — returns PASS or FAIL with evidence
+$PYTHON system/test/verify.py /tmp/screenshot.png \
+  --assert 'frame_not_blank' \
+  --assert 'page_centered tol=5' \
+  --assert 'cursor_visible_at x=400 y=400 size=32 tol=15'
+
+# Run from a spec file (one assertion per line, # comments)
+$PYTHON system/test/verify.py /tmp/screenshot.png --spec system/test/visual/boot-idle.spec
+
+# SSIM comparison against a baseline
+$PYTHON system/test/verify.py /tmp/after.png --assert 'ssim_above ref=/tmp/before.png threshold=0.99'
+
+# Specific pixel check
+$PYTHON system/test/verify.py /tmp/screenshot.png --assert 'pixel_is x=100 y=100 r=32 g=32 b=32 tol=5'
 ```
 
-Output includes:
+**Available assertions:**
 
-- **Page edges** — left/right x of the white page (first/last bright pixel in the middle row)
-- **Page center** — midpoint of left/right edges
-- **Colored region** — bounding box of the test image (non-black, non-white)
-- **Pixel diff** — count of differing pixels between two images
+| Assertion                 | Parameters                     | What it checks                                                    |
+| ------------------------- | ------------------------------ | ----------------------------------------------------------------- |
+| `frame_not_blank`         |                                | Any non-background pixels exist                                   |
+| `page_centered`           | `tol`                          | Page center_x == frame center_x ± tol                             |
+| `page_width`              | `expected`, `tol`              | Page width matches expected ± tol                                 |
+| `cursor_visible_at`       | `x`, `y`, `size`, `tol`        | Cursor-like content at position (works on dark bg and white page) |
+| `cursor_not_visible`      |                                | No cursor-like content outside page                               |
+| `content_in_region`       | `x0`, `y0`, `x1`, `y1`         | Non-background/non-page pixels in region                          |
+| `region_not_blank`        | `x0`, `y0`, `x1`, `y1`         | Any non-background pixels in region                               |
+| `no_content_outside_page` | `margin`                       | Nothing rendered outside page + margin                            |
+| `pixel_is`                | `x`, `y`, `r`, `g`, `b`, `tol` | Specific pixel matches expected RGB                               |
+| `ssim_above`              | `ref`, `threshold`             | Structural similarity vs reference image                          |
+| `pixel_diff`              | `ref`, `max_pixels`, `tol`     | Differing pixel count within limit                                |
 
-Use this to verify: "page left=1164 in both images" is proof of no shift. "colored region: not found" is proof the image is offscreen. Never claim a visual result without a number backing it.
+**Cursor compositing:** Captures always include the cursor (composited via GPU onto the staging texture). Event scripts can position the cursor with `move x y`.
 
-**Always capture a baseline BEFORE making display changes.** Compare before/after with imgdiff.py to verify only intended pixels changed. For new visual elements, generate a reference with Python/PIL (draw the expected shape, text, layout) and compare the actual render against it. "Something rendered" is NOT verification — you must verify it is geometrically and visually correct.
+**Visual test suite:** Run `cd system/test && ./visual-test.sh` to execute all visual regression tests (boot-idle, cursor-dark, cursor-page, after-type). Each test boots the hypervisor, runs a scenario, captures, and asserts. All tests must pass before shipping display changes.
+
+**Visual TDD workflow:**
+
+1. Before implementing a visual change, write assertions in a `.spec` file that define what "correct" looks like
+2. Run verify.py — new assertions FAIL (feature doesn't exist yet)
+3. Implement the change
+4. Run verify.py — assertions PASS, all existing specs still pass
+5. Run `visual-test.sh` — full regression suite passes
 
 **When you cannot verify a change with available tools, that is a BLOCKING problem.** Fix the tooling gap before shipping the change. Do not ship unverifiable work.
+
+**Legacy tool (imgdiff.py):** Still available for raw measurements, but prefer verify.py for all verification. imgdiff.py returns numbers for you to interpret; verify.py returns verdicts.
 
 Launch: `cd system && cargo run -r` (default, no env vars needed).
 

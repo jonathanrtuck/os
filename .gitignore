@@ -11,3 +11,4 @@ design/drafts/
 docs/
 reference/
 target/
+.venv/
