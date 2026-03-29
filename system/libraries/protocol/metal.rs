@@ -14,6 +14,10 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
+/// Legacy Virgl3D protocol constants and command encoding.
+#[path = "virgl.rs"]
+pub mod virgl;
+
 // ── Command header ──────────────────────────────────────────────────────
 
 /// Every command starts with this 8-byte header.

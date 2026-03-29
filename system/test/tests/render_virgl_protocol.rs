@@ -1,6 +1,6 @@
 //! Host-side tests for Virgl protocol encoding.
 
-use protocol::virgl::*;
+use protocol::metal::virgl::*;
 
 // Include the virgil-render driver's shader definitions directly.
 // shaders.rs is pure const data with no runtime dependencies and no
@@ -566,7 +566,7 @@ fn cmd_set_scissor_rect_packing() {
 /// within the 60-byte IPC payload limit.
 #[test]
 fn compositor_config_includes_font_fields() {
-    use protocol::compose::CompositorConfig;
+    use protocol::init::CompositorConfig;
     let config = CompositorConfig {
         scene_va: 0,
         content_va: 0,

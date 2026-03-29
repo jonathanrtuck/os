@@ -1,6 +1,6 @@
 # Project Status
 
-**Last updated:** 2026-03-27
+**Last updated:** 2026-03-29
 
 ## Current State
 
@@ -8,11 +8,19 @@
 
 **v0.5 Rich Text: DESIGN SETTLED** (2026-03-27). Piece table, library-based, single-file, style palette, a11y roles. Ready for implementation.
 
-## Architecture (Settled 2026-03-18)
+## Architecture (Decomposed 2026-03-29)
 
 ```text
-Core (shaping, layout, scene building) → Scene Graph (shared memory) → Render Service → Display
+Input Driver → C (View Engine) → Scene Graph → Render Service → Display
+                  ↕         ↕
+               Editor    B (Layout Engine)
+                  ↕         ↕
+           A (Document Model)
+                  ↕
+           Document Service → Disk
 ```
+
+The monolithic `core` has been decomposed into three processes: A (document-model), B (layout-engine), C (view-engine). Protocol library consolidated to 10 modules (init, device, input, edit, layout, view, document, decode, content, metal). 2,375 tests pass.
 
 Content types: `None`, `InlineImage` (per-frame scene data), `Image` (Content Region via content_id), `Path`, `Glyphs`. Three render services: `metal-render` (default), `cpu-render`, `virgil-render`.
 
@@ -40,7 +48,7 @@ Seven-layer fs stack: `BlockDevice` trait → superblock ring → free-extent al
 
 ### System Code
 
-`system/kernel/` (33 .rs + 2 .S), `system/services/{init,core,document,drivers/{cpu-render,virgil-render,metal-render,virtio-blk,virtio-console,virtio-input,virtio-9p},decoders/{png}}/`, `system/libraries/{sys,virtio,drawing,fonts,animation,layout,scene,ipc,protocol,render,fs,store}/`, `system/user/{echo,text-editor,stress,fuzz,fuzz-helper}/`, `system/test/`, `tools/mkdisk/`. 28 syscalls. 4 SMP cores, EEVDF scheduler.
+`system/kernel/` (33 .rs + 2 .S), `system/services/{init,document-model,layout-engine,view-engine,document,filesystem,drivers/{cpu-render,virgil-render,metal-render,virtio-blk,virtio-console,virtio-input,virtio-9p},decoders/{png}}/`, `system/libraries/{sys,virtio,drawing,fonts,animation,layout,scene,ipc,protocol,render,fs,store}/`, `system/user/{echo,text-editor,rich-editor,stress,fuzz,fuzz-helper}/`, `system/test/`, `tools/mkdisk/`. 28 syscalls. 4 SMP cores, EEVDF scheduler.
 
 ## Milestone Roadmap
 

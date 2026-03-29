@@ -7,8 +7,8 @@
 //! messages with init (MSG_DISPLAY_INFO, MSG_GPU_CONFIG, MSG_GPU_READY).
 
 use protocol::{
-    gpu::{DisplayInfoMsg, MSG_DISPLAY_INFO, MSG_GPU_CONFIG, MSG_GPU_READY},
-    virgl::{VIRTIO_GPU_CMD_GET_DISPLAY_INFO, VIRTIO_GPU_RESP_OK_DISPLAY_INFO},
+    init::{DisplayInfoMsg, MSG_DISPLAY_INFO, MSG_GPU_CONFIG, MSG_GPU_READY},
+    metal::virgl::{VIRTIO_GPU_CMD_GET_DISPLAY_INFO, VIRTIO_GPU_RESP_OK_DISPLAY_INFO},
 };
 
 use crate::{
@@ -171,8 +171,8 @@ pub(crate) fn init_handshake(
             break;
         }
     }
-    let config = if let Some(protocol::gpu::Message::GpuConfig(c)) =
-        protocol::gpu::decode(msg.msg_type, &msg.payload)
+    let config = if let Some(protocol::init::GpuMessage::GpuConfig(c)) =
+        protocol::init::decode_gpu(msg.msg_type, &msg.payload)
     {
         c
     } else {

@@ -35,9 +35,8 @@ extern crate scene;
 mod gpu;
 
 use protocol::{
-    compose::MSG_COMPOSITOR_CONFIG,
     device::MSG_DEVICE_CONFIG,
-    gpu::{DisplayInfoMsg, MSG_DISPLAY_INFO, MSG_GPU_CONFIG, MSG_GPU_READY},
+    init::{DisplayInfoMsg, MSG_COMPOSITOR_CONFIG, MSG_DISPLAY_INFO, MSG_GPU_CONFIG, MSG_GPU_READY},
 };
 use render::{
     frame_scheduler,
@@ -141,8 +140,8 @@ pub extern "C" fn _start() -> ! {
             break;
         }
     }
-    let gpu_config = if let Some(protocol::gpu::Message::GpuConfig(c)) =
-        protocol::gpu::decode(msg.msg_type, &msg.payload)
+    let gpu_config = if let Some(protocol::init::GpuMessage::GpuConfig(c)) =
+        protocol::init::decode_gpu(msg.msg_type, &msg.payload)
     {
         c
     } else {
@@ -275,8 +274,8 @@ pub extern "C" fn _start() -> ! {
             break;
         }
     }
-    let config = if let Some(protocol::compose::Message::CompositorConfig(c)) =
-        protocol::compose::decode(msg.msg_type, &msg.payload)
+    let config = if let Some(protocol::init::ComposeMessage::CompositorConfig(c)) =
+        protocol::init::decode_compose(msg.msg_type, &msg.payload)
     {
         c
     } else {

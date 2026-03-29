@@ -975,7 +975,7 @@ fn f32_scale_factor_exact_representation() {
 /// enforces this. We also verify at runtime for documentation.
 #[test]
 fn compositor_config_fits_ipc_payload() {
-    let size = core::mem::size_of::<protocol::compose::CompositorConfig>();
+    let size = core::mem::size_of::<protocol::init::CompositorConfig>();
     assert!(
         size <= 60,
         "VAL-COORD-008: CompositorConfig size {} exceeds 60-byte IPC payload",

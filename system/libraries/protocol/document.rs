@@ -255,3 +255,48 @@ pub fn decode(msg_type: u32, payload: &[u8; crate::PAYLOAD_SIZE]) -> Option<Mess
         _ => None,
     }
 }
+
+// ── Legacy filesystem service (blkfs) ───────────────────────────────
+//
+// These types were originally in the `blkfs` module. They are used by
+// the filesystem service which is the predecessor of the document service.
+
+/// Config message: init → filesystem service.
+pub const MSG_FS_CONFIG: u32 = 70;
+/// Commit request: core → filesystem service.
+pub const MSG_FS_COMMIT: u32 = 71;
+/// Ready signal: filesystem → core (via init channel, not direct).
+pub const MSG_FS_READY: u32 = 72;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FsConfig {
+    /// VA of the shared document buffer (read-only for filesystem).
+    pub doc_va: u64,
+    /// Document buffer capacity in bytes (content area, excluding header).
+    pub doc_capacity: u32,
+    /// Kernel channel handle for signaling init.
+    pub init_handle: u8,
+    /// Kernel channel handle for the core (docmodel) channel.
+    pub core_handle: u8,
+    pub _pad: [u8; 2],
+}
+const _: () = assert!(core::mem::size_of::<FsConfig>() <= 60);
+
+#[derive(Clone, Copy, Debug)]
+pub enum FsMessage {
+    FsConfig(FsConfig),
+    FsCommit,
+    FsReady,
+}
+
+pub fn decode_fs(msg_type: u32, payload: &[u8; crate::PAYLOAD_SIZE]) -> Option<FsMessage> {
+    match msg_type {
+        MSG_FS_CONFIG => Some(FsMessage::FsConfig(unsafe {
+            crate::decode_payload(payload)
+        })),
+        MSG_FS_COMMIT => Some(FsMessage::FsCommit),
+        MSG_FS_READY => Some(FsMessage::FsReady),
+        _ => None,
+    }
+}

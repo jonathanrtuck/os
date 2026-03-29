@@ -4,7 +4,7 @@
 //! buffers, texture resources, and provides low-level GPU command submission
 //! (gpu_command, gpu_cmd_ok) used by all phases.
 
-use protocol::virgl::{
+use protocol::metal::virgl::{
     VIRGL_FORMAT_B8G8R8A8_UNORM, VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE, VIRTIO_GPU_CMD_CTX_CREATE,
     VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING, VIRTIO_GPU_CMD_RESOURCE_CREATE_3D,
     VIRTIO_GPU_CMD_RESOURCE_FLUSH, VIRTIO_GPU_CMD_SET_SCANOUT, VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D,
@@ -347,7 +347,7 @@ pub(crate) fn resource_create_vbo(
             ResourceCreate3d {
                 hdr: ctrl_header(VIRTIO_GPU_CMD_RESOURCE_CREATE_3D),
                 resource_id: VB_RESOURCE_ID,
-                target: protocol::virgl::PIPE_BUFFER,
+                target: protocol::metal::virgl::PIPE_BUFFER,
                 format: VIRGL_FORMAT_B8G8R8A8_UNORM, // format doesn't matter for buffers
                 bind: 0x10,                          // PIPE_BIND_VERTEX_BUFFER
                 width: size_bytes,
@@ -443,7 +443,7 @@ pub(crate) fn transfer_vbo_to_host(
         core::ptr::write(
             cmd.va as *mut TransferToHost3d,
             TransferToHost3d {
-                hdr: ctrl_header_ctx(protocol::virgl::VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D),
+                hdr: ctrl_header_ctx(protocol::metal::virgl::VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D),
                 box_x: 0,
                 box_y: 0,
                 box_z: 0,

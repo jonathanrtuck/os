@@ -23,9 +23,9 @@ extern crate scene;
 use alloc::{boxed::Box, vec::Vec};
 
 use protocol::{
-    compose::MSG_COMPOSITOR_CONFIG,
     device::MSG_DEVICE_CONFIG,
-    virgl::{
+    init::MSG_COMPOSITOR_CONFIG,
+    metal::virgl::{
         self, PIPE_BUFFER, PIPE_PRIM_TRIANGLES, PIPE_SHADER_FRAGMENT, PIPE_SHADER_VERTEX,
         PIPE_TEXTURE_2D, VIRGL_FORMAT_B8G8R8A8_UNORM, VIRGL_FORMAT_R8_UNORM,
         VIRGL_FORMAT_Z32_FLOAT_S8X24_UINT, VIRGL_OBJECT_BLEND, VIRGL_OBJECT_DSA,
@@ -340,8 +340,8 @@ pub extern "C" fn _start() -> ! {
     loop {
         let _ = sys::wait(&[INIT_HANDLE], u64::MAX);
         if ch.try_recv(&mut msg) && msg.msg_type == MSG_COMPOSITOR_CONFIG {
-            if let Some(protocol::compose::Message::CompositorConfig(config)) =
-                protocol::compose::decode(msg.msg_type, &msg.payload)
+            if let Some(protocol::init::ComposeMessage::CompositorConfig(config)) =
+                protocol::init::decode_compose(msg.msg_type, &msg.payload)
             {
                 scene_va = config.scene_va;
                 content_va = config.content_va;

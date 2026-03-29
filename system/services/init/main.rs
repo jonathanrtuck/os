@@ -83,20 +83,16 @@ include!(env!("INIT_EMBEDDED_RS"));
 
 /// Channel shared memory base. The kernel's channel is at page 0.
 /// Channels created by init are at subsequent 2-page pairs.
-use protocol::compose::{
-    CompositorConfig, ImageConfig, RtcConfig, MSG_COMPOSITOR_CONFIG, MSG_IMAGE_CONFIG,
-    MSG_RTC_CONFIG,
+use protocol::init::{
+    CompositorConfig, CoreConfig, DocModelConfig, EditorConfig, FrameRateMsg, GpuConfig,
+    ImageConfig, RtcConfig, MSG_COMPOSITOR_CONFIG, MSG_CORE_CONFIG, MSG_DISPLAY_INFO,
+    MSG_DOC_MODEL_CONFIG, MSG_EDITOR_CONFIG, MSG_FRAME_RATE, MSG_FS_READ_REQUEST,
+    MSG_FS_READ_RESPONSE, MSG_GPU_CONFIG, MSG_GPU_READY, MSG_IMAGE_CONFIG, MSG_RTC_CONFIG,
 };
 use protocol::layout::{
     CoreLayoutConfig, LayoutEngineConfig, MSG_CORE_LAYOUT_CONFIG, MSG_LAYOUT_ENGINE_CONFIG,
 };
-use protocol::{
-    core_config::{CoreConfig, FrameRateMsg, MSG_CORE_CONFIG, MSG_FRAME_RATE},
-    device::{DeviceConfig, MSG_DEVICE_CONFIG},
-    editor::{EditorConfig, MSG_EDITOR_CONFIG},
-    fs::{MSG_FS_READ_REQUEST, MSG_FS_READ_RESPONSE},
-    gpu::{GpuConfig, MSG_DISPLAY_INFO, MSG_GPU_CONFIG, MSG_GPU_READY},
-};
+use protocol::device::{DeviceConfig, MSG_DEVICE_CONFIG};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -1461,8 +1457,8 @@ fn configure_render_service(
         }
     }
 
-    let display_info = if let Some(protocol::gpu::Message::DisplayInfo(d)) =
-        protocol::gpu::decode(resp_msg.msg_type, &resp_msg.payload)
+    let display_info = if let Some(protocol::init::GpuMessage::DisplayInfo(d)) =
+        protocol::init::decode_gpu(resp_msg.msg_type, &resp_msg.payload)
     {
         d
     } else {
@@ -1776,7 +1772,7 @@ fn spawn_document_model(
     // Handle order determined by handle_send calls in wire_service_channels():
     //   1=editor, 2=decoder, 3=document-service, 4=core
     let docmodel_ch = init_channel(docmodel_ch_idx);
-    let docmodel_config = protocol::document_model::DocModelConfig {
+    let docmodel_config = DocModelConfig {
         doc_va: docmodel_doc_va as u64,
         doc_capacity: DOC_BUF_CAPACITY,
         content_va: docmodel_content_va,
@@ -1790,7 +1786,7 @@ fn spawn_document_model(
     };
     let dm_msg = unsafe {
         ipc::Message::from_payload(
-            protocol::document_model::MSG_DOC_MODEL_CONFIG,
+            MSG_DOC_MODEL_CONFIG,
             &docmodel_config,
         )
     };

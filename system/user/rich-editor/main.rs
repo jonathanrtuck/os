@@ -98,11 +98,11 @@ pub extern "C" fn _start() -> ! {
     let mut msg = ipc::Message::new(0);
 
     let config = if init_ch.try_recv(&mut msg) {
-        protocol::editor::decode(msg.msg_type, &msg.payload)
+        protocol::init::decode_editor(msg.msg_type, &msg.payload)
     } else {
         None
     };
-    let Some(protocol::editor::Message::EditorConfig(config)) = config else {
+    let Some(protocol::init::EditorMessage::EditorConfig(config)) = config else {
         sys::print(b"rich-editor: no config message\n");
         sys::exit();
     };

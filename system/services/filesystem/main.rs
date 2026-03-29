@@ -408,9 +408,9 @@ pub extern "C" fn _start() -> ! {
     // Read FS config from init (doc buffer VA).
     let doc_va: usize;
     let doc_capacity: usize;
-    if ch.try_recv(&mut msg) && msg.msg_type == protocol::blkfs::MSG_FS_CONFIG {
-        if let Some(protocol::blkfs::Message::FsConfig(cfg)) =
-            protocol::blkfs::decode(msg.msg_type, &msg.payload)
+    if ch.try_recv(&mut msg) && msg.msg_type == protocol::document::MSG_FS_CONFIG {
+        if let Some(protocol::document::FsMessage::FsConfig(cfg)) =
+            protocol::document::decode_fs(msg.msg_type, &msg.payload)
         {
             doc_va = cfg.doc_va as usize;
             doc_capacity = cfg.doc_capacity as usize;
@@ -442,7 +442,7 @@ pub extern "C" fn _start() -> ! {
         let _ = sys::wait(&[1], u64::MAX);
 
         while core_ch.try_recv(&mut msg) {
-            if msg.msg_type == protocol::blkfs::MSG_FS_COMMIT {
+            if msg.msg_type == protocol::document::MSG_FS_COMMIT {
                 // Read document content from shared buffer.
                 // Header layout: [0..8) = content_len (u64), [8..16) = cursor_pos, [16..64) = reserved, [64..) = content
                 let content_len =

@@ -16,7 +16,7 @@ pub const SCANOUT_ID: u32 = 0;
 pub const FB_BPP: u32 = 4;
 
 // virtio-gpu command and response types — imported from protocol crate.
-use protocol::virgl::{
+use protocol::metal::virgl::{
     VIRGL_FORMAT_B8G8R8A8_UNORM as FORMAT_B8G8R8A8_UNORM,
     VIRTIO_GPU_CMD_GET_DISPLAY_INFO as CMD_GET_DISPLAY_INFO,
     VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING as CMD_RESOURCE_ATTACH_BACKING,

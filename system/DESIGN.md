@@ -185,11 +185,11 @@ Notification for both: `channel_signal` syscall wakes the consumer from `sys::wa
 
 **Goal:** Single source of truth for all IPC message types and payload structs. Every component that sends or receives IPC messages imports from here.
 
-**Status:** ~400 lines. Defines message type constants and all shared payload structs across 9 protocol modules, plus shared memory layout types (`PointerState` for the input state register), `CHANNEL_SHM_BASE` and `channel_shm_va()`.
+**Status:** 10 protocol modules across ~1000 lines (lib.rs + external files). Defines message type constants and all shared payload structs, plus shared memory layout types (`PointerState` for the input state register), `CHANNEL_SHM_BASE` and `channel_shm_va()`.
 
 **What's foundational:**
 
-- **One module per protocol boundary.** `device` (init→drivers), `gpu` (init↔render service), `input` (input→core), `edit` (core↔editor), `core_config` (init→core), `compose` (init→render service), `editor` (init→editor), `fs` (init↔9p). The module structure mirrors the IPC topology.
+- **One module per protocol boundary (10 modules).** `init` (init→any service config), `device` (init→drivers), `input` (input→C), `edit` (editor↔A, editor↔C), `layout` (C↔B), `view` (C→compositor, A↔C notifications), `document` (A↔document service), `decode` (A↔decoders), `content` (shared memory layout), `metal` (compositor→hypervisor, includes legacy virgl submodule). The module structure mirrors the IPC topology.
 - **All payload structs are `#[repr(C)]`** and fit within the 60-byte IPC message payload. Size guards via `const _: ()` assertions where payloads approach the limit.
 - **`CHANNEL_SHM_BASE` and `channel_shm_va()`** defined once. Every userspace component imports these instead of defining local copies.
 - **Zero dependencies.** Pure `no_std` library, fully testable on the host.

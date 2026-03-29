@@ -1,8 +1,7 @@
 //! Phase A-C: device initialization, display handshake, and render config.
 
-use protocol::{
-    compose::MSG_COMPOSITOR_CONFIG,
-    gpu::{DisplayInfoMsg, MSG_DISPLAY_INFO, MSG_GPU_CONFIG, MSG_GPU_READY},
+use protocol::init::{
+    DisplayInfoMsg, MSG_COMPOSITOR_CONFIG, MSG_DISPLAY_INFO, MSG_GPU_CONFIG, MSG_GPU_READY,
 };
 
 use crate::{
@@ -142,7 +141,7 @@ pub(crate) fn phase_b(device: &virtio::Device, ch: &ipc::Channel) -> DisplayConf
         }
     }
     // We use display dimensions from config space; decode to consume the message type safely.
-    let _ = protocol::gpu::decode(msg.msg_type, &msg.payload);
+    let _ = protocol::init::decode_gpu(msg.msg_type, &msg.payload);
 
     // Signal init that we're ready.
     sys::print(b"     handshake complete, sending GPU_READY\n");
@@ -173,8 +172,8 @@ pub(crate) fn phase_c(ch: &ipc::Channel) -> RenderConfig {
     loop {
         let _ = sys::wait(&[INIT_HANDLE], u64::MAX);
         if ch.try_recv(&mut msg) && msg.msg_type == MSG_COMPOSITOR_CONFIG {
-            if let Some(protocol::compose::Message::CompositorConfig(config)) =
-                protocol::compose::decode(msg.msg_type, &msg.payload)
+            if let Some(protocol::init::ComposeMessage::CompositorConfig(config)) =
+                protocol::init::decode_compose(msg.msg_type, &msg.payload)
             {
                 scene_va = config.scene_va;
                 content_va = config.content_va;

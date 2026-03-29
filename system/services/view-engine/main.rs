@@ -48,14 +48,13 @@ mod layout;
 mod scene_state;
 
 use protocol::{
-    compose::{self, RtcConfig, MSG_RTC_CONFIG},
-    core_config::{
-        self, CoreConfig, FrameRateMsg, MSG_CORE_CONFIG, MSG_FRAME_RATE, MSG_SCENE_UPDATED,
+    init::{
+        self as init_proto, CoreConfig, FrameRateMsg, RtcConfig, MSG_CORE_CONFIG, MSG_FRAME_RATE,
+        MSG_RTC_CONFIG, MSG_SCENE_UPDATED,
     },
-    document_model::{
-        self as docmodel_proto, DocChanged, DocLoaded, ImageDecoded, MSG_DOC_CHANGED,
-        MSG_DOC_LOADED, MSG_IMAGE_DECODED, MSG_REDO_REQUEST, MSG_UNDO_REQUEST,
-        DOC_CHANGED_CLEAR_SELECTION,
+    view::{
+        self as view_proto, DocChanged, DocLoaded, ImageDecoded, MSG_DOC_CHANGED, MSG_DOC_LOADED,
+        MSG_IMAGE_DECODED, MSG_REDO_REQUEST, MSG_UNDO_REQUEST, DOC_CHANGED_CLEAR_SELECTION,
     },
     edit::{
         self, CursorMove, SelectionUpdate, MSG_CURSOR_MOVE, MSG_SELECTION_UPDATE, MSG_SET_CURSOR,
@@ -606,7 +605,7 @@ fn resolve_cursor_shape(
 /// header + data. Bumps shape_generation with a store-release so the
 /// render driver sees the complete write.
 fn write_cursor_shape(cursor_state_va: usize, generation: &mut u32, icon_name: &str) {
-    use protocol::cursor::{CursorState, CURSOR_DATA_OFFSET};
+    use protocol::view::{CursorState, CURSOR_DATA_OFFSET};
 
     let icon = icon_lib::get(icon_name, None);
 
@@ -1116,8 +1115,8 @@ pub extern "C" fn _start() -> ! {
         sys::exit();
     }
 
-    let Some(core_config::Message::CoreConfig(config)) =
-        core_config::decode(msg.msg_type, &msg.payload)
+    let Some(init_proto::CoreMessage::CoreConfig(config)) =
+        init_proto::decode_core(msg.msg_type, &msg.payload)
     else {
         sys::print(b"view-engine: bad config payload\n");
         sys::exit();
@@ -1128,9 +1127,9 @@ pub extern "C" fn _start() -> ! {
     // Read frame rate from separate message (CoreConfig is full at 56 bytes).
     // Init sends FrameRateMsg immediately after CoreConfig on the same channel.
     let _ = sys::wait(&[0], 100_000_000); // 100ms timeout on init channel
-    let frame_rate: u64 = if let Some(core_config::Message::FrameRate(fr)) = init_ch
+    let frame_rate: u64 = if let Some(init_proto::CoreMessage::FrameRate(fr)) = init_ch
         .try_recv(&mut msg)
-        .then(|| core_config::decode(msg.msg_type, &msg.payload))
+        .then(|| init_proto::decode_core(msg.msg_type, &msg.payload))
         .flatten()
     {
         if fr.frame_rate > 0 {
@@ -1394,9 +1393,9 @@ pub extern "C" fn _start() -> ! {
     // ── Read remaining init channel messages (fast, already queued) ──
 
     // RTC config — fast, synchronous (already on init channel).
-    if let Some(compose::Message::RtcConfig(rtc_config)) = init_ch
+    if let Some(init_proto::ComposeMessage::RtcConfig(rtc_config)) = init_ch
         .try_recv(&mut msg)
-        .then(|| compose::decode(msg.msg_type, &msg.payload))
+        .then(|| init_proto::decode_compose(msg.msg_type, &msg.payload))
         .flatten()
     {
         if rtc_config.mmio_pa != 0 {
@@ -1467,8 +1466,8 @@ pub extern "C" fn _start() -> ! {
         while docmodel_ch.try_recv(&mut msg) {
             match msg.msg_type {
                 MSG_DOC_LOADED => {
-                    if let Some(docmodel_proto::Message::DocLoaded(loaded)) =
-                        docmodel_proto::decode(msg.msg_type, &msg.payload)
+                    if let Some(view_proto::Message::DocLoaded(loaded)) =
+                        view_proto::decode(msg.msg_type, &msg.payload)
                     {
                         let s = state();
                         s.doc_file_id = loaded.doc_file_id;
@@ -1484,8 +1483,8 @@ pub extern "C" fn _start() -> ! {
                     }
                 }
                 MSG_IMAGE_DECODED => {
-                    if let Some(docmodel_proto::Message::ImageDecoded(img)) =
-                        docmodel_proto::decode(msg.msg_type, &msg.payload)
+                    if let Some(view_proto::Message::ImageDecoded(img)) =
+                        view_proto::decode(msg.msg_type, &msg.payload)
                     {
                         let s = state();
                         s.image_content_id = img.content_id;
@@ -2076,8 +2075,8 @@ pub extern "C" fn _start() -> ! {
         while docmodel_ch.try_recv(&mut msg) {
             match msg.msg_type {
                 MSG_DOC_CHANGED => {
-                    if let Some(docmodel_proto::Message::DocChanged(dc)) =
-                        docmodel_proto::decode(msg.msg_type, &msg.payload)
+                    if let Some(view_proto::Message::DocChanged(dc)) =
+                        view_proto::decode(msg.msg_type, &msg.payload)
                     {
                         let s = state();
                         s.doc_len = dc.doc_len as usize;
@@ -2093,8 +2092,8 @@ pub extern "C" fn _start() -> ! {
                     }
                 }
                 MSG_IMAGE_DECODED => {
-                    if let Some(docmodel_proto::Message::ImageDecoded(img)) =
-                        docmodel_proto::decode(msg.msg_type, &msg.payload)
+                    if let Some(view_proto::Message::ImageDecoded(img)) =
+                        view_proto::decode(msg.msg_type, &msg.payload)
                     {
                         let s = state();
                         s.image_content_id = img.content_id;

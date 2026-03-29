@@ -394,7 +394,7 @@ fn channel_config_as_first_message() {
     let init_ch = unsafe { Channel::from_pages(page0.as_mut_ptr(), page1.as_mut_ptr(), 0) };
     init_ch.init();
 
-    use protocol::gpu::GpuConfig;
+    use protocol::init::GpuConfig;
 
     let config = GpuConfig {
         mmio_pa: 0x0A00_0000,
@@ -408,7 +408,7 @@ fn channel_config_as_first_message() {
         _pad2: 0,
     };
 
-    let msg = unsafe { Message::from_payload(protocol::gpu::MSG_GPU_CONFIG, &config) };
+    let msg = unsafe { Message::from_payload(protocol::init::MSG_GPU_CONFIG, &config) };
     assert!(init_ch.send(&msg));
 
     // Child side (endpoint 1) — reads config as first message.
@@ -416,7 +416,7 @@ fn channel_config_as_first_message() {
 
     let mut out = Message::new(0);
     assert!(child_ch.try_recv(&mut out));
-    assert_eq!(out.msg_type, protocol::gpu::MSG_GPU_CONFIG);
+    assert_eq!(out.msg_type, protocol::init::MSG_GPU_CONFIG);
 
     let recovered: GpuConfig = unsafe { out.payload_as() };
     assert_eq!(recovered, config);

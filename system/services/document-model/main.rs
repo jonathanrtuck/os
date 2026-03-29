@@ -27,10 +27,10 @@ use protocol::{
         MSG_DOC_READ, MSG_DOC_READ_DONE, MSG_DOC_RESTORE, MSG_DOC_RESTORE_RESULT, MSG_DOC_SNAPSHOT,
         MSG_DOC_SNAPSHOT_RESULT,
     },
-    document_model::{
-        DocChanged, DocLoaded, DocModelConfig, ImageDecoded, MSG_DOC_CHANGED, MSG_DOC_LOADED,
-        MSG_DOC_MODEL_CONFIG, MSG_IMAGE_DECODED, MSG_REDO_REQUEST, MSG_UNDO_REQUEST,
-        DOC_CHANGED_CLEAR_SELECTION,
+    init::{DocModelConfig, MSG_DOC_MODEL_CONFIG},
+    view::{
+        DocChanged, DocLoaded, ImageDecoded, MSG_DOC_CHANGED, MSG_DOC_LOADED, MSG_IMAGE_DECODED,
+        MSG_REDO_REQUEST, MSG_UNDO_REQUEST, DOC_CHANGED_CLEAR_SELECTION,
     },
     edit::{
         self, MSG_CURSOR_MOVE, MSG_SELECTION_UPDATE, MSG_STYLE_APPLY, MSG_STYLE_SET_CURRENT,
@@ -153,7 +153,6 @@ struct DocModelState {
     content_va: usize,
     content_size: usize,
     content_alloc: protocol::content::ContentAllocator,
-    scene_generation: u32,
     editor_handle: sys::ChannelHandle,
     decoder_handle: sys::ChannelHandle,
     fs_handle: sys::ChannelHandle,
@@ -175,7 +174,6 @@ static mut STATE: DocModelState = DocModelState {
     content_va: 0,
     content_size: 0,
     content_alloc: protocol::content::ContentAllocator::empty(),
-    scene_generation: 0,
     editor_handle: sys::ChannelHandle(u8::MAX),
     decoder_handle: sys::ChannelHandle(u8::MAX),
     fs_handle: sys::ChannelHandle(u8::MAX),
@@ -676,7 +674,7 @@ fn boot_load_document(
                                     _pad: [0; 3],
                                     width: resp.width as u16,
                                     height: resp.height as u16,
-                                    generation: s.scene_generation,
+                                    generation: 0,
                                 };
                                 header.entry_count += 1;
                                 notify_core_image_decoded(
@@ -907,8 +905,8 @@ pub extern "C" fn _start() -> ! {
         sys::exit();
     }
 
-    let Some(protocol::document_model::Message::DocModelConfig(config)) =
-        protocol::document_model::decode(msg.msg_type, &msg.payload)
+    let Some(protocol::init::DocModelMessage::DocModelConfig(config)) =
+        protocol::init::decode_doc_model(msg.msg_type, &msg.payload)
     else {
         sys::print(b"document-model: bad config payload\n");
         sys::exit();

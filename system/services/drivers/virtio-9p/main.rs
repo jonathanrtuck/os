@@ -11,7 +11,7 @@
 
 use protocol::{
     device::MSG_DEVICE_CONFIG,
-    fs::{MSG_FS_READ_REQUEST, MSG_FS_READ_RESPONSE},
+    init::{MSG_FS_READ_REQUEST, MSG_FS_READ_RESPONSE},
 };
 
 const FILE_FID: u32 = 1;

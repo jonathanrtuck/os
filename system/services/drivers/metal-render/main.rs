@@ -1068,7 +1068,7 @@ pub extern "C" fn _start() -> ! {
 
             if data_len > 0 && viewbox > 0.0 {
                 // Read path command bytes from the data area.
-                let data_offset = protocol::cursor::CURSOR_DATA_OFFSET;
+                let data_offset = protocol::view::CURSOR_DATA_OFFSET;
                 let path_data: &[u8] = unsafe {
                     core::slice::from_raw_parts(
                         (cursor_state_va + data_offset) as *const u8,
@@ -1122,7 +1122,7 @@ pub extern "C" fn _start() -> ! {
                 // Body pass: fill for closed shapes, narrow inner stroke for
                 // stroke-only cursors (open paths where fill would create wedges).
                 let stroke_only =
-                    flags & protocol::cursor::CursorState::FLAG_STROKE_ONLY != 0;
+                    flags & protocol::view::CursorState::FLAG_STROKE_ONLY != 0;
                 if stroke_only {
                     let inner_w = stroke_w * 0.45;
                     let inner = scene::stroke::expand_stroke(path_data, inner_w);

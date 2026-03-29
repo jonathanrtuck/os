@@ -5,7 +5,7 @@
 
 use alloc::boxed::Box;
 
-use protocol::virgl::{
+use protocol::metal::virgl::{
     self, PIPE_PRIM_TRIANGLES, PIPE_SHADER_FRAGMENT, PIPE_SHADER_VERTEX,
     VIRGL_FORMAT_B8G8R8A8_UNORM, VIRGL_FORMAT_Z32_FLOAT_S8X24_UINT, VIRGL_OBJECT_BLEND,
     VIRGL_OBJECT_DSA, VIRGL_OBJECT_RASTERIZER, VIRGL_OBJECT_VERTEX_ELEMENTS,
@@ -137,7 +137,7 @@ pub(crate) fn setup_pipeline(
     cmdbuf.cmd_create_sampler_view(
         HANDLE_SAMPLER_VIEW,
         ATLAS_RESOURCE_ID,
-        protocol::virgl::VIRGL_FORMAT_R8_UNORM,
+        protocol::metal::virgl::VIRGL_FORMAT_R8_UNORM,
     );
 
     // Image pipeline: full-color fragment shader (TEXTURED_FS) + sampler view.
