@@ -237,10 +237,19 @@ def _extract_cursor_mask(arr: np.ndarray, cx: int, cy: int,
     if len(xs) == 0:
         return None
 
-    # Crop to tight bounding box, then resize to 32x32.
+    # Crop to tight bounding box, pad to square, then resize to 32x32.
+    # Padding preserves aspect ratio — a tall narrow I-beam stays narrow
+    # instead of stretching to fill the 32x32 canvas.
     tight = mask[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
+    mh, mw = tight.shape
+    side = max(mw, mh)
+    padded = np.zeros((side, side), dtype=bool)
+    py = (side - mh) // 2
+    px = (side - mw) // 2
+    padded[py:py + mh, px:px + mw] = tight
+
     from PIL import Image as PILImage
-    mask_img = PILImage.fromarray(tight.astype(np.uint8) * 255, "L")
+    mask_img = PILImage.fromarray(padded.astype(np.uint8) * 255, "L")
     normalized = np.array(
         mask_img.resize((32, 32), PILImage.Resampling.NEAREST)) > 128
     return normalized
