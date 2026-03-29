@@ -48,17 +48,8 @@ pub fn build_full_scene(
     let doc_width = doc_width(cfg);
     let cpl = chars_per_line(cfg);
 
-    // Text layout (always computed — text document is always in the scene).
-    let all_runs = layout_mono_lines(
-        doc_text,
-        cpl as usize,
-        cfg.line_height as i32,
-        scene_text_color,
-        cfg.font_size,
-    );
     let content_y = cfg.title_bar_h + cfg.shadow_depth;
     let content_h_u32 = cfg.fb_height.saturating_sub(content_y);
-    let visible_runs = scroll_runs(all_runs, scroll_y, cfg.line_height, content_h_u32 as i32);
     let scroll_pt = scroll_y >> 10;
     let cursor_byte = cursor_pos as usize;
     let (cursor_line, cursor_col) = byte_to_line_col(doc_text, cursor_byte, cpl as usize);
@@ -71,29 +62,35 @@ pub fn build_full_scene(
 
     w.clear();
 
-    // ── Style registry (first item in data buffer) ───────────────────
-
-    let (style_table, mono_style_id, sans_style_id) = super::base_style_table(cfg);
-    super::write_style_registry(w, &style_table);
+    // ── Style registry ────────────────────────────────────────────────
+    // Try to use B's pre-computed style registry; fall back to local.
+    let (mono_style_id, sans_style_id) = if let Some(header) = crate::read_layout_header() {
+        let registry_bytes = crate::read_layout_style_registry(&header);
+        if !registry_bytes.is_empty() {
+            let _registry_ref = w.push_data(registry_bytes);
+        }
+        (0u32, 1u32) // B always assigns mono=0, sans=1
+    } else {
+        let (style_table, mono_id, sans_id) = super::base_style_table(cfg);
+        super::write_style_registry(w, &style_table);
+        (mono_id, sans_id)
+    };
 
     // ── Push data ────────────────────────────────────────────────────
 
-    // Chrome glyphs.
+    // Chrome glyphs (always shaped locally — not part of document layout).
     let title_glyphs = shape_chrome_text(cfg, title_label);
     let title_glyph_ref = w.push_shaped_glyphs(&title_glyphs);
     let clock_glyphs = shape_chrome_text(cfg, clock_text);
     let clock_glyph_ref = w.push_shaped_glyphs(&clock_glyphs);
 
-    // Document text glyphs.
-    let line_glyph_refs = shape_visible_runs(
-        w,
-        &visible_runs,
-        doc_text,
-        cfg.font_data,
-        cfg.font_size,
-        cfg.upem,
-        cfg.axes,
-    );
+    // Document text glyphs — read pre-shaped from layout engine (B).
+    let line_glyph_refs = if let Some(header) = crate::read_layout_header() {
+        super::push_layout_results_to_scene(w, &header)
+    } else {
+        // B not ready — empty scene (no text lines).
+        alloc::vec::Vec::new()
+    };
 
     // ── Allocate well-known nodes (sequential IDs 0..12) ─────────────
 
@@ -539,9 +536,18 @@ pub fn build_document_content(
     // are re-pushed in build_full_scene on the next full rebuild.
     w.reset_data();
 
-    // ── Style registry (first item in data buffer) ───────────────────
-    let (style_table, mono_style_id, sans_style_id) = super::base_style_table(cfg);
-    super::write_style_registry(w, &style_table);
+    // ── Style registry ──────────────────────────────────────────────
+    let (mono_style_id, sans_style_id) = if let Some(header) = crate::read_layout_header() {
+        let registry_bytes = crate::read_layout_style_registry(&header);
+        if !registry_bytes.is_empty() {
+            let _registry_ref = w.push_data(registry_bytes);
+        }
+        (0u32, 1u32)
+    } else {
+        let (style_table, mono_id, sans_id) = super::base_style_table(cfg);
+        super::write_style_registry(w, &style_table);
+        (mono_id, sans_id)
+    };
 
     // Re-push title icon path data (invalidated by reset_data).
     {
@@ -568,8 +574,7 @@ pub fn build_document_content(
     }
 
     // Content::Image nodes reference the Content Region (not the scene data buffer),
-    // so no re-push is needed for space 1 after reset_data. The content_id reference
-    // is stable across data buffer compaction.
+    // so no re-push is needed for space 1 after reset_data.
 
     // Re-push title glyph data (shaped with chrome font).
     let title_glyphs = shape_chrome_text(cfg, title_label);
@@ -579,26 +584,13 @@ pub fn build_document_content(
     let clock_glyphs = shape_chrome_text(cfg, clock_text);
     let clock_glyph_ref = w.push_shaped_glyphs(&clock_glyphs);
 
-    // Re-layout visible document text lines.
-    let all_runs = layout_mono_lines(
-        doc_text,
-        cpl as usize,
-        cfg.line_height as i32,
-        scene_text_color,
-        cfg.font_size,
-    );
-    let visible_runs = scroll_runs(all_runs, scroll_y, cfg.line_height, text_area_h as i32);
-
-    // Push visible line glyph data.
-    let line_glyph_refs = shape_visible_runs(
-        w,
-        &visible_runs,
-        doc_text,
-        cfg.font_data,
-        cfg.font_size,
-        cfg.upem,
-        cfg.axes,
-    );
+    // Document text glyphs — read pre-shaped from layout engine (B).
+    let line_glyph_refs = if let Some(header) = crate::read_layout_header() {
+        super::push_layout_results_to_scene(w, &header)
+    } else {
+        // B not ready — empty scene (no text lines).
+        alloc::vec::Vec::new()
+    };
 
     // Update N_TITLE_TEXT content references (data was reset).
     {

@@ -56,6 +56,9 @@ use protocol::compose::{
     CompositorConfig, ImageConfig, RtcConfig, MSG_COMPOSITOR_CONFIG, MSG_IMAGE_CONFIG,
     MSG_RTC_CONFIG,
 };
+use protocol::layout::{
+    CoreLayoutConfig, LayoutEngineConfig, MSG_CORE_LAYOUT_CONFIG, MSG_LAYOUT_ENGINE_CONFIG,
+};
 use protocol::{
     core_config::{CoreConfig, FrameRateMsg, MSG_CORE_CONFIG, MSG_FRAME_RATE},
     device::{DeviceConfig, MSG_DEVICE_CONFIG},
@@ -224,6 +227,31 @@ fn setup_render_pipeline(
     unsafe { core::ptr::write_bytes(input_state_va as *mut u8, 0, PAGE_SIZE) };
 
     sys::print(b"     pointer state register: 4 KiB shared\n");
+
+    // Layout results region (256 KiB = 16 pages = order 4).
+    // Shared with layout-engine (read-write) and core (read-only).
+    let layout_results_order: u32 = 4; // 2^4 = 16 pages = 256 KiB
+    let layout_results_pages: u64 = 1u64 << layout_results_order;
+    let layout_results_size: usize = (layout_results_pages as usize) * PAGE_SIZE;
+    let mut layout_results_pa: u64 = 0;
+    let layout_results_va =
+        sys::dma_alloc(layout_results_order, &mut layout_results_pa).unwrap_or_else(|_| {
+            sys::print(b"init: dma_alloc (layout results) failed\n");
+            sys::exit();
+        });
+    // SAFETY: layout_results_va is a valid DMA region; zeroing is within bounds.
+    unsafe { core::ptr::write_bytes(layout_results_va as *mut u8, 0, layout_results_size) };
+    sys::print(b"     layout results: 256 KiB shared\n");
+
+    // Viewport state register (1 page). C writes viewport params, B reads.
+    let mut viewport_state_pa: u64 = 0;
+    let viewport_state_va = sys::dma_alloc(0, &mut viewport_state_pa).unwrap_or_else(|_| {
+        sys::print(b"init: dma_alloc (viewport state) failed\n");
+        sys::exit();
+    });
+    // SAFETY: viewport_state_va is a valid 1-page DMA region.
+    unsafe { core::ptr::write_bytes(viewport_state_va as *mut u8, 0, PAGE_SIZE) };
+    sys::print(b"     viewport state register: 4 KiB shared\n");
 
     // Cursor state page (1 page). Shared with core (read-write) and
     // render service (read-only). Core writes cursor shape path data +
@@ -548,6 +576,20 @@ fn setup_render_pipeline(
             sys::exit();
         });
 
+    // Share layout results with core (read-only — C consumes layout from B).
+    let core_layout_results_va =
+        sys::memory_share(core_proc, layout_results_pa, layout_results_pages, true)
+            .unwrap_or_else(|_| {
+                sys::print(b"init: memory_share (layout results to C) failed\n");
+                sys::exit();
+            });
+    // Share viewport state with core (read-write — C writes viewport params).
+    let core_viewport_state_va =
+        sys::memory_share(core_proc, viewport_state_pa, 1, false).unwrap_or_else(|_| {
+            sys::print(b"init: memory_share (viewport state to C) failed\n");
+            sys::exit();
+        });
+
     // Send core config.
     let core_ch = init_channel(core_channel_idx);
     let core_config = CoreConfig {
@@ -575,6 +617,18 @@ fn setup_render_pipeline(
         )
     };
     core_ch.send(&fr_msg);
+
+    // Send layout config (layout results VA + viewport state VA).
+    let core_layout_config = CoreLayoutConfig {
+        layout_results_va: core_layout_results_va as u64,
+        layout_results_capacity: layout_results_size as u32,
+        viewport_state_va: core_viewport_state_va as u64,
+        _pad: 0,
+    };
+    // SAFETY: CoreLayoutConfig fits within 60-byte payload.
+    let cl_msg =
+        unsafe { ipc::Message::from_payload(MSG_CORE_LAYOUT_CONFIG, &core_layout_config) };
+    core_ch.send(&cl_msg);
 
     // Send RTC config to core.
     if rtc_pa != 0 {
@@ -637,6 +691,67 @@ fn setup_render_pipeline(
     docmodel_ch.send(&dm_msg);
 
     // -----------------------------------------------------------------------
+    // Phase 7c: Spawn layout-engine (B) process.
+    // B reads the document buffer (RO), Content Region (RO, fonts),
+    // writes layout results (RW), reads viewport state (RO).
+    // -----------------------------------------------------------------------
+    sys::print(b"     spawning layout-engine\n");
+    let (layout_proc, _layout_ch_handle, layout_ch_idx) =
+        match spawn_with_channel(LAYOUT_ENGINE_ELF, next_channel) {
+            Some(v) => v,
+            None => {
+                sys::print(b"init: failed to spawn layout-engine\n");
+                sys::exit();
+            }
+        };
+    // Share document buffer with B (read-only).
+    let layout_doc_va =
+        sys::memory_share(layout_proc, doc_pa, DOC_BUF_PAGES, true).unwrap_or_else(|_| {
+            sys::print(b"init: memory_share (layout doc) failed\n");
+            sys::exit();
+        });
+    // Share Content Region with B (read-only — fonts).
+    let layout_content_va = if content_pages > 0 {
+        sys::memory_share(layout_proc, content_pa_val, content_pages, true).unwrap_or_else(
+            |_| {
+                sys::print(b"init: memory_share (layout content) failed\n");
+                sys::exit();
+            },
+        ) as u64
+    } else {
+        0u64
+    };
+    // Share layout results with B (read-write — B produces layout).
+    let layout_results_b_va =
+        sys::memory_share(layout_proc, layout_results_pa, layout_results_pages, false)
+            .unwrap_or_else(|_| {
+                sys::print(b"init: memory_share (layout results to B) failed\n");
+                sys::exit();
+            });
+    // Share viewport state with B (read-only — C writes, B reads).
+    let layout_viewport_va =
+        sys::memory_share(layout_proc, viewport_state_pa, 1, true).unwrap_or_else(|_| {
+            sys::print(b"init: memory_share (viewport state to B) failed\n");
+            sys::exit();
+        });
+    // Send LayoutEngineConfig to B.
+    let layout_ch = init_channel(layout_ch_idx);
+    let layout_config = LayoutEngineConfig {
+        doc_va: layout_doc_va as u64,
+        doc_capacity: DOC_BUF_CAPACITY,
+        content_va: layout_content_va,
+        content_size: content_size_val,
+        layout_results_va: layout_results_b_va as u64,
+        layout_results_capacity: layout_results_size as u32,
+        viewport_state_va: layout_viewport_va as u64,
+    };
+    let layout_msg =
+        // SAFETY: LayoutEngineConfig fits within 60-byte payload.
+        unsafe { ipc::Message::from_payload(MSG_LAYOUT_ENGINE_CONFIG, &layout_config) };
+    layout_ch.send(&layout_msg);
+    sys::print(b"     layout-engine config sent\n");
+
+    // -----------------------------------------------------------------------
     // Phase 8: Cross-process channels.
     //
     // Core handle layout:
@@ -645,6 +760,7 @@ fn setup_render_pipeline(
     //   handle 3 = core ↔ editor (key forwarding, cursor sync)
     //   handle 4 = core ↔ document-model (notifications, undo/redo)
     //   handle 5+ = additional input devices
+    //   last  = core ↔ layout-engine (layout recompute/ready)
     //
     // Document-model (A) handle layout:
     //   handle 1 = A ↔ editor (receives write operations)
@@ -933,8 +1049,30 @@ fn setup_render_pipeline(
         sys::exit();
     });
 
-    // Additional input device channels → core handle 5+.
-    // Must come AFTER Phase 10 so that handle 4 = document-model.
+    // -----------------------------------------------------------------------
+    // Phase 10b: B ↔ C channel (layout-engine ↔ core).
+    // Sent before additional input devices → core handle 5 = LAYOUT_HANDLE.
+    // -----------------------------------------------------------------------
+    sys::print(b"     creating layout-engine\xE2\x86\x94core channel\n");
+    let (bc_a, bc_b) = sys::channel_create().unwrap_or_else(|_| {
+        sys::print(b"init: channel_create (layout-core) failed\n");
+        sys::exit();
+    });
+    *next_channel += 1;
+
+    // Endpoint A → layout-engine (handle 1 = CORE_HANDLE in B).
+    sys::handle_send(layout_proc, bc_a.0).unwrap_or_else(|_| {
+        sys::print(b"init: handle_send (layout-core A) failed\n");
+        sys::exit();
+    });
+    // Endpoint B → core (handle 5 = LAYOUT_HANDLE in core).
+    sys::handle_send(core_proc, bc_b.0).unwrap_or_else(|_| {
+        sys::print(b"init: handle_send (layout-core B) failed\n");
+        sys::exit();
+    });
+
+    // Additional input device channels → core handle 6+.
+    // Must come AFTER B↔C channel so that handle 5 = layout-engine.
     for i in 1..input_devices.len() {
         let (input_proc_handle, input_ch_idx, input_pa, input_irq) = input_devices[i];
 
@@ -984,7 +1122,7 @@ fn setup_render_pipeline(
     // -----------------------------------------------------------------------
     // Phase 11: Start processes.
     // Order: decoder → document service → input drivers → editor →
-    //        document-model → core.
+    //        document-model → layout-engine → core.
     // Document-model must start before core (A loads document, core waits).
     // Decoder must start before A (A sends decode request at boot).
     // Document service must start before A (A queries documents at boot).
@@ -1020,6 +1158,12 @@ fn setup_render_pipeline(
     sys::print(b"     starting document-model\n");
 
     start_process(docmodel_proc, b"document-model");
+
+    sys::yield_now();
+
+    sys::print(b"     starting layout-engine\n");
+
+    start_process(layout_proc, b"layout-engine");
 
     sys::yield_now();
 

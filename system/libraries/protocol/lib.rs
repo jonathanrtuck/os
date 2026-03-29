@@ -806,6 +806,11 @@ pub mod document;
 /// Decode protocol for content decoder services (PNG, JPEG, etc.).
 pub mod decode;
 
+// ── layout: layout engine (B) protocol ──────────────────────────────
+
+/// Layout engine (B) protocol — shared memory format and IPC signals.
+pub mod layout;
+
 // ── document_model: document model (A) protocol ─────────────────────
 
 /// Document model (A) protocol — init → A config, A ↔ core notifications.

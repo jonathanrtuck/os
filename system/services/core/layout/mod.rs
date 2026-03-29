@@ -1197,6 +1197,28 @@ pub(crate) fn allocate_line_nodes(
     prev_line_node
 }
 
+/// Read pre-shaped glyph data from layout engine (B) results and push
+/// to the scene writer. Returns glyph refs for line-node construction.
+///
+/// This replaces local glyph shaping — B has already computed the layout
+/// and shaped the glyphs. C just reads and pushes to the scene buffer.
+pub(crate) fn push_layout_results_to_scene(
+    w: &mut scene::SceneWriter<'_>,
+    header: &protocol::layout::LayoutResultsHeader,
+) -> Vec<(DataRef, u16, i32)> {
+    let mut line_glyph_refs: Vec<(DataRef, u16, i32)> =
+        Vec::with_capacity(header.visible_run_count as usize);
+
+    for i in 0..header.visible_run_count as usize {
+        let run = crate::read_visible_run(header, i);
+        let glyphs = crate::read_glyph_data(header, run.glyph_data_offset, run.glyph_count);
+        let glyph_ref = w.push_shaped_glyphs(glyphs);
+        line_glyph_refs.push((glyph_ref, run.glyph_count, run.y_pt));
+    }
+
+    line_glyph_refs
+}
+
 /// Shape visible runs and collect glyph data refs for line-node
 /// construction. Used by both full and incremental scene builds.
 pub(crate) fn shape_visible_runs(

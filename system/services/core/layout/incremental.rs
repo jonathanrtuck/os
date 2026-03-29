@@ -98,6 +98,25 @@ fn max_line_node_idx(w: &scene::SceneWriter<'_>) -> u16 {
 /// cursor position + optional clock.
 #[allow(clippy::too_many_arguments)]
 pub fn update_single_line(
+    _w: &mut scene::SceneWriter<'_>,
+    _cfg: &SceneConfig,
+    _doc_text: &[u8],
+    _changed_line: usize,
+    _cursor_pos: u32,
+    _sel_start: u32,
+    _sel_end: u32,
+    _scroll_y: scene::Mpt,
+    _clock_text: Option<&[u8]>,
+    _cursor_opacity: u8,
+) -> bool {
+    // Layout computation is now in the layout engine (B).
+    // Always fall back to compaction (build_document_content) which reads
+    // B's pre-shaped results. The incremental path is no longer needed.
+    false
+}
+
+#[allow(dead_code)]
+fn update_single_line_legacy(
     w: &mut scene::SceneWriter<'_>,
     cfg: &SceneConfig,
     doc_text: &[u8],
@@ -374,6 +393,23 @@ fn finish_line_update(
 /// compaction via `build_document_content`).
 #[allow(clippy::too_many_arguments)]
 pub fn insert_line(
+    _w: &mut scene::SceneWriter<'_>,
+    _cfg: &SceneConfig,
+    _doc_text: &[u8],
+    _cursor_pos: u32,
+    _sel_start: u32,
+    _sel_end: u32,
+    _scroll_y: scene::Mpt,
+    _clock_text: Option<&[u8]>,
+    _cursor_opacity: u8,
+) -> bool {
+    // Layout computation is now in the layout engine (B).
+    // Always fall back to compaction which reads B's results.
+    false
+}
+
+#[allow(dead_code)]
+fn insert_line_legacy(
     w: &mut scene::SceneWriter<'_>,
     cfg: &SceneConfig,
     doc_text: &[u8],
@@ -599,6 +635,23 @@ pub fn insert_line(
 /// compaction via `build_document_content`).
 #[allow(clippy::too_many_arguments)]
 pub fn delete_line(
+    _w: &mut scene::SceneWriter<'_>,
+    _cfg: &SceneConfig,
+    _doc_text: &[u8],
+    _cursor_pos: u32,
+    _sel_start: u32,
+    _sel_end: u32,
+    _scroll_y: scene::Mpt,
+    _clock_text: Option<&[u8]>,
+    _cursor_opacity: u8,
+) -> bool {
+    // Layout computation is now in the layout engine (B).
+    // Always fall back to compaction which reads B's results.
+    false
+}
+
+#[allow(dead_code)]
+fn delete_line_legacy(
     w: &mut scene::SceneWriter<'_>,
     cfg: &SceneConfig,
     doc_text: &[u8],

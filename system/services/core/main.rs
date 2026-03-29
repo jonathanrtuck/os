@@ -63,6 +63,10 @@ use protocol::{
         self, CursorMove, SelectionUpdate, MSG_CURSOR_MOVE, MSG_SELECTION_UPDATE, MSG_SET_CURSOR,
     },
     input::{self, KeyEvent, PointerButton, MSG_KEY_EVENT, MSG_POINTER_BUTTON},
+    layout::{
+        self as layout_proto, CoreLayoutConfig, LayoutResultsHeader, LineInfo, ViewportState,
+        VisibleRun, MSG_CORE_LAYOUT_CONFIG, MSG_LAYOUT_READY, MSG_LAYOUT_RECOMPUTE,
+    },
 };
 
 /// Clamp a float to [min, max]. Manual implementation for `no_std`.
@@ -165,7 +169,8 @@ pub(crate) const DOC_HEADER_SIZE: usize = 64;
 const EDITOR_HANDLE: sys::ChannelHandle = sys::ChannelHandle(3);
 const FONT_SIZE: u32 = 18;
 const INPUT_HANDLE: sys::ChannelHandle = sys::ChannelHandle(1);
-const INPUT2_HANDLE: sys::ChannelHandle = sys::ChannelHandle(5);
+const INPUT2_HANDLE: sys::ChannelHandle = sys::ChannelHandle(6);
+const LAYOUT_HANDLE: sys::ChannelHandle = sys::ChannelHandle(5);
 // Keycodes (Linux evdev).
 const KEY_BACKSPACE: u16 = 14;
 const KEY_TAB: u16 = 15;
@@ -307,6 +312,14 @@ pub(crate) struct CoreState {
     pub(crate) input_state_va: usize,
     /// VA of the shared CursorState page (core writes, render service reads).
     pub(crate) cursor_state_va: usize,
+    /// VA of the layout results shared memory (read-only, B writes).
+    pub(crate) layout_results_va: usize,
+    /// Layout results region capacity in bytes.
+    pub(crate) layout_results_capacity: usize,
+    /// VA of the viewport state register (read-write, C writes, B reads).
+    pub(crate) viewport_state_va: usize,
+    /// Last layout generation read from B.
+    pub(crate) layout_generation: u32,
     /// Current shape_generation written to the cursor state page.
     pub(crate) cursor_shape_generation: u32,
     /// Current cursor shape name (static literal for pointer identity comparison).
@@ -437,6 +450,10 @@ impl CoreState {
             pointer_visible: false,
             input_state_va: 0,
             cursor_state_va: 0,
+            layout_results_va: 0,
+            layout_results_capacity: 0,
+            viewport_state_va: 0,
+            layout_generation: 0,
             cursor_shape_generation: 0,
             cursor_shape_name: "pointer",
             last_pointer_xy: 0,
@@ -815,6 +832,125 @@ pub(crate) fn make_rich_fonts() -> scene_state::RichFonts<'static> {
     }
 }
 
+// ── Layout engine (B) communication ─────────────────────────────────
+
+/// Write viewport state to the shared register so B can read it.
+fn write_viewport_state(
+    fb_width: u32,
+    fb_height: u32,
+    scroll_y: scene::Mpt,
+    page_width: u32,
+    page_height: u32,
+) {
+    let s = state();
+    if s.viewport_state_va == 0 {
+        return;
+    }
+    let content_y = TITLE_BAR_H + SHADOW_DEPTH;
+    let viewport_h = fb_height.saturating_sub(content_y);
+    let text_area_h = page_height.saturating_sub(2 * TEXT_INSET_X);
+    let doc_format = match s.doc_format {
+        DocumentFormat::Plain => 0u32,
+        DocumentFormat::Rich => 1u32,
+    };
+    let vp = ViewportState {
+        generation: s.layout_generation.wrapping_add(1),
+        scroll_y_mpt: scroll_y as i32,
+        viewport_width_pt: fb_width,
+        viewport_height_pt: text_area_h,
+        page_width_pt: page_width,
+        page_height_pt: page_height,
+        text_inset_x: TEXT_INSET_X,
+        font_size: FONT_SIZE as u16,
+        _pad0: 0,
+        char_width_fx: s.char_w_fx,
+        line_height: s.line_h,
+        doc_format,
+        doc_len: s.doc_len as u32,
+        _reserved: [0; 4],
+    };
+    // SAFETY: viewport_state_va points to mapped shared memory, ViewportState is 64 bytes.
+    unsafe {
+        let ptr = s.viewport_state_va as *mut ViewportState;
+        core::ptr::write_volatile(ptr, vp);
+        // Store-release on generation.
+        let gen_ptr = s.viewport_state_va as *const core::sync::atomic::AtomicU32;
+        (*gen_ptr).store(vp.generation, core::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Signal B to recompute layout.
+fn signal_layout_recompute(layout_ch: &ipc::Channel) {
+    let msg = ipc::Message::new(MSG_LAYOUT_RECOMPUTE);
+    layout_ch.send(&msg);
+    let _ = sys::channel_signal(LAYOUT_HANDLE);
+}
+
+/// Read layout results header from shared memory.
+fn read_layout_header() -> Option<LayoutResultsHeader> {
+    let s = state();
+    if s.layout_results_va == 0 {
+        return None;
+    }
+    let ptr = s.layout_results_va as *const LayoutResultsHeader;
+    // Load-acquire on generation to ensure we see all data written by B.
+    let gen = unsafe {
+        let gen_ptr = s.layout_results_va as *const core::sync::atomic::AtomicU32;
+        (*gen_ptr).load(core::sync::atomic::Ordering::Acquire)
+    };
+    if gen == 0 {
+        return None;
+    }
+    // SAFETY: layout_results_va points to mapped shared memory with valid header.
+    let header = unsafe { core::ptr::read_volatile(ptr) };
+    Some(header)
+}
+
+/// Read a LineInfo entry from the layout results.
+fn read_line_info(index: usize) -> LineInfo {
+    let s = state();
+    let off = layout_proto::line_info_offset() + index * core::mem::size_of::<LineInfo>();
+    let ptr = (s.layout_results_va + off) as *const LineInfo;
+    // SAFETY: within mapped region, index checked by caller.
+    unsafe { core::ptr::read(ptr) }
+}
+
+/// Read a VisibleRun entry from the layout results.
+fn read_visible_run(header: &LayoutResultsHeader, index: usize) -> VisibleRun {
+    let s = state();
+    let off = layout_proto::visible_run_offset(header.total_line_count)
+        + index * core::mem::size_of::<VisibleRun>();
+    let ptr = (s.layout_results_va + off) as *const VisibleRun;
+    // SAFETY: within mapped region, index checked by caller.
+    unsafe { core::ptr::read(ptr) }
+}
+
+/// Read glyph data from the layout results.
+fn read_glyph_data(header: &LayoutResultsHeader, offset: u32, count: u16) -> &'static [scene::ShapedGlyph] {
+    let s = state();
+    let glyph_base = layout_proto::glyph_data_offset(header.total_line_count, header.visible_run_count);
+    let ptr = (s.layout_results_va + glyph_base + offset as usize) as *const scene::ShapedGlyph;
+    // SAFETY: within mapped region, offset + count*16 within glyph_data_used.
+    unsafe { core::slice::from_raw_parts(ptr, count as usize) }
+}
+
+/// Read the style registry from the layout results (raw bytes).
+fn read_layout_style_registry(header: &LayoutResultsHeader) -> &'static [u8] {
+    let s = state();
+    let off = layout_proto::style_registry_offset(
+        header.total_line_count,
+        header.visible_run_count,
+        header.glyph_data_used,
+    );
+    let ptr = (s.layout_results_va + off) as *const u8;
+    let len = header.style_registry_size as usize;
+    if len == 0 {
+        return &[];
+    }
+    // SAFETY: within mapped region.
+    unsafe { core::slice::from_raw_parts(ptr, len) }
+}
+
 fn clock_seconds() -> u64 {
     let s = state();
     let freq = s.counter_freq;
@@ -1052,6 +1188,22 @@ pub extern "C" fn _start() -> ! {
     };
     let frame_interval_ns: u64 = 1_000_000_000 / frame_rate;
 
+    // Read layout config (layout results VA + viewport state VA).
+    let _ = sys::wait(&[0], 100_000_000);
+    if let Some(layout_proto::Message::CoreLayoutConfig(lc)) = init_ch
+        .try_recv(&mut msg)
+        .then(|| layout_proto::decode(msg.msg_type, &msg.payload))
+        .flatten()
+    {
+        let s = state();
+        s.layout_results_va = lc.layout_results_va as usize;
+        s.layout_results_capacity = lc.layout_results_capacity as usize;
+        s.viewport_state_va = lc.viewport_state_va as usize;
+        sys::print(b"     layout config received\n");
+    } else {
+        sys::print(b"core: no layout config\n");
+    }
+
     if config.doc_va == 0 || config.scene_va == 0 {
         sys::print(b"core: bad config\n");
         sys::exit();
@@ -1250,6 +1402,14 @@ pub extern "C" fn _start() -> ! {
     let docmodel_ch = unsafe {
         ipc::Channel::from_base(
             protocol::channel_shm_va(DOCMODEL_HANDLE.0 as usize),
+            ipc::PAGE_SIZE,
+            1,
+        )
+    };
+    // SAFETY: channel_shm_va(5) is the B↔C channel mapped by the kernel.
+    let layout_ch = unsafe {
+        ipc::Channel::from_base(
+            protocol::channel_shm_va(LAYOUT_HANDLE.0 as usize),
             ipc::PAGE_SIZE,
             1,
         )
@@ -1460,6 +1620,16 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
+    // Signal layout engine (B) for initial layout computation.
+    {
+        write_viewport_state(fb_width, fb_height, 0, page_width, page_height);
+        signal_layout_recompute(&layout_ch);
+        // Wait for B to compute initial layout.
+        let _ = sys::wait(&[LAYOUT_HANDLE.0], 50_000_000); // 50ms
+        let mut layout_msg = ipc::Message::new(0);
+        while layout_ch.try_recv(&mut layout_msg) {}
+    }
+
     {
         let s = state();
         let is_rich_doc = s.doc_format == DocumentFormat::Rich;
@@ -1621,18 +1791,19 @@ pub extern "C" fn _start() -> ! {
                     DOCMODEL_HANDLE.0,
                     timer_handle.0,
                     INPUT2_HANDLE.0,
+                    LAYOUT_HANDLE.0,
                 ],
                 timeout_ns,
             ),
             (true, false) => sys::wait(
-                &[INPUT_HANDLE.0, EDITOR_HANDLE.0, DOCMODEL_HANDLE.0, timer_handle.0],
+                &[INPUT_HANDLE.0, EDITOR_HANDLE.0, DOCMODEL_HANDLE.0, timer_handle.0, LAYOUT_HANDLE.0],
                 timeout_ns,
             ),
             (false, true) => sys::wait(
-                &[INPUT_HANDLE.0, EDITOR_HANDLE.0, DOCMODEL_HANDLE.0, INPUT2_HANDLE.0],
+                &[INPUT_HANDLE.0, EDITOR_HANDLE.0, DOCMODEL_HANDLE.0, INPUT2_HANDLE.0, LAYOUT_HANDLE.0],
                 timeout_ns,
             ),
-            (false, false) => sys::wait(&[INPUT_HANDLE.0, EDITOR_HANDLE.0, DOCMODEL_HANDLE.0], timeout_ns),
+            (false, false) => sys::wait(&[INPUT_HANDLE.0, EDITOR_HANDLE.0, DOCMODEL_HANDLE.0, LAYOUT_HANDLE.0], timeout_ns),
         };
         let mut changed = false;
         let mut text_changed = false;
@@ -2330,6 +2501,23 @@ pub extern "C" fn _start() -> ! {
         // Use targeted updates for incremental changes instead of
         // rebuilding the entire scene graph every frame.
         //
+        // ── Signal layout engine (B) for recompute if needed ────────
+        //
+        // Write viewport state and signal B when document content or scroll
+        // position changed. B will recompute layout and signal back with
+        // MSG_LAYOUT_READY. We drain the ready signal before scene dispatch.
+        if text_changed || context_switched {
+            write_viewport_state(fb_width, fb_height, state().scroll_offset, page_width, page_height);
+            signal_layout_recompute(&layout_ch);
+            // Wait briefly for B to finish layout (shared memory, fast).
+            let _ = sys::wait(&[LAYOUT_HANDLE.0], 5_000_000); // 5ms
+            // Drain layout-ready signal.
+            let mut layout_msg = ipc::Message::new(0);
+            while layout_ch.try_recv(&mut layout_msg) {
+                // MSG_LAYOUT_READY — results now in shared memory.
+            }
+        }
+
         // Priority order (most-specific first):
         // 1. context_switched → full rebuild
         // 2. text_changed     → update_document_content (+ clock if timer)

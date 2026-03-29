@@ -44,6 +44,7 @@ struct CargoLibOutput {
 const INIT_EMBEDDED: &[(&str, &str)] = &[
     ("document", "DOCUMENT_ELF"),
     ("document-model", "DOCUMENT_MODEL_ELF"),
+    ("layout-engine", "LAYOUT_ENGINE_ELF"),
     ("virtio-blk", "VIRTIO_BLK_ELF"),
     ("virtio-console", "VIRTIO_CONSOLE_ELF"),
     ("virtio-input", "VIRTIO_INPUT_ELF"),
@@ -76,6 +77,12 @@ const PROGRAMS: &[(&str, &str, bool, bool)] = &[
     (
         "document-model",
         "services/document-model",
+        false,
+        false,
+    ),
+    (
+        "layout-engine",
+        "services/layout-engine",
         false,
         false,
     ),
@@ -284,6 +291,12 @@ fn main() {
             externs.push(("piecetable", piecetable_rlib.clone()));
             externs.push(("icons", icons_rlib.clone()));
         }
+        if name == "layout-engine" {
+            externs.push(("layout", layout_rlib.clone()));
+            externs.push(("piecetable", piecetable_rlib.clone()));
+            externs.push(("fonts", fonts_output.rlib.clone()));
+            externs.push(("scene", scene_rlib.clone()));
+        }
         if name == "rich-editor" || name == "document-model" {
             externs.push(("piecetable", piecetable_rlib.clone()));
         }
@@ -311,8 +324,8 @@ fn main() {
             ));
         }
 
-        // Add fonts library search paths for programs that need drawing.
-        let search_paths: Vec<&Path> = if needs_drawing {
+        // Add fonts library search paths for programs that need drawing or fonts.
+        let search_paths: Vec<&Path> = if needs_drawing || name == "layout-engine" {
             vec![&fonts_output.deps_dir, &fonts_host_deps]
         } else {
             vec![]
