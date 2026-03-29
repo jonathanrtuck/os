@@ -210,8 +210,11 @@ fn scale_icon_paths(
 /// Set up a scene node as an icon using Content::Path.
 ///
 /// This is the single rendering helper that maps icon layers to theme
-/// colors. Currently monochrome (all layers get the same color).
-/// Layered rendering (Primary/Secondary opacity) is a future enhancement.
+/// colors. `color` fills the interior; `stroke_color` outlines the path.
+/// Either can be `Color::TRANSPARENT` to disable that pass.
+///
+/// For standard Tabler icons (stroke-only): pass `TRANSPARENT` fill + icon color stroke.
+/// For cursors (fill+stroke): pass black fill + white stroke (or vice versa).
 pub(crate) fn emit_icon(
     w: &mut scene::SceneWriter<'_>,
     node_id: u16,
@@ -220,6 +223,7 @@ pub(crate) fn emit_icon(
     y: i32,
     size_pt: u32,
     color: Color,
+    stroke_color: Color,
 ) {
     let (data_ref, hash) = scale_icon_paths(w, icon, size_pt);
 
@@ -234,6 +238,7 @@ pub(crate) fn emit_icon(
     n.height = scene::upt(size_pt);
     n.content = Content::Path {
         color,
+        stroke_color,
         fill_rule: scene::FillRule::Winding,
         stroke_width: sw_fixed,
         contours: data_ref,

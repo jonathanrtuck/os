@@ -6,7 +6,7 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ## Cursor as Icon — Fill+Stroke Prerequisite (2026-03-28)
 
-**Status:** Design settled. Blocked on fill+stroke support for `Content::Path`.
+**Status:** Design settled. Fill+stroke support implemented — `Content::Path` now has separate `color` (fill) and `stroke_color` (stroke) fields. Next: cursor shape register + render driver cursor plane.
 
 ### The question
 
@@ -29,10 +29,12 @@ But our `Content::Path` currently supports only one color — fill OR stroke, no
 ### Design: Cursors as icons with fill+stroke
 
 **Prerequisites:**
+
 - `Content::Path` gains separate fill color and stroke color (like SVG)
 - Render backends handle fill+stroke rendering (fill interior, then stroke outline)
 
 **Then:**
+
 - Cursor icons (`pointer`, `cursor-text`) are regular entries in the icon library — same SVG build pipeline, same path data, same lookup API
 - Core tells the render driver: icon name + size (pt) + offset (pt) + opacity + colors
 - The **offset** is the hotspot expressed in points: for `cursor-text`, the meaningful point is at viewbox center (12, 12) in a 24×24 viewbox, so at 24pt display size the offset is (-12pt, -12pt). Core computes this in points — no pixel knowledge.
@@ -40,6 +42,7 @@ But our `Content::Path` currently supports only one color — fill OR stroke, no
 - The scene graph is not involved. Cursor state travels via a small shared-memory register (shape + offset + opacity), analogous to the existing `PointerState` register for position
 
 **What changes:**
+
 - `Content::Path` → add `stroke_color: Color` alongside existing `color` (fill) and `stroke_width`
 - Icon library → add `pointer` and `cursor-text` entries (SVGs already in `resources/icons/`)
 - Core → cursor shape determination (hit-test mouse position), write cursor state register
@@ -47,6 +50,7 @@ But our `Content::Path` currently supports only one color — fill OR stroke, no
 - Remove N_POINTER from the scene graph entirely
 
 **What stays the same:**
+
 - Position via atomic `PointerState` register (input driver → core + render driver)
 - Hardware cursor plane in the hypervisor (`set_cursor_image`, `set_cursor_position`)
 - Icon library as pure data (`no_std`, build-time SVG conversion)

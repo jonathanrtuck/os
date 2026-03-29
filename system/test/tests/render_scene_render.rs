@@ -4197,6 +4197,7 @@ fn build_path_scene(
     w.node_mut(root).flags = NodeFlags::VISIBLE;
     w.node_mut(root).content = scene::Content::Path {
         color,
+        stroke_color: scene::Color::TRANSPARENT,
         fill_rule,
         stroke_width: 0,
         contours: dref,
@@ -4840,6 +4841,7 @@ fn all_content_types_render_in_one_scene() {
     w.node_mut(path_node).flags = NodeFlags::VISIBLE;
     w.node_mut(path_node).content = scene::Content::Path {
         color: scene::Color::rgba(0, 255, 0, 255),
+        stroke_color: scene::Color::TRANSPARENT,
         fill_rule: scene::FillRule::Winding,
         stroke_width: 0,
         contours: path_ref,

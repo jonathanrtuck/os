@@ -340,6 +340,7 @@ fn walk_node(
         }
         Content::Path {
             color,
+            stroke_color: _,
             fill_rule,
             stroke_width: _,
             contours,

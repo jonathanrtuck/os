@@ -248,18 +248,25 @@ pub enum Content {
         /// Source image height in pixels.
         src_height: u16,
     },
-    /// Cubic Bezier contours, filled or stroked. The render backend
+    /// Cubic Bezier contours, filled and/or stroked. The render backend
     /// rasterizes them with scanline coverage (same engine as glyph
     /// outlines). Vector content scales cleanly at any display density.
+    ///
+    /// Fill and stroke are independent: set `color.a > 0` for fill,
+    /// `stroke_width > 0 && stroke_color.a > 0` for stroke. Both can
+    /// be active simultaneously (fill first, stroke on top — like SVG).
     Path {
-        /// Fill or stroke color.
+        /// Fill color. Transparent = no fill.
         color: Color,
+        /// Stroke color. Transparent or stroke_width==0 = no stroke.
+        stroke_color: Color,
         /// Winding or even-odd fill rule (applies to fill; ignored for stroke).
         fill_rule: FillRule,
-        /// Stroke width in 8.8 fixed-point points (0 = filled, not stroked).
+        /// Stroke width in 8.8 fixed-point points (0 = no stroke).
         /// Example: 2.0 pt = `0x0200`, 1.5 pt = `0x0180`.
-        /// When non-zero, the render backend expands strokes to filled
-        /// geometry before rasterization (round joins and caps).
+        /// When non-zero and stroke_color is non-transparent, the render
+        /// backend expands strokes to filled geometry before rasterization
+        /// (round joins and caps).
         stroke_width: u16,
         /// Reference to serialized path commands in the data buffer
         /// (MoveTo, LineTo, CubicTo, Close). 4-byte aligned.
@@ -286,6 +293,7 @@ pub enum Content {
 }
 
 // Compile-time size assertion: Content must remain exactly 24 bytes.
-// Largest payload: Glyphs = Color(4) + DataRef(8) + u16 + u16 + u32 = 20 bytes.
-// Image payload: u32 + u16 + u16 = 8 bytes (well within budget).
+// Largest payloads (tied at 20 bytes):
+//   Glyphs = Color(4) + DataRef(8) + u16 + u16 + u32 = 20 bytes.
+//   Path   = Color(4) + Color(4) + FillRule(1) + pad(1) + u16(2) + DataRef(8) = 20 bytes.
 const _: () = assert!(core::mem::size_of::<Content>() == 24);

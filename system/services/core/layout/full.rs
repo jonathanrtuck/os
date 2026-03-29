@@ -184,7 +184,7 @@ pub fn build_full_scene(
     let icon_y = ((cfg.title_bar_h.saturating_sub(icon_size_pt)) / 2).saturating_sub(1);
     let title_text_x = icon_x + icon_size_pt as i32 + 8;
 
-    emit_icon(w, N_TITLE_ICON, icon, icon_x, icon_y as i32, icon_size_pt, dc(cfg.chrome_title_color));
+    emit_icon(w, N_TITLE_ICON, icon, icon_x, icon_y as i32, icon_size_pt, Color::TRANSPARENT, dc(cfg.chrome_title_color));
     w.node_mut(N_TITLE_ICON).next_sibling = N_TITLE_TEXT;
     {
         let n = w.node_mut(N_TITLE_TEXT);
@@ -595,7 +595,7 @@ pub fn build_document_content(
         let icon = icon_lib::get("document", mimetype);
         let icon_x: i32 = 6;
         let icon_y = ((cfg.title_bar_h.saturating_sub(icon_size_pt)) / 2).saturating_sub(1);
-        emit_icon(w, N_TITLE_ICON, icon, icon_x, icon_y as i32, icon_size_pt, dc(cfg.chrome_title_color));
+        emit_icon(w, N_TITLE_ICON, icon, icon_x, icon_y as i32, icon_size_pt, Color::TRANSPARENT, dc(cfg.chrome_title_color));
         w.node_mut(N_TITLE_ICON).next_sibling = N_TITLE_TEXT;
     }
 
@@ -1199,7 +1199,7 @@ pub fn build_rich_document_content(
         let icon = icon_lib::get("document", mimetype);
         let icon_x: i32 = 6;
         let icon_y = ((cfg.title_bar_h.saturating_sub(icon_size_pt)) / 2).saturating_sub(1);
-        emit_icon(w, N_TITLE_ICON, icon, icon_x, icon_y as i32, icon_size_pt, dc(cfg.chrome_title_color));
+        emit_icon(w, N_TITLE_ICON, icon, icon_x, icon_y as i32, icon_size_pt, Color::TRANSPARENT, dc(cfg.chrome_title_color));
         w.node_mut(N_TITLE_ICON).next_sibling = N_TITLE_TEXT;
     }
 

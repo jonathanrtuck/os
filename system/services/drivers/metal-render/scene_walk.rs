@@ -578,44 +578,14 @@ pub(crate) fn walk_scene(
         }
         Content::Path {
             color,
+            stroke_color,
             fill_rule,
             stroke_width,
             contours,
         } => {
             if contours.length > 0 {
-                if stroke_width > 0 {
-                    // Expand stroked path to filled geometry before rendering.
-                    let offset = contours.offset as usize;
-                    let end = offset + contours.length as usize;
-                    if end <= data_buf.len() {
-                        let src = &data_buf[offset..end];
-                        let sw_pt = stroke_width as f32 / 256.0;
-                        let expanded = scene::stroke::expand_stroke(src, sw_pt);
-                        if !expanded.is_empty() {
-                            let exp_ref = scene::DataRef {
-                                offset: 0,
-                                length: expanded.len() as u32,
-                            };
-                            draw_path_stencil_cover(
-                                ctx.cmdbuf,
-                                ctx.solid_verts,
-                                &expanded,
-                                exp_ref,
-                                color,
-                                scene::FillRule::Winding,
-                                abs_x,
-                                abs_y,
-                                w,
-                                h,
-                                vw,
-                                vh,
-                                scale,
-                                opacity,
-                                ctx.path_buf,
-                            );
-                        }
-                    }
-                } else {
+                // Fill pass: render filled path when fill color is non-transparent.
+                if color.a > 0 {
                     draw_path_stencil_cover(
                         ctx.cmdbuf,
                         ctx.solid_verts,
@@ -633,6 +603,39 @@ pub(crate) fn walk_scene(
                         opacity,
                         ctx.path_buf,
                     );
+                }
+                // Stroke pass: expand and render stroked outline on top.
+                if stroke_width > 0 && stroke_color.a > 0 {
+                    let offset = contours.offset as usize;
+                    let end = offset + contours.length as usize;
+                    if end <= data_buf.len() {
+                        let src = &data_buf[offset..end];
+                        let sw_pt = stroke_width as f32 / 256.0;
+                        let expanded = scene::stroke::expand_stroke(src, sw_pt);
+                        if !expanded.is_empty() {
+                            let exp_ref = scene::DataRef {
+                                offset: 0,
+                                length: expanded.len() as u32,
+                            };
+                            draw_path_stencil_cover(
+                                ctx.cmdbuf,
+                                ctx.solid_verts,
+                                &expanded,
+                                exp_ref,
+                                stroke_color,
+                                scene::FillRule::Winding,
+                                abs_x,
+                                abs_y,
+                                w,
+                                h,
+                                vw,
+                                vh,
+                                scale,
+                                opacity,
+                                ctx.path_buf,
+                            );
+                        }
+                    }
                 }
             }
         }

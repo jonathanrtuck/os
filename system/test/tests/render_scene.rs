@@ -4460,6 +4460,7 @@ fn path_content_variant_exists() {
     let id = w.alloc_node().unwrap();
     w.node_mut(id).content = Content::Path {
         color: Color::rgb(255, 0, 0),
+        stroke_color: Color::TRANSPARENT,
         fill_rule: scene::FillRule::Winding,
         stroke_width: 0,
         contours: dref,
@@ -4470,11 +4471,13 @@ fn path_content_variant_exists() {
     match r.node(id).content {
         Content::Path {
             color,
+            stroke_color,
             fill_rule,
             stroke_width,
             contours,
         } => {
             assert_eq!(color, Color::rgb(255, 0, 0));
+            assert_eq!(stroke_color, Color::TRANSPARENT);
             assert_eq!(fill_rule, scene::FillRule::Winding);
             assert_eq!(stroke_width, 0);
             assert_eq!(contours.length as usize, cmds.len());
@@ -4563,6 +4566,7 @@ fn path_empty_commands() {
     };
     let content = Content::Path {
         color: Color::rgb(255, 0, 0),
+        stroke_color: Color::TRANSPARENT,
         fill_rule: scene::FillRule::Winding,
         stroke_width: 0,
         contours: dref,

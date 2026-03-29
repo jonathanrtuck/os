@@ -36,12 +36,19 @@ pub(super) fn render_content(
         Content::None => {}
         Content::Path {
             color,
+            stroke_color,
             fill_rule,
             stroke_width,
             contours,
         } => {
-            if stroke_width > 0 {
-                // Expand stroked path to filled geometry, then rasterize.
+            // Fill pass: render filled path when fill color is non-transparent.
+            if color.a > 0 {
+                render_path(
+                    fb, graph, scale, contours, color, fill_rule, draw_x, draw_y, nw, nh,
+                );
+            }
+            // Stroke pass: expand and render stroked outline on top.
+            if stroke_width > 0 && stroke_color.a > 0 {
                 let data =
                     if (contours.offset as usize + contours.length as usize) <= graph.data.len() {
                         &graph.data[contours.offset as usize..][..contours.length as usize]
@@ -56,7 +63,7 @@ pub(super) fn render_content(
                         fb,
                         &expanded,
                         scale,
-                        color,
+                        stroke_color,
                         scene::FillRule::Winding,
                         draw_x,
                         draw_y,
@@ -64,10 +71,6 @@ pub(super) fn render_content(
                         nh,
                     );
                 }
-            } else {
-                render_path(
-                    fb, graph, scale, contours, color, fill_rule, draw_x, draw_y, nw, nh,
-                );
             }
         }
         Content::Glyphs {

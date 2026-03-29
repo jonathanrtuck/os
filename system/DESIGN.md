@@ -422,7 +422,7 @@ Notification for both: `channel_signal` syscall wakes the consumer from `sys::wa
 
 Core's boot phase is fully event-driven: it publishes a loading scene (Tabler loader-2 spinner, CPU-rasterized as `Content::InlineImage`) to shared memory immediately, giving the user a visible frame within milliseconds. It then enters a multiplexed wait loop: animation timer ticks rotate the spinner while async init replies (font metrics from 9p, document queries/reads from the document service, PNG decode from the decoder service, undo snapshot) arrive as IPC messages. Each reply advances a state machine (`BootState` with `DecodePhase` and `DocPhase` sub-states). The loop exits when all init completes (`all_ready()`) or a 5-second timeout fires. Core then builds the full document scene, replacing the loading scene in the triple buffer.
 
-This pattern — show UI immediately, init async, transition on completion — avoids blocking the display pipeline during boot. The spinner uses `Content::InlineImage` (CPU-rasterized each frame) rather than `Content::Path` because the metal-render stencil pipeline doesn't handle stroked path geometry correctly; all icons and the mouse cursor use the same InlineImage approach.
+This pattern — show UI immediately, init async, transition on completion — avoids blocking the display pipeline during boot. The spinner uses `Content::InlineImage` (CPU-rasterized each frame) rather than `Content::Path` because it rotates each frame and path re-rasterization would be wasteful. Title bar icons use `Content::Path` with fill+stroke support (separate fill color and stroke color per path node).
 
 **Incremental scene updates (2026-03-15 rendering pipeline optimization):**
 
