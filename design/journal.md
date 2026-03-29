@@ -6,7 +6,7 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ## Scene Graph Hit-Testing — Design Decision (2026-03-29)
 
-**Status:** Decided. Not yet implemented.
+**Status:** Implemented (2026-03-29). All 5 steps complete.
 
 ### The problem
 
@@ -48,23 +48,41 @@ Either input changing should trigger re-evaluation. The fix has two parts:
 
 **Cursor shape as first consumer:**
 
-- Scene nodes carry a cursor shape declaration (what cursor to show when the mouse is over this node)
-- After `hit_test`, read the cursor shape from the hit node (or fall back to default pointer/arrow if the node declares none)
-- This replaces the current hardcoded page-rectangle check
+- Scene nodes carry a `cursor_shape: u8` field (what cursor to show when the mouse is over this node). Lives on the Node struct in `_reserved` — one byte, no struct size change. The render driver ignores it (same as `content_hash` is only meaningful to the diff engine).
+- Values: `0 = inherit` (walk up to nearest ancestor with a declaration), `1 = pointer/arrow`, `2 = text/I-beam`, extensible.
+- After `hit_test`, walk from hit node up through ancestors, stop at first non-inherit declaration. If none found, default to pointer/arrow.
+- This replaces the current hardcoded page-rectangle check.
+
+**Why inheritance:** Essentially free (the hit-test already touches ancestors for coordinate transforms). Means only "interesting" nodes need cursor annotations — a page declares `text`, its children inherit. Aligns with CSS cursor inheritance, which simplifies the web translator (v0.12). Starting without inheritance and adding later would also work (one-line change), but the cost of having it from day one is zero.
+
+**Cursor data flow (two separate paths, already in place):**
+
+```text
+Per-node declarations (Node.cursor_shape) + pointer position
+  → hit_test() → NodeId → walk up for cursor shape
+  → write to CursorState (shared-memory page: path commands, hotspot, colors)
+  → render driver reads CursorState, draws cursor via GPU pipeline
+```
+
+CursorState is the **output** channel (active cursor rendering data). Node.cursor_shape is the **input** (per-node interaction metadata). These are independent: CursorState already exists and doesn't change.
+
+**Coordinate transform during hit-test:** Nodes have `content_transform` (used for scrolling — the document strip slides horizontally). The hit-test must apply the **inverse** content_transform to the pointer position as it descends into children. Otherwise scrolled content reports hits at wrong positions. The transform is a pure translation for scrolling, so inversion is just negation.
 
 **Performance:** The scene graph is small (tens to low hundreds of nodes). One back-to-front walk with bounding-box early exit, at most once per event loop iteration. Not a concern.
 
 **Coordinates:** Core works in millipoints, render driver works in pixels. Both would identify the same node — the coordinate transform is a uniform scale. Core is the right place because it already owns the scene graph and the layout state.
 
+**Why this is better than macOS:** macOS uses `NSTrackingArea` — rectangular regions apps register separately from views. Three architectural flaws: (1) two data structures that drift (view hierarchy vs tracking areas), (2) app-driven not OS-driven (hung app = frozen cursor), (3) re-evaluates on pointer movement only, not on content changes. Our approach has a single source of truth (scene graph), is Core-driven, and re-evaluates whenever either input changes.
+
 ### Implementation plan
 
-1. Extract current cursor logic into a `hit_test(x, y)` function — same hardcoded rectangle logic initially, but callable from anywhere and returning a node identity rather than a cursor shape directly
+1. Extract current cursor logic into a `hit_test(x, y)` function — same hardcoded rectangle logic initially, but callable from anywhere and returning a `NodeId` rather than a cursor shape directly
 2. Call it at end of event loop whenever `changed || pointer_position_changed || context_switched || slide_changed`
-3. Map hit result to cursor shape (first consumer)
-4. Add cursor shape declaration to scene nodes, replace hardcoded rectangle check with scene graph walk
+3. Map hit result to cursor shape via hardcoded `match node_id` (first consumer)
+4. Add `cursor_shape: u8` field to Node struct (in `_reserved`), set declarations on N_PAGE etc., replace hardcoded match with scene graph walk + inheritance
 5. Add point-in-path test for non-rectangular nodes (winding number, with bounding box early exit)
 
-Steps 1–3 fix the immediate bug. Steps 4–5 make it general.
+Steps 1–3 fix the immediate bug (same behavior, decoupled timing). Step 4 makes it data-driven. Step 5 makes it geometry-general.
 
 ---
 

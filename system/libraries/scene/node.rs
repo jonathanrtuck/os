@@ -62,6 +62,15 @@ pub fn mpt_round_pt(mpt: Mpt) -> Mpt {
     }
 }
 
+// ── Cursor shape constants ──────────────────────────────────────────
+
+/// Inherit cursor shape from the nearest ancestor with a declaration.
+pub const CURSOR_INHERIT: u8 = 0;
+/// Pointer/arrow cursor (default for non-interactive regions).
+pub const CURSOR_POINTER: u8 = 1;
+/// Text/I-beam cursor (text content regions).
+pub const CURSOR_TEXT: u8 = 2;
+
 // ── Node flags ──────────────────────────────────────────────────────
 
 bitflags! {
@@ -131,8 +140,12 @@ pub struct Node {
     /// a clip region for this node and its children. `DataRef::EMPTY` means
     /// no path clip (rectangular clip via `CLIPS_CHILDREN` flag still applies).
     pub clip_path: DataRef,
+    /// Cursor shape to show when the pointer is over this node.
+    /// 0 = inherit from parent, 1 = pointer/arrow, 2 = text/I-beam.
+    /// Core reads this during hit-testing; the render driver ignores it.
+    pub cursor_shape: u8,
     /// Reserved for future fields. Must be zero.
-    pub _reserved: [u8; 4],
+    pub _reserved: [u8; 3],
     // ── content ──
     pub content: Content,
 }
@@ -165,7 +178,8 @@ impl Node {
         transform: AffineTransform::identity(),
         content_hash: 0,
         clip_path: DataRef::EMPTY,
-        _reserved: [0; 4],
+        cursor_shape: 0, // inherit
+        _reserved: [0; 3],
         content: Content::None,
     };
 
@@ -190,7 +204,7 @@ impl Node {
 // Compile-time size assertion: Node must be exactly 136 bytes.
 // This prevents silent shared-memory layout drift between core and compositor.
 // If you add a field, update this assertion and verify both sides agree.
-// Layout: 96 bytes pre-content + clip_path (8) + _reserved (4) + content (24) = 132 +4 = 136.
+// Layout: 96 bytes pre-content + clip_path (8) + cursor_shape (1) + _reserved (3) + content (24) = 136.
 const _: () = assert!(core::mem::size_of::<Node>() == 136);
 
 // ── Shared memory layout ────────────────────────────────────────────

@@ -52,6 +52,47 @@ impl SceneState {
         self.triple().reader_done_gen()
     }
 
+    /// Read-only view of the most recently published scene nodes.
+    /// Used by hit-testing to walk the scene graph after a frame is built.
+    ///
+    /// Reads directly from the triple-buffer's latest slot rather than
+    /// going through TripleWriter, because the writer creates a temporary
+    /// whose lifetime would prevent returning a reference to the underlying
+    /// static buffer.
+    pub fn latest_nodes(&self) -> &[scene::Node] {
+        let ptr = self.buf.as_ptr();
+        // Read latest_buf index from control region (offset 0 in control).
+        // SAFETY: buf is TRIPLE_SCENE_SIZE. Control region starts at 3×SCENE_SIZE.
+        let latest = unsafe {
+            let ctrl = ptr.add(3 * scene::SCENE_SIZE) as *const u32;
+            core::sync::atomic::AtomicU32::from_ptr(ctrl as *mut u32)
+                .load(core::sync::atomic::Ordering::Relaxed)
+        };
+        let off = (latest as usize) * scene::SCENE_SIZE;
+        // SAFETY: off is within buf (latest ∈ {0,1,2}). SceneHeader is repr(C).
+        let hdr = unsafe { &*(ptr.add(off) as *const scene::SceneHeader) };
+        let count = (hdr.node_count as usize).min(scene::MAX_NODES);
+        // SAFETY: NODES_OFFSET + count*NODE_SIZE is within SCENE_SIZE.
+        let node_ptr = unsafe { ptr.add(off + scene::NODES_OFFSET) as *const scene::Node };
+        unsafe { core::slice::from_raw_parts(node_ptr, count) }
+    }
+
+    /// Read-only view of the most recently published data buffer.
+    /// Used by hit-testing to read path commands from `Content::Path` nodes.
+    pub fn latest_data_buf(&self) -> &[u8] {
+        let ptr = self.buf.as_ptr();
+        let latest = unsafe {
+            let ctrl = ptr.add(3 * scene::SCENE_SIZE) as *const u32;
+            core::sync::atomic::AtomicU32::from_ptr(ctrl as *mut u32)
+                .load(core::sync::atomic::Ordering::Relaxed)
+        };
+        let off = (latest as usize) * scene::SCENE_SIZE;
+        let hdr = unsafe { &*(ptr.add(off) as *const scene::SceneHeader) };
+        let used = (hdr.data_used as usize).min(scene::DATA_BUFFER_SIZE);
+        let data_start = off + scene::DATA_OFFSET;
+        &self.buf[data_start..data_start + used]
+    }
+
     /// Build the loading scene (background + spinning arc indicator).
     ///
     /// Called once at boot before async init begins. The spinner is

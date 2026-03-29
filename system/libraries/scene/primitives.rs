@@ -206,6 +206,192 @@ pub fn path_close(buf: &mut Vec<u8>) {
     buf.extend_from_slice(&PATH_CLOSE.to_le_bytes());
 }
 
+// ── Point-in-path test (winding number) ────────────────────────────
+
+/// Test whether a point is inside a path using the winding number rule.
+///
+/// Parses the serialized path commands (MoveTo, LineTo, CubicTo, Close)
+/// and counts signed crossings of a horizontal ray cast rightward from
+/// the test point. Cubic Béziers are flattened to line segments.
+///
+/// Coordinates are in the path's local space (typically points or viewbox
+/// units). The caller must transform the test point to match.
+///
+/// Returns the winding number. Non-zero means the point is inside
+/// (for the winding fill rule). For even-odd, test `winding & 1 != 0`.
+pub fn path_winding_number(path_data: &[u8], px: f32, py: f32) -> i32 {
+    let mut winding: i32 = 0;
+
+    // Current position and sub-path start (for Close).
+    let mut cx: f32 = 0.0;
+    let mut cy: f32 = 0.0;
+    let mut sx: f32 = 0.0;
+    let mut sy: f32 = 0.0;
+
+    let mut pos = 0;
+    while pos + 4 <= path_data.len() {
+        let tag = u32::from_le_bytes([
+            path_data[pos],
+            path_data[pos + 1],
+            path_data[pos + 2],
+            path_data[pos + 3],
+        ]);
+        match tag {
+            PATH_MOVE_TO => {
+                if pos + PATH_MOVE_TO_SIZE > path_data.len() {
+                    break;
+                }
+                cx = f32::from_le_bytes(path_data[pos + 4..pos + 8].try_into().unwrap());
+                cy = f32::from_le_bytes(path_data[pos + 8..pos + 12].try_into().unwrap());
+                sx = cx;
+                sy = cy;
+                pos += PATH_MOVE_TO_SIZE;
+            }
+            PATH_LINE_TO => {
+                if pos + PATH_LINE_TO_SIZE > path_data.len() {
+                    break;
+                }
+                let x = f32::from_le_bytes(path_data[pos + 4..pos + 8].try_into().unwrap());
+                let y = f32::from_le_bytes(path_data[pos + 8..pos + 12].try_into().unwrap());
+                winding += line_winding(px, py, cx, cy, x, y);
+                cx = x;
+                cy = y;
+                pos += PATH_LINE_TO_SIZE;
+            }
+            PATH_CUBIC_TO => {
+                if pos + PATH_CUBIC_TO_SIZE > path_data.len() {
+                    break;
+                }
+                let c1x = f32::from_le_bytes(path_data[pos + 4..pos + 8].try_into().unwrap());
+                let c1y = f32::from_le_bytes(path_data[pos + 8..pos + 12].try_into().unwrap());
+                let c2x = f32::from_le_bytes(path_data[pos + 12..pos + 16].try_into().unwrap());
+                let c2y = f32::from_le_bytes(path_data[pos + 16..pos + 20].try_into().unwrap());
+                let x = f32::from_le_bytes(path_data[pos + 20..pos + 24].try_into().unwrap());
+                let y = f32::from_le_bytes(path_data[pos + 24..pos + 28].try_into().unwrap());
+                winding += cubic_winding(px, py, cx, cy, c1x, c1y, c2x, c2y, x, y);
+                cx = x;
+                cy = y;
+                pos += PATH_CUBIC_TO_SIZE;
+            }
+            PATH_CLOSE => {
+                winding += line_winding(px, py, cx, cy, sx, sy);
+                cx = sx;
+                cy = sy;
+                pos += PATH_CLOSE_SIZE;
+            }
+            _ => break,
+        }
+    }
+
+    winding
+}
+
+/// Winding contribution of a line segment for a rightward horizontal ray.
+/// Returns +1 for upward crossing, -1 for downward crossing, 0 for no crossing.
+fn line_winding(px: f32, py: f32, x0: f32, y0: f32, x1: f32, y1: f32) -> i32 {
+    if (y0 <= py && y1 > py) || (y1 <= py && y0 > py) {
+        // Compute x-intercept of the line at y=py.
+        let t = (py - y0) / (y1 - y0);
+        let ix = x0 + t * (x1 - x0);
+        if px < ix {
+            // Ray crosses the segment.
+            return if y1 > y0 { 1 } else { -1 };
+        }
+    }
+    0
+}
+
+/// Winding contribution of a cubic Bézier, computed by recursive
+/// subdivision to line segments (de Casteljau, max depth 6 = 64 segments).
+fn cubic_winding(
+    px: f32,
+    py: f32,
+    x0: f32,
+    y0: f32,
+    c1x: f32,
+    c1y: f32,
+    c2x: f32,
+    c2y: f32,
+    x3: f32,
+    y3: f32,
+) -> i32 {
+    cubic_winding_recursive(px, py, x0, y0, c1x, c1y, c2x, c2y, x3, y3, 0)
+}
+
+fn cubic_winding_recursive(
+    px: f32,
+    py: f32,
+    x0: f32,
+    y0: f32,
+    c1x: f32,
+    c1y: f32,
+    c2x: f32,
+    c2y: f32,
+    x3: f32,
+    y3: f32,
+    depth: u8,
+) -> i32 {
+    // Flatness test: if the control points are close to the line x0→x3,
+    // treat as a line segment.
+    if depth >= 6 {
+        return line_winding(px, py, x0, y0, x3, y3);
+    }
+
+    // Quick reject: if py is outside the vertical extent of all control
+    // points, no crossing is possible.
+    let min_y = f32_min(f32_min(y0, c1y), f32_min(c2y, y3));
+    let max_y = f32_max(f32_max(y0, c1y), f32_max(c2y, y3));
+    if py < min_y || py > max_y {
+        return 0;
+    }
+
+    // Flatness: max distance of control points from the chord.
+    let dx = x3 - x0;
+    let dy = y3 - y0;
+    let d2 = (dx * (c1y - y0) - dy * (c1x - x0)).abs();
+    let d3 = (dx * (c2y - y0) - dy * (c2x - x0)).abs();
+    let chord_len_sq = dx * dx + dy * dy;
+
+    if (d2 + d3) * (d2 + d3) <= 0.25 * chord_len_sq {
+        return line_winding(px, py, x0, y0, x3, y3);
+    }
+
+    // De Casteljau split at t=0.5.
+    let m01x = (x0 + c1x) * 0.5;
+    let m01y = (y0 + c1y) * 0.5;
+    let m12x = (c1x + c2x) * 0.5;
+    let m12y = (c1y + c2y) * 0.5;
+    let m23x = (c2x + x3) * 0.5;
+    let m23y = (c2y + y3) * 0.5;
+    let m012x = (m01x + m12x) * 0.5;
+    let m012y = (m01y + m12y) * 0.5;
+    let m123x = (m12x + m23x) * 0.5;
+    let m123y = (m12y + m23y) * 0.5;
+    let mx = (m012x + m123x) * 0.5;
+    let my = (m012y + m123y) * 0.5;
+
+    cubic_winding_recursive(px, py, x0, y0, m01x, m01y, m012x, m012y, mx, my, depth + 1)
+        + cubic_winding_recursive(px, py, mx, my, m123x, m123y, m23x, m23y, x3, y3, depth + 1)
+}
+
+#[inline]
+fn f32_min(a: f32, b: f32) -> f32 {
+    if a < b {
+        a
+    } else {
+        b
+    }
+}
+
+#[inline]
+fn f32_max(a: f32, b: f32) -> f32 {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
 // ── Font identity constants ─────────────────────────────────────────
 
 // Font identity constants FONT_MONO/FONT_SANS/FONT_SERIF removed.

@@ -241,6 +241,7 @@ pub fn build_full_scene(
         n.shadow_offset_y = DOCUMENT_SHADOW_OFFSET_Y;
         n.shadow_blur_radius = DOCUMENT_SHADOW_BLUR_RADIUS;
         n.shadow_spread = DOCUMENT_SHADOW_SPREAD;
+        n.cursor_shape = scene::CURSOR_TEXT;
         n.flags = NodeFlags::VISIBLE;
     }
     {

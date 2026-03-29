@@ -4,14 +4,13 @@ Central OS service: sole owner of document state, text layout, scene graph build
 
 ## Key Files
 
-- `main.rs` — Entry point, event loop, CoreState struct, undo/redo state machine, IPC dispatch
+- `main.rs` — Entry point, event loop, CoreState struct, undo/redo state machine, IPC dispatch, `resolve_cursor_shape()` (scene graph hit-testing with winding number + cursor shape inheritance)
 - `documents.rs` — Document buffer operations (insert, delete, delete_range) over shared memory
 - `input.rs` — Keyboard dispatch, cursor navigation (word/line/page), selection management, editor forwarding
 - `blink.rs` — Four-phase cursor blink state machine (visible hold, fade out, hidden hold, fade in)
-- `icons.rs` — Tabler icon rasterization (SVG path to BGRA pixels) and pointer cursor rendering
 - `typography.rs` — Content-type-aware typography defaults (font family, OpenType features, weight)
 - `fallback.rs` — Font fallback chain: tries fonts in order until a valid glyph is found
-- `scene_state.rs` — Triple-buffered scene graph wrapper (acquire/publish lifecycle, incremental updates)
+- `scene_state.rs` — Triple-buffered scene graph wrapper (acquire/publish lifecycle, incremental updates), `latest_nodes()`/`latest_data_buf()` for hit-testing read-back
 - `layout/` — Scene graph building and text layout (see below)
 
 ## layout/

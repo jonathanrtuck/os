@@ -559,6 +559,154 @@ pub(crate) fn state() -> &'static mut CoreState {
     unsafe { &mut *STATE.0.get() }
 }
 
+/// Resolve cursor shape by hit-testing the scene graph.
+///
+/// Walks the scene tree depth-first (pre-order) to find the topmost
+/// visible node containing the pointer. Then walks up through ancestors
+/// to find the first `cursor_shape` declaration (inheritance). Returns
+/// the cursor icon name.
+///
+/// Coordinates: mouse position in pixels, scene graph in millipoints.
+/// Handles content_transform (scroll/slide) by inverting the translation
+/// when descending into children.
+fn resolve_cursor_shape(
+    nodes: &[scene::Node],
+    data_buf: &[u8],
+    mouse_x: u32,
+    mouse_y: u32,
+) -> &'static str {
+    if nodes.is_empty() {
+        return "pointer";
+    }
+
+    // Convert pixel coordinates to millipoints.
+    let test_x = (mouse_x as i64) * (scene::MPT_PER_PT as i64);
+    let test_y = (mouse_y as i64) * (scene::MPT_PER_PT as i64);
+
+    // Parent map for inheritance walk. Built during traversal.
+    let mut parent = [scene::NULL; 64];
+
+    // Topmost hit node (last in rendering order that contains the point).
+    let mut hit: scene::NodeId = scene::NULL;
+
+    // Iterative depth-first walk with coordinate tracking.
+    // Stack entries: (node_id, origin_x_mpt, origin_y_mpt).
+    // origin is the accumulated position from all ancestors, in millipoints.
+    let mut stack: [(scene::NodeId, i64, i64); 48] = [(scene::NULL, 0, 0); 48];
+    let mut sp: usize = 0;
+
+    // Seed with root node at the origin.
+    if nodes[0].flags.contains(scene::NodeFlags::VISIBLE) {
+        stack[0] = (0, 0, 0);
+        sp = 1;
+    }
+
+    while sp > 0 {
+        sp -= 1;
+        let (id, ox, oy) = stack[sp];
+
+        let node = &nodes[id as usize];
+
+        // Absolute position of this node's top-left corner.
+        let abs_x = ox + node.x as i64;
+        let abs_y = oy + node.y as i64;
+
+        // Bounding box test.
+        let inside = test_x >= abs_x
+            && test_x < abs_x + node.width as i64
+            && test_y >= abs_y
+            && test_y < abs_y + node.height as i64;
+
+        if inside {
+            // Fine phase: for Path nodes, test whether the point is actually
+            // inside the path geometry (winding number), not just the bounding
+            // box. This enables precise hit-testing for circles, icons, and
+            // arbitrary shapes.
+            if let scene::Content::Path { contours, .. } = node.content {
+                if contours.length > 0 {
+                    let start = contours.offset as usize;
+                    let end = start + contours.length as usize;
+                    if end <= data_buf.len() {
+                        // Convert test point to node-local coordinates (points, f32).
+                        let local_x =
+                            (test_x - abs_x) as f32 / scene::MPT_PER_PT as f32;
+                        let local_y =
+                            (test_y - abs_y) as f32 / scene::MPT_PER_PT as f32;
+                        let w = scene::path_winding_number(
+                            &data_buf[start..end],
+                            local_x,
+                            local_y,
+                        );
+                        if w != 0 {
+                            hit = id;
+                        }
+                        // If winding == 0, point is outside the path — skip this
+                        // node (don't update hit). The bounding box matched but
+                        // the actual geometry didn't.
+                    } else {
+                        hit = id;
+                    }
+                } else {
+                    hit = id;
+                }
+            } else {
+                hit = id;
+            }
+        }
+
+        // Skip clipped-out children: if this node clips children and the
+        // point is outside, no child can be hit.
+        if node.clips_children() && !inside {
+            continue;
+        }
+
+        // Children's origin: node's absolute position + inverse content_transform.
+        // content_transform shifts children's coordinate space (e.g., scroll/slide).
+        // To test a point against children, apply the inverse: add the transform's
+        // translation back (the transform is tx,ty pure translation for scroll/slide).
+        let ct = &node.content_transform;
+        let child_ox = abs_x - (ct.tx * scene::MPT_PER_PT as f32) as i64;
+        let child_oy = abs_y - (ct.ty * scene::MPT_PER_PT as f32) as i64;
+
+        // Collect children (forward-linked: first_child → next_sibling → ...).
+        let mut children: [scene::NodeId; 16] = [scene::NULL; 16];
+        let mut nc: usize = 0;
+        let mut c = node.first_child;
+        while c != scene::NULL && (c as usize) < nodes.len() && nc < 16 {
+            children[nc] = c;
+            parent[c as usize & 63] = id;
+            nc += 1;
+            c = nodes[c as usize].next_sibling;
+        }
+
+        // Push in reverse order: first child on top → processed first.
+        // Later siblings processed later → their hits override (topmost wins).
+        for i in (0..nc).rev() {
+            let cid = children[i];
+            if nodes[cid as usize].flags.contains(scene::NodeFlags::VISIBLE) && sp < stack.len() {
+                stack[sp] = (cid, child_ox, child_oy);
+                sp += 1;
+            }
+        }
+    }
+
+    // Resolve cursor shape with inheritance: walk up from hit node to
+    // the first ancestor with a non-inherit cursor_shape declaration.
+    let mut cursor_node = hit;
+    while cursor_node != scene::NULL && (cursor_node as usize) < nodes.len() {
+        let shape = nodes[cursor_node as usize].cursor_shape;
+        if shape != scene::CURSOR_INHERIT {
+            return match shape {
+                scene::CURSOR_TEXT => "cursor-text",
+                _ => "pointer",
+            };
+        }
+        cursor_node = parent[cursor_node as usize & 63];
+    }
+
+    "pointer"
+}
+
 /// Write cursor shape data to the CursorState shared page.
 ///
 /// Looks up the icon, concatenates its path commands, and writes the
@@ -2303,39 +2451,6 @@ pub extern "C" fn _start() -> ! {
                 s.pointer_last_event_ms = now_ms;
 
                 pointer_position_changed = true;
-
-                // Determine cursor shape from mouse position.
-                if s.cursor_state_va != 0 {
-                    let content_y = TITLE_BAR_H + SHADOW_DEPTH;
-                    let content_h = fb_height.saturating_sub(content_y);
-                    let page_margin_v: u32 = 16;
-                    let page_h = content_h.saturating_sub(2 * page_margin_v);
-                    let page_w = (page_h as u64 * 210 / 297) as u32;
-                    let page_x_start = (fb_width.saturating_sub(page_w)) / 2;
-                    let page_x_end = page_x_start + page_w;
-                    let page_y_start = content_y + page_margin_v;
-                    let page_y_end = page_y_start + page_h;
-                    let over_page = s.active_space == 0
-                        && s.mouse_x >= page_x_start
-                        && s.mouse_x < page_x_end
-                        && s.mouse_y >= page_y_start
-                        && s.mouse_y < page_y_end;
-                    let new_shape = if over_page {
-                        "cursor-text"
-                    } else {
-                        "pointer"
-                    };
-                    // Only re-write if shape changed (comparing string pointers is fine
-                    // since these are static literals).
-                    if !core::ptr::eq(new_shape as *const str, s.cursor_shape_name as *const str) {
-                        s.cursor_shape_name = new_shape;
-                        write_cursor_shape(
-                            s.cursor_state_va,
-                            &mut s.cursor_shape_generation,
-                            new_shape,
-                        );
-                    }
-                }
             }
         }
 
@@ -3399,6 +3514,31 @@ pub extern "C" fn _start() -> ! {
                 let s = state();
                 if s.cursor_state_va != 0 {
                     write_cursor_opacity(s.cursor_state_va, s.pointer_opacity);
+                }
+            }
+        }
+
+        // ── Cursor shape re-evaluation ──────────────────────────────
+        //
+        // Re-evaluate whenever either input to the cursor decision changed:
+        // pointer position OR scene content (edit, context switch, slide,
+        // scroll, animation). This decouples cursor shape from pointer
+        // movement — a stationary pointer updates its shape when content
+        // changes underneath it.
+        if pointer_position_changed || needs_scene_update || slide_changed {
+            let s = state();
+            if s.cursor_state_va != 0 {
+                let nodes = scene.latest_nodes();
+                let data_buf = scene.latest_data_buf();
+                let new_shape =
+                    resolve_cursor_shape(nodes, data_buf, s.mouse_x, s.mouse_y);
+                if !core::ptr::eq(new_shape as *const str, s.cursor_shape_name as *const str) {
+                    s.cursor_shape_name = new_shape;
+                    write_cursor_shape(
+                        s.cursor_state_va,
+                        &mut s.cursor_shape_generation,
+                        new_shape,
+                    );
                 }
             }
         }
