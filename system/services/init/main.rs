@@ -512,7 +512,8 @@ fn setup_render_pipeline(
                 sys::exit();
             }
         };
-    // Share document buffer with core (read-write).
+    // Share document buffer with core (read-write — core writes header for cursor sync,
+    // A is sole writer of content bytes at offset 64+).
     let core_doc_va =
         sys::memory_share(core_proc, doc_pa, DOC_BUF_PAGES, false).unwrap_or_else(|_| {
             sys::print(b"init: memory_share (core doc) failed\n");
@@ -524,23 +525,12 @@ fn setup_render_pipeline(
             sys::print(b"init: memory_share (core scene) failed\n");
             sys::exit();
         });
-    // Share Content Region with core (read-write — core writes decoded images).
+    // Share Content Region with core (read-only — A manages decoded images).
     let core_content_va = if content_pages > 0 {
-        sys::memory_share(core_proc, content_pa_val, content_pages, false).unwrap_or_else(|_| {
+        sys::memory_share(core_proc, content_pa_val, content_pages, true).unwrap_or_else(|_| {
             sys::print(b"init: memory_share (core content) failed\n");
             sys::exit();
         }) as u64
-    } else {
-        0u64
-    };
-    // Share File Store with core (read-only — raw PNG bytes for decoding).
-    let core_file_store_va = if file_store_pages > 0 {
-        sys::memory_share(core_proc, file_store_pa_val, file_store_pages, true).unwrap_or_else(
-            |_| {
-                sys::print(b"init: memory_share (core file store) failed\n");
-                sys::exit();
-            },
-        ) as u64
     } else {
         0u64
     };
@@ -586,18 +576,6 @@ fn setup_render_pipeline(
     };
     core_ch.send(&fr_msg);
 
-    // Send image config to core (PNG location in the File Store).
-    if png_len > 0 {
-        let img_config = ImageConfig {
-            file_store_offset: png_offset,
-            file_store_length: png_len,
-        };
-        // SAFETY: ImageConfig fits within 60-byte payload; msg_type matches the payload type.
-        let img_msg = unsafe { ipc::Message::from_payload(MSG_IMAGE_CONFIG, &img_config) };
-
-        core_ch.send(&img_msg);
-    }
-
     // Send RTC config to core.
     if rtc_pa != 0 {
         let rtc_config = RtcConfig { mmio_pa: rtc_pa };
@@ -610,13 +588,69 @@ fn setup_render_pipeline(
     }
 
     // -----------------------------------------------------------------------
+    // Phase 7b: Spawn document-model (A) process.
+    // A owns the document buffer (read-write), manages undo, talks to doc service.
+    // -----------------------------------------------------------------------
+    sys::print(b"     spawning document-model\n");
+    let (docmodel_proc, _docmodel_ch_handle, docmodel_ch_idx) =
+        match spawn_with_channel(DOCUMENT_MODEL_ELF, next_channel) {
+            Some(v) => v,
+            None => {
+                sys::print(b"init: failed to spawn document-model\n");
+                sys::exit();
+            }
+        };
+    // Share document buffer with A (read-write — A is sole content writer).
+    let docmodel_doc_va =
+        sys::memory_share(docmodel_proc, doc_pa, DOC_BUF_PAGES, false).unwrap_or_else(|_| {
+            sys::print(b"init: memory_share (docmodel doc) failed\n");
+            sys::exit();
+        });
+    // Share Content Region with A (read-write — A manages decoded images).
+    let docmodel_content_va = if content_pages > 0 {
+        sys::memory_share(docmodel_proc, content_pa_val, content_pages, false).unwrap_or_else(
+            |_| {
+                sys::print(b"init: memory_share (docmodel content) failed\n");
+                sys::exit();
+            },
+        ) as u64
+    } else {
+        0u64
+    };
+    // Send document-model config.
+    let docmodel_ch = init_channel(docmodel_ch_idx);
+    let docmodel_config = protocol::document_model::DocModelConfig {
+        doc_va: docmodel_doc_va as u64,
+        doc_capacity: DOC_BUF_CAPACITY,
+        content_va: docmodel_content_va,
+        content_size: content_size_val,
+        img_file_store_offset: png_offset,
+        img_file_store_length: png_len,
+        _pad: 0,
+    };
+    let dm_msg = unsafe {
+        ipc::Message::from_payload(
+            protocol::document_model::MSG_DOC_MODEL_CONFIG,
+            &docmodel_config,
+        )
+    };
+    docmodel_ch.send(&dm_msg);
+
+    // -----------------------------------------------------------------------
     // Phase 8: Cross-process channels.
     //
     // Core handle layout:
     //   handle 1 = first input (keyboard)
     //   handle 2 = core → render service (scene update)
-    //   handle 3 = core ↔ editor
-    //   handle 4+ = additional input devices
+    //   handle 3 = core ↔ editor (key forwarding, cursor sync)
+    //   handle 4 = core ↔ document-model (notifications, undo/redo)
+    //   handle 5+ = additional input devices
+    //
+    // Document-model (A) handle layout:
+    //   handle 1 = A ↔ editor (receives write operations)
+    //   handle 2 = A ↔ document service (persistence)
+    //   handle 3 = A ↔ decoder (image decode)
+    //   handle 4 = A ↔ core (notifications, undo/redo)
     // -----------------------------------------------------------------------
 
     // Input → Core channel (keyboard events).
@@ -679,7 +713,7 @@ fn setup_render_pipeline(
     });
 
     // -----------------------------------------------------------------------
-    // Phase 9: Core ↔ Editor channel.
+    // Phase 9: Core ↔ Editor + Editor ↔ A channels.
     // -----------------------------------------------------------------------
     sys::print(b"     spawning rich editor\n");
 
@@ -708,6 +742,7 @@ fn setup_render_pipeline(
 
     editor_ch.send(&msg);
 
+    // Core ↔ editor channel (key forwarding, cursor sync).
     sys::print(b"     creating core\xE2\x86\x94editor channel\n");
 
     let (ce_a, ce_b) = sys::channel_create().unwrap_or_else(|_| {
@@ -728,8 +763,30 @@ fn setup_render_pipeline(
         sys::exit();
     });
 
+    // Editor ↔ A channel (editor sends write operations to document-model).
+    sys::print(b"     creating editor\xE2\x86\x94document-model channel\n");
+
+    let (ea_a, ea_b) = sys::channel_create().unwrap_or_else(|_| {
+        sys::print(b"init: channel_create (editor-docmodel) failed\n");
+        sys::exit();
+    });
+
+    *next_channel += 1;
+
+    // Endpoint A → document-model (handle 1 = EDITOR_HANDLE in A).
+    sys::handle_send(docmodel_proc, ea_a.0).unwrap_or_else(|_| {
+        sys::print(b"init: handle_send (editor-docmodel A) failed\n");
+        sys::exit();
+    });
+    // Endpoint B → editor (handle 2 = DOCMODEL_HANDLE in editor).
+    sys::handle_send(editor_proc, ea_b.0).unwrap_or_else(|_| {
+        sys::print(b"init: handle_send (editor-docmodel B) failed\n");
+        sys::exit();
+    });
+
     // -----------------------------------------------------------------------
-    // Phase 9b: Core ↔ Decoder channel (handle 4 in core, handle 1 in decoder).
+    // Phase 9b: A ↔ Decoder channel (handle 3 in A, handle 1 in decoder).
+    // Decoder now talks to document-model (A) instead of core.
     // -----------------------------------------------------------------------
     let decoder_proc = if content_pages > 0 && file_store_pages > 0 {
         sys::print(b"     spawning png-decode\n");
@@ -762,22 +819,22 @@ fn setup_render_pipeline(
                 };
                 dec_ch.send(&dec_msg);
 
-                // Core ↔ decoder channel.
-                sys::print(b"     creating core\xE2\x86\x94decoder channel\n");
+                // A ↔ decoder channel (A manages image decode).
+                sys::print(b"     creating docmodel\xE2\x86\x94decoder channel\n");
                 let (dc_a, dc_b) = sys::channel_create().unwrap_or_else(|_| {
-                    sys::print(b"init: channel_create (core-decoder) failed\n");
+                    sys::print(b"init: channel_create (docmodel-decoder) failed\n");
                     sys::exit();
                 });
                 *next_channel += 1;
 
-                // Endpoint A → core (handle 4 = DECODER_HANDLE in core).
-                sys::handle_send(core_proc, dc_a.0).unwrap_or_else(|_| {
-                    sys::print(b"init: handle_send (core-decoder A) failed\n");
+                // Endpoint A → document-model (handle 3 = DECODER_HANDLE in A).
+                sys::handle_send(docmodel_proc, dc_a.0).unwrap_or_else(|_| {
+                    sys::print(b"init: handle_send (docmodel-decoder A) failed\n");
                     sys::exit();
                 });
                 // Endpoint B → decoder (handle 1 in decoder's table).
                 sys::handle_send(dec_proc, dc_b.0).unwrap_or_else(|_| {
-                    sys::print(b"init: handle_send (core-decoder B) failed\n");
+                    sys::print(b"init: handle_send (docmodel-decoder B) failed\n");
                     sys::exit();
                 });
 
@@ -793,22 +850,22 @@ fn setup_render_pipeline(
     };
 
     // -----------------------------------------------------------------------
-    // Phase 10: Core ↔ Document service channel.
+    // Phase 10: A ↔ Document service channel + A ↔ Core channel.
     //
-    // Core handle layout addition:
-    //   handle 5 = core ↔ document service
-    //   handle 6+ = additional input devices (shifted from 5+)
+    // Document service now talks to A (document-model) instead of core.
+    // A handle 2 = A ↔ document service
+    // Core handle 4 = core ↔ A (notifications, undo/redo)
     // -----------------------------------------------------------------------
     if let Some((fs_proc, fs_ch, fs_ch_idx, fs_pa, fs_irq)) = fs_info {
-        sys::print(b"     creating core\xE2\x86\x94document channel\n");
+        sys::print(b"     creating docmodel\xE2\x86\x94document channel\n");
 
         if fs_started {
             // Document service already running (started during font loading).
-            // Core↔doc channel was pre-created; endpoint B already sent to doc.
-            // Only send endpoint A to core (which is still unstarted).
+            // Channel was pre-created; endpoint B already sent to doc.
+            // Send endpoint A to document-model (A) instead of core.
             if let Some(ch_a) = doc_core_ch {
-                sys::handle_send(core_proc, ch_a.0).unwrap_or_else(|_| {
-                    sys::print(b"init: handle_send (core-doc A) failed\n");
+                sys::handle_send(docmodel_proc, ch_a.0).unwrap_or_else(|_| {
+                    sys::print(b"init: handle_send (docmodel-doc A) failed\n");
                     sys::exit();
                 });
             }
@@ -837,28 +894,47 @@ fn setup_render_pipeline(
             };
             fs_ch_obj.send(&doc_msg);
 
-            // Create core ↔ document service channel.
+            // Create A ↔ document service channel.
             let (cf_a, cf_b) = sys::channel_create().unwrap_or_else(|_| {
-                sys::print(b"init: channel_create (core-doc) failed\n");
+                sys::print(b"init: channel_create (docmodel-doc) failed\n");
                 sys::exit();
             });
             *next_channel += 1;
 
-            // Endpoint A → core (handle 5 = FS_HANDLE in core).
-            sys::handle_send(core_proc, cf_a.0).unwrap_or_else(|_| {
-                sys::print(b"init: handle_send (core-doc A) failed\n");
+            // Endpoint A → document-model (handle 2 = FS_HANDLE in A).
+            sys::handle_send(docmodel_proc, cf_a.0).unwrap_or_else(|_| {
+                sys::print(b"init: handle_send (docmodel-doc A) failed\n");
                 sys::exit();
             });
             // Endpoint B → document service (handle 1 in doc's table).
             sys::handle_send(fs_proc, cf_b.0).unwrap_or_else(|_| {
-                sys::print(b"init: handle_send (core-doc B) failed\n");
+                sys::print(b"init: handle_send (docmodel-doc B) failed\n");
                 sys::exit();
             });
         }
     }
 
-    // Additional input device channels → core handle 6+.
-    // Must come AFTER Phase 10 so that handle 5 = document service.
+    // A ↔ Core notification channel.
+    sys::print(b"     creating docmodel\xE2\x86\x94core channel\n");
+    let (ac_a, ac_b) = sys::channel_create().unwrap_or_else(|_| {
+        sys::print(b"init: channel_create (docmodel-core) failed\n");
+        sys::exit();
+    });
+    *next_channel += 1;
+
+    // Endpoint A → core (handle 4 = DOCMODEL_HANDLE in core).
+    sys::handle_send(core_proc, ac_a.0).unwrap_or_else(|_| {
+        sys::print(b"init: handle_send (docmodel-core A) failed\n");
+        sys::exit();
+    });
+    // Endpoint B → document-model (handle 4 = CORE_HANDLE in A).
+    sys::handle_send(docmodel_proc, ac_b.0).unwrap_or_else(|_| {
+        sys::print(b"init: handle_send (docmodel-core B) failed\n");
+        sys::exit();
+    });
+
+    // Additional input device channels → core handle 5+.
+    // Must come AFTER Phase 10 so that handle 4 = document-model.
     for i in 1..input_devices.len() {
         let (input_proc_handle, input_ch_idx, input_pa, input_irq) = input_devices[i];
 
@@ -907,10 +983,11 @@ fn setup_render_pipeline(
 
     // -----------------------------------------------------------------------
     // Phase 11: Start processes.
-    // Input drivers first, then decoder, then document service, then editor, then core.
-    // Render service is already running (started in Phase 4).
-    // Decoder must start before core (core sends decode request at boot).
-    // Document service must start before core (core may send commit at boot).
+    // Order: decoder → document service → input drivers → editor →
+    //        document-model → core.
+    // Document-model must start before core (A loads document, core waits).
+    // Decoder must start before A (A sends decode request at boot).
+    // Document service must start before A (A queries documents at boot).
     // -----------------------------------------------------------------------
     if let Some(dec_proc) = decoder_proc {
         sys::print(b"     starting png-decode\n");
@@ -937,6 +1014,12 @@ fn setup_render_pipeline(
     sys::print(b"     starting rich editor\n");
 
     start_process(editor_proc, b"editor");
+
+    sys::yield_now();
+
+    sys::print(b"     starting document-model\n");
+
+    start_process(docmodel_proc, b"document-model");
 
     sys::yield_now();
 

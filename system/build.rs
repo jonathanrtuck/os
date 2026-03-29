@@ -43,6 +43,7 @@ struct CargoLibOutput {
 /// ELFs that init embeds (must be a subset of PROGRAMS names).
 const INIT_EMBEDDED: &[(&str, &str)] = &[
     ("document", "DOCUMENT_ELF"),
+    ("document-model", "DOCUMENT_MODEL_ELF"),
     ("virtio-blk", "VIRTIO_BLK_ELF"),
     ("virtio-console", "VIRTIO_CONSOLE_ELF"),
     ("virtio-input", "VIRTIO_INPUT_ELF"),
@@ -72,6 +73,12 @@ const PROGRAMS: &[(&str, &str, bool, bool)] = &[
     ),
     ("virtio-input", "services/drivers/virtio-input", true, false),
     ("virtio-9p", "services/drivers/virtio-9p", true, false),
+    (
+        "document-model",
+        "services/document-model",
+        false,
+        false,
+    ),
     ("core", "services/core", false, true),
     ("cpu-render", "services/drivers/cpu-render", true, true),
     (
@@ -277,7 +284,7 @@ fn main() {
             externs.push(("piecetable", piecetable_rlib.clone()));
             externs.push(("icons", icons_rlib.clone()));
         }
-        if name == "rich-editor" {
+        if name == "rich-editor" || name == "document-model" {
             externs.push(("piecetable", piecetable_rlib.clone()));
         }
         if name == "document" {

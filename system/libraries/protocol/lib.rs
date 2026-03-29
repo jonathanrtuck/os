@@ -805,3 +805,129 @@ pub mod document;
 
 /// Decode protocol for content decoder services (PNG, JPEG, etc.).
 pub mod decode;
+
+// ── document_model: document model (A) protocol ─────────────────────
+
+/// Document model (A) protocol — init → A config, A ↔ core notifications.
+pub mod document_model {
+    // ── Config (init → A) ───────────────────────────────────────────
+
+    /// Config message sent by init to the document-model process.
+    pub const MSG_DOC_MODEL_CONFIG: u32 = 110;
+
+    /// Document-model process configuration.
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct DocModelConfig {
+        /// VA of the shared document buffer (read-write for A).
+        pub doc_va: u64,
+        /// Document buffer capacity (content area, excluding 64-byte header).
+        pub doc_capacity: u32,
+        /// VA of the Content Region (read-write for image decode allocation).
+        pub content_va: u64,
+        /// Content Region size in bytes.
+        pub content_size: u32,
+        /// Byte offset of the encoded image within the File Store.
+        pub img_file_store_offset: u32,
+        /// Byte length of the encoded image in the File Store.
+        pub img_file_store_length: u32,
+        pub _pad: u32,
+    }
+    const _: () = assert!(core::mem::size_of::<DocModelConfig>() <= 60);
+
+    // ── A → core notifications ──────────────────────────────────────
+
+    /// Initial document loaded during boot (A → core).
+    pub const MSG_DOC_LOADED: u32 = 111;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct DocLoaded {
+        /// Number of content bytes in the document buffer.
+        pub doc_len: u32,
+        /// Cursor position after load.
+        pub cursor_pos: u32,
+        /// FileId of the loaded document.
+        pub doc_file_id: u64,
+        /// Document format: 0 = Plain, 1 = Rich.
+        pub format: u8,
+        pub _pad: [u8; 3],
+    }
+    const _: () = assert!(core::mem::size_of::<DocLoaded>() <= 60);
+
+    /// Document buffer changed (A → core, after edit or undo/redo).
+    pub const MSG_DOC_CHANGED: u32 = 112;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct DocChanged {
+        /// New content length.
+        pub doc_len: u32,
+        /// New cursor position.
+        pub cursor_pos: u32,
+        /// Flags: bit 0 = clear_selection (after undo/redo).
+        pub flags: u8,
+        pub _pad: [u8; 3],
+    }
+    const _: () = assert!(core::mem::size_of::<DocChanged>() <= 60);
+
+    /// Flag: core should clear selection (used after undo/redo).
+    pub const DOC_CHANGED_CLEAR_SELECTION: u8 = 1;
+
+    // ── Core → A requests ───────────────────────────────────────────
+
+    /// Undo request (core → A).
+    pub const MSG_UNDO_REQUEST: u32 = 113;
+
+    /// Redo request (core → A).
+    pub const MSG_REDO_REQUEST: u32 = 114;
+
+    // ── Image decode complete (A → core) ────────────────────────────
+
+    /// Image decoded and registered in Content Region (A → core).
+    pub const MSG_IMAGE_DECODED: u32 = 115;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct ImageDecoded {
+        /// Content ID in the Content Region registry.
+        pub content_id: u32,
+        /// Image width in pixels.
+        pub width: u16,
+        /// Image height in pixels.
+        pub height: u16,
+    }
+    const _: () = assert!(core::mem::size_of::<ImageDecoded>() <= 60);
+
+    // ── Decode ──────────────────────────────────────────────────────
+
+    #[derive(Clone, Copy, Debug)]
+    pub enum Message {
+        DocModelConfig(DocModelConfig),
+        DocLoaded(DocLoaded),
+        DocChanged(DocChanged),
+        UndoRequest,
+        RedoRequest,
+        ImageDecoded(ImageDecoded),
+    }
+
+    pub fn decode(msg_type: u32, payload: &[u8; crate::PAYLOAD_SIZE]) -> Option<Message> {
+        match msg_type {
+            MSG_DOC_MODEL_CONFIG => Some(Message::DocModelConfig(unsafe {
+                crate::decode_payload(payload)
+            })),
+            MSG_DOC_LOADED => Some(Message::DocLoaded(unsafe {
+                crate::decode_payload(payload)
+            })),
+            MSG_DOC_CHANGED => Some(Message::DocChanged(unsafe {
+                crate::decode_payload(payload)
+            })),
+            MSG_UNDO_REQUEST => Some(Message::UndoRequest),
+            MSG_REDO_REQUEST => Some(Message::RedoRequest),
+            MSG_IMAGE_DECODED => Some(Message::ImageDecoded(unsafe {
+                crate::decode_payload(payload)
+            })),
+            _ => None,
+        }
+    }
+}

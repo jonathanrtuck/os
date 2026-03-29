@@ -11,21 +11,10 @@ use protocol::{
 
 use super::{
     clamp_f32, content_text_layout,
-    documents::{doc_content, doc_delete_range, doc_write_header},
+    documents::{doc_content, doc_write_header},
     EDITOR_HANDLE, KEY_1, KEY_2, KEY_A, KEY_B, KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END,
     KEY_HOME, KEY_I, KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_TAB, KEY_UP,
 };
-
-/// Delete a byte range using the correct path for the current document format.
-/// Rich text documents route through the piece table; plain text through the flat buffer.
-fn delete_range_for_format(start: usize, end: usize) -> bool {
-    let s = super::state();
-    if s.doc_format == super::DocumentFormat::Rich {
-        super::documents::rich_delete_range(start, end)
-    } else {
-        doc_delete_range(start, end)
-    }
-}
 
 pub(crate) struct KeyAction {
     pub(crate) changed: bool,
@@ -33,6 +22,16 @@ pub(crate) struct KeyAction {
     pub(crate) selection_changed: bool,
     pub(crate) context_switched: bool,
     pub(crate) consumed: bool,
+    /// Pending delete range to forward to document-model (A).
+    /// Set when a selection-delete or word-delete needs A to apply.
+    pub(crate) pending_delete: Option<(u32, u32)>,
+}
+
+impl KeyAction {
+    /// Create a new KeyAction with the given flags and no pending delete.
+    pub(crate) fn new(changed: bool, text_changed: bool, selection_changed: bool, context_switched: bool, consumed: bool) -> Self {
+        Self { changed, text_changed, selection_changed, context_switched, consumed, pending_delete: None }
+    }
 }
 
 // ── Navigation helpers ─────────────────────────────────────────────
@@ -165,6 +164,7 @@ pub(crate) fn process_key_event(
         selection_changed: false,
         context_switched: false,
         consumed: true,
+        pending_delete: None,
     };
 
     // Ignore modifier-only key events (tracked by input driver).
@@ -202,6 +202,7 @@ pub(crate) fn process_key_event(
                 selection_changed: false,
                 context_switched: true,
                 consumed: true,
+                pending_delete: None,
             };
         }
         return no_change;
@@ -287,6 +288,7 @@ pub(crate) fn process_key_event(
                 selection_changed: true,
                 context_switched: false,
                 consumed: true,
+                pending_delete: None,
             }
         }};
     }
@@ -310,6 +312,7 @@ pub(crate) fn process_key_event(
                 selection_changed: true,
                 context_switched: false,
                 consumed: true,
+                pending_delete: None,
             }
         }
 
@@ -337,6 +340,7 @@ pub(crate) fn process_key_event(
                 text_changed: true,
                 selection_changed: false,
                 context_switched: false,
+                pending_delete: None,
                 consumed: true,
             }
         }
@@ -365,6 +369,7 @@ pub(crate) fn process_key_event(
                 changed: true,
                 text_changed: true,
                 selection_changed: false,
+                pending_delete: None,
                 context_switched: false,
                 consumed: true,
             }
@@ -392,6 +397,7 @@ pub(crate) fn process_key_event(
             KeyAction {
                 changed: true,
                 text_changed: true,
+                pending_delete: None,
                 selection_changed: false,
                 context_switched: false,
                 consumed: true,
@@ -419,6 +425,7 @@ pub(crate) fn process_key_event(
             }
             KeyAction {
                 changed: true,
+                pending_delete: None,
                 text_changed: true,
                 selection_changed: false,
                 context_switched: false,
@@ -462,6 +469,7 @@ pub(crate) fn process_key_event(
                     selection_changed: true,
                     context_switched: false,
                     consumed: true,
+                pending_delete: None,
                 };
             } else if s.cursor_pos > 0 {
                 // Move back one character (UTF-8 aware for rich text).
@@ -514,6 +522,7 @@ pub(crate) fn process_key_event(
                     selection_changed: true,
                     context_switched: false,
                     consumed: true,
+                pending_delete: None,
                 };
             } else if s.cursor_pos < len {
                 // Move forward one character (UTF-8 aware for rich text).
@@ -760,30 +769,28 @@ pub(crate) fn process_key_event(
         KEY_BACKSPACE => {
             let s = super::state();
             if s.has_selection {
-                // Selection-delete: core handles directly.
+                // Selection-delete: send to A via pending_delete.
                 let lo = s.sel_start;
                 let hi = s.sel_end;
                 clear_selection();
-                if delete_range_for_format(lo, hi) {
-                    super::state().cursor_pos = lo;
-                    doc_write_header();
-                    sync_cursor_to_editor(editor_ch);
-                    let _ = sys::channel_signal(EDITOR_HANDLE);
-                    return KeyAction {
-                        changed: true,
-                        text_changed: true,
-                        selection_changed: true,
-                        context_switched: false,
-                        consumed: true,
-                    };
-                }
-                return no_change;
+                super::state().cursor_pos = lo;
+                doc_write_header();
+                sync_cursor_to_editor(editor_ch);
+                let _ = sys::channel_signal(EDITOR_HANDLE);
+                return KeyAction {
+                    changed: true,
+                    text_changed: false, // A will notify when buffer changes
+                    selection_changed: true,
+                    context_switched: false,
+                    consumed: true,
+                    pending_delete: Some((lo as u32, hi as u32)),
+                };
             }
             if alt {
-                // Opt+Backspace: word-delete backward.
+                // Opt+Backspace: word-delete backward → send to A.
                 let cursor = super::state().cursor_pos;
                 let boundary = word_boundary_backward(text, cursor);
-                if boundary < cursor && delete_range_for_format(boundary, cursor) {
+                if boundary < cursor {
                     super::state().cursor_pos = boundary;
                     super::state().goal_column = None;
                     super::state().goal_x = None;
@@ -792,10 +799,11 @@ pub(crate) fn process_key_event(
                     let _ = sys::channel_signal(EDITOR_HANDLE);
                     return KeyAction {
                         changed: true,
-                        text_changed: true,
+                        text_changed: false,
                         selection_changed: false,
                         context_switched: false,
                         consumed: true,
+                        pending_delete: Some((boundary as u32, cursor as u32)),
                     };
                 }
                 return no_change;
@@ -809,30 +817,28 @@ pub(crate) fn process_key_event(
         KEY_DELETE => {
             let s = super::state();
             if s.has_selection {
-                // Selection-delete: core handles directly.
+                // Selection-delete: send to A via pending_delete.
                 let lo = s.sel_start;
                 let hi = s.sel_end;
                 clear_selection();
-                if delete_range_for_format(lo, hi) {
-                    super::state().cursor_pos = lo;
-                    doc_write_header();
-                    sync_cursor_to_editor(editor_ch);
-                    let _ = sys::channel_signal(EDITOR_HANDLE);
-                    return KeyAction {
-                        changed: true,
-                        text_changed: true,
-                        selection_changed: true,
-                        context_switched: false,
-                        consumed: true,
-                    };
-                }
-                return no_change;
+                super::state().cursor_pos = lo;
+                doc_write_header();
+                sync_cursor_to_editor(editor_ch);
+                let _ = sys::channel_signal(EDITOR_HANDLE);
+                return KeyAction {
+                    changed: true,
+                    text_changed: false,
+                    selection_changed: true,
+                    context_switched: false,
+                    consumed: true,
+                    pending_delete: Some((lo as u32, hi as u32)),
+                };
             }
             if alt {
-                // Opt+Delete: word-delete forward.
+                // Opt+Delete: word-delete forward → send to A.
                 let cursor = super::state().cursor_pos;
                 let boundary = word_boundary_forward(text, cursor);
-                if boundary > cursor && delete_range_for_format(cursor, boundary) {
+                if boundary > cursor {
                     super::state().goal_column = None;
                     super::state().goal_x = None;
                     doc_write_header();
@@ -840,10 +846,11 @@ pub(crate) fn process_key_event(
                     let _ = sys::channel_signal(EDITOR_HANDLE);
                     return KeyAction {
                         changed: true,
-                        text_changed: true,
+                        text_changed: false,
                         selection_changed: false,
                         context_switched: false,
                         consumed: true,
+                        pending_delete: Some((cursor as u32, boundary as u32)),
                     };
                 }
                 return no_change;
@@ -862,20 +869,19 @@ pub(crate) fn process_key_event(
                 let lo = s.sel_start;
                 let hi = s.sel_end;
                 clear_selection();
-                if delete_range_for_format(lo, hi) {
-                    super::state().cursor_pos = lo;
-                    doc_write_header();
-                    sync_cursor_to_editor(editor_ch);
-                    // Now forward the key so editor inserts at the new cursor.
-                    forward_key_to_editor(key, editor_ch);
-                    return KeyAction {
-                        changed: true,
-                        text_changed: true,
-                        selection_changed: true,
-                        context_switched: false,
-                        consumed: true,
-                    };
-                }
+                super::state().cursor_pos = lo;
+                doc_write_header();
+                sync_cursor_to_editor(editor_ch);
+                // Now forward the key so editor inserts at the new cursor.
+                forward_key_to_editor(key, editor_ch);
+                return KeyAction {
+                    changed: true,
+                    text_changed: false,
+                    selection_changed: true,
+                    context_switched: false,
+                    consumed: true,
+                    pending_delete: Some((lo as u32, hi as u32)),
+                };
             }
 
             super::state().goal_column = None;
@@ -892,6 +898,7 @@ pub(crate) fn process_key_event(
                 selection_changed: false,
                 context_switched: false,
                 consumed: false,
+                pending_delete: None,
             }
         }
     }

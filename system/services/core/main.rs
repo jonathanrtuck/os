@@ -50,21 +50,17 @@ mod scene_state;
 mod typography;
 
 use protocol::{
-    compose::{self, ImageConfig, RtcConfig, MSG_IMAGE_CONFIG, MSG_RTC_CONFIG},
+    compose::{self, RtcConfig, MSG_RTC_CONFIG},
     core_config::{
         self, CoreConfig, FrameRateMsg, MSG_CORE_CONFIG, MSG_FRAME_RATE, MSG_SCENE_UPDATED,
     },
-    document::{
-        DocCommit, DocCreate, DocCreateResult, DocDeleteSnapshot, DocQuery, DocQueryResult,
-        DocRead, DocReadDone, DocRestore, DocSnapshot, DocSnapshotResult, MSG_DOC_COMMIT,
-        MSG_DOC_CREATE, MSG_DOC_CREATE_RESULT, MSG_DOC_DELETE_SNAPSHOT, MSG_DOC_QUERY,
-        MSG_DOC_QUERY_RESULT, MSG_DOC_READ, MSG_DOC_READ_DONE, MSG_DOC_RESTORE,
-        MSG_DOC_RESTORE_RESULT, MSG_DOC_SNAPSHOT, MSG_DOC_SNAPSHOT_RESULT,
+    document_model::{
+        self as docmodel_proto, DocChanged, DocLoaded, ImageDecoded, MSG_DOC_CHANGED,
+        MSG_DOC_LOADED, MSG_IMAGE_DECODED, MSG_REDO_REQUEST, MSG_UNDO_REQUEST,
+        DOC_CHANGED_CLEAR_SELECTION,
     },
     edit::{
-        self, CursorMove, SelectionUpdate, WriteDelete, WriteDeleteRange, WriteInsert,
-        MSG_CURSOR_MOVE, MSG_SELECTION_UPDATE, MSG_SET_CURSOR, MSG_STYLE_APPLY,
-        MSG_STYLE_SET_CURRENT, MSG_WRITE_DELETE, MSG_WRITE_DELETE_RANGE, MSG_WRITE_INSERT,
+        self, CursorMove, SelectionUpdate, MSG_CURSOR_MOVE, MSG_SELECTION_UPDATE, MSG_SET_CURSOR,
     },
     input::{self, KeyEvent, PointerButton, MSG_KEY_EVENT, MSG_POINTER_BUTTON},
 };
@@ -164,13 +160,12 @@ const BOOT_TIMEOUT_NS: u64 = 5_000_000_000;
 const SPINNER_ANGLE_DELTA: f32 = 0.0873;
 
 const COMPOSITOR_HANDLE: sys::ChannelHandle = sys::ChannelHandle(2);
-const DECODER_HANDLE: sys::ChannelHandle = sys::ChannelHandle(4);
+const DOCMODEL_HANDLE: sys::ChannelHandle = sys::ChannelHandle(4);
 pub(crate) const DOC_HEADER_SIZE: usize = 64;
 const EDITOR_HANDLE: sys::ChannelHandle = sys::ChannelHandle(3);
 const FONT_SIZE: u32 = 18;
-const FS_HANDLE: sys::ChannelHandle = sys::ChannelHandle(5);
 const INPUT_HANDLE: sys::ChannelHandle = sys::ChannelHandle(1);
-const INPUT2_HANDLE: sys::ChannelHandle = sys::ChannelHandle(6);
+const INPUT2_HANDLE: sys::ChannelHandle = sys::ChannelHandle(5);
 // Keycodes (Linux evdev).
 const KEY_BACKSPACE: u16 = 14;
 const KEY_TAB: u16 = 15;
@@ -197,84 +192,7 @@ const TEXT_INSET_TOP: u32 = TITLE_BAR_H + SHADOW_DEPTH + 8;
 const TEXT_INSET_X: u32 = 12;
 const TITLE_BAR_H: u32 = 36;
 
-/// Undo/redo state: fixed-size ring of COW snapshot IDs.
-///
-/// `snapshots[0..count]` are valid snapshot IDs in chronological order.
-/// `position` is the index of the snapshot matching the current document state.
-/// Undo decrements position and restores; redo increments and restores.
-/// Editing after undo truncates redo history, then pushes a new snapshot.
-struct UndoState {
-    snapshots: [u64; MAX_UNDO],
-    count: usize,
-    position: usize,
-}
-
-impl UndoState {
-    const fn new() -> Self {
-        Self {
-            snapshots: [0; MAX_UNDO],
-            count: 0,
-            position: 0,
-        }
-    }
-
-    /// Record the initial document state (called once at boot).
-    fn set_initial(&mut self, snap_id: u64) {
-        self.snapshots[0] = snap_id;
-        self.count = 1;
-        self.position = 0;
-    }
-
-    /// Push a new snapshot after an edit. Truncates any redo history.
-    /// Returns the number of discarded snapshot IDs written to `discarded`.
-    fn push(&mut self, snap_id: u64, discarded: &mut [u64; MAX_UNDO]) -> usize {
-        let mut n = 0;
-
-        // Collect redo history being truncated.
-        for i in (self.position + 1)..self.count {
-            discarded[n] = self.snapshots[i];
-            n += 1;
-        }
-        self.count = self.position + 1;
-
-        if self.count >= MAX_UNDO {
-            // Array full — oldest snapshot evicted.
-            discarded[n] = self.snapshots[0];
-            n += 1;
-            let dst = &mut self.snapshots;
-            for i in 0..MAX_UNDO - 1 {
-                dst[i] = dst[i + 1];
-            }
-            self.count -= 1;
-            self.position -= 1;
-        }
-
-        self.snapshots[self.count] = snap_id;
-        self.count += 1;
-        self.position = self.count - 1;
-        n
-    }
-
-    /// Undo: return the snapshot ID to restore, or None if at oldest.
-    fn undo(&mut self) -> Option<u64> {
-        if self.position > 0 {
-            self.position -= 1;
-            Some(self.snapshots[self.position])
-        } else {
-            None
-        }
-    }
-
-    /// Redo: return the snapshot ID to restore, or None if at newest.
-    fn redo(&mut self) -> Option<u64> {
-        if self.count > 0 && self.position < self.count - 1 {
-            self.position += 1;
-            Some(self.snapshots[self.position])
-        } else {
-            None
-        }
-    }
-}
+// Undo/redo state is now managed by the document-model (A) service.
 
 pub(crate) struct CoreState {
     pub(crate) blink_phase: blink::BlinkPhase,
@@ -1329,46 +1247,15 @@ pub extern "C" fn _start() -> ! {
         unsafe { ipc::Channel::from_base(protocol::channel_shm_va(2), ipc::PAGE_SIZE, 0) };
     let editor_ch =
         unsafe { ipc::Channel::from_base(protocol::channel_shm_va(3), ipc::PAGE_SIZE, 0) };
-    let decoder_ch = unsafe {
+    let docmodel_ch = unsafe {
         ipc::Channel::from_base(
-            protocol::channel_shm_va(DECODER_HANDLE.0 as usize),
+            protocol::channel_shm_va(DOCMODEL_HANDLE.0 as usize),
             ipc::PAGE_SIZE,
-            0,
-        )
-    };
-    let fs_ch = unsafe {
-        ipc::Channel::from_base(
-            protocol::channel_shm_va(FS_HANDLE.0 as usize),
-            ipc::PAGE_SIZE,
-            0,
+            1,
         )
     };
 
     // ── Read remaining init channel messages (fast, already queued) ──
-
-    // Image config — save for async decode, don't block.
-    let mut boot = BootState {
-        spinner_angle: 0.0,
-        decode_phase: DecodePhase::None,
-        doc_phase: DocPhase::QueryRich,
-        image_ready: true, // default: no image to decode
-        doc_ready: false,
-        undo_ready: false,
-        img_file_store_offset: 0,
-        img_file_store_length: 0,
-    };
-
-    if let Some(compose::Message::ImageConfig(img_config)) = init_ch
-        .try_recv(&mut msg)
-        .then(|| compose::decode(msg.msg_type, &msg.payload))
-        .flatten()
-    {
-        if img_config.file_store_length > 0 {
-            boot.img_file_store_offset = img_config.file_store_offset;
-            boot.img_file_store_length = img_config.file_store_length;
-            boot.image_ready = false;
-        }
-    }
 
     // RTC config — fast, synchronous (already on init channel).
     if let Some(compose::Message::RtcConfig(rtc_config)) = init_ch
@@ -1409,51 +1296,14 @@ pub extern "C" fn _start() -> ! {
     let _ = sys::channel_signal(COMPOSITOR_HANDLE);
     sys::print(b"     loading scene published\n");
 
-    // ── Send async init requests (non-blocking) ─────────────────────
-
-    // PNG decode: send header-only query.
-    if !boot.image_ready {
-        let hdr_req = protocol::decode::DecodeRequest {
-            file_offset: boot.img_file_store_offset,
-            file_length: boot.img_file_store_length,
-            content_offset: 0,
-            max_output: 0,
-            request_id: 1,
-            flags: protocol::decode::DECODE_FLAG_HEADER_ONLY,
-        };
-        // SAFETY: DecodeRequest is repr(C) and fits in 60-byte payload.
-        let req_msg =
-            unsafe { ipc::Message::from_payload(protocol::decode::MSG_DECODE_REQUEST, &hdr_req) };
-        decoder_ch.send(&req_msg);
-        let _ = sys::channel_signal(DECODER_HANDLE);
-        boot.decode_phase = DecodePhase::AwaitingHeader;
-    }
-
-    // Document: send query for text/rich.
-    {
-        let media = b"text/rich";
-        let mut query_payload = DocQuery {
-            query_type: 0,
-            data_len: media.len() as u32,
-            data: [0u8; 48],
-        };
-        query_payload.data[..media.len()].copy_from_slice(media);
-        // SAFETY: DocQuery is repr(C) and fits in 60-byte payload.
-        let query_msg = unsafe { ipc::Message::from_payload(MSG_DOC_QUERY, &query_payload) };
-        fs_ch.send(&query_msg);
-        let _ = sys::channel_signal(FS_HANDLE);
-        boot.doc_phase = DocPhase::QueryRich;
-    }
-
     // ── Create animation timer ──────────────────────────────────────
     let mut anim_timer = sys::timer_create(frame_interval_ns).unwrap_or(sys::TimerHandle(255));
 
     // ── Boot animation loop ─────────────────────────────────────────
     //
-    // Multiplex timer ticks (spinner animation) with async init replies
-    // (decoder, document service). Exits when all init completes or
-    // boot timeout expires.
-    let mut undo_state = UndoState::new();
+    // Wait for document-model (A) to load the document and signal us.
+    // Animate spinner while waiting. A handles document queries, reads,
+    // image decode, and initial undo snapshot.
     let boot_start = sys::counter();
     let boot_timeout_ticks = if state().counter_freq > 0 {
         BOOT_TIMEOUT_NS as u128 * state().counter_freq as u128 / 1_000_000_000
@@ -1461,309 +1311,64 @@ pub extern "C" fn _start() -> ! {
         u128::MAX
     } as u64;
 
+    let mut boot_doc_loaded = false;
+    let mut boot_spinner_angle: f32 = 0.0;
+
     loop {
-        // Wait on animation timer + async reply channels.
-        let mut wait_handles = alloc::vec![anim_timer.0, FS_HANDLE.0];
-        if !boot.image_ready {
-            wait_handles.push(DECODER_HANDLE.0);
-        }
-        let _ = sys::wait(&wait_handles, frame_interval_ns);
+        let _ = sys::wait(&[anim_timer.0, DOCMODEL_HANDLE.0], frame_interval_ns);
 
         // ── Timer tick: rotate spinner ──────────────────────────────
         if let Ok(_) = sys::wait(&[anim_timer.0], 0) {
             let _ = sys::handle_close(anim_timer.0);
-            boot.spinner_angle += SPINNER_ANGLE_DELTA;
-            scene.update_spinner(boot.spinner_angle);
+            boot_spinner_angle += SPINNER_ANGLE_DELTA;
+            scene.update_spinner(boot_spinner_angle);
             compositor_ch.send(&scene_msg);
             let _ = sys::channel_signal(COMPOSITOR_HANDLE);
-            // Recreate one-shot timer.
             anim_timer = sys::timer_create(frame_interval_ns).unwrap_or(sys::TimerHandle(255));
         }
 
-        // ── Decoder replies ─────────────────────────────────────────
-        while !boot.image_ready && decoder_ch.try_recv(&mut msg) {
-            if let Some(protocol::decode::Message::Response(resp)) =
-                protocol::decode::decode(msg.msg_type, &msg.payload)
-            {
-                match boot.decode_phase {
-                    DecodePhase::AwaitingHeader => {
-                        if resp.status == protocol::decode::DecodeStatus::HeaderOk as u8
-                            && resp.width > 0
-                            && resp.height > 0
-                        {
-                            let pixel_bytes = resp.width as u32 * resp.height as u32 * 4;
-                            let s = state();
-                            if let Some(alloc_offset) = s.content_alloc.allocate(pixel_bytes) {
-                                // Send full decode request.
-                                let dec_req = protocol::decode::DecodeRequest {
-                                    file_offset: boot.img_file_store_offset,
-                                    file_length: boot.img_file_store_length,
-                                    content_offset: alloc_offset,
-                                    max_output: pixel_bytes,
-                                    request_id: 2,
-                                    flags: 0,
-                                };
-                                let req_msg = unsafe {
-                                    ipc::Message::from_payload(
-                                        protocol::decode::MSG_DECODE_REQUEST,
-                                        &dec_req,
-                                    )
-                                };
-                                decoder_ch.send(&req_msg);
-                                let _ = sys::channel_signal(DECODER_HANDLE);
-                                boot.decode_phase = DecodePhase::AwaitingDecode {
-                                    alloc_offset,
-                                    pixel_bytes,
-                                };
-                            } else {
-                                boot.image_ready = true;
-                                boot.decode_phase = DecodePhase::Done;
-                            }
+        // ── Document-model notifications ────────────────────────────
+        while docmodel_ch.try_recv(&mut msg) {
+            match msg.msg_type {
+                MSG_DOC_LOADED => {
+                    if let Some(docmodel_proto::Message::DocLoaded(loaded)) =
+                        docmodel_proto::decode(msg.msg_type, &msg.payload)
+                    {
+                        let s = state();
+                        s.doc_file_id = loaded.doc_file_id;
+                        s.doc_len = loaded.doc_len as usize;
+                        s.cursor_pos = loaded.cursor_pos as usize;
+                        s.doc_format = if loaded.format == 1 {
+                            DocumentFormat::Rich
                         } else {
-                            boot.image_ready = true;
-                            boot.decode_phase = DecodePhase::Done;
-                        }
+                            DocumentFormat::Plain
+                        };
+                        sys::print(b"     document loaded via A\n");
+                        boot_doc_loaded = true;
                     }
-                    DecodePhase::AwaitingDecode {
-                        alloc_offset,
-                        pixel_bytes,
-                    } => {
-                        if resp.status == protocol::decode::DecodeStatus::Ok as u8 {
-                            // Register decoded image in Content Region.
-                            let s = state();
-                            // SAFETY: content_va is mapped read-write.
-                            let header = unsafe {
-                                &mut *(s.content_va as *mut protocol::content::ContentRegionHeader)
-                            };
-                            let entry_idx = header.entry_count as usize;
-                            if entry_idx < protocol::content::MAX_CONTENT_ENTRIES {
-                                let content_id = protocol::content::CONTENT_ID_DYNAMIC_START;
-                                header.entries[entry_idx] = protocol::content::ContentEntry {
-                                    content_id,
-                                    offset: alloc_offset,
-                                    length: resp.bytes_written,
-                                    class: protocol::content::ContentClass::Pixels as u8,
-                                    _pad: [0; 3],
-                                    width: resp.width as u16,
-                                    height: resp.height as u16,
-                                    generation: s.scene_generation,
-                                };
-                                header.entry_count += 1;
-                                s.image_content_id = content_id;
-                                s.image_width = resp.width as u16;
-                                s.image_height = resp.height as u16;
-                                sys::print(b"     PNG decoded into Content Region\n");
-                            }
-                        } else {
-                            state().content_alloc.free(alloc_offset, pixel_bytes);
-                            sys::print(b"     PNG decode failed\n");
-                        }
-                        boot.image_ready = true;
-                        boot.decode_phase = DecodePhase::Done;
-                    }
-                    _ => {}
                 }
+                MSG_IMAGE_DECODED => {
+                    if let Some(docmodel_proto::Message::ImageDecoded(img)) =
+                        docmodel_proto::decode(msg.msg_type, &msg.payload)
+                    {
+                        let s = state();
+                        s.image_content_id = img.content_id;
+                        s.image_width = img.width;
+                        s.image_height = img.height;
+                        sys::print(b"     image decoded via A\n");
+                    }
+                }
+                _ => {}
             }
         }
 
-        // ── Document service replies ────────────────────────────────
-        while fs_ch.try_recv(&mut msg) {
-            match boot.doc_phase {
-                DocPhase::QueryRich => {
-                    if let Some(protocol::document::Message::DocQueryResult(result)) =
-                        protocol::document::decode(msg.msg_type, &msg.payload)
-                    {
-                        if result.count > 0 {
-                            // Found text/rich — send read request.
-                            let s = state();
-                            let read_payload = DocRead {
-                                file_id: result.file_ids[0],
-                                target_va: 0,
-                                capacity: s.doc_capacity as u32,
-                                _pad: 0,
-                            };
-                            let read_msg =
-                                unsafe { ipc::Message::from_payload(MSG_DOC_READ, &read_payload) };
-                            fs_ch.send(&read_msg);
-                            let _ = sys::channel_signal(FS_HANDLE);
-                            boot.doc_phase = DocPhase::Reading {
-                                file_id: result.file_ids[0],
-                                detected_format: DocumentFormat::Rich,
-                            };
-                        } else {
-                            // Not found — try text/plain.
-                            let media = b"text/plain";
-                            let mut query_payload = DocQuery {
-                                query_type: 0,
-                                data_len: media.len() as u32,
-                                data: [0u8; 48],
-                            };
-                            query_payload.data[..media.len()].copy_from_slice(media);
-                            let query_msg = unsafe {
-                                ipc::Message::from_payload(MSG_DOC_QUERY, &query_payload)
-                            };
-                            fs_ch.send(&query_msg);
-                            let _ = sys::channel_signal(FS_HANDLE);
-                            boot.doc_phase = DocPhase::QueryPlain;
-                        }
-                    }
-                }
-                DocPhase::QueryPlain => {
-                    if let Some(protocol::document::Message::DocQueryResult(result)) =
-                        protocol::document::decode(msg.msg_type, &msg.payload)
-                    {
-                        if result.count > 0 {
-                            // Found text/plain — send read request.
-                            let s = state();
-                            let read_payload = DocRead {
-                                file_id: result.file_ids[0],
-                                target_va: 0,
-                                capacity: s.doc_capacity as u32,
-                                _pad: 0,
-                            };
-                            let read_msg =
-                                unsafe { ipc::Message::from_payload(MSG_DOC_READ, &read_payload) };
-                            fs_ch.send(&read_msg);
-                            let _ = sys::channel_signal(FS_HANDLE);
-                            boot.doc_phase = DocPhase::Reading {
-                                file_id: result.file_ids[0],
-                                detected_format: DocumentFormat::Plain,
-                            };
-                        } else {
-                            // Neither found — create text/plain.
-                            sys::print(b"     creating new text document\n");
-                            let media = b"text/plain";
-                            let mut create_payload = DocCreate {
-                                media_type_len: media.len() as u32,
-                                _pad: 0,
-                                media_type: [0u8; 52],
-                            };
-                            create_payload.media_type[..media.len()].copy_from_slice(media);
-                            let create_msg = unsafe {
-                                ipc::Message::from_payload(MSG_DOC_CREATE, &create_payload)
-                            };
-                            fs_ch.send(&create_msg);
-                            let _ = sys::channel_signal(FS_HANDLE);
-                            boot.doc_phase = DocPhase::Creating;
-                        }
-                    }
-                }
-                DocPhase::Reading {
-                    file_id,
-                    detected_format,
-                } => {
-                    if let Some(protocol::document::Message::DocReadDone(done)) =
-                        protocol::document::decode(msg.msg_type, &msg.payload)
-                    {
-                        if done.status == 0 && done.len > 0 {
-                            let s = state();
-                            s.doc_file_id = file_id;
-                            // SAFETY: doc_buf valid, done.len <= capacity.
-                            let content_start = unsafe {
-                                core::slice::from_raw_parts(
-                                    s.doc_buf.add(DOC_HEADER_SIZE),
-                                    done.len as usize,
-                                )
-                            };
-                            if detected_format == DocumentFormat::Rich
-                                && done.len >= 64
-                                && piecetable::validate(content_start)
-                            {
-                                s.doc_format = DocumentFormat::Rich;
-                                s.doc_len = done.len as usize;
-                                s.cursor_pos =
-                                    piecetable::cursor_pos(documents::rich_buf_ref()) as usize;
-                                documents::doc_write_header();
-                                sys::print(b"     rich text document loaded\n");
-                            } else {
-                                s.doc_format = DocumentFormat::Plain;
-                                s.doc_len = done.len as usize;
-                                documents::doc_write_header();
-                                sys::print(b"     plain text document loaded\n");
-                            }
-                        } else {
-                            state().doc_file_id = file_id;
-                            state().doc_format = detected_format;
-                        }
-                    }
-                    boot.doc_ready = true;
-                    // Send undo snapshot request.
-                    if state().doc_file_id != 0 {
-                        let snap_payload = DocSnapshot {
-                            file_count: 1,
-                            _pad: 0,
-                            file_ids: [state().doc_file_id, 0, 0, 0, 0, 0],
-                        };
-                        let snap_msg =
-                            unsafe { ipc::Message::from_payload(MSG_DOC_SNAPSHOT, &snap_payload) };
-                        fs_ch.send(&snap_msg);
-                        let _ = sys::channel_signal(FS_HANDLE);
-                        boot.doc_phase = DocPhase::AwaitingUndo;
-                    } else {
-                        boot.undo_ready = true;
-                        boot.doc_phase = DocPhase::Done;
-                    }
-                }
-                DocPhase::Creating => {
-                    if let Some(protocol::document::Message::DocCreateResult(result)) =
-                        protocol::document::decode(msg.msg_type, &msg.payload)
-                    {
-                        if result.status == 0 {
-                            state().doc_file_id = result.file_id;
-                            state().doc_format = DocumentFormat::Plain;
-                            sys::print(b"     text document created\n");
-                        } else {
-                            sys::print(b"     warning: document create failed\n");
-                        }
-                    }
-                    boot.doc_ready = true;
-                    // Send undo snapshot for newly created document.
-                    if state().doc_file_id != 0 {
-                        let snap_payload = DocSnapshot {
-                            file_count: 1,
-                            _pad: 0,
-                            file_ids: [state().doc_file_id, 0, 0, 0, 0, 0],
-                        };
-                        let snap_msg =
-                            unsafe { ipc::Message::from_payload(MSG_DOC_SNAPSHOT, &snap_payload) };
-                        fs_ch.send(&snap_msg);
-                        let _ = sys::channel_signal(FS_HANDLE);
-                        boot.doc_phase = DocPhase::AwaitingUndo;
-                    } else {
-                        boot.undo_ready = true;
-                        boot.doc_phase = DocPhase::Done;
-                    }
-                }
-                DocPhase::AwaitingUndo => {
-                    if let Some(protocol::document::Message::DocSnapshotResult(result)) =
-                        protocol::document::decode(msg.msg_type, &msg.payload)
-                    {
-                        if result.status == 0 {
-                            undo_state.set_initial(result.snapshot_id);
-                            sys::print(b"     initial undo snapshot taken\n");
-                        }
-                    }
-                    boot.undo_ready = true;
-                    boot.doc_phase = DocPhase::Done;
-                }
-                DocPhase::Done => {
-                    // Spurious message after completion — discard.
-                }
-            }
-        }
-
-        // ── Check completion ────────────────────────────────────────
-        if boot.all_ready() {
+        if boot_doc_loaded {
             sys::print(b"     boot init complete\n");
             break;
         }
 
-        // ── Boot timeout ────────────────────────────────────────────
         if sys::counter() - boot_start > boot_timeout_ticks {
             sys::print(b"     boot timeout - proceeding with available data\n");
-            boot.undo_ready = true;
-            boot.image_ready = true;
-            boot.doc_ready = true;
             break;
         }
     }
@@ -1966,15 +1571,6 @@ pub extern "C" fn _start() -> ! {
         }
     };
 
-    // ── Undo coalescing ─────────────────────────────────────────────
-    //
-    // Commit is always immediate (crash safety). Snapshots are debounced:
-    // rapid keystrokes within COALESCE_MS produce one undo step, not one
-    // per character. The snapshot fires when a typing pause is detected.
-    const COALESCE_MS: u64 = 500;
-    let mut snapshot_pending = false;
-    let mut last_edit_ms: u64 = 0;
-
     loop {
         let timer_active = state().timer_active;
         let timer_handle = state().timer_handle;
@@ -2016,34 +1612,27 @@ pub extern "C" fn _start() -> ! {
                 remaining_ms.saturating_mul(1_000_000)
             }
         };
-        // If a snapshot is pending, wake up in time to fire it.
-        let timeout_ns = if snapshot_pending {
-            let snap_deadline_ms = last_edit_ms + COALESCE_MS;
-            let snap_remaining_ms = snap_deadline_ms.saturating_sub(now_ms);
-            let snap_ns = snap_remaining_ms.saturating_mul(1_000_000).max(1_000_000);
-            timeout_ns.min(snap_ns)
-        } else {
-            timeout_ns
-        };
+        // Snapshot coalescing is now managed by the document-model (A).
         let _ = match (timer_active, has_input2) {
             (true, true) => sys::wait(
                 &[
                     INPUT_HANDLE.0,
                     EDITOR_HANDLE.0,
+                    DOCMODEL_HANDLE.0,
                     timer_handle.0,
                     INPUT2_HANDLE.0,
                 ],
                 timeout_ns,
             ),
             (true, false) => sys::wait(
-                &[INPUT_HANDLE.0, EDITOR_HANDLE.0, timer_handle.0],
+                &[INPUT_HANDLE.0, EDITOR_HANDLE.0, DOCMODEL_HANDLE.0, timer_handle.0],
                 timeout_ns,
             ),
             (false, true) => sys::wait(
-                &[INPUT_HANDLE.0, EDITOR_HANDLE.0, INPUT2_HANDLE.0],
+                &[INPUT_HANDLE.0, EDITOR_HANDLE.0, DOCMODEL_HANDLE.0, INPUT2_HANDLE.0],
                 timeout_ns,
             ),
-            (false, false) => sys::wait(&[INPUT_HANDLE.0, EDITOR_HANDLE.0], timeout_ns),
+            (false, false) => sys::wait(&[INPUT_HANDLE.0, EDITOR_HANDLE.0, DOCMODEL_HANDLE.0], timeout_ns),
         };
         let mut changed = false;
         let mut text_changed = false;
@@ -2105,6 +1694,19 @@ pub extern "C" fn _start() -> ! {
                 if action.context_switched {
                     context_switched = true;
                 }
+                // Forward pending delete to document-model (A).
+                if let Some((start, end)) = action.pending_delete {
+                    let del = protocol::edit::WriteDeleteRange { start, end };
+                    // SAFETY: WriteDeleteRange is repr(C) and fits in 60-byte payload.
+                    let del_msg = unsafe {
+                        ipc::Message::from_payload(
+                            protocol::edit::MSG_WRITE_DELETE_RANGE,
+                            &del,
+                        )
+                    };
+                    docmodel_ch.send(&del_msg);
+                    let _ = sys::channel_signal(DOCMODEL_HANDLE);
+                }
                 had_user_input = true;
             }
         }
@@ -2155,6 +1757,17 @@ pub extern "C" fn _start() -> ! {
                         }
                         if action.context_switched {
                             context_switched = true;
+                        }
+                        if let Some((start, end)) = action.pending_delete {
+                            let del = protocol::edit::WriteDeleteRange { start, end };
+                            let del_msg = unsafe {
+                                ipc::Message::from_payload(
+                                    protocol::edit::MSG_WRITE_DELETE_RANGE,
+                                    &del,
+                                )
+                            };
+                            docmodel_ch.send(&del_msg);
+                            let _ = sys::channel_signal(DOCMODEL_HANDLE);
                         }
                         had_user_input = true;
                     }
@@ -2450,375 +2063,56 @@ pub extern "C" fn _start() -> ! {
             }
         }
 
-        // Process editor write requests.
-        let is_rich = state().doc_format == DocumentFormat::Rich;
-        while editor_ch.try_recv(&mut msg) {
+        // Process document-model (A) notifications.
+        // A signals core when the document buffer changes (edits, undo/redo).
+        while docmodel_ch.try_recv(&mut msg) {
             match msg.msg_type {
-                MSG_WRITE_INSERT => {
-                    let Some(edit::Message::WriteInsert(insert)) =
-                        edit::decode(msg.msg_type, &msg.payload)
-                    else {
-                        continue;
-                    };
-                    let pos = insert.position as usize;
-
-                    let ok = if is_rich {
-                        documents::rich_insert(pos, insert.byte)
-                    } else {
-                        documents::doc_insert(pos, insert.byte)
-                    };
-                    if ok {
+                MSG_DOC_CHANGED => {
+                    if let Some(docmodel_proto::Message::DocChanged(dc)) =
+                        docmodel_proto::decode(msg.msg_type, &msg.payload)
+                    {
                         let s = state();
-                        s.cursor_pos = pos + 1;
-                        if is_rich {
-                            documents::rich_set_cursor_pos(s.cursor_pos);
+                        s.doc_len = dc.doc_len as usize;
+                        s.cursor_pos = dc.cursor_pos as usize;
+                        if dc.flags & DOC_CHANGED_CLEAR_SELECTION != 0 {
+                            input_handling::clear_selection();
                         }
-
+                        // Sync cursor to editor so it tracks the new position.
+                        input_handling::sync_cursor_to_editor(&editor_ch);
+                        let _ = sys::channel_signal(EDITOR_HANDLE);
                         changed = true;
                         text_changed = true;
                     }
                 }
-                MSG_WRITE_DELETE => {
-                    let Some(edit::Message::WriteDelete(del)) =
-                        edit::decode(msg.msg_type, &msg.payload)
-                    else {
-                        continue;
-                    };
-                    let pos = del.position as usize;
-
-                    let ok = if is_rich {
-                        documents::rich_delete(pos)
-                    } else {
-                        documents::doc_delete(pos)
-                    };
-                    if ok {
+                MSG_IMAGE_DECODED => {
+                    if let Some(docmodel_proto::Message::ImageDecoded(img)) =
+                        docmodel_proto::decode(msg.msg_type, &msg.payload)
+                    {
                         let s = state();
-                        s.cursor_pos = pos;
-                        if is_rich {
-                            documents::rich_set_cursor_pos(s.cursor_pos);
-                        }
-
-                        changed = true;
-                        text_changed = true;
-                    }
-                }
-                MSG_CURSOR_MOVE => {
-                    let Some(edit::Message::CursorMove(cm)) =
-                        edit::decode(msg.msg_type, &msg.payload)
-                    else {
-                        continue;
-                    };
-                    let pos = cm.position as usize;
-                    let doc_text_len = if is_rich {
-                        documents::rich_text_len()
-                    } else {
-                        state().doc_len
-                    };
-
-                    if pos <= doc_text_len {
-                        state().cursor_pos = pos;
-
-                        if is_rich {
-                            documents::rich_set_cursor_pos(pos);
-                        } else {
-                            documents::doc_write_header();
-                        }
-
+                        s.image_content_id = img.content_id;
+                        s.image_width = img.width;
+                        s.image_height = img.height;
                         changed = true;
                     }
-                }
-                MSG_SELECTION_UPDATE => {
-                    let Some(edit::Message::SelectionUpdate(su)) =
-                        edit::decode(msg.msg_type, &msg.payload)
-                    else {
-                        continue;
-                    };
-                    let s = state();
-                    s.sel_start = su.sel_start as usize;
-                    s.sel_end = su.sel_end as usize;
-
-                    changed = true;
-                    selection_changed = true;
-                }
-                MSG_WRITE_DELETE_RANGE => {
-                    let Some(edit::Message::WriteDeleteRange(dr)) =
-                        edit::decode(msg.msg_type, &msg.payload)
-                    else {
-                        continue;
-                    };
-                    let start = dr.start as usize;
-                    let end = dr.end as usize;
-
-                    let ok = if is_rich {
-                        documents::rich_delete_range(start, end)
-                    } else {
-                        documents::doc_delete_range(start, end)
-                    };
-                    if ok {
-                        let s = state();
-                        s.cursor_pos = start;
-                        if is_rich {
-                            documents::rich_set_cursor_pos(s.cursor_pos);
-                        }
-
-                        changed = true;
-                        text_changed = true;
-                    }
-                }
-                MSG_STYLE_APPLY => {
-                    // Only valid for rich text documents.
-                    if !is_rich {
-                        continue;
-                    }
-                    let Some(edit::Message::StyleApply(sa)) =
-                        edit::decode(msg.msg_type, &msg.payload)
-                    else {
-                        continue;
-                    };
-                    documents::rich_apply_style(sa.start as usize, sa.end as usize, sa.style_id);
-                    // Style changes modify the piece table — trigger rebuild.
-                    changed = true;
-                    text_changed = true;
-                }
-                MSG_STYLE_SET_CURRENT => {
-                    if !is_rich {
-                        continue;
-                    }
-                    let Some(edit::Message::StyleSetCurrent(sc)) =
-                        edit::decode(msg.msg_type, &msg.payload)
-                    else {
-                        continue;
-                    };
-                    documents::rich_set_current_style(sc.style_id);
-                    // No scene rebuild needed — only affects future insertions.
                 }
                 _ => {}
             }
         }
 
-        // ── Persist + snapshot / undo / redo ────────────────────────────
+        // ── Undo / redo ──────────────────────────────────────────────────
         //
-        // Commit is always immediate (crash safety). Snapshots are debounced:
-        // rapid keystrokes within COALESCE_MS produce one undo step instead
-        // of one per character. The snapshot fires when a typing pause is
-        // detected, or immediately when undo/redo is requested (flush).
-        //
-        // Helper: take a snapshot and push it onto the undo stack.
-        // Defined as a macro to avoid borrow conflicts with `fs_ch`.
-        macro_rules! take_snapshot {
-            () => {{
-                let file_id = state().doc_file_id;
-                let snap_payload = DocSnapshot {
-                    file_count: 1,
-                    _pad: 0,
-                    file_ids: [file_id, 0, 0, 0, 0, 0],
-                };
-                // SAFETY: DocSnapshot is repr(C) and fits in 60-byte payload.
-                let snap_msg =
-                    unsafe { ipc::Message::from_payload(MSG_DOC_SNAPSHOT, &snap_payload) };
-                fs_ch.send(&snap_msg);
-                let _ = sys::channel_signal(FS_HANDLE);
-
-                let mut reply = ipc::Message::new(0);
-                if fs_ch.recv_blocking(FS_HANDLE.0, &mut reply)
-                    && reply.msg_type == MSG_DOC_SNAPSHOT_RESULT
-                {
-                    if let Some(protocol::document::Message::DocSnapshotResult(result)) =
-                        protocol::document::decode(reply.msg_type, &reply.payload)
-                    {
-                        if result.status == 0 {
-                            let mut discarded = [0u64; MAX_UNDO];
-                            let n = undo_state.push(result.snapshot_id, &mut discarded);
-                            for &snap in &discarded[..n] {
-                                let del = DocDeleteSnapshot { snapshot_id: snap };
-                                // SAFETY: DocDeleteSnapshot is repr(C), fits in 60 bytes.
-                                let del_msg = unsafe {
-                                    ipc::Message::from_payload(MSG_DOC_DELETE_SNAPSHOT, &del)
-                                };
-                                fs_ch.send(&del_msg);
-                            }
-                            if n > 0 {
-                                let _ = sys::channel_signal(FS_HANDLE);
-                            }
-                        }
-                    }
-                }
-            }};
-        }
-
-        if text_changed {
-            let file_id = state().doc_file_id;
-
-            // Commit current content to disk (always immediate, fire-and-forget).
-            let commit_payload = DocCommit { file_id };
-            // SAFETY: DocCommit is repr(C) and fits in 60-byte payload.
-            let commit_msg = unsafe { ipc::Message::from_payload(MSG_DOC_COMMIT, &commit_payload) };
-            fs_ch.send(&commit_msg);
-            let _ = sys::channel_signal(FS_HANDLE);
-
-            // Mark snapshot as pending — it will fire after a typing pause.
-            snapshot_pending = true;
-            last_edit_ms = now_ms;
-        }
-
-        // Flush pending snapshot on typing pause (coalesce window elapsed).
-        if snapshot_pending && !text_changed && now_ms.saturating_sub(last_edit_ms) >= COALESCE_MS {
-            // Advance piece table operation_id at snapshot boundary.
-            if state().doc_format == DocumentFormat::Rich {
-                documents::rich_next_operation();
-            }
-            take_snapshot!();
-            snapshot_pending = false;
-        }
-
-        // Flush pending snapshot immediately before undo/redo so the
-        // current editing burst is undoable as a single step.
-        if snapshot_pending && (undo_requested || redo_requested) {
-            if state().doc_format == DocumentFormat::Rich {
-                documents::rich_next_operation();
-            }
-            take_snapshot!();
-            snapshot_pending = false;
-        }
-
+        // Forward undo/redo requests to document-model (A). A manages the
+        // undo ring and communicates with the document service. When A
+        // completes the operation, it sends MSG_DOC_CHANGED which we
+        // process on the next iteration.
         if undo_requested {
-            if let Some(snap_id) = undo_state.undo() {
-                // Restore the snapshot.
-                let restore_payload = DocRestore {
-                    snapshot_id: snap_id,
-                };
-                // SAFETY: DocRestore is repr(C) and fits in 60-byte payload.
-                let restore_msg =
-                    unsafe { ipc::Message::from_payload(MSG_DOC_RESTORE, &restore_payload) };
-                fs_ch.send(&restore_msg);
-                let _ = sys::channel_signal(FS_HANDLE);
-
-                let mut reply = ipc::Message::new(0);
-                if fs_ch.recv_blocking(FS_HANDLE.0, &mut reply)
-                    && reply.msg_type == MSG_DOC_RESTORE_RESULT
-                {
-                    if let Some(protocol::document::Message::DocRestoreResult(result)) =
-                        protocol::document::decode(reply.msg_type, &reply.payload)
-                    {
-                        if result.status == 0 {
-                            // Reload document content from the restored snapshot.
-                            let s = state();
-                            let read_payload = DocRead {
-                                file_id: s.doc_file_id,
-                                target_va: 0,
-                                capacity: s.doc_capacity as u32,
-                                _pad: 0,
-                            };
-                            // SAFETY: DocRead is repr(C) and fits in 60-byte payload.
-                            let read_msg =
-                                unsafe { ipc::Message::from_payload(MSG_DOC_READ, &read_payload) };
-                            fs_ch.send(&read_msg);
-                            let _ = sys::channel_signal(FS_HANDLE);
-
-                            if fs_ch.recv_blocking(FS_HANDLE.0, &mut reply)
-                                && reply.msg_type == MSG_DOC_READ_DONE
-                            {
-                                if let Some(protocol::document::Message::DocReadDone(done)) =
-                                    protocol::document::decode(reply.msg_type, &reply.payload)
-                                {
-                                    if done.status == 0 {
-                                        let s = state();
-                                        s.doc_len = done.len as usize;
-                                        if s.doc_format == DocumentFormat::Rich {
-                                            // Restore cursor from piece table header.
-                                            let text_len = documents::rich_text_len();
-                                            s.cursor_pos = documents::rich_cursor_pos();
-                                            if s.cursor_pos > text_len {
-                                                s.cursor_pos = text_len;
-                                            }
-                                        } else {
-                                            if s.cursor_pos > s.doc_len {
-                                                s.cursor_pos = s.doc_len;
-                                            }
-                                        }
-                                        input_handling::clear_selection();
-                                        if s.doc_format != DocumentFormat::Rich {
-                                            documents::doc_write_header();
-                                        }
-                                        input_handling::sync_cursor_to_editor(&editor_ch);
-                                        let _ = sys::channel_signal(EDITOR_HANDLE);
-                                        text_changed = true;
-                                        changed = true;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            let undo_msg = ipc::Message::new(MSG_UNDO_REQUEST);
+            docmodel_ch.send(&undo_msg);
+            let _ = sys::channel_signal(DOCMODEL_HANDLE);
         } else if redo_requested {
-            if let Some(snap_id) = undo_state.redo() {
-                // Restore the snapshot (same pattern as undo).
-                let restore_payload = DocRestore {
-                    snapshot_id: snap_id,
-                };
-                // SAFETY: DocRestore is repr(C) and fits in 60-byte payload.
-                let restore_msg =
-                    unsafe { ipc::Message::from_payload(MSG_DOC_RESTORE, &restore_payload) };
-                fs_ch.send(&restore_msg);
-                let _ = sys::channel_signal(FS_HANDLE);
-
-                let mut reply = ipc::Message::new(0);
-                if fs_ch.recv_blocking(FS_HANDLE.0, &mut reply)
-                    && reply.msg_type == MSG_DOC_RESTORE_RESULT
-                {
-                    if let Some(protocol::document::Message::DocRestoreResult(result)) =
-                        protocol::document::decode(reply.msg_type, &reply.payload)
-                    {
-                        if result.status == 0 {
-                            let s = state();
-                            let read_payload = DocRead {
-                                file_id: s.doc_file_id,
-                                target_va: 0,
-                                capacity: s.doc_capacity as u32,
-                                _pad: 0,
-                            };
-                            // SAFETY: DocRead is repr(C) and fits in 60-byte payload.
-                            let read_msg =
-                                unsafe { ipc::Message::from_payload(MSG_DOC_READ, &read_payload) };
-                            fs_ch.send(&read_msg);
-                            let _ = sys::channel_signal(FS_HANDLE);
-
-                            if fs_ch.recv_blocking(FS_HANDLE.0, &mut reply)
-                                && reply.msg_type == MSG_DOC_READ_DONE
-                            {
-                                if let Some(protocol::document::Message::DocReadDone(done)) =
-                                    protocol::document::decode(reply.msg_type, &reply.payload)
-                                {
-                                    if done.status == 0 {
-                                        let s = state();
-                                        s.doc_len = done.len as usize;
-                                        if s.doc_format == DocumentFormat::Rich {
-                                            let text_len = documents::rich_text_len();
-                                            s.cursor_pos = documents::rich_cursor_pos();
-                                            if s.cursor_pos > text_len {
-                                                s.cursor_pos = text_len;
-                                            }
-                                        } else {
-                                            if s.cursor_pos > s.doc_len {
-                                                s.cursor_pos = s.doc_len;
-                                            }
-                                        }
-                                        input_handling::clear_selection();
-                                        if s.doc_format != DocumentFormat::Rich {
-                                            documents::doc_write_header();
-                                        }
-                                        input_handling::sync_cursor_to_editor(&editor_ch);
-                                        let _ = sys::channel_signal(EDITOR_HANDLE);
-                                        text_changed = true;
-                                        changed = true;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            let redo_msg = ipc::Message::new(MSG_REDO_REQUEST);
+            docmodel_ch.send(&redo_msg);
+            let _ = sys::channel_signal(DOCMODEL_HANDLE);
         }
 
         // Update scroll offset for cursor/text changes.

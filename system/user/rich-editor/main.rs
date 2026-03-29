@@ -116,10 +116,13 @@ pub extern "C" fn _start() -> ! {
 
     sys::print(b"     document buffer mapped (read-only)\n");
 
-    // Handle 1: OS service (core) — bidirectional.
+    // Handle 1: OS service (core) — receives key events, cursor sync.
     let os_ch = unsafe { ipc::Channel::from_base(channel_shm_va(1), ipc::PAGE_SIZE, 1) };
+    // Handle 2: Document-model (A) — sends write operations.
+    let docmodel_ch = unsafe { ipc::Channel::from_base(channel_shm_va(2), ipc::PAGE_SIZE, 1) };
 
     const OS_HANDLE: u8 = 1;
+    const DOCMODEL_HANDLE: u8 = 2;
 
     // Editor-local cursor position (byte offset in document).
     // Synced from core via MSG_SET_CURSOR.
@@ -168,8 +171,8 @@ pub extern "C" fn _start() -> ! {
                             position: cursor as u32,
                         };
                         let del_msg = unsafe { ipc::Message::from_payload(MSG_WRITE_DELETE, &del) };
-                        os_ch.send(&del_msg);
-                        let _ = sys::channel_signal(sys::ChannelHandle(OS_HANDLE));
+                        docmodel_ch.send(&del_msg);
+                        let _ = sys::channel_signal(sys::ChannelHandle(DOCMODEL_HANDLE));
                     }
                 }
 
@@ -180,8 +183,8 @@ pub extern "C" fn _start() -> ! {
                             position: cursor as u32,
                         };
                         let del_msg = unsafe { ipc::Message::from_payload(MSG_WRITE_DELETE, &del) };
-                        os_ch.send(&del_msg);
-                        let _ = sys::channel_signal(sys::ChannelHandle(OS_HANDLE));
+                        docmodel_ch.send(&del_msg);
+                        let _ = sys::channel_signal(sys::ChannelHandle(DOCMODEL_HANDLE));
                     }
                 }
 
@@ -208,7 +211,7 @@ pub extern "C" fn _start() -> ! {
                                 let del_msg = unsafe {
                                     ipc::Message::from_payload(MSG_WRITE_DELETE_RANGE, &del_range)
                                 };
-                                os_ch.send(&del_msg);
+                                docmodel_ch.send(&del_msg);
                                 let removed_before = if cursor >= ls + spaces {
                                     spaces
                                 } else if cursor > ls {
@@ -222,8 +225,8 @@ pub extern "C" fn _start() -> ! {
                                 };
                                 let cm_msg =
                                     unsafe { ipc::Message::from_payload(MSG_CURSOR_MOVE, &cm) };
-                                os_ch.send(&cm_msg);
-                                let _ = sys::channel_signal(sys::ChannelHandle(OS_HANDLE));
+                                docmodel_ch.send(&cm_msg);
+                                let _ = sys::channel_signal(sys::ChannelHandle(DOCMODEL_HANDLE));
                             }
                         } else {
                             // Flat text path.
@@ -241,7 +244,7 @@ pub extern "C" fn _start() -> ! {
                                 let del_msg = unsafe {
                                     ipc::Message::from_payload(MSG_WRITE_DELETE_RANGE, &del_range)
                                 };
-                                os_ch.send(&del_msg);
+                                docmodel_ch.send(&del_msg);
                                 let removed_before = if cursor >= ls + spaces {
                                     spaces
                                 } else if cursor > ls {
@@ -255,8 +258,8 @@ pub extern "C" fn _start() -> ! {
                                 };
                                 let cm_msg =
                                     unsafe { ipc::Message::from_payload(MSG_CURSOR_MOVE, &cm) };
-                                os_ch.send(&cm_msg);
-                                let _ = sys::channel_signal(sys::ChannelHandle(OS_HANDLE));
+                                docmodel_ch.send(&cm_msg);
+                                let _ = sys::channel_signal(sys::ChannelHandle(DOCMODEL_HANDLE));
                             }
                         }
                     } else {
@@ -270,10 +273,10 @@ pub extern "C" fn _start() -> ! {
                                 let ins_msg = unsafe {
                                     ipc::Message::from_payload(MSG_WRITE_INSERT, &insert)
                                 };
-                                os_ch.send(&ins_msg);
+                                docmodel_ch.send(&ins_msg);
                                 cursor += 1;
                             }
-                            let _ = sys::channel_signal(sys::ChannelHandle(OS_HANDLE));
+                            let _ = sys::channel_signal(sys::ChannelHandle(DOCMODEL_HANDLE));
                         }
                     }
                 }
@@ -287,9 +290,9 @@ pub extern "C" fn _start() -> ! {
                         };
                         let ins_msg =
                             unsafe { ipc::Message::from_payload(MSG_WRITE_INSERT, &insert) };
-                        os_ch.send(&ins_msg);
+                        docmodel_ch.send(&ins_msg);
                         cursor += 1;
-                        let _ = sys::channel_signal(sys::ChannelHandle(OS_HANDLE));
+                        let _ = sys::channel_signal(sys::ChannelHandle(DOCMODEL_HANDLE));
                     }
                 }
             }
