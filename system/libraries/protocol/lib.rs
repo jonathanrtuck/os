@@ -311,6 +311,69 @@ pub mod input {
     }
 }
 
+// ── cursor: core -> render service (cursor plane) ─────────────────
+
+pub mod cursor {
+    /// Byte offset where path command data begins in the cursor state page.
+    pub const CURSOR_DATA_OFFSET: usize = 40;
+
+    /// Shared cursor state — lives in an init-allocated page.
+    ///
+    /// Core writes path commands + metadata when the cursor shape changes,
+    /// then bumps `shape_generation` with a store-release. Render service
+    /// load-acquires `shape_generation` each frame; if changed, it re-reads
+    /// all metadata fields and rasterizes the new cursor image via the
+    /// normal GPU path pipeline.
+    ///
+    /// `opacity` is updated independently via atomic store/load — fade
+    /// animation changes opacity without re-rasterization.
+    ///
+    /// Path command data (same binary format as Content::Path contours)
+    /// follows this header at byte offset `CURSOR_DATA_OFFSET`.
+    #[repr(C)]
+    pub struct CursorState {
+        /// Bumped after core writes new path data + metadata.
+        /// Accessed via AtomicU32 (store-release by core, load-acquire by render).
+        pub shape_generation: u32,
+        /// 0 = hidden, 255 = fully visible.
+        /// Accessed via AtomicU32 independently of shape_generation.
+        pub opacity: u32,
+        /// Icon viewbox size (e.g. 24.0 for Tabler icons).
+        pub viewbox: f32,
+        /// Stroke width in viewbox units (e.g. 2.0 for Tabler default).
+        pub stroke_width: f32,
+        /// Hotspot x in viewbox units (arrow tip / I-beam center).
+        pub hotspot_x: f32,
+        /// Hotspot y in viewbox units.
+        pub hotspot_y: f32,
+        /// Fill color (RGBA packed: `(r << 24) | (g << 16) | (b << 8) | a`).
+        pub fill_color: u32,
+        /// Stroke color (RGBA packed).
+        pub stroke_color: u32,
+        /// Number of bytes of path command data at `CURSOR_DATA_OFFSET`.
+        pub data_len: u32,
+        pub _pad: u32,
+    }
+
+    impl CursorState {
+        /// Pack RGBA into a u32 for `fill_color` / `stroke_color`.
+        pub const fn pack_color(r: u8, g: u8, b: u8, a: u8) -> u32 {
+            ((r as u32) << 24) | ((g as u32) << 16) | ((b as u32) << 8) | (a as u32)
+        }
+
+        pub const fn unpack_color(packed: u32) -> (u8, u8, u8, u8) {
+            (
+                (packed >> 24) as u8,
+                (packed >> 16) as u8,
+                (packed >> 8) as u8,
+                packed as u8,
+            )
+        }
+    }
+
+    const _: () = assert!(core::mem::size_of::<CursorState>() == CURSOR_DATA_OFFSET);
+}
+
 // ── edit: core <-> text editor ──────────────────────────────────────
 
 pub mod edit {
@@ -456,9 +519,13 @@ pub mod core_config {
         pub fb_height: u32,
         pub doc_capacity: u32,
         pub content_size: u32,
+        /// VA of the shared CursorState page (core writes, render reads).
+        /// Core writes cursor shape path data + metadata; render service
+        /// rasterizes via GPU and applies to the hardware cursor plane.
+        pub cursor_state_va: u64,
     }
 
-    // Guard: must fit within the 60-byte IPC payload (48 bytes used).
+    // Guard: must fit within the 60-byte IPC payload (56 bytes used).
     const _: () = assert!(core::mem::size_of::<CoreConfig>() <= 60);
 
     /// Display refresh rate, sent as a separate message after CoreConfig.
@@ -542,9 +609,12 @@ pub mod compose {
         /// reads cursor position directly from here for cursor plane commands,
         /// independent of the scene graph.
         pub pointer_state_va: u64,
+        /// Cursor state page VA (read-only). Metal-render reads cursor shape
+        /// path data + metadata, rasterizes via GPU, applies to cursor plane.
+        pub cursor_state_va: u64,
     }
 
-    // Guard: must fit within the 60-byte IPC payload.
+    // Guard: must fit within the 60-byte IPC payload (56 bytes used).
     const _: () = assert!(core::mem::size_of::<CompositorConfig>() <= 60);
 
     #[repr(C)]

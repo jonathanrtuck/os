@@ -65,6 +65,9 @@ pub const CMD_PRESENT_AND_COMMIT: u16 = 0x0F00;
 pub const CMD_SET_CURSOR_IMAGE: u16 = 0x0F10;
 pub const CMD_SET_CURSOR_POSITION: u16 = 0x0F11;
 pub const CMD_SET_CURSOR_VISIBLE: u16 = 0x0F12;
+/// Set cursor from a GPU texture handle (no pixel readback needed).
+/// The host reads the texture directly and creates an NSCursor from it.
+pub const CMD_SET_CURSOR_FROM_TEXTURE: u16 = 0x0F13;
 
 // ── Special handles ─────────────────────────────────────────────────────
 
@@ -569,5 +572,26 @@ impl CommandBuffer {
     pub fn set_cursor_visible(&mut self, visible: bool) {
         self.push_header(CMD_SET_CURSOR_VISIBLE, 1);
         self.push_u8(if visible { 1 } else { 0 });
+    }
+
+    /// Set cursor image from a GPU texture (no pixel readback).
+    ///
+    /// The host reads the texture contents directly and creates an NSCursor.
+    /// This avoids guest→host pixel transfer — the texture is already on the
+    /// GPU from the normal stencil-then-cover render path.
+    pub fn set_cursor_from_texture(
+        &mut self,
+        texture_handle: u32,
+        width: u16,
+        height: u16,
+        hotspot_x: i16,
+        hotspot_y: i16,
+    ) {
+        self.push_header(CMD_SET_CURSOR_FROM_TEXTURE, 12);
+        self.push_u32(texture_handle);
+        self.push_u16(width);
+        self.push_u16(height);
+        self.data.extend_from_slice(&hotspot_x.to_le_bytes());
+        self.data.extend_from_slice(&hotspot_y.to_le_bytes());
     }
 }

@@ -100,11 +100,15 @@ fn parse_flag(s: &[u8], start: usize) -> Option<(bool, usize)> {
 
 fn arc_to_cubics(
     out: &mut Vec<u8>,
-    x1: f32, y1: f32,
-    mut rx: f32, mut ry: f32,
+    x1: f32,
+    y1: f32,
+    mut rx: f32,
+    mut ry: f32,
     x_rot_deg: f32,
-    large_arc: bool, sweep: bool,
-    x2: f32, y2: f32,
+    large_arc: bool,
+    sweep: bool,
+    x2: f32,
+    y2: f32,
 ) {
     use std::f32::consts::{FRAC_PI_2, PI};
 
@@ -173,9 +177,14 @@ fn arc_to_cubics(
 
 fn emit_arc_segment(
     out: &mut Vec<u8>,
-    cx: f32, cy: f32, rx: f32, ry: f32,
-    cos_phi: f32, sin_phi: f32,
-    a1: f32, a2: f32,
+    cx: f32,
+    cy: f32,
+    rx: f32,
+    ry: f32,
+    cos_phi: f32,
+    sin_phi: f32,
+    a1: f32,
+    a2: f32,
 ) {
     let da = a2 - a1;
     let half = da * 0.5;
@@ -267,29 +276,193 @@ fn parse_svg_path(d: &str) -> Vec<u8> {
         }
 
         match cmd {
-            b'M' => { num!(x); num!(y); cx = x; cy = y; subpath_x = cx; subpath_y = cy; emit_move_to(&mut out, cx, cy); }
-            b'm' => { num!(dx); num!(dy); cx += dx; cy += dy; subpath_x = cx; subpath_y = cy; emit_move_to(&mut out, cx, cy); }
-            b'L' => { num!(x); num!(y); cx = x; cy = y; emit_line_to(&mut out, cx, cy); }
-            b'l' => { num!(dx); num!(dy); cx += dx; cy += dy; emit_line_to(&mut out, cx, cy); }
-            b'H' => { num!(x); cx = x; emit_line_to(&mut out, cx, cy); }
-            b'h' => { num!(dx); cx += dx; emit_line_to(&mut out, cx, cy); }
-            b'V' => { num!(y); cy = y; emit_line_to(&mut out, cx, cy); }
-            b'v' => { num!(dy); cy += dy; emit_line_to(&mut out, cx, cy); }
-            b'C' => { num!(c1x); num!(c1y); num!(c2x); num!(c2y); num!(x); num!(y); last_c2x = c2x; last_c2y = c2y; cx = x; cy = y; emit_cubic_to(&mut out, c1x, c1y, c2x, c2y, cx, cy); }
-            b'c' => { num!(dc1x); num!(dc1y); num!(dc2x); num!(dc2y); num!(dx); num!(dy); let c1x = cx+dc1x; let c1y = cy+dc1y; let c2x = cx+dc2x; let c2y = cy+dc2y; last_c2x = c2x; last_c2y = c2y; cx += dx; cy += dy; emit_cubic_to(&mut out, c1x, c1y, c2x, c2y, cx, cy); }
-            b'S' => { let c1x = 2.0*cx - last_c2x; let c1y = 2.0*cy - last_c2y; num!(c2x); num!(c2y); num!(x); num!(y); last_c2x = c2x; last_c2y = c2y; cx = x; cy = y; emit_cubic_to(&mut out, c1x, c1y, c2x, c2y, cx, cy); }
-            b's' => { let c1x = 2.0*cx - last_c2x; let c1y = 2.0*cy - last_c2y; num!(dc2x); num!(dc2y); num!(dx); num!(dy); let c2x = cx+dc2x; let c2y = cy+dc2y; last_c2x = c2x; last_c2y = c2y; cx += dx; cy += dy; emit_cubic_to(&mut out, c1x, c1y, c2x, c2y, cx, cy); }
-            b'Q' => { num!(qx); num!(qy); num!(x); num!(y); let c1x = cx + 2.0/3.0*(qx-cx); let c1y = cy + 2.0/3.0*(qy-cy); let c2x = x + 2.0/3.0*(qx-x); let c2y = y + 2.0/3.0*(qy-y); last_c2x = c2x; last_c2y = c2y; cx = x; cy = y; emit_cubic_to(&mut out, c1x, c1y, c2x, c2y, cx, cy); }
-            b'q' => { num!(dqx); num!(dqy); num!(dx); num!(dy); let qx = cx+dqx; let qy = cy+dqy; let x = cx+dx; let y = cy+dy; let c1x = cx + 2.0/3.0*(qx-cx); let c1y = cy + 2.0/3.0*(qy-cy); let c2x = x + 2.0/3.0*(qx-x); let c2y = y + 2.0/3.0*(qy-y); last_c2x = c2x; last_c2y = c2y; cx = x; cy = y; emit_cubic_to(&mut out, c1x, c1y, c2x, c2y, cx, cy); }
-            b'A' => { num!(arx); num!(ary); num!(rot); flag!(la); flag!(sw); num!(x); num!(y); arc_to_cubics(&mut out, cx, cy, arx, ary, rot, la, sw, x, y); cx = x; cy = y; }
-            b'a' => { num!(arx); num!(ary); num!(rot); flag!(la); flag!(sw); num!(dx); num!(dy); let x = cx+dx; let y = cy+dy; arc_to_cubics(&mut out, cx, cy, arx, ary, rot, la, sw, x, y); cx = x; cy = y; }
-            b'Z' | b'z' => { emit_close(&mut out); cx = subpath_x; cy = subpath_y; }
-            _ => { i += 1; continue; }
+            b'M' => {
+                num!(x);
+                num!(y);
+                cx = x;
+                cy = y;
+                subpath_x = cx;
+                subpath_y = cy;
+                emit_move_to(&mut out, cx, cy);
+            }
+            b'm' => {
+                num!(dx);
+                num!(dy);
+                cx += dx;
+                cy += dy;
+                subpath_x = cx;
+                subpath_y = cy;
+                emit_move_to(&mut out, cx, cy);
+            }
+            b'L' => {
+                num!(x);
+                num!(y);
+                cx = x;
+                cy = y;
+                emit_line_to(&mut out, cx, cy);
+            }
+            b'l' => {
+                num!(dx);
+                num!(dy);
+                cx += dx;
+                cy += dy;
+                emit_line_to(&mut out, cx, cy);
+            }
+            b'H' => {
+                num!(x);
+                cx = x;
+                emit_line_to(&mut out, cx, cy);
+            }
+            b'h' => {
+                num!(dx);
+                cx += dx;
+                emit_line_to(&mut out, cx, cy);
+            }
+            b'V' => {
+                num!(y);
+                cy = y;
+                emit_line_to(&mut out, cx, cy);
+            }
+            b'v' => {
+                num!(dy);
+                cy += dy;
+                emit_line_to(&mut out, cx, cy);
+            }
+            b'C' => {
+                num!(c1x);
+                num!(c1y);
+                num!(c2x);
+                num!(c2y);
+                num!(x);
+                num!(y);
+                last_c2x = c2x;
+                last_c2y = c2y;
+                cx = x;
+                cy = y;
+                emit_cubic_to(&mut out, c1x, c1y, c2x, c2y, cx, cy);
+            }
+            b'c' => {
+                num!(dc1x);
+                num!(dc1y);
+                num!(dc2x);
+                num!(dc2y);
+                num!(dx);
+                num!(dy);
+                let c1x = cx + dc1x;
+                let c1y = cy + dc1y;
+                let c2x = cx + dc2x;
+                let c2y = cy + dc2y;
+                last_c2x = c2x;
+                last_c2y = c2y;
+                cx += dx;
+                cy += dy;
+                emit_cubic_to(&mut out, c1x, c1y, c2x, c2y, cx, cy);
+            }
+            b'S' => {
+                let c1x = 2.0 * cx - last_c2x;
+                let c1y = 2.0 * cy - last_c2y;
+                num!(c2x);
+                num!(c2y);
+                num!(x);
+                num!(y);
+                last_c2x = c2x;
+                last_c2y = c2y;
+                cx = x;
+                cy = y;
+                emit_cubic_to(&mut out, c1x, c1y, c2x, c2y, cx, cy);
+            }
+            b's' => {
+                let c1x = 2.0 * cx - last_c2x;
+                let c1y = 2.0 * cy - last_c2y;
+                num!(dc2x);
+                num!(dc2y);
+                num!(dx);
+                num!(dy);
+                let c2x = cx + dc2x;
+                let c2y = cy + dc2y;
+                last_c2x = c2x;
+                last_c2y = c2y;
+                cx += dx;
+                cy += dy;
+                emit_cubic_to(&mut out, c1x, c1y, c2x, c2y, cx, cy);
+            }
+            b'Q' => {
+                num!(qx);
+                num!(qy);
+                num!(x);
+                num!(y);
+                let c1x = cx + 2.0 / 3.0 * (qx - cx);
+                let c1y = cy + 2.0 / 3.0 * (qy - cy);
+                let c2x = x + 2.0 / 3.0 * (qx - x);
+                let c2y = y + 2.0 / 3.0 * (qy - y);
+                last_c2x = c2x;
+                last_c2y = c2y;
+                cx = x;
+                cy = y;
+                emit_cubic_to(&mut out, c1x, c1y, c2x, c2y, cx, cy);
+            }
+            b'q' => {
+                num!(dqx);
+                num!(dqy);
+                num!(dx);
+                num!(dy);
+                let qx = cx + dqx;
+                let qy = cy + dqy;
+                let x = cx + dx;
+                let y = cy + dy;
+                let c1x = cx + 2.0 / 3.0 * (qx - cx);
+                let c1y = cy + 2.0 / 3.0 * (qy - cy);
+                let c2x = x + 2.0 / 3.0 * (qx - x);
+                let c2y = y + 2.0 / 3.0 * (qy - y);
+                last_c2x = c2x;
+                last_c2y = c2y;
+                cx = x;
+                cy = y;
+                emit_cubic_to(&mut out, c1x, c1y, c2x, c2y, cx, cy);
+            }
+            b'A' => {
+                num!(arx);
+                num!(ary);
+                num!(rot);
+                flag!(la);
+                flag!(sw);
+                num!(x);
+                num!(y);
+                arc_to_cubics(&mut out, cx, cy, arx, ary, rot, la, sw, x, y);
+                cx = x;
+                cy = y;
+            }
+            b'a' => {
+                num!(arx);
+                num!(ary);
+                num!(rot);
+                flag!(la);
+                flag!(sw);
+                num!(dx);
+                num!(dy);
+                let x = cx + dx;
+                let y = cy + dy;
+                arc_to_cubics(&mut out, cx, cy, arx, ary, rot, la, sw, x, y);
+                cx = x;
+                cy = y;
+            }
+            b'Z' | b'z' => {
+                emit_close(&mut out);
+                cx = subpath_x;
+                cy = subpath_y;
+            }
+            _ => {
+                i += 1;
+                continue;
+            }
         }
 
         match cmd {
             b'C' | b'c' | b'S' | b's' => {}
-            _ => { last_c2x = cx; last_c2y = cy; }
+            _ => {
+                last_c2x = cx;
+                last_c2y = cy;
+            }
         }
         last_cmd = cmd;
     }
@@ -350,68 +523,239 @@ struct IconEntry {
 const MANIFEST: &[IconEntry] = &[
     // ── document variants ──────────────────────────────────────
     IconEntry {
-        os_name: "document", label: "Document", svg_file: "file",
-        mimetype: None, mime_category: None,
+        os_name: "document",
+        label: "Document",
+        svg_file: "file",
+        mimetype: None,
+        mime_category: None,
         layers: &[Layer::Primary, Layer::Primary],
     },
     IconEntry {
-        os_name: "document", label: "Text document", svg_file: "file-text",
-        mimetype: None, mime_category: Some("text/"),
-        layers: &[Layer::Primary, Layer::Primary, Layer::Secondary, Layer::Secondary, Layer::Secondary],
+        os_name: "document",
+        label: "Text document",
+        svg_file: "file-text",
+        mimetype: None,
+        mime_category: Some("text/"),
+        layers: &[
+            Layer::Primary,
+            Layer::Primary,
+            Layer::Secondary,
+            Layer::Secondary,
+            Layer::Secondary,
+        ],
     },
     IconEntry {
-        os_name: "document", label: "Rich text document", svg_file: "file-pencil",
-        mimetype: Some("text/rich"), mime_category: None,
-        layers: &[Layer::Primary, Layer::Primary, Layer::Secondary, Layer::Secondary],
+        os_name: "document",
+        label: "Rich text document",
+        svg_file: "file-pencil",
+        mimetype: Some("text/rich"),
+        mime_category: None,
+        layers: &[
+            Layer::Primary,
+            Layer::Primary,
+            Layer::Secondary,
+            Layer::Secondary,
+        ],
     },
     IconEntry {
-        os_name: "document", label: "Markdown document", svg_file: "markdown",
-        mimetype: Some("text/markdown"), mime_category: None,
+        os_name: "document",
+        label: "Markdown document",
+        svg_file: "markdown",
+        mimetype: Some("text/markdown"),
+        mime_category: None,
         layers: &[Layer::Primary],
     },
     IconEntry {
-        os_name: "document", label: "Source code", svg_file: "file-code",
-        mimetype: Some("application/json"), mime_category: None,
+        os_name: "document",
+        label: "Source code",
+        svg_file: "file-code",
+        mimetype: Some("application/json"),
+        mime_category: None,
         layers: &[Layer::Primary, Layer::Primary, Layer::Secondary],
     },
     IconEntry {
-        os_name: "document", label: "Image", svg_file: "photo",
-        mimetype: None, mime_category: Some("image/"),
+        os_name: "document",
+        label: "Image",
+        svg_file: "photo",
+        mimetype: None,
+        mime_category: Some("image/"),
         layers: &[Layer::Primary, Layer::Primary, Layer::Secondary],
     },
     IconEntry {
-        os_name: "document", label: "Audio", svg_file: "device-audio-tape",
-        mimetype: None, mime_category: Some("audio/"),
-        layers: &[Layer::Primary, Layer::Primary, Layer::Secondary, Layer::Secondary],
+        os_name: "document",
+        label: "Audio",
+        svg_file: "device-audio-tape",
+        mimetype: None,
+        mime_category: Some("audio/"),
+        layers: &[
+            Layer::Primary,
+            Layer::Primary,
+            Layer::Secondary,
+            Layer::Secondary,
+        ],
     },
     IconEntry {
-        os_name: "document", label: "Video", svg_file: "movie",
-        mimetype: None, mime_category: Some("video/"),
+        os_name: "document",
+        label: "Video",
+        svg_file: "movie",
+        mimetype: None,
+        mime_category: Some("video/"),
         layers: &[Layer::Primary, Layer::Secondary, Layer::Secondary],
     },
     IconEntry {
-        os_name: "document", label: "Data table", svg_file: "table",
-        mimetype: Some("text/csv"), mime_category: None,
+        os_name: "document",
+        label: "Data table",
+        svg_file: "table",
+        mimetype: Some("text/csv"),
+        mime_category: None,
         layers: &[Layer::Primary, Layer::Secondary],
     },
-
     // ── system UI icons ────────────────────────────────────────
-    IconEntry { os_name: "search", label: "Search", svg_file: "search", mimetype: None, mime_category: None, layers: &[Layer::Primary, Layer::Primary] },
-    IconEntry { os_name: "settings", label: "Settings", svg_file: "settings", mimetype: None, mime_category: None, layers: &[Layer::Primary] },
-    IconEntry { os_name: "alert", label: "Alert", svg_file: "alert-triangle", mimetype: None, mime_category: None, layers: &[Layer::Primary, Layer::Secondary] },
-    IconEntry { os_name: "info", label: "Information", svg_file: "info-circle", mimetype: None, mime_category: None, layers: &[Layer::Primary, Layer::Secondary] },
-    IconEntry { os_name: "check", label: "Confirm", svg_file: "check", mimetype: None, mime_category: None, layers: &[Layer::Primary] },
-    IconEntry { os_name: "close", label: "Close", svg_file: "x", mimetype: None, mime_category: None, layers: &[Layer::Primary] },
-    IconEntry { os_name: "plus", label: "Add", svg_file: "plus", mimetype: None, mime_category: None, layers: &[Layer::Primary] },
-    IconEntry { os_name: "minus", label: "Remove", svg_file: "minus", mimetype: None, mime_category: None, layers: &[Layer::Primary] },
-    IconEntry { os_name: "arrow-left", label: "Navigate left", svg_file: "arrow-left", mimetype: None, mime_category: None, layers: &[Layer::Primary] },
-    IconEntry { os_name: "arrow-right", label: "Navigate right", svg_file: "arrow-right", mimetype: None, mime_category: None, layers: &[Layer::Primary] },
-    IconEntry { os_name: "arrow-up", label: "Navigate up", svg_file: "arrow-up", mimetype: None, mime_category: None, layers: &[Layer::Primary] },
-    IconEntry { os_name: "arrow-down", label: "Navigate down", svg_file: "arrow-down", mimetype: None, mime_category: None, layers: &[Layer::Primary] },
-    IconEntry { os_name: "undo", label: "Undo", svg_file: "arrow-back-up", mimetype: None, mime_category: None, layers: &[Layer::Primary] },
-    IconEntry { os_name: "redo", label: "Redo", svg_file: "arrow-forward-up", mimetype: None, mime_category: None, layers: &[Layer::Primary] },
-    IconEntry { os_name: "menu", label: "Menu", svg_file: "menu-2", mimetype: None, mime_category: None, layers: &[Layer::Primary] },
-    IconEntry { os_name: "loading", label: "Loading", svg_file: "loader-2", mimetype: None, mime_category: None, layers: &[Layer::Primary] },
+    IconEntry {
+        os_name: "search",
+        label: "Search",
+        svg_file: "search",
+        mimetype: None,
+        mime_category: None,
+        layers: &[Layer::Primary, Layer::Primary],
+    },
+    IconEntry {
+        os_name: "settings",
+        label: "Settings",
+        svg_file: "settings",
+        mimetype: None,
+        mime_category: None,
+        layers: &[Layer::Primary],
+    },
+    IconEntry {
+        os_name: "alert",
+        label: "Alert",
+        svg_file: "alert-triangle",
+        mimetype: None,
+        mime_category: None,
+        layers: &[Layer::Primary, Layer::Secondary],
+    },
+    IconEntry {
+        os_name: "info",
+        label: "Information",
+        svg_file: "info-circle",
+        mimetype: None,
+        mime_category: None,
+        layers: &[Layer::Primary, Layer::Secondary],
+    },
+    IconEntry {
+        os_name: "check",
+        label: "Confirm",
+        svg_file: "check",
+        mimetype: None,
+        mime_category: None,
+        layers: &[Layer::Primary],
+    },
+    IconEntry {
+        os_name: "close",
+        label: "Close",
+        svg_file: "x",
+        mimetype: None,
+        mime_category: None,
+        layers: &[Layer::Primary],
+    },
+    IconEntry {
+        os_name: "plus",
+        label: "Add",
+        svg_file: "plus",
+        mimetype: None,
+        mime_category: None,
+        layers: &[Layer::Primary],
+    },
+    IconEntry {
+        os_name: "minus",
+        label: "Remove",
+        svg_file: "minus",
+        mimetype: None,
+        mime_category: None,
+        layers: &[Layer::Primary],
+    },
+    IconEntry {
+        os_name: "arrow-left",
+        label: "Navigate left",
+        svg_file: "arrow-left",
+        mimetype: None,
+        mime_category: None,
+        layers: &[Layer::Primary],
+    },
+    IconEntry {
+        os_name: "arrow-right",
+        label: "Navigate right",
+        svg_file: "arrow-right",
+        mimetype: None,
+        mime_category: None,
+        layers: &[Layer::Primary],
+    },
+    IconEntry {
+        os_name: "arrow-up",
+        label: "Navigate up",
+        svg_file: "arrow-up",
+        mimetype: None,
+        mime_category: None,
+        layers: &[Layer::Primary],
+    },
+    IconEntry {
+        os_name: "arrow-down",
+        label: "Navigate down",
+        svg_file: "arrow-down",
+        mimetype: None,
+        mime_category: None,
+        layers: &[Layer::Primary],
+    },
+    IconEntry {
+        os_name: "undo",
+        label: "Undo",
+        svg_file: "arrow-back-up",
+        mimetype: None,
+        mime_category: None,
+        layers: &[Layer::Primary],
+    },
+    IconEntry {
+        os_name: "redo",
+        label: "Redo",
+        svg_file: "arrow-forward-up",
+        mimetype: None,
+        mime_category: None,
+        layers: &[Layer::Primary],
+    },
+    IconEntry {
+        os_name: "menu",
+        label: "Menu",
+        svg_file: "menu-2",
+        mimetype: None,
+        mime_category: None,
+        layers: &[Layer::Primary],
+    },
+    IconEntry {
+        os_name: "loading",
+        label: "Loading",
+        svg_file: "loader-2",
+        mimetype: None,
+        mime_category: None,
+        layers: &[Layer::Primary],
+    },
+    // ── cursor icons ──────────────────────────────────────────
+    IconEntry {
+        os_name: "pointer",
+        label: "Pointer",
+        svg_file: "pointer",
+        mimetype: None,
+        mime_category: None,
+        layers: &[Layer::Primary],
+    },
+    IconEntry {
+        os_name: "cursor-text",
+        label: "Text cursor",
+        svg_file: "cursor-text",
+        mimetype: None,
+        mime_category: None,
+        layers: &[Layer::Primary, Layer::Primary, Layer::Primary],
+    },
 ];
 
 // ── Code generator ─────────────────────────────────────────────────
@@ -466,12 +810,8 @@ pub fn generate_icon_data(icons_dir: &Path, output_path: &Path) {
 
     for entry in MANIFEST {
         let svg_path = icons_dir.join(format!("{}.svg", entry.svg_file));
-        let svg_content = std::fs::read_to_string(&svg_path).unwrap_or_else(|e| {
-            panic!(
-                "Failed to read SVG {}: {e}",
-                svg_path.display()
-            )
-        });
+        let svg_content = std::fs::read_to_string(&svg_path)
+            .unwrap_or_else(|e| panic!("Failed to read SVG {}: {e}", svg_path.display()));
 
         let d_attrs = extract_svg_paths(&svg_content);
         if d_attrs.is_empty() {
@@ -481,11 +821,13 @@ pub fn generate_icon_data(icons_dir: &Path, output_path: &Path) {
         // Generate a unique constant name.
         let const_suffix = match (&entry.mimetype, &entry.mime_category) {
             (Some(mt), _) => format!(
-                "{}_{}", entry.os_name.to_uppercase().replace('-', "_"),
+                "{}_{}",
+                entry.os_name.to_uppercase().replace('-', "_"),
                 mt.replace('/', "_").replace('.', "_").to_uppercase()
             ),
             (_, Some(cat)) => format!(
-                "{}_CAT_{}", entry.os_name.to_uppercase().replace('-', "_"),
+                "{}_CAT_{}",
+                entry.os_name.to_uppercase().replace('-', "_"),
                 cat.replace('/', "").to_uppercase()
             ),
             _ => entry.os_name.to_uppercase().replace('-', "_"),
@@ -505,11 +847,7 @@ pub fn generate_icon_data(icons_dir: &Path, output_path: &Path) {
         let paths_const = format!("PATHS_{const_suffix}");
         code.push_str(&format!("static {paths_const}: &[IconPath] = &[\n"));
         for (pi, _) in d_attrs.iter().enumerate() {
-            let layer = entry
-                .layers
-                .get(pi)
-                .copied()
-                .unwrap_or(Layer::Primary);
+            let layer = entry.layers.get(pi).copied().unwrap_or(Layer::Primary);
             let layer_str = match layer {
                 Layer::Primary => "Layer::Primary",
                 Layer::Secondary => "Layer::Secondary",
@@ -544,7 +882,9 @@ pub fn generate_icon_data(icons_dir: &Path, output_path: &Path) {
 
     // Generate lookup function.
     code.push_str("/// Look up an icon by exact name and optional exact mimetype.\n");
-    code.push_str("pub(crate) fn lookup(name: &str, mimetype: Option<&str>) -> Option<&'static Icon> {\n");
+    code.push_str(
+        "pub(crate) fn lookup(name: &str, mimetype: Option<&str>) -> Option<&'static Icon> {\n",
+    );
     code.push_str("    match (name, mimetype) {\n");
 
     // Exact mimetype matches first.
@@ -572,7 +912,9 @@ pub fn generate_icon_data(icons_dir: &Path, output_path: &Path) {
 
     // Generate category lookup function.
     code.push_str("/// Look up an icon by name and mimetype category prefix.\n");
-    code.push_str("pub(crate) fn lookup_category(name: &str, category: &str) -> Option<&'static Icon> {\n");
+    code.push_str(
+        "pub(crate) fn lookup_category(name: &str, category: &str) -> Option<&'static Icon> {\n",
+    );
     code.push_str("    match (name, category) {\n");
 
     for g in &generated {

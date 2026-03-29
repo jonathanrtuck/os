@@ -11,14 +11,13 @@ mod loading;
 
 use alloc::vec::Vec;
 
-use icon_lib as icons;
-
 pub(crate) use full::rich_xy_to_byte;
 // Re-export all public items from submodules.
 pub use full::{
     build_clock_update, build_cursor_update, build_document_content, build_full_scene,
-    build_rich_document_content, build_selection_update, RichFonts, CURSOR_HOTSPOT_OFFSET,
+    build_rich_document_content, build_selection_update, RichFonts,
 };
+use icon_lib as icons;
 pub use incremental::{delete_line, insert_line, update_single_line};
 pub use loading::{build_loading_scene, update_spinner_angle};
 // Style table is used by scene_state (via main.rs re-export path).
@@ -47,36 +46,35 @@ pub const N_CONTENT: u16 = 5;
 pub const N_DOC_TEXT: u16 = 6;
 pub const N_CURSOR: u16 = 7;
 
-// ── Pointer cursor node (8) ──────────────────────────────────────────
-//
-// Top-level node rendered above all content. Position updated each
-// frame from MSG_POINTER_ABS. Auto-hides after 3 s of inactivity with
-// a 300 ms EaseOut fade.
-pub const N_POINTER: u16 = 8;
+// Pointer cursor (formerly node 8) is no longer in the scene graph.
+// Cursor shape and opacity flow through the CursorState shared-memory
+// register; position flows through PointerState. The render driver
+// rasterizes cursor icons via the normal GPU pipeline and manages the
+// hardware cursor plane independently.
 
-// ── Title bar icon (9) ──────────────────────────────────────────────
+// ── Title bar icon (8) ──────────────────────────────────────────────
 //
 // Document type icon in the title bar, baseline-aligned with the title
 // text. Content::Path with stroke_width > 0 for outline Tabler icons.
-pub const N_TITLE_ICON: u16 = 9;
+pub const N_TITLE_ICON: u16 = 8;
 
-// ── Document strip (10..12) ─────────────────────────────────────────
+// ── Document strip (9..11) ──────────────────────────────────────────
 //
 // Horizontal strip of document spaces. N_STRIP is a child of N_CONTENT
 // with width = N × viewport. content_transform.tx slides the viewport.
 // Each document occupies one viewport-width "space" in the strip.
-pub const N_STRIP: u16 = 10;
+pub const N_STRIP: u16 = 9;
 
 // White page surface for the text document (space 0). A4 proportions,
 // centered horizontally. N_DOC_TEXT is a child of this node.
-pub const N_PAGE: u16 = 11;
+pub const N_PAGE: u16 = 10;
 
 // Image content in space 1. Centered in the second viewport-width
 // region of the strip. The image IS its own surface (no page bg).
-pub const N_DOC_IMAGE: u16 = 12;
+pub const N_DOC_IMAGE: u16 = 11;
 
-/// Number of well-known nodes (indices 0..12). Dynamic nodes start at 13.
-pub const WELL_KNOWN_COUNT: u16 = 13;
+/// Number of well-known nodes (indices 0..11). Dynamic nodes start at 12.
+pub const WELL_KNOWN_COUNT: u16 = 12;
 
 // ── Configuration ───────────────────────────────────────────────────
 
@@ -160,9 +158,21 @@ fn scale_icon_paths(
             match tag {
                 0 => {
                     // MoveTo: tag(4) + x(4) + y(4) = 12
-                    if pos + 12 > cmds.len() { break; }
-                    let x = f32::from_le_bytes([cmds[pos+4], cmds[pos+5], cmds[pos+6], cmds[pos+7]]) * scale;
-                    let y = f32::from_le_bytes([cmds[pos+8], cmds[pos+9], cmds[pos+10], cmds[pos+11]]) * scale;
+                    if pos + 12 > cmds.len() {
+                        break;
+                    }
+                    let x = f32::from_le_bytes([
+                        cmds[pos + 4],
+                        cmds[pos + 5],
+                        cmds[pos + 6],
+                        cmds[pos + 7],
+                    ]) * scale;
+                    let y = f32::from_le_bytes([
+                        cmds[pos + 8],
+                        cmds[pos + 9],
+                        cmds[pos + 10],
+                        cmds[pos + 11],
+                    ]) * scale;
                     buf.extend_from_slice(&0u32.to_le_bytes());
                     buf.extend_from_slice(&x.to_le_bytes());
                     buf.extend_from_slice(&y.to_le_bytes());
@@ -170,9 +180,21 @@ fn scale_icon_paths(
                 }
                 1 => {
                     // LineTo: tag(4) + x(4) + y(4) = 12
-                    if pos + 12 > cmds.len() { break; }
-                    let x = f32::from_le_bytes([cmds[pos+4], cmds[pos+5], cmds[pos+6], cmds[pos+7]]) * scale;
-                    let y = f32::from_le_bytes([cmds[pos+8], cmds[pos+9], cmds[pos+10], cmds[pos+11]]) * scale;
+                    if pos + 12 > cmds.len() {
+                        break;
+                    }
+                    let x = f32::from_le_bytes([
+                        cmds[pos + 4],
+                        cmds[pos + 5],
+                        cmds[pos + 6],
+                        cmds[pos + 7],
+                    ]) * scale;
+                    let y = f32::from_le_bytes([
+                        cmds[pos + 8],
+                        cmds[pos + 9],
+                        cmds[pos + 10],
+                        cmds[pos + 11],
+                    ]) * scale;
                     buf.extend_from_slice(&1u32.to_le_bytes());
                     buf.extend_from_slice(&x.to_le_bytes());
                     buf.extend_from_slice(&y.to_le_bytes());
@@ -180,11 +202,18 @@ fn scale_icon_paths(
                 }
                 2 => {
                     // CubicTo: tag(4) + c1x(4) + c1y(4) + c2x(4) + c2y(4) + x(4) + y(4) = 28
-                    if pos + 28 > cmds.len() { break; }
+                    if pos + 28 > cmds.len() {
+                        break;
+                    }
                     let mut coords = [0f32; 6];
                     for ci in 0..6 {
                         let off = pos + 4 + ci * 4;
-                        coords[ci] = f32::from_le_bytes([cmds[off], cmds[off+1], cmds[off+2], cmds[off+3]]) * scale;
+                        coords[ci] = f32::from_le_bytes([
+                            cmds[off],
+                            cmds[off + 1],
+                            cmds[off + 2],
+                            cmds[off + 3],
+                        ]) * scale;
                     }
                     buf.extend_from_slice(&2u32.to_le_bytes());
                     for c in &coords {

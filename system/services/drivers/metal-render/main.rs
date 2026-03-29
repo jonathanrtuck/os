@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 
 use protocol::metal::{self, DRAWABLE_HANDLE};
 use render::frame_scheduler::frame_period_ns;
-use scene::{Content, NodeFlags, NodeId, NULL};
+use scene::{NodeId, NULL};
 
 #[path = "atlas.rs"]
 mod atlas;
@@ -63,11 +63,6 @@ pub(crate) const VIRTQ_RENDER: u32 = 1;
 pub(crate) const INIT_HANDLE: u8 = 0;
 /// IPC handle for the core->metal-render scene update channel.
 pub(crate) const SCENE_HANDLE: u8 = 1;
-
-/// Scene graph node index for the pointer cursor. Matches core's N_POINTER.
-/// When the cursor plane is active, this node is skipped during walk_scene
-/// and composited by the host's cursor plane instead.
-pub(crate) const CURSOR_PLANE_NODE: NodeId = 8;
 
 // ── Metal object handles (guest-assigned, must be nonzero) ──────────────
 
@@ -122,6 +117,18 @@ pub(crate) const TEX_BLUR_B: u32 = 54;
 pub(crate) const TEX_IMAGE: u32 = 55;
 /// Float16 resolve target — MSAA resolves here, then dither pass blits to drawable.
 pub(crate) const TEX_RESOLVE: u32 = 56;
+/// Cursor MSAA render target (4x, RGBA16Float — matches TEX_MSAA format).
+pub(crate) const TEX_CURSOR_MSAA: u32 = 57;
+/// Cursor MSAA stencil attachment (4x — matches TEX_STENCIL format).
+pub(crate) const TEX_CURSOR_STENCIL: u32 = 58;
+/// Cursor MSAA resolve target (1x, RGBA16Float).
+pub(crate) const TEX_CURSOR_RESOLVE: u32 = 59;
+/// Cursor final output (1x, BGRA8_sRGB — for hardware cursor plane).
+pub(crate) const TEX_CURSOR_SRGB: u32 = 60;
+/// Cursor texture size in pixels.
+const CURSOR_TEX_SIZE: u16 = 64;
+/// Cursor display size in points.
+const CURSOR_SIZE_PT: f32 = 24.0;
 
 /// Maximum image texture dimension. All per-frame images are packed into
 /// sub-rectangles of this single atlas texture via `ImageAtlas`.
@@ -218,6 +225,7 @@ pub extern "C" fn _start() -> ! {
     let content_size = rcfg.content_size;
     let scale_factor = rcfg.scale_factor;
     let pointer_state_va = rcfg.pointer_state_va;
+    let cursor_state_va = rcfg.cursor_state_va as usize;
     let font_size_cfg = rcfg.font_size_cfg;
     let frame_rate_cfg = rcfg.frame_rate_cfg;
 
@@ -564,8 +572,9 @@ pub extern "C" fn _start() -> ! {
 
     let mut cmdbuf = metal::CommandBuffer::new();
 
-    // Cursor plane state.
-    let mut cursor_image_hash: u32 = 0;
+    // Cursor state (from CursorState shared page).
+    let mut cursor_shape_gen: u32 = 0;
+    let mut cursor_opacity: u32 = 0;
     let mut cursor_visible: bool = false;
     let mut last_pointer_xy: u64 = 0;
     let mut cursor_x: f32 = 0.0;
@@ -599,23 +608,54 @@ pub extern "C" fn _start() -> ! {
             false
         };
 
+        // Read cursor state from CursorState shared page.
+        let mut cursor_shape_changed = false;
+        let mut cursor_opacity_changed = false;
+        if cursor_state_va != 0 {
+            // SAFETY: cursor_state_va is a shared page mapped by init (read-only).
+            let gen = unsafe {
+                let atom = &*((cursor_state_va) as *const core::sync::atomic::AtomicU32);
+                atom.load(core::sync::atomic::Ordering::Acquire)
+            };
+            if gen != cursor_shape_gen {
+                cursor_shape_gen = gen;
+                cursor_shape_changed = true;
+            }
+            let opa = unsafe {
+                let atom = &*((cursor_state_va + 4) as *const core::sync::atomic::AtomicU32);
+                atom.load(core::sync::atomic::Ordering::Acquire)
+            };
+            if opa != cursor_opacity {
+                cursor_opacity = opa;
+                cursor_opacity_changed = true;
+                let new_visible = opa > 0;
+                if new_visible != cursor_visible {
+                    cursor_visible = new_visible;
+                }
+            }
+        }
+
         // Read scene graph.
         let reader = unsafe { scene::TripleReader::new(scene_va as *mut u8, scene_total_size) };
         let generation = reader.front_generation();
         let scene_changed = generation != last_gen;
 
-        if !scene_changed && !cursor_moved {
+        if !scene_changed && !cursor_moved && !cursor_shape_changed && !cursor_opacity_changed {
             drop(reader);
             continue; // Nothing changed.
         }
 
-        if !scene_changed && cursor_moved {
-            // Cursor-only frame: send position update, no scene walk.
-            // The hypervisor blits the retained frame and composites cursor.
+        if !scene_changed && !cursor_shape_changed {
+            // No scene change and no cursor shape change — lightweight frame.
+            // Send cursor position/visibility/opacity updates only.
             drop(reader);
             cmdbuf.clear();
-            cmdbuf.set_cursor_position(cursor_x, cursor_y);
-            cmdbuf.set_cursor_visible(cursor_visible);
+            if cursor_opacity_changed {
+                cmdbuf.set_cursor_visible(cursor_visible);
+            }
+            if cursor_visible && cursor_moved {
+                cmdbuf.set_cursor_position(cursor_x, cursor_y);
+            }
             cmdbuf.present_and_commit();
             send_render(&device, &mut render_vq, irq_handle, &render_dma, &cmdbuf);
             continue;
@@ -1005,45 +1045,132 @@ pub extern "C" fn _start() -> ! {
         }
 
         // ── Cursor plane ────────────────────────────────────────────────
-        // Read cursor image and visibility from the scene graph (these change
-        // infrequently). Position comes from the pointer state register (read
-        // at the top of the loop, independent of scene generation).
-        if (CURSOR_PLANE_NODE as usize) < nodes.len() {
-            let cnode = &nodes[CURSOR_PLANE_NODE as usize];
-            cursor_visible = cnode.flags.contains(NodeFlags::VISIBLE) && cnode.opacity > 0;
-            cmdbuf.set_cursor_visible(cursor_visible);
+        // Cursor shape and opacity come from the CursorState shared page.
+        // Position comes from the PointerState register (unchanged).
 
-            // Always upload cursor image when hash changes — even if not
-            // yet visible. This pre-populates the cursor texture on the first
-            // frame so the render command buffer doesn't suddenly grow by ~5KB
-            // when cursor becomes visible (avoids captured-frame corruption).
-            if cnode.content_hash != cursor_image_hash {
-                if let Content::InlineImage {
-                    data,
-                    src_width,
-                    src_height,
-                } = cnode.content
-                {
-                    let byte_count = src_width as usize * src_height as usize * 4;
-                    let start = data.offset as usize;
-                    let end = start + byte_count;
-                    if data.length > 0 && end <= data_buf.len() {
-                        cmdbuf.set_cursor_image(
-                            src_width,
-                            src_height,
-                            0, // hotspot_x — baked into position by core
-                            0, // hotspot_y
-                            &data_buf[start..end],
-                        );
-                        cursor_image_hash = cnode.content_hash;
-                    }
+        if cursor_shape_changed && cursor_state_va != 0 {
+            // Read cursor metadata from the shared page header.
+            // SAFETY: cursor_state_va is a valid shared page, shape_generation
+            // was load-acquired above so all header fields are visible.
+            let (viewbox, stroke_w, hot_x, hot_y, fill_rgba, stroke_rgba, data_len) = unsafe {
+                let base = cursor_state_va as *const u8;
+                let viewbox = (base.add(8) as *const f32).read_unaligned();
+                let stroke_w = (base.add(12) as *const f32).read_unaligned();
+                let hot_x = (base.add(16) as *const f32).read_unaligned();
+                let hot_y = (base.add(20) as *const f32).read_unaligned();
+                let fill_rgba = (base.add(24) as *const u32).read_unaligned();
+                let stroke_rgba = (base.add(28) as *const u32).read_unaligned();
+                let data_len = (base.add(32) as *const u32).read_unaligned();
+                (viewbox, stroke_w, hot_x, hot_y, fill_rgba, stroke_rgba, data_len)
+            };
+
+            if data_len > 0 && viewbox > 0.0 {
+                // Read path command bytes from the data area.
+                let data_offset = protocol::cursor::CURSOR_DATA_OFFSET;
+                let path_data: &[u8] = unsafe {
+                    core::slice::from_raw_parts(
+                        (cursor_state_va + data_offset) as *const u8,
+                        data_len as usize,
+                    )
+                };
+
+                let tex_sz = CURSOR_TEX_SIZE as f32;
+                let px_scale = (CURSOR_SIZE_PT * scale_factor) / viewbox;
+                // Margin in viewbox units for stroke overflow.
+                let margin_vb = stroke_w / 2.0 + 1.0;
+
+                // Unpack colors.
+                let fill_color = scene::Color::rgba(
+                    (fill_rgba >> 24) as u8, (fill_rgba >> 16) as u8,
+                    (fill_rgba >> 8) as u8, fill_rgba as u8,
+                );
+                let stroke_color = scene::Color::rgba(
+                    (stroke_rgba >> 24) as u8, (stroke_rgba >> 16) as u8,
+                    (stroke_rgba >> 8) as u8, stroke_rgba as u8,
+                );
+
+                // ── Pass 1: Render cursor to MSAA float16 (same pipeline as main scene) ──
+                cmdbuf.begin_render_pass(
+                    TEX_CURSOR_MSAA, TEX_CURSOR_RESOLVE, TEX_CURSOR_STENCIL,
+                    metal::LOAD_CLEAR, metal::STORE_MSAA_RESOLVE,
+                    0.0, 0.0, 0.0, 0.0, // clear transparent
+                );
+
+                let contours = scene::DataRef { offset: 0, length: data_len };
+                let mut cursor_verts: Vec<u8> = Vec::new();
+
+                // Stroke pass: expand stroke geometry, render with stroke color.
+                let expanded = scene::stroke::expand_stroke(path_data, stroke_w);
+                if !expanded.is_empty() {
+                    let stroke_contours = scene::DataRef {
+                        offset: 0, length: expanded.len() as u32,
+                    };
+                    path::draw_path_stencil_cover(
+                        &mut cmdbuf, &mut cursor_verts,
+                        &expanded, stroke_contours,
+                        stroke_color, scene::FillRule::Winding,
+                        margin_vb, margin_vb,   // node position (viewbox units)
+                        viewbox, viewbox,        // node size (viewbox units)
+                        tex_sz, tex_sz,          // viewport size (pixels)
+                        px_scale, 1.0,           // scale, opacity
+                        path_buf,
+                    );
                 }
-            }
 
-            if cursor_visible {
-                // Position from pointer state register (already scaled).
-                cmdbuf.set_cursor_position(cursor_x, cursor_y);
+                // Fill pass: original paths with fill color.
+                path::draw_path_stencil_cover(
+                    &mut cmdbuf, &mut cursor_verts,
+                    path_data, contours,
+                    fill_color, scene::FillRule::Winding,
+                    margin_vb, margin_vb,
+                    viewbox, viewbox,
+                    tex_sz, tex_sz,
+                    px_scale, 1.0,
+                    path_buf,
+                );
+                flush_solid_vertices(&mut cmdbuf, &mut cursor_verts);
+
+                cmdbuf.end_render_pass();
+
+                // ── Pass 2: Dither/convert float16 → sRGB8 (same as main framebuffer) ──
+                cmdbuf.begin_render_pass(
+                    TEX_CURSOR_SRGB, 0, 0,
+                    metal::LOAD_DONT_CARE, metal::STORE_STORE,
+                    0.0, 0.0, 0.0, 0.0,
+                );
+                cmdbuf.set_render_pipeline(PIPE_DITHER);
+                cmdbuf.set_fragment_texture(TEX_CURSOR_RESOLVE, 0);
+                cmdbuf.set_fragment_sampler(SAMPLER_NEAREST, 0);
+                // Fullscreen quad covering the cursor texture.
+                emit_quad(
+                    &mut cursor_verts,
+                    0.0, 0.0,
+                    tex_sz / scale_factor, tex_sz / scale_factor,
+                    tex_sz, tex_sz,
+                    scale_factor,
+                    1.0, 1.0, 1.0, 1.0,
+                );
+                flush_solid_vertices(&mut cmdbuf, &mut cursor_verts);
+                cmdbuf.end_render_pass();
+
+                // Compute hotspot in pixels.
+                let hotspot_x_px = ((hot_x + margin_vb) * px_scale) as i16;
+                let hotspot_y_px = ((hot_y + margin_vb) * px_scale) as i16;
+
+                cmdbuf.set_cursor_from_texture(
+                    TEX_CURSOR_SRGB,
+                    CURSOR_TEX_SIZE, CURSOR_TEX_SIZE,
+                    hotspot_x_px, hotspot_y_px,
+                );
             }
+        }
+
+        if cursor_opacity_changed {
+            cmdbuf.set_cursor_visible(cursor_visible);
+        }
+
+        if cursor_visible && cursor_moved {
+            cmdbuf.set_cursor_position(cursor_x, cursor_y);
         }
 
         cmdbuf.present_and_commit();

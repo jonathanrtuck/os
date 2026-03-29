@@ -11,8 +11,8 @@ use crate::{
     path::{draw_path_stencil_cover, parse_path_to_points, PathPointsBuf},
     round_font_size,
     virtio_helpers::send_setup,
-    CURSOR_PLANE_NODE, DSS_CLIP_TEST, DSS_NONE, DSS_STENCIL_WRITE, IMG_TEX_DIM, MAX_INLINE_BYTES,
-    PIPE_GLYPH, PIPE_ROUNDED_RECT, PIPE_SHADOW, PIPE_SOLID, PIPE_SOLID_NO_MSAA, PIPE_STENCIL_WRITE,
+    DSS_CLIP_TEST, DSS_NONE, DSS_STENCIL_WRITE, IMG_TEX_DIM, MAX_INLINE_BYTES, PIPE_GLYPH,
+    PIPE_ROUNDED_RECT, PIPE_SHADOW, PIPE_SOLID, PIPE_SOLID_NO_MSAA, PIPE_STENCIL_WRITE,
     PIPE_TEXTURED, SAMPLER_LINEAR, SAMPLER_NEAREST, TEX_ATLAS, TEX_IMAGE, VERTEX_BYTES,
 };
 
@@ -154,11 +154,6 @@ pub(crate) fn walk_scene(
     ctx: &mut RenderContext,
 ) {
     if node_id == NULL || node_id as usize >= nodes.len() {
-        return;
-    }
-
-    // Skip cursor node — composited by the host's cursor plane.
-    if node_id == CURSOR_PLANE_NODE {
         return;
     }
 

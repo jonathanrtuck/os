@@ -22,6 +22,7 @@ pub(crate) struct RenderConfig {
     pub(crate) content_size: u32,
     pub(crate) scale_factor: f32,
     pub(crate) pointer_state_va: u64,
+    pub(crate) cursor_state_va: u64,
     pub(crate) font_size_cfg: u16,
     pub(crate) frame_rate_cfg: u32,
 }
@@ -164,6 +165,7 @@ pub(crate) fn phase_c(ch: &ipc::Channel) -> RenderConfig {
     let mut content_size: u32 = 0;
     let mut scale_factor: f32 = 1.0;
     let mut pointer_state_va: u64 = 0;
+    let mut cursor_state_va: u64 = 0;
     let mut font_size_cfg: u16 = 18;
     let mut frame_rate_cfg: u32 = 60;
 
@@ -179,6 +181,7 @@ pub(crate) fn phase_c(ch: &ipc::Channel) -> RenderConfig {
                 content_size = config.content_size;
                 scale_factor = config.scale_factor;
                 pointer_state_va = config.pointer_state_va;
+                cursor_state_va = config.cursor_state_va;
                 font_size_cfg = config.font_size;
                 frame_rate_cfg = if config.frame_rate > 0 {
                     config.frame_rate as u32
@@ -210,6 +213,7 @@ pub(crate) fn phase_c(ch: &ipc::Channel) -> RenderConfig {
         content_size,
         scale_factor,
         pointer_state_va,
+        cursor_state_va,
         font_size_cfg,
         frame_rate_cfg,
     }

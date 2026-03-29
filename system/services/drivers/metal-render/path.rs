@@ -336,7 +336,20 @@ pub(crate) fn draw_path_stencil_cover(
     let g = color.g as f32 / 255.0;
     let b = color.b as f32 / 255.0;
     let a = (color.a as f32 / 255.0) * opacity;
-    emit_quad(solid_verts, node_x, node_y, node_w, node_h, vw, vh, scale, r, g, b, a);
+    emit_quad(
+        solid_verts,
+        node_x,
+        node_y,
+        node_w,
+        node_h,
+        vw,
+        vh,
+        scale,
+        r,
+        g,
+        b,
+        a,
+    );
     flush_solid_vertices(cmdbuf, solid_verts);
 
     // Restore default depth/stencil state.

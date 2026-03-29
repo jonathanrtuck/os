@@ -225,6 +225,20 @@ fn setup_render_pipeline(
 
     sys::print(b"     pointer state register: 4 KiB shared\n");
 
+    // Cursor state page (1 page). Shared with core (read-write) and
+    // render service (read-only). Core writes cursor shape path data +
+    // metadata; render service GPU-rasterizes and applies to cursor plane.
+    let mut cursor_state_pa: u64 = 0;
+    let cursor_state_va = sys::dma_alloc(0, &mut cursor_state_pa).unwrap_or_else(|_| {
+        sys::print(b"init: dma_alloc (cursor state) failed\n");
+        sys::exit();
+    });
+
+    // SAFETY: cursor_state_va is a valid 1-page DMA region; zeroing PAGE_SIZE bytes is within bounds.
+    unsafe { core::ptr::write_bytes(cursor_state_va as *mut u8, 0, PAGE_SIZE) };
+
+    sys::print(b"     cursor state page: 4 KiB shared\n");
+
     // Unpack Content Region and File Store info.
     let (content_pa_val, content_size_val) = if let Some((pa, size)) = content_region {
         (pa, size)
@@ -288,6 +302,13 @@ fn setup_render_pipeline(
     let render_input_state_va = sys::memory_share(gpu_proc, input_state_pa, 1, true)
         .unwrap_or_else(|_| {
             sys::print(b"init: memory_share (render input state) failed\n");
+            sys::exit();
+        });
+
+    // Share cursor state page with render service (read-only).
+    let render_cursor_state_va = sys::memory_share(gpu_proc, cursor_state_pa, 1, true)
+        .unwrap_or_else(|_| {
+            sys::print(b"init: memory_share (render cursor state) failed\n");
             sys::exit();
         });
 
@@ -467,6 +488,7 @@ fn setup_render_pipeline(
         screen_dpi: 96,
         _pad: 0,
         pointer_state_va: render_input_state_va as u64,
+        cursor_state_va: render_cursor_state_va as u64,
     };
     // SAFETY: CompositorConfig fits within 60-byte payload; msg_type matches the payload type.
     let msg = unsafe { ipc::Message::from_payload(MSG_COMPOSITOR_CONFIG, &render_config) };
@@ -529,6 +551,13 @@ fn setup_render_pipeline(
             sys::exit();
         });
 
+    // Share cursor state page with core (read-write — core writes shape data).
+    let core_cursor_state_va = sys::memory_share(core_proc, cursor_state_pa, 1, false)
+        .unwrap_or_else(|_| {
+            sys::print(b"init: memory_share (core cursor state) failed\n");
+            sys::exit();
+        });
+
     // Send core config.
     let core_ch = init_channel(core_channel_idx);
     let core_config = CoreConfig {
@@ -540,6 +569,7 @@ fn setup_render_pipeline(
         fb_height: logical_h,
         doc_capacity: DOC_BUF_CAPACITY,
         content_size: content_size_val,
+        cursor_state_va: core_cursor_state_va as u64,
     };
     // SAFETY: CoreConfig fits within 60-byte payload; msg_type matches the payload type.
     let msg = unsafe { ipc::Message::from_payload(MSG_CORE_CONFIG, &core_config) };

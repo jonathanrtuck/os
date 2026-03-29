@@ -4,9 +4,63 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
-## Cursor as Icon — Fill+Stroke Prerequisite (2026-03-28)
+## Cursor as Icon — Implementation In Progress (2026-03-28)
 
-**Status:** Design settled. Fill+stroke support implemented — `Content::Path` now has separate `color` (fill) and `stroke_color` (stroke) fields. Next: cursor shape register + render driver cursor plane.
+**Status:** Architecture implemented, rendering unverified. All code compiles, 2,375 tests pass. Needs interactive visual verification.
+
+### What's done
+
+**Architecture (complete):**
+
+- N_POINTER removed from scene graph (node indices shifted 9→8, 10→9, etc.)
+- CursorState shared-memory page: core writes cursor shape path data + metadata, render driver reads
+- Two independent atomics: `shape_generation` (bumped on shape change) and `opacity` (updated for fade)
+- Core hit-tests mouse position: over text page → "cursor-text", elsewhere → "pointer"
+- Core looks up icon from `icon_lib`, writes raw path commands + viewbox/stroke_width/hotspot/colors to CursorState page
+- Metal-render reads CursorState each frame, renders cursor through the **same GPU pipeline** as the main scene (4x MSAA, float16, stencil-then-cover), resolves, dithers to sRGB8
+- `CMD_SET_CURSOR_FROM_TEXTURE` (0x0F13): new hypervisor command. Guest renders to GPU texture, hypervisor encodes blit on same command buffer (deferred readback after presentAndCommit's waitUntilCompleted), creates NSCursor
+- Icon library: `pointer` and `cursor-text` icons added to build manifest
+- Cursor display size: 24pt (matches old ~15pt visible arrow), 64×64 texture
+
+**Files changed (OS repo):**
+
+- `protocol/lib.rs`: CursorState module, cursor_state_va in CoreConfig + CompositorConfig
+- `protocol/metal.rs`: CMD_SET_CURSOR_FROM_TEXTURE command + builder
+- `build_icons.rs`: pointer + cursor-text manifest entries
+- `init/main.rs`: cursor state page allocation + sharing (RW to core, RO to render)
+- `core/main.rs`: cursor state writing, shape hit-testing, removed apply_pointer/rasterize_cursor
+- `core/icons.rs`: deleted (was only cursor rasterization)
+- `core/layout/mod.rs`: N_POINTER removed, indices shifted
+- `core/layout/full.rs`: setup_cursor removed, pointer params removed from build_full_scene
+- `core/scene_state.rs`: apply_pointer removed, pointer params removed
+- `metal-render/main.rs`: cursor rendering via normal pipeline, CursorState reading
+- `metal-render/pipeline.rs`: 4 cursor textures (MSAA + stencil + resolve + sRGB)
+- `metal-render/scene_walk.rs`: CURSOR_PLANE_NODE skip removed
+- `metal-render/device.rs`: cursor_state_va in RenderConfig
+- `test/tests/render_virgl_protocol.rs`: cursor_state_va field added
+
+**Files changed (hypervisor repo):**
+
+- `MetalProtocol.swift`: setCursorFromTexture enum case
+- `VirtioMetal.swift`: deferred cursor readback (blit on currentCommandBuffer, pixel read after commit)
+
+### What's not verified
+
+1. **Cursor rendering correctness** — fill+stroke rendering through the full MSAA pipeline hasn't been visually confirmed. The blit timing fix (deferred readback) is in place but untested.
+2. **Cursor shape determination** — hit-testing logic looks correct on paper but user reported shapes were swapped in an earlier (broken) build. Needs retest.
+3. **Hotspot accuracy** — offset fixed from pixels to viewbox units, but pixel-level correctness unverified.
+4. **Cursor size** — changed to 24pt to match old visual size, unverified.
+
+### Known verification gap
+
+The hardware cursor (NSCursor) is composited by macOS's WindowServer above the Metal drawable. Hypervisor frame captures (`--capture`) don't include it. macOS `screencapture -C` includes the host cursor but the event script's `move` command only positions the GUEST cursor (via virtio tablet), not the host cursor. To verify: run interactively with `cargo run -r` and move the real mouse over the window.
+
+### Design decisions made during implementation
+
+- **Cursor data flows through shared memory, not scene graph.** CursorState page with path commands + metadata. Render driver never touches the icon library — it just sees path data.
+- **Same GPU pipeline as the main scene.** 4x MSAA float16 → resolve → dither to sRGB8. No cursor-specific pipelines. Avoids Metal pipeline/format mismatch bugs.
+- **CMD_SET_CURSOR_FROM_TEXTURE mirrors real hardware.** Analogous to `drmModeSetCursor2` — guest tells display controller "use this GPU buffer as the cursor." No pixel transfer from guest to host; hypervisor reads the texture directly.
+- **Deferred readback.** Blit encoded on the same command buffer as cursor render passes. Pixel readback happens after presentAndCommit's waitUntilCompleted — ensures GPU has finished writing.
 
 ### The question
 

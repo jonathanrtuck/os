@@ -28,9 +28,9 @@ extern crate alloc;
 extern crate animation;
 extern crate drawing;
 extern crate fonts;
+extern crate icons as icon_lib;
 extern crate layout as layout_lib;
 extern crate piecetable;
-extern crate icons as icon_lib;
 extern crate render;
 extern crate scene;
 
@@ -40,8 +40,6 @@ mod blink;
 mod documents;
 #[path = "fallback.rs"]
 mod fallback;
-#[path = "icons.rs"]
-mod icons;
 #[path = "input.rs"]
 mod input_handling;
 #[path = "layout/mod.rs"]
@@ -115,10 +113,7 @@ enum DecodePhase {
     /// Header-only query sent, awaiting dimensions.
     AwaitingHeader,
     /// Full decode request sent, awaiting pixel data.
-    AwaitingDecode {
-        alloc_offset: u32,
-        pixel_bytes: u32,
-    },
+    AwaitingDecode { alloc_offset: u32, pixel_bytes: u32 },
     /// Decode complete (success or failure).
     Done,
 }
@@ -392,6 +387,12 @@ pub(crate) struct CoreState {
     pub(crate) pointer_visible: bool,
     /// VA of the shared PointerState register (input driver writes, core reads).
     pub(crate) input_state_va: usize,
+    /// VA of the shared CursorState page (core writes, render service reads).
+    pub(crate) cursor_state_va: usize,
+    /// Current shape_generation written to the cursor state page.
+    pub(crate) cursor_shape_generation: u32,
+    /// Current cursor shape name (static literal for pointer identity comparison).
+    pub(crate) cursor_shape_name: &'static str,
     /// Last-seen packed pointer_xy value (for change detection).
     pub(crate) last_pointer_xy: u64,
     pub(crate) rtc_mmio_va: usize,
@@ -517,6 +518,9 @@ impl CoreState {
             pointer_opacity: 0,
             pointer_visible: false,
             input_state_va: 0,
+            cursor_state_va: 0,
+            cursor_shape_generation: 0,
+            cursor_shape_name: "pointer",
             last_pointer_xy: 0,
             rtc_mmio_va: 0,
             rtc_epoch_at_boot: 0,
@@ -553,6 +557,67 @@ static STATE: SyncState = SyncState(core::cell::UnsafeCell::new(CoreState::new()
 pub(crate) fn state() -> &'static mut CoreState {
     // SAFETY: Single-threaded userspace process. No concurrent access.
     unsafe { &mut *STATE.0.get() }
+}
+
+/// Write cursor shape data to the CursorState shared page.
+///
+/// Looks up the icon, concatenates its path commands, and writes the
+/// header + data. Bumps shape_generation with a store-release so the
+/// render driver sees the complete write.
+fn write_cursor_shape(cursor_state_va: usize, generation: &mut u32, icon_name: &str) {
+    use protocol::cursor::{CursorState, CURSOR_DATA_OFFSET};
+
+    let icon = icon_lib::get(icon_name, None);
+
+    // Concatenate all sub-path commands.
+    let mut data_len: u32 = 0;
+    for path in icon.paths {
+        let bytes = path.commands;
+        let dst_offset = CURSOR_DATA_OFFSET + data_len as usize;
+        // SAFETY: cursor_state_va is a valid RW page from init.
+        unsafe {
+            let dst = (cursor_state_va + dst_offset) as *mut u8;
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, bytes.len());
+        }
+        data_len += bytes.len() as u32;
+    }
+
+    // Hotspot depends on cursor shape.
+    let (hotspot_x, hotspot_y) = match icon_name {
+        "pointer" => (4.0_f32, 4.0_f32),       // arrow tip in 24×24 viewbox
+        "cursor-text" => (12.0_f32, 12.0_f32), // I-beam center
+        _ => (0.0_f32, 0.0_f32),
+    };
+
+    // Write header fields (non-atomic — protected by generation protocol).
+    // SAFETY: cursor_state_va points to a valid CursorState page.
+    unsafe {
+        let header = cursor_state_va as *mut CursorState;
+        (*header).viewbox = icon.viewbox;
+        (*header).stroke_width = icon.stroke_width;
+        (*header).hotspot_x = hotspot_x;
+        (*header).hotspot_y = hotspot_y;
+        (*header).fill_color = CursorState::pack_color(0, 0, 0, 255); // black fill
+        (*header).stroke_color = CursorState::pack_color(255, 255, 255, 255); // white stroke
+        (*header).data_len = data_len;
+    }
+
+    // Bump generation with store-release.
+    *generation = generation.wrapping_add(1);
+    unsafe {
+        let gen_ptr = cursor_state_va as *const core::sync::atomic::AtomicU32;
+        (*gen_ptr).store(*generation, core::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Write cursor opacity to the CursorState page (independent of shape).
+fn write_cursor_opacity(cursor_state_va: usize, opacity: u8) {
+    // SAFETY: cursor_state_va is a valid shared page.
+    // opacity field is at offset 4 (after shape_generation u32).
+    unsafe {
+        let opacity_ptr = (cursor_state_va + 4) as *const core::sync::atomic::AtomicU32;
+        (*opacity_ptr).store(opacity as u32, core::sync::atomic::Ordering::Release);
+    }
 }
 
 /// Access the mono font data slice from shared memory.
@@ -927,6 +992,7 @@ pub extern "C" fn _start() -> ! {
         s.doc_capacity = config.doc_capacity as usize;
         s.doc_len = 0;
         s.input_state_va = config.input_state_va as usize;
+        s.cursor_state_va = config.cursor_state_va as usize;
     }
     documents::doc_write_header();
 
@@ -1203,9 +1269,8 @@ pub extern "C" fn _start() -> ! {
             flags: protocol::decode::DECODE_FLAG_HEADER_ONLY,
         };
         // SAFETY: DecodeRequest is repr(C) and fits in 60-byte payload.
-        let req_msg = unsafe {
-            ipc::Message::from_payload(protocol::decode::MSG_DECODE_REQUEST, &hdr_req)
-        };
+        let req_msg =
+            unsafe { ipc::Message::from_payload(protocol::decode::MSG_DECODE_REQUEST, &hdr_req) };
         decoder_ch.send(&req_msg);
         let _ = sys::channel_signal(DECODER_HANDLE);
         boot.decode_phase = DecodePhase::AwaitingHeader;
@@ -1259,8 +1324,7 @@ pub extern "C" fn _start() -> ! {
             compositor_ch.send(&scene_msg);
             let _ = sys::channel_signal(COMPOSITOR_HANDLE);
             // Recreate one-shot timer.
-            anim_timer = sys::timer_create(frame_interval_ns)
-                .unwrap_or(sys::TimerHandle(255));
+            anim_timer = sys::timer_create(frame_interval_ns).unwrap_or(sys::TimerHandle(255));
         }
 
         // ── Decoder replies ─────────────────────────────────────────
@@ -1316,8 +1380,7 @@ pub extern "C" fn _start() -> ! {
                             let s = state();
                             // SAFETY: content_va is mapped read-write.
                             let header = unsafe {
-                                &mut *(s.content_va
-                                    as *mut protocol::content::ContentRegionHeader)
+                                &mut *(s.content_va as *mut protocol::content::ContentRegionHeader)
                             };
                             let entry_idx = header.entry_count as usize;
                             if entry_idx < protocol::content::MAX_CONTENT_ENTRIES {
@@ -1366,9 +1429,8 @@ pub extern "C" fn _start() -> ! {
                                 capacity: s.doc_capacity as u32,
                                 _pad: 0,
                             };
-                            let read_msg = unsafe {
-                                ipc::Message::from_payload(MSG_DOC_READ, &read_payload)
-                            };
+                            let read_msg =
+                                unsafe { ipc::Message::from_payload(MSG_DOC_READ, &read_payload) };
                             fs_ch.send(&read_msg);
                             let _ = sys::channel_signal(FS_HANDLE);
                             boot.doc_phase = DocPhase::Reading {
@@ -1406,9 +1468,8 @@ pub extern "C" fn _start() -> ! {
                                 capacity: s.doc_capacity as u32,
                                 _pad: 0,
                             };
-                            let read_msg = unsafe {
-                                ipc::Message::from_payload(MSG_DOC_READ, &read_payload)
-                            };
+                            let read_msg =
+                                unsafe { ipc::Message::from_payload(MSG_DOC_READ, &read_payload) };
                             fs_ch.send(&read_msg);
                             let _ = sys::channel_signal(FS_HANDLE);
                             boot.doc_phase = DocPhase::Reading {
@@ -1480,9 +1541,8 @@ pub extern "C" fn _start() -> ! {
                             _pad: 0,
                             file_ids: [state().doc_file_id, 0, 0, 0, 0, 0],
                         };
-                        let snap_msg = unsafe {
-                            ipc::Message::from_payload(MSG_DOC_SNAPSHOT, &snap_payload)
-                        };
+                        let snap_msg =
+                            unsafe { ipc::Message::from_payload(MSG_DOC_SNAPSHOT, &snap_payload) };
                         fs_ch.send(&snap_msg);
                         let _ = sys::channel_signal(FS_HANDLE);
                         boot.doc_phase = DocPhase::AwaitingUndo;
@@ -1511,9 +1571,8 @@ pub extern "C" fn _start() -> ! {
                             _pad: 0,
                             file_ids: [state().doc_file_id, 0, 0, 0, 0, 0],
                         };
-                        let snap_msg = unsafe {
-                            ipc::Message::from_payload(MSG_DOC_SNAPSHOT, &snap_payload)
-                        };
+                        let snap_msg =
+                            unsafe { ipc::Message::from_payload(MSG_DOC_SNAPSHOT, &snap_payload) };
                         fs_ch.send(&snap_msg);
                         let _ = sys::channel_signal(FS_HANDLE);
                         boot.doc_phase = DocPhase::AwaitingUndo;
@@ -1634,6 +1693,15 @@ pub extern "C" fn _start() -> ! {
         }
     };
 
+    // Write initial cursor shape (arrow) to cursor state page.
+    {
+        let s = state();
+        if s.cursor_state_va != 0 {
+            write_cursor_shape(s.cursor_state_va, &mut s.cursor_shape_generation, "pointer");
+            write_cursor_opacity(s.cursor_state_va, 0); // hidden initially
+        }
+    }
+
     {
         let s = state();
         let is_rich_doc = s.doc_format == DocumentFormat::Rich;
@@ -1652,9 +1720,6 @@ pub extern "C" fn _start() -> ! {
             &time_buf,
             0,
             s.cursor_opacity,
-            s.mouse_x,
-            s.mouse_y,
-            s.pointer_opacity,
             0,
             0,
         );
@@ -2221,11 +2286,45 @@ pub extern "C" fn _start() -> ! {
                 // handled by the render service reading the shared register.
                 if s.pointer_opacity != 255 {
                     s.pointer_opacity = 255;
+                    if s.cursor_state_va != 0 {
+                        write_cursor_opacity(s.cursor_state_va, 255);
+                    }
                     changed = true;
                 }
                 s.pointer_last_event_ms = now_ms;
 
                 pointer_position_changed = true;
+
+                // Determine cursor shape from mouse position.
+                if s.cursor_state_va != 0 {
+                    let page_w = {
+                        let ch = fb_height.saturating_sub(TITLE_BAR_H + SHADOW_DEPTH);
+                        let ph = ch.saturating_sub(2 * 16); // page_margin_v
+                        (ph as u64 * 210 / 297) as u32
+                    };
+                    let page_x_start = (fb_width.saturating_sub(page_w)) / 2;
+                    let page_x_end = page_x_start + page_w;
+                    let over_content = s.mouse_y >= TITLE_BAR_H;
+                    let over_page = over_content
+                        && s.active_space == 0
+                        && s.mouse_x >= page_x_start
+                        && s.mouse_x < page_x_end;
+                    let new_shape = if over_page {
+                        "cursor-text"
+                    } else {
+                        "pointer"
+                    };
+                    // Only re-write if shape changed (comparing string pointers is fine
+                    // since these are static literals).
+                    if !core::ptr::eq(new_shape as *const str, s.cursor_shape_name as *const str) {
+                        s.cursor_shape_name = new_shape;
+                        write_cursor_shape(
+                            s.cursor_state_va,
+                            &mut s.cursor_shape_generation,
+                            new_shape,
+                        );
+                    }
+                }
             }
         }
 
@@ -2792,6 +2891,9 @@ pub extern "C" fn _start() -> ! {
                     let new_opacity = s.timeline.value(id) as u8;
                     if new_opacity != s.pointer_opacity {
                         s.pointer_opacity = new_opacity;
+                        if s.cursor_state_va != 0 {
+                            write_cursor_opacity(s.cursor_state_va, new_opacity);
+                        }
                         changed = true;
                     }
                 } else {
@@ -2799,6 +2901,9 @@ pub extern "C" fn _start() -> ! {
                     s.pointer_opacity = 0;
                     s.pointer_visible = false;
                     s.pointer_fade_id = None;
+                    if s.cursor_state_va != 0 {
+                        write_cursor_opacity(s.cursor_state_va, 0);
+                    }
                     changed = true;
                 }
             }
@@ -2837,7 +2942,6 @@ pub extern "C" fn _start() -> ! {
             let is_rich_doc = state().doc_format == DocumentFormat::Rich;
 
             if context_switched {
-
                 let s = state();
                 let title: &[u8] = if s.active_space != 0 {
                     b"Image"
@@ -2862,9 +2966,6 @@ pub extern "C" fn _start() -> ! {
                     &time_buf,
                     s.scroll_offset,
                     s.cursor_opacity,
-                    s.mouse_x,
-                    s.mouse_y,
-                    s.pointer_opacity,
                     s.slide_offset,
                     s.active_space,
                 );
@@ -2933,7 +3034,11 @@ pub extern "C" fn _start() -> ! {
             } else if text_changed && is_rich_doc {
                 // Rich text content changed — always full rebuild.
                 let s = state();
-                let title: &[u8] = if s.active_space != 0 { b"Image" } else { b"Rich Text" };
+                let title: &[u8] = if s.active_space != 0 {
+                    b"Image"
+                } else {
+                    b"Rich Text"
+                };
                 let rich_fonts = scene_state::RichFonts {
                     mono_data: font_data(),
                     mono_upem: s.font_upem,
@@ -3092,7 +3197,11 @@ pub extern "C" fn _start() -> ! {
             } else if selection_changed && is_rich_doc {
                 // Rich text selection — full rebuild (proportional positioning).
                 let s = state();
-                let title: &[u8] = if s.active_space != 0 { b"Image" } else { b"Rich Text" };
+                let title: &[u8] = if s.active_space != 0 {
+                    b"Image"
+                } else {
+                    b"Rich Text"
+                };
                 let rich_fonts = scene_state::RichFonts {
                     mono_data: font_data(),
                     mono_upem: s.font_upem,
@@ -3174,7 +3283,11 @@ pub extern "C" fn _start() -> ! {
                 // Rich text cursor-only update — full rebuild needed because
                 // proportional cursor positioning requires the styled layout.
                 let s = state();
-                let title: &[u8] = if s.active_space != 0 { b"Image" } else { b"Rich Text" };
+                let title: &[u8] = if s.active_space != 0 {
+                    b"Image"
+                } else {
+                    b"Rich Text"
+                };
                 let rich_fonts = scene_state::RichFonts {
                     mono_data: font_data(),
                     mono_upem: s.font_upem,
@@ -3270,13 +3383,12 @@ pub extern "C" fn _start() -> ! {
                 scene.apply_slide(state().slide_offset);
             }
 
-            // Apply pointer cursor opacity to the scene graph. Position
-            // is read directly from the shared register by the render
-            // service, so we only need to publish when something else in
-            // the scene already changed (opacity, visibility, image).
+            // Write cursor opacity to shared register (render driver reads).
             if needs_scene_update {
                 let s = state();
-                scene.apply_pointer(s.mouse_x, s.mouse_y, s.pointer_opacity);
+                if s.cursor_state_va != 0 {
+                    write_cursor_opacity(s.cursor_state_va, s.pointer_opacity);
+                }
             }
         }
 

@@ -12,49 +12,15 @@ use super::{
     allocate_line_nodes, allocate_selection_rects, byte_to_line_col, chars_per_line, dc, doc_width,
     emit_icon, layout_mono_lines, layout_rich_lines, scroll_runs, shape_chrome_text,
     shape_rich_segment, shape_visible_runs, update_clock_inline, FontInfo, RichLine, SceneConfig,
-    N_CLOCK_TEXT, N_CONTENT, N_CURSOR, N_DOC_IMAGE, N_DOC_TEXT, N_PAGE, N_POINTER, N_ROOT,
-    N_SHADOW, N_STRIP, N_TITLE_BAR, N_TITLE_ICON, N_TITLE_TEXT, WELL_KNOWN_COUNT,
+    N_CLOCK_TEXT, N_CONTENT, N_CURSOR, N_DOC_IMAGE, N_DOC_TEXT, N_PAGE, N_ROOT, N_SHADOW, N_STRIP,
+    N_TITLE_BAR, N_TITLE_ICON, N_TITLE_TEXT, WELL_KNOWN_COUNT,
 };
-use crate::icons;
 
 const DOCUMENT_SHADOW_BLUR_RADIUS: u8 = 64;
 const DOCUMENT_SHADOW_COLOR: Color = Color::rgba(0, 0, 0, 255);
 const DOCUMENT_SHADOW_OFFSET_X: i16 = 0;
 const DOCUMENT_SHADOW_OFFSET_Y: i16 = 0;
 const DOCUMENT_SHADOW_SPREAD: i8 = 36;
-
-// ── Pointer cursor constants ─────────────────────────────────────────
-
-/// Pointer cursor display size in points.
-const CURSOR_SIZE_PT: u32 = 18;
-/// Hotspot offset in points (arrow tip is inset by this amount from node origin).
-pub const CURSOR_HOTSPOT_OFFSET: i32 = {
-    // offset_viewbox * display_pt / viewbox_size, rounded
-    // = 1.0 * 18 / 14 ≈ 1.3 → 1
-    (CURSOR_SIZE_PT as f32 * icons::CURSOR_VIEWBOX.recip()) as i32
-};
-
-/// Push cursor image data and set up N_POINTER as Content::InlineImage.
-fn setup_cursor(w: &mut scene::SceneWriter<'_>, mouse_x: u32, mouse_y: u32, pointer_opacity: u8) {
-    let cursor_px = CURSOR_SIZE_PT * 2; // 2× for Retina
-    let cursor_pixels = icons::rasterize_cursor(cursor_px);
-    let cursor_ref = w.push_data(&cursor_pixels);
-    let cursor_hash = fnv1a(&cursor_pixels);
-    let n = w.node_mut(N_POINTER);
-    n.x = scene::pt(mouse_x as i32 - CURSOR_HOTSPOT_OFFSET);
-    n.y = scene::pt(mouse_y as i32 - CURSOR_HOTSPOT_OFFSET);
-    n.width = scene::upt(CURSOR_SIZE_PT);
-    n.height = scene::upt(CURSOR_SIZE_PT);
-    n.content = Content::InlineImage {
-        data: cursor_ref,
-        src_width: cursor_px as u16,
-        src_height: cursor_px as u16,
-    };
-    n.content_hash = cursor_hash;
-    n.opacity = pointer_opacity;
-    n.flags = NodeFlags::VISIBLE;
-    n.next_sibling = NULL;
-}
 
 // ── Full scene builds (called by SceneState methods) ────────────────
 
@@ -75,9 +41,6 @@ pub fn build_full_scene(
     clock_text: &[u8],
     scroll_y: scene::Mpt,
     cursor_opacity: u8,
-    mouse_x: u32,
-    mouse_y: u32,
-    pointer_opacity: u8,
     slide_offset: scene::Mpt,
     active_space: u8,
 ) {
@@ -184,7 +147,16 @@ pub fn build_full_scene(
     let icon_y = ((cfg.title_bar_h.saturating_sub(icon_size_pt)) / 2).saturating_sub(1);
     let title_text_x = icon_x + icon_size_pt as i32 + 8;
 
-    emit_icon(w, N_TITLE_ICON, icon, icon_x, icon_y as i32, icon_size_pt, Color::TRANSPARENT, dc(cfg.chrome_title_color));
+    emit_icon(
+        w,
+        N_TITLE_ICON,
+        icon,
+        icon_x,
+        icon_y as i32,
+        icon_size_pt,
+        Color::TRANSPARENT,
+        dc(cfg.chrome_title_color),
+    );
     w.node_mut(N_TITLE_ICON).next_sibling = N_TITLE_TEXT;
     {
         let n = w.node_mut(N_TITLE_TEXT);
@@ -401,12 +373,8 @@ pub fn build_full_scene(
         n.next_sibling = NULL;
     }
 
-    // ── Pointer cursor (top-level, highest z-order) ──────────────────
-    // Sibling chain: N_CONTENT → N_TITLE_BAR → N_POINTER
-    // (content set above; title bar links to pointer here)
-
-    w.node_mut(N_TITLE_BAR).next_sibling = N_POINTER;
-    setup_cursor(w, mouse_x, mouse_y, pointer_opacity);
+    // Sibling chain ends: N_CONTENT → N_TITLE_BAR
+    w.node_mut(N_TITLE_BAR).next_sibling = NULL;
 
     w.set_root(N_ROOT);
 }
@@ -573,29 +541,27 @@ pub fn build_document_content(
     let (style_table, mono_style_id, sans_style_id) = super::base_style_table(cfg);
     super::write_style_registry(w, &style_table);
 
-    // Re-push pointer cursor image data (invalidated by reset_data).
-    {
-        let cursor_px = CURSOR_SIZE_PT * 2;
-        let cursor_pixels = icons::rasterize_cursor(cursor_px);
-        let cursor_ref = w.push_data(&cursor_pixels);
-        let cursor_hash = fnv1a(&cursor_pixels);
-        let n = w.node_mut(N_POINTER);
-        n.content = Content::InlineImage {
-            data: cursor_ref,
-            src_width: cursor_px as u16,
-            src_height: cursor_px as u16,
-        };
-        n.content_hash = cursor_hash;
-    }
-
     // Re-push title icon path data (invalidated by reset_data).
     {
         let icon_size_pt = cfg.line_height + 2;
-        let mimetype = if active_space != 0 { Some("image/png") } else { Some("text/plain") };
+        let mimetype = if active_space != 0 {
+            Some("image/png")
+        } else {
+            Some("text/plain")
+        };
         let icon = icon_lib::get("document", mimetype);
         let icon_x: i32 = 6;
         let icon_y = ((cfg.title_bar_h.saturating_sub(icon_size_pt)) / 2).saturating_sub(1);
-        emit_icon(w, N_TITLE_ICON, icon, icon_x, icon_y as i32, icon_size_pt, Color::TRANSPARENT, dc(cfg.chrome_title_color));
+        emit_icon(
+            w,
+            N_TITLE_ICON,
+            icon,
+            icon_x,
+            icon_y as i32,
+            icon_size_pt,
+            Color::TRANSPARENT,
+            dc(cfg.chrome_title_color),
+        );
         w.node_mut(N_TITLE_ICON).next_sibling = N_TITLE_TEXT;
     }
 
@@ -1177,29 +1143,27 @@ pub fn build_rich_document_content(
     }
     super::write_style_registry(w, &style_table);
 
-    // Re-push pointer cursor image data.
-    {
-        let cursor_px = CURSOR_SIZE_PT * 2;
-        let cursor_pixels = icons::rasterize_cursor(cursor_px);
-        let cursor_ref = w.push_data(&cursor_pixels);
-        let cursor_hash = fnv1a(&cursor_pixels);
-        let n = w.node_mut(N_POINTER);
-        n.content = Content::InlineImage {
-            data: cursor_ref,
-            src_width: cursor_px as u16,
-            src_height: cursor_px as u16,
-        };
-        n.content_hash = cursor_hash;
-    }
-
     // Re-push title icon path data.
     {
         let icon_size_pt = cfg.line_height + 2;
-        let mimetype = if active_space != 0 { Some("image/png") } else { Some("text/rich") };
+        let mimetype = if active_space != 0 {
+            Some("image/png")
+        } else {
+            Some("text/rich")
+        };
         let icon = icon_lib::get("document", mimetype);
         let icon_x: i32 = 6;
         let icon_y = ((cfg.title_bar_h.saturating_sub(icon_size_pt)) / 2).saturating_sub(1);
-        emit_icon(w, N_TITLE_ICON, icon, icon_x, icon_y as i32, icon_size_pt, Color::TRANSPARENT, dc(cfg.chrome_title_color));
+        emit_icon(
+            w,
+            N_TITLE_ICON,
+            icon,
+            icon_x,
+            icon_y as i32,
+            icon_size_pt,
+            Color::TRANSPARENT,
+            dc(cfg.chrome_title_color),
+        );
         w.node_mut(N_TITLE_ICON).next_sibling = N_TITLE_TEXT;
     }
 
