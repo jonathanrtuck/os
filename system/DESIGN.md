@@ -298,7 +298,7 @@ Notification for both: `channel_signal` syscall wakes the consumer from `sys::wa
 - One `Node` type with geometric content variants: `None`, `FillRect`, `Glyphs`, `Image` (no semantic content types — the scene graph is purely geometric).
 - Tree encoded via `first_child` / `next_sibling` (left-child right-sibling representation).
 - Cursor and selection are `FillRect` content nodes (explicit geometry, not implicit text properties).
-- `content_transform` (AffineTransform) for scrolling and zoom.
+- `child_offset` (f32, f32) for scrolling and document slide.
 - The scene graph is a **compiled output** of the document model, not the document model itself.
 
 **Shared memory layout:**
@@ -311,7 +311,7 @@ Notification for both: `channel_signal` syscall wakes the consumer from `sys::wa
 ```
 
 - **Header (64 B):** generation counter (u32), node count (u16), root NodeId (u16), data bytes used (u32), reserved.
-- **Node array:** fixed-size entries indexed by `NodeId` (u16). Each node is 136 bytes (17 × 8, aarch64 cache-line friendly). Geometry (x, y, width, height), visual decoration (background, border, corner radius, opacity, shadow), flags (visible, clips children), `clip_path` (DataRef), `content_transform` (AffineTransform), `cursor_shape` (u8: 0=inherit, 1=pointer, 2=text — used by Core's hit-test, ignored by render driver), and a `Content` variant (None/Image/Path/Glyphs). **Growth policy:** add fields in 8-byte increments. `_reserved` fields (3 bytes) provide headroom for future additions without a size bump.
+- **Node array:** fixed-size entries indexed by `NodeId` (u16). Each node is 120 bytes. Geometry (x, y, width, height), visual decoration (background, border, corner radius, opacity, shadow), flags (visible, clips children), `clip_path` (DataRef), `child_offset` (f32, f32) for scroll/slide, `transform` (AffineTransform), `cursor_shape` (u8: 0=inherit, 1=pointer, 2=text — used by Core's hit-test, ignored by render driver), and a `Content` variant (None/Image/Path/Glyphs). **Growth policy:** add fields in 8-byte increments. `_reserved` fields (3 bytes) provide headroom for future additions without a size bump.
 - **Data buffer (128 KiB):** variable-length data (shaped glyph arrays, pixel buffers, path commands) referenced by offset+length (`DataRef`).
 
 **APIs:**

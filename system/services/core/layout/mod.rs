@@ -61,7 +61,7 @@ pub const N_TITLE_ICON: u16 = 8;
 // ── Document strip (9..11) ──────────────────────────────────────────
 //
 // Horizontal strip of document spaces. N_STRIP is a child of N_CONTENT
-// with width = N × viewport. content_transform.tx slides the viewport.
+// with width = N × viewport. child_offset_x slides the viewport.
 // Each document occupies one viewport-width "space" in the strip.
 pub const N_STRIP: u16 = 9;
 
@@ -386,7 +386,7 @@ pub fn line_bytes_for_run<'a>(text: &'a [u8], run: &LayoutRun) -> &'a [u8] {
 /// Filter runs to those visible in a scrolled viewport.
 ///
 /// `scroll_y` is the scroll offset in pixels (f32). Runs keep their
-/// document-relative y positions. The caller sets `content_transform`
+/// document-relative y positions. The caller sets `child_offset_y`
 /// on the container node so the renderer handles the viewport offset.
 pub fn scroll_runs(
     runs: Vec<LayoutRun>,
@@ -1255,7 +1255,7 @@ pub(crate) fn update_clock_inline(
 /// the cursor node). Each line of the selection gets one rect node.
 ///
 /// Selection rects use document-relative y positions. The renderer
-/// applies `content_transform` from the parent container to offset them
+/// applies `child_offset` from the parent container to offset them
 /// visually. `scroll_pt` and `content_h` are used only for visibility
 /// culling.
 #[allow(clippy::too_many_arguments)]

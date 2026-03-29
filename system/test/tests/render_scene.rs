@@ -123,7 +123,7 @@ fn line_bytes_for_run<'a>(text: &'a [u8], run: &TestLayoutRun) -> &'a [u8] {
 /// Filter runs to those visible in a scrolled viewport.
 ///
 /// `scroll_y` is the scroll offset in pixels (f32). Runs keep their
-/// document-relative y positions. The caller sets `content_transform`
+/// document-relative y positions. The caller sets `child_offset_y`
 /// on the container node so the renderer handles the viewport offset.
 fn scroll_runs(
     runs: Vec<TestLayoutRun>,
@@ -1620,13 +1620,13 @@ fn abs_bounds_large_coords_no_truncation() {
     assert!(physical_x <= u16::MAX as i32);
 }
 
-// ── VAL-COORD-013: abs_bounds accounts for content_transform from ancestor nodes ──
+// ── VAL-COORD-013: abs_bounds accounts for child_offset from ancestor nodes ──
 
-/// abs_bounds must apply parent content_transform when computing a child's
+/// abs_bounds must apply parent child_offset when computing a child's
 /// absolute position. A child inside a scrolled container has its effective y
-/// position offset by content_transform.ty (negative for scroll-down).
+/// position offset by child_offset_y (negative for scroll-down).
 #[test]
-fn abs_bounds_accounts_for_content_transform() {
+fn abs_bounds_accounts_for_child_offset() {
     let mut buf = make_buf();
     let mut w = SceneWriter::new(&mut buf);
 
@@ -1636,12 +1636,12 @@ fn abs_bounds_accounts_for_content_transform() {
     w.node_mut(root).height = scene::upt(600);
     w.set_root(root);
 
-    // Scrollable container at (0, 50) with scroll offset 10 (ty = -10)
+    // Scrollable container at (0, 50) with scroll offset 10 (child_offset_y = -10)
     let container = w.alloc_node().unwrap();
     w.node_mut(container).y = scene::pt(50);
     w.node_mut(container).width = scene::upt(800);
     w.node_mut(container).height = scene::upt(500);
-    w.node_mut(container).content_transform = AffineTransform::translate(0.0, -10.0);
+    w.node_mut(container).child_offset_y = -10.0;
     w.add_child(root, container);
 
     // Child inside the scrolled container at (20, 30)
@@ -1662,13 +1662,13 @@ fn abs_bounds_accounts_for_content_transform() {
     assert_eq!(
         ay,
         scene::pt(70),
-        "abs_bounds y must apply parent content_transform"
+        "abs_bounds y must apply parent child_offset"
     );
     assert_eq!(aw, scene::upt(100));
     assert_eq!(ah, scene::upt(40));
 }
 
-/// abs_bounds with deeply nested scroll containers: content_transform accumulates.
+/// abs_bounds with deeply nested scroll containers: child_offset accumulates.
 #[test]
 fn abs_bounds_nested_scroll_containers() {
     let mut buf = make_buf();
@@ -1679,20 +1679,20 @@ fn abs_bounds_nested_scroll_containers() {
     w.node_mut(root).height = scene::upt(600);
     w.set_root(root);
 
-    // Outer container scrolled by 5 (ty = -5)
+    // Outer container scrolled by 5 (child_offset_y = -5)
     let outer = w.alloc_node().unwrap();
     w.node_mut(outer).y = scene::pt(100);
     w.node_mut(outer).width = scene::upt(800);
     w.node_mut(outer).height = scene::upt(400);
-    w.node_mut(outer).content_transform = AffineTransform::translate(0.0, -5.0);
+    w.node_mut(outer).child_offset_y = -5.0;
     w.add_child(root, outer);
 
-    // Inner container scrolled by 15 (ty = -15)
+    // Inner container scrolled by 15 (child_offset_y = -15)
     let inner = w.alloc_node().unwrap();
     w.node_mut(inner).y = scene::pt(20);
     w.node_mut(inner).width = scene::upt(800);
     w.node_mut(inner).height = scene::upt(300);
-    w.node_mut(inner).content_transform = AffineTransform::translate(0.0, -15.0);
+    w.node_mut(inner).child_offset_y = -15.0;
     w.add_child(outer, inner);
 
     // Leaf at y=10 inside inner
@@ -1713,7 +1713,7 @@ fn abs_bounds_nested_scroll_containers() {
     assert_eq!(
         ay,
         scene::pt(110),
-        "abs_bounds must apply each ancestor's content_transform"
+        "abs_bounds must apply each ancestor's child_offset"
     );
 }
 
@@ -2117,10 +2117,10 @@ fn node_has_transform_field() {
 }
 
 #[test]
-fn node_has_content_transform_field() {
+fn node_has_child_offset_fields() {
     let node = Node::EMPTY;
-    assert!(node.content_transform.is_identity());
-    assert!(node.content_transform.is_pure_translation());
+    assert_eq!(node.child_offset_x, 0.0);
+    assert_eq!(node.child_offset_y, 0.0);
 }
 
 #[test]
@@ -2150,12 +2150,12 @@ fn affine_transform_partial_eq() {
 #[test]
 fn node_size_assertion_with_transform() {
     // VAL-XFORM-022: Node size compile-time assertion.
-    // After adding clip_path (DataRef, 8 bytes) and _reserved (8 bytes),
-    // Node grew from 120 to 136 bytes.
+    // After replacing content_transform (AffineTransform, 24B) with
+    // child_offset (f32, f32, 8B), Node shrank from 136 to 120 bytes.
     let size = core::mem::size_of::<Node>();
     assert_eq!(
-        size, 136,
-        "Node size should be 136 bytes with clip_path + _reserved, got {}",
+        size, 120,
+        "Node size should be 120 bytes with child_offset, got {}",
         size
     );
 }
@@ -2671,8 +2671,8 @@ fn multiple_glyphs_nodes_coexist() {
 // ── Node size (VAL-SCENE-006) ────────────────────────────────────────
 
 #[test]
-fn node_size_is_136_bytes() {
-    assert_eq!(core::mem::size_of::<Node>(), 136);
+fn node_size_is_120_bytes() {
+    assert_eq!(core::mem::size_of::<Node>(), 120);
 }
 
 #[test]
@@ -3078,14 +3078,14 @@ fn build_test_editor_scene(
         n.height = content_h as u32;
         n.flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
     }
-    // N_DOC_TEXT -- Content::None (pure container with content_transform)
+    // N_DOC_TEXT -- Content::None (pure container with child_offset for scroll)
     {
         let n = w.node_mut(CORE_N_DOC_TEXT);
         n.x = text_inset_x as i32;
         n.y = 8;
         n.width = doc_width as u32;
         n.height = content_h as u32;
-        n.content_transform = AffineTransform::translate(0.0, -scroll_y);
+        n.child_offset_y = -scroll_y;
         n.content = Content::None;
         n.content_hash = fnv1a(doc_text);
         n.flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
@@ -3584,11 +3584,11 @@ fn core_scroll_filters_lines_correctly() {
         "first visible line at document y=100 (line 5 * 20px)"
     );
 
-    // N_DOC_TEXT.content_transform.ty should be -(scroll_lines * line_height)
+    // N_DOC_TEXT.child_offset_y should be -(scroll_lines * line_height)
     assert_eq!(
-        w.node(CORE_N_DOC_TEXT).content_transform.ty,
+        w.node(CORE_N_DOC_TEXT).child_offset_y,
         -100.0, // -(5 * 20)
-        "N_DOC_TEXT.content_transform.ty should be -(scroll_lines * line_height)"
+        "N_DOC_TEXT.child_offset_y should be -(scroll_lines * line_height)"
     );
 }
 
@@ -3597,7 +3597,7 @@ fn core_scroll_filters_lines_correctly() {
 #[test]
 fn core_scroll_model_document_relative_positions() {
     // Verify the scroll model invariant: all children of N_DOC_TEXT are
-    // positioned at document-relative coordinates, and N_DOC_TEXT.content_transform
+    // positioned at document-relative coordinates, and N_DOC_TEXT.child_offset_y
     // provides the viewport offset.
     let mut buf = make_buf();
     let mut w = SceneWriter::new(&mut buf);
@@ -3609,11 +3609,11 @@ fn core_scroll_model_document_relative_positions() {
 
     let scroll_pt = scroll_y.round() as i32; // 60
 
-    // 1. N_DOC_TEXT.content_transform.ty == -scroll_y
+    // 1. N_DOC_TEXT.child_offset_y == -scroll_y
     assert_eq!(
-        w.node(CORE_N_DOC_TEXT).content_transform.ty,
+        w.node(CORE_N_DOC_TEXT).child_offset_y,
         -scroll_y,
-        "N_DOC_TEXT.content_transform.ty must equal -scroll_y (pixel offset)"
+        "N_DOC_TEXT.child_offset_y must equal -scroll_y (pixel offset)"
     );
 
     // 2. Line nodes have document-relative y (not viewport-relative).
@@ -3646,11 +3646,9 @@ fn core_scroll_model_no_scroll_positions_unchanged() {
     let mut w = SceneWriter::new(&mut buf);
     build_test_editor_scene(&mut w, 1024, 768, b"aaa\nbbb\nccc", 0, 0, 0, 8, 20, 16, 0.0);
 
-    // content_transform should be identity (no scroll).
-    assert_eq!(
-        w.node(CORE_N_DOC_TEXT).content_transform,
-        AffineTransform::identity()
-    );
+    // child_offset should be zero (no scroll).
+    assert_eq!(w.node(CORE_N_DOC_TEXT).child_offset_x, 0.0);
+    assert_eq!(w.node(CORE_N_DOC_TEXT).child_offset_y, 0.0);
 
     // Line positions: 0, 20, 40 (document == viewport when no scroll).
     let children = collect_children(&w, CORE_N_DOC_TEXT);
@@ -4527,7 +4525,7 @@ fn path_cubic_to_encoding() {
 fn node_size_unchanged_with_path() {
     // VAL-CROSS-01: Node size assertion passes after adding Content::Path.
     let size = core::mem::size_of::<Node>();
-    assert_eq!(size, 136, "Node must remain 136 bytes with Path variant");
+    assert_eq!(size, 120, "Node must remain 120 bytes with Path variant");
 }
 
 #[test]

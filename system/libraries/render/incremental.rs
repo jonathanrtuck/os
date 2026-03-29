@@ -5,10 +5,7 @@
 //! dirty bitmap from the scene header is compared against previous state to
 //! produce a minimal set of dirty rectangles for partial repaint.
 
-use scene::{
-    abs_bounds, build_parent_map, AffineTransform, Node, NodeId, DIRTY_BITMAP_WORDS, MAX_NODES,
-    NULL,
-};
+use scene::{abs_bounds, build_parent_map, Node, NodeId, DIRTY_BITMAP_WORDS, MAX_NODES, NULL};
 
 use crate::damage::DamageTracker;
 
@@ -20,8 +17,8 @@ pub struct IncrementalState {
     pub prev_bounds: [(i32, i32, u32, u32); MAX_NODES],
     /// Bitmap: was node visible last frame? One bit per node.
     pub prev_visible: [u64; DIRTY_BITMAP_WORDS],
-    /// Per-node content_transform from the previous frame.
-    pub prev_content_transform: [AffineTransform; MAX_NODES],
+    /// Per-node child_offset from the previous frame.
+    pub prev_child_offset: [(f32, f32); MAX_NODES],
     /// Per-node content_hash from the previous frame. Used by the render
     /// backends (Tasks 7/8) to detect property-only changes: if a node is
     /// dirty but content_hash is unchanged, the backend can blit from its
@@ -36,7 +33,7 @@ impl IncrementalState {
         Self {
             prev_bounds: [(0, 0, 0, 0); MAX_NODES],
             prev_visible: [0u64; DIRTY_BITMAP_WORDS],
-            prev_content_transform: [AffineTransform::identity(); MAX_NODES],
+            prev_child_offset: [(0.0, 0.0); MAX_NODES],
             prev_content_hash: [0u32; MAX_NODES],
             first_frame: true,
         }
@@ -118,17 +115,12 @@ impl IncrementalState {
         Some(tracker)
     }
 
-    /// Detect pure-translation content_transform changes on container nodes.
+    /// Detect child_offset changes on container nodes (scroll/slide).
     ///
-    /// Returns `Some((node_id, delta_tx, delta_ty))` for the first dirty
-    /// container whose content_transform changed and both the old and new
-    /// transforms are pure translations (no scale/rotation). Scale or
-    /// rotation changes are NOT reported as scroll — they affect the
-    /// entire container and should be handled as full dirty rects.
-    ///
-    /// Only reports the first scrolled container — sufficient for the
-    /// current single-document model. Multi-container scroll would
-    /// require returning an iterator or small array.
+    /// Returns `Some((node_id, delta_x, delta_y))` for the first dirty
+    /// container whose child_offset changed. Only reports the first
+    /// scrolled container — sufficient for the current single-document
+    /// model.
     pub fn detect_scroll(
         &self,
         nodes: &[Node],
@@ -139,15 +131,13 @@ impl IncrementalState {
                 break;
             }
             let node = &nodes[i];
-            let prev = &self.prev_content_transform[i];
+            let (prev_x, prev_y) = self.prev_child_offset[i];
             if node.first_child != NULL
-                && node.content_transform != *prev
-                && node.content_transform.is_pure_translation()
-                && prev.is_pure_translation()
+                && (node.child_offset_x != prev_x || node.child_offset_y != prev_y)
             {
-                let delta_tx = node.content_transform.tx - prev.tx;
-                let delta_ty = node.content_transform.ty - prev.ty;
-                return Some((i as NodeId, delta_tx, delta_ty));
+                let delta_x = node.child_offset_x - prev_x;
+                let delta_y = node.child_offset_y - prev_y;
+                return Some((i as NodeId, delta_x, delta_y));
             }
         }
         None
@@ -173,14 +163,14 @@ impl IncrementalState {
             } else {
                 self.prev_bounds[i] = (0, 0, 0, 0);
             }
-            self.prev_content_transform[i] = nodes[i].content_transform;
+            self.prev_child_offset[i] = (nodes[i].child_offset_x, nodes[i].child_offset_y);
             self.prev_content_hash[i] = nodes[i].content_hash;
         }
 
         // Clear state for nodes beyond the current count.
         for i in count..MAX_NODES {
             self.prev_bounds[i] = (0, 0, 0, 0);
-            self.prev_content_transform[i] = AffineTransform::identity();
+            self.prev_child_offset[i] = (0.0, 0.0);
             self.prev_content_hash[i] = 0;
             // prev_visible already cleared above.
         }

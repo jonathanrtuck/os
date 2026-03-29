@@ -208,10 +208,10 @@ pub fn update_single_line(
         w.mark_dirty(cur);
     }
 
-    // Update N_DOC_TEXT: content_transform, content_hash.
+    // Update N_DOC_TEXT: child_offset (scroll), content_hash.
     // N_DOC_TEXT is the sole child of N_CONTENT — no siblings.
-    w.node_mut(N_DOC_TEXT).content_transform =
-        scene::AffineTransform::translate(0.0, -scene::mpt_to_f32(scroll_y));
+    w.node_mut(N_DOC_TEXT).child_offset_x = 0.0;
+    w.node_mut(N_DOC_TEXT).child_offset_y = -scene::mpt_to_f32(scroll_y);
     w.node_mut(N_DOC_TEXT).next_sibling = NULL;
     w.node_mut(N_DOC_TEXT).content_hash = scene::fnv1a(doc_text);
     w.mark_dirty(N_DOC_TEXT);
@@ -294,7 +294,7 @@ fn update_line_positions(
     }
 }
 
-/// Shared tail: update cursor, selection, content_transform, N_DOC_TEXT hash,
+/// Shared tail: update cursor, selection, child_offset (scroll), N_DOC_TEXT hash,
 /// and optionally the clock. Truncates old selection rects before rebuilding.
 #[allow(clippy::too_many_arguments)]
 fn finish_line_update(
@@ -314,10 +314,10 @@ fn finish_line_update(
     let content_h = cfg.fb_height.saturating_sub(content_y);
     let scroll_pt = scroll_y >> 10;
 
-    // Update N_DOC_TEXT content_transform and content hash.
+    // Update N_DOC_TEXT child_offset (scroll) and content hash.
     // N_DOC_TEXT is the sole child of N_CONTENT — no siblings.
-    w.node_mut(N_DOC_TEXT).content_transform =
-        scene::AffineTransform::translate(0.0, -scene::mpt_to_f32(scroll_y));
+    w.node_mut(N_DOC_TEXT).child_offset_x = 0.0;
+    w.node_mut(N_DOC_TEXT).child_offset_y = -scene::mpt_to_f32(scroll_y);
     w.node_mut(N_DOC_TEXT).next_sibling = NULL;
     w.node_mut(N_DOC_TEXT).content_hash = fnv1a(doc_text);
     w.mark_dirty(N_DOC_TEXT);

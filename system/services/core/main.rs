@@ -567,8 +567,8 @@ pub(crate) fn state() -> &'static mut CoreState {
 /// the cursor icon name.
 ///
 /// Coordinates: mouse position in pixels, scene graph in millipoints.
-/// Handles content_transform (scroll/slide) by inverting the translation
-/// when descending into children.
+/// Handles child_offset (scroll/slide) by inverting the offset when
+/// descending into children.
 fn resolve_cursor_shape(
     nodes: &[scene::Node],
     data_buf: &[u8],
@@ -628,15 +628,9 @@ fn resolve_cursor_shape(
                     let end = start + contours.length as usize;
                     if end <= data_buf.len() {
                         // Convert test point to node-local coordinates (points, f32).
-                        let local_x =
-                            (test_x - abs_x) as f32 / scene::MPT_PER_PT as f32;
-                        let local_y =
-                            (test_y - abs_y) as f32 / scene::MPT_PER_PT as f32;
-                        let w = scene::path_winding_number(
-                            &data_buf[start..end],
-                            local_x,
-                            local_y,
-                        );
+                        let local_x = (test_x - abs_x) as f32 / scene::MPT_PER_PT as f32;
+                        let local_y = (test_y - abs_y) as f32 / scene::MPT_PER_PT as f32;
+                        let w = scene::path_winding_number(&data_buf[start..end], local_x, local_y);
                         if w != 0 {
                             hit = id;
                         }
@@ -660,13 +654,11 @@ fn resolve_cursor_shape(
             continue;
         }
 
-        // Children's origin: node's absolute position + inverse content_transform.
-        // content_transform shifts children's coordinate space (e.g., scroll/slide).
-        // To test a point against children, apply the inverse: add the transform's
-        // translation back (the transform is tx,ty pure translation for scroll/slide).
-        let ct = &node.content_transform;
-        let child_ox = abs_x - (ct.tx * scene::MPT_PER_PT as f32) as i64;
-        let child_oy = abs_y - (ct.ty * scene::MPT_PER_PT as f32) as i64;
+        // Children's origin: node's absolute position + inverse child_offset.
+        // child_offset shifts children's coordinate space (scroll/slide).
+        // To test a point against children, apply the inverse.
+        let child_ox = abs_x - (node.child_offset_x * scene::MPT_PER_PT as f32) as i64;
+        let child_oy = abs_y - (node.child_offset_y * scene::MPT_PER_PT as f32) as i64;
 
         // Collect children (forward-linked: first_child → next_sibling → ...).
         let mut children: [scene::NodeId; 16] = [scene::NULL; 16];
@@ -683,7 +675,11 @@ fn resolve_cursor_shape(
         // Later siblings processed later → their hits override (topmost wins).
         for i in (0..nc).rev() {
             let cid = children[i];
-            if nodes[cid as usize].flags.contains(scene::NodeFlags::VISIBLE) && sp < stack.len() {
+            if nodes[cid as usize]
+                .flags
+                .contains(scene::NodeFlags::VISIBLE)
+                && sp < stack.len()
+            {
                 stack[sp] = (cid, child_ox, child_oy);
                 sp += 1;
             }
@@ -2952,7 +2948,7 @@ pub extern "C" fn _start() -> ! {
         //
         // Ctrl+Tab sets slide_target to the next space. The spring
         // animates slide_offset toward the target. We update N_STRIP's
-        // content_transform each frame via apply_slide.
+        // child_offset each frame via apply_slide.
         //
         // The slide does NOT set `changed` — it uses its own publish
         // path (apply_slide) and compositor signal. Setting `changed`
@@ -3530,8 +3526,7 @@ pub extern "C" fn _start() -> ! {
             if s.cursor_state_va != 0 {
                 let nodes = scene.latest_nodes();
                 let data_buf = scene.latest_data_buf();
-                let new_shape =
-                    resolve_cursor_shape(nodes, data_buf, s.mouse_x, s.mouse_y);
+                let new_shape = resolve_cursor_shape(nodes, data_buf, s.mouse_x, s.mouse_y);
                 if !core::ptr::eq(new_shape as *const str, s.cursor_shape_name as *const str) {
                     s.cursor_shape_name = new_shape;
                     write_cursor_shape(

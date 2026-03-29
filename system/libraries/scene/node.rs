@@ -99,11 +99,11 @@ pub struct Node {
     pub y: i32,
     pub width: Umpt,
     pub height: Umpt,
-    // ── content transform ──
-    /// 2D affine transform applied to children's coordinate space.
-    /// Used for scrolling (pure translation) and zoom (scale).
-    /// Identity by default (no offset).
-    pub content_transform: AffineTransform,
+    // ── child offset ──
+    /// Translation applied to children's coordinate space (points).
+    /// Used for scrolling and document slide. (0, 0) by default.
+    pub child_offset_x: f32,
+    pub child_offset_y: f32,
     // ── visual decoration ──
     pub background: Color,
     pub border: Border,
@@ -158,7 +158,8 @@ impl Node {
         y: 0,
         width: 0,
         height: 0,
-        content_transform: AffineTransform::identity(),
+        child_offset_x: 0.0,
+        child_offset_y: 0.0,
         background: Color::TRANSPARENT,
         border: Border {
             color: Color::TRANSPARENT,
@@ -204,8 +205,8 @@ impl Node {
 // Compile-time size assertion: Node must be exactly 136 bytes.
 // This prevents silent shared-memory layout drift between core and compositor.
 // If you add a field, update this assertion and verify both sides agree.
-// Layout: 96 bytes pre-content + clip_path (8) + cursor_shape (1) + _reserved (3) + content (24) = 136.
-const _: () = assert!(core::mem::size_of::<Node>() == 136);
+// Layout: 80 bytes pre-content + clip_path (8) + cursor_shape (1) + _reserved (3) + content (24) = 120.
+const _: () = assert!(core::mem::size_of::<Node>() == 120);
 
 // ── Shared memory layout ────────────────────────────────────────────
 

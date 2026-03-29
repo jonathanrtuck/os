@@ -45,6 +45,31 @@ pub fn font_metrics(font_data: &[u8]) -> Option<FontMetrics> {
     })
 }
 
+/// Compute the caret skew factor from a font's hhea table.
+///
+/// Returns the horizontal shear factor for `skew_x()`: negative for
+/// right-leaning italic, zero for upright. Derived from the font's
+/// `caretSlopeRise` and `caretSlopeRun` fields — the font designer's
+/// intended caret angle, not a guess.
+pub fn caret_skew(font_data: &[u8]) -> f32 {
+    let font = match FontRef::new(font_data) {
+        Ok(f) => f,
+        Err(_) => return 0.0,
+    };
+    let hhea = match font.hhea() {
+        Ok(h) => h,
+        Err(_) => return 0.0,
+    };
+    let rise = hhea.caret_slope_rise();
+    let run = hhea.caret_slope_run();
+    if rise == 0 {
+        return 0.0;
+    }
+    // Negate: hhea run is positive for right-leaning italic, but skew_x
+    // needs negative to shift the bottom left (leaning the top right).
+    -(run as f32) / (rise as f32)
+}
+
 /// Look up the glyph ID for a Unicode codepoint using the font's cmap table.
 pub fn glyph_id_for_char(font_data: &[u8], codepoint: char) -> Option<u16> {
     let font = FontRef::new(font_data).ok()?;

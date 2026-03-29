@@ -401,8 +401,8 @@ fn walk_node(
     // or if we were already inside one from an ancestor.
     let children_clipped = inside_clip || !node.clip_path.is_empty();
 
-    let ct_tx = node.content_transform.tx * scale;
-    let ct_ty = node.content_transform.ty * scale;
+    let ct_tx = node.child_offset_x * scale;
+    let ct_ty = node.child_offset_y * scale;
 
     let mut child = node.first_child;
     while child != NULL {

@@ -25,8 +25,9 @@ pub use embolden::{compute_dilation, embolden_outline};
 pub use gvar::rasterize_with_axes;
 // From metrics
 pub use metrics::{
-    axis_values_hash, font_axes, font_metrics, glyph_h_advance_with_axes, glyph_h_metrics,
-    glyph_id_for_char, AxisValue, FontAxis, FontMetrics, GlyphMetrics, RasterBuffer,
+    axis_values_hash, caret_skew, font_axes, font_metrics, glyph_h_advance_with_axes,
+    glyph_h_metrics, glyph_id_for_char, AxisValue, FontAxis, FontMetrics, GlyphMetrics,
+    RasterBuffer,
 };
 // From optical
 pub use optical::{

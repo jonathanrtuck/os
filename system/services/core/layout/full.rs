@@ -209,14 +209,14 @@ pub fn build_full_scene(
     }
     {
         // N_STRIP: horizontal strip of document spaces, offset below title bar.
-        // content_transform.tx slides between spaces.
+        // child_offset_x slides between spaces.
         let n = w.node_mut(N_STRIP);
         n.first_child = N_PAGE;
         n.y = scene::pt(content_y as i32);
         n.width = scene::upt(cfg.fb_width * 2); // 2 spaces
         n.height = scene::upt(content_h_u32);
-        n.content_transform =
-            scene::AffineTransform::translate(-scene::mpt_to_f32(slide_offset), 0.0);
+        n.child_offset_x = -scene::mpt_to_f32(slide_offset);
+        n.child_offset_y = 0.0;
         n.flags = NodeFlags::VISIBLE;
     }
 
@@ -250,7 +250,8 @@ pub fn build_full_scene(
         n.y = scene::pt(page_padding as i32);
         n.width = scene::upt(doc_width);
         n.height = scene::upt(text_area_h);
-        n.content_transform = scene::AffineTransform::translate(0.0, -scene::mpt_to_f32(scroll_y));
+        n.child_offset_x = 0.0;
+        n.child_offset_y = -scene::mpt_to_f32(scroll_y);
         n.content = Content::None;
         n.content_hash = fnv1a(doc_text);
         n.flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
@@ -631,8 +632,8 @@ pub fn build_document_content(
     // Re-create per-line Glyphs children under N_DOC_TEXT.
     // N_DOC_TEXT is the sole child of N_PAGE — no siblings.
     w.node_mut(N_DOC_TEXT).next_sibling = NULL;
-    w.node_mut(N_DOC_TEXT).content_transform =
-        scene::AffineTransform::translate(0.0, -scene::mpt_to_f32(scroll_y));
+    w.node_mut(N_DOC_TEXT).child_offset_x = 0.0;
+    w.node_mut(N_DOC_TEXT).child_offset_y = -scene::mpt_to_f32(scroll_y);
     w.node_mut(N_DOC_TEXT).content = Content::None;
     w.node_mut(N_DOC_TEXT).content_hash = fnv1a(doc_text);
 
@@ -1245,8 +1246,8 @@ pub fn build_rich_document_content(
 
     // Set up N_DOC_TEXT.
     w.node_mut(N_DOC_TEXT).next_sibling = NULL;
-    w.node_mut(N_DOC_TEXT).content_transform =
-        scene::AffineTransform::translate(0.0, -scene::mpt_to_f32(scroll_y));
+    w.node_mut(N_DOC_TEXT).child_offset_x = 0.0;
+    w.node_mut(N_DOC_TEXT).child_offset_y = -scene::mpt_to_f32(scroll_y);
     w.node_mut(N_DOC_TEXT).content = Content::None;
     w.node_mut(N_DOC_TEXT).content_hash = text_len as u32;
 
@@ -1301,9 +1302,9 @@ pub fn build_rich_document_content(
         n.content = Content::None;
         n.flags = NodeFlags::VISIBLE;
         n.next_sibling = NULL;
-        // Italic cursor: ~12° skew (standard italic angle).
-        n.content_transform = if cursor_info.italic {
-            scene::AffineTransform::skew_x(-0.21) // ~12° in radians
+        // Caret skew from the font's hhea table (exact angle, not a guess).
+        n.transform = if cursor_info.caret_skew != 0.0 {
+            scene::AffineTransform::skew_x(cursor_info.caret_skew)
         } else {
             scene::AffineTransform::identity()
         };
@@ -1448,8 +1449,9 @@ struct RichCursorInfo {
     style_weight: u16,
     /// Text color at the cursor position (cursor matches text color).
     color: [u8; 4],
-    /// Whether the style at cursor is italic (cursor slants to match).
-    italic: bool,
+    /// Caret skew factor from the font's hhea table (caretSlopeRun/Rise).
+    /// Zero for upright fonts, negative for right-leaning italic.
+    caret_skew: f32,
 }
 
 /// Compute cursor position and height for a rich text document.
@@ -1543,7 +1545,7 @@ fn rich_cursor_position(
         // Height = cap height (baseline to top of capital letters).
         // Computed in float, converted to millipoints at the end to avoid
         // truncation that would cause the cursor to fall short of the baseline.
-        let (cursor_cap_pt, cursor_weight, cursor_color, cursor_italic) = if let Some(style) =
+        let (cursor_cap_pt, cursor_weight, cursor_color, cursor_skew) = if let Some(style) =
             piecetable::style(pt_buf, cursor_style_id)
         {
             let fi = fonts.resolve(style);
@@ -1557,10 +1559,12 @@ fn rich_cursor_position(
             } else {
                 style.font_size_pt as f32 * 0.7
             };
-            let is_italic = style.flags & piecetable::FLAG_ITALIC != 0;
-            (cap_h, style.weight, style.color, is_italic)
+            // Read the caret skew from the font's hhea table — the font
+            // designer's intended caret angle, not a hardcoded guess.
+            let skew = fonts::rasterize::caret_skew(fi.data);
+            (cap_h, style.weight, style.color, skew)
         } else {
-            (default_height as f32 * 0.7, 400, [32, 32, 32, 255], false)
+            (default_height as f32 * 0.7, 400, [32, 32, 32, 255], 0.0)
         };
 
         // Baseline-aligned y and height in millipoints (Mpt/Umpt).
@@ -1580,7 +1584,7 @@ fn rich_cursor_position(
             height: cursor_h_mpt.max(scene::upt(2)),
             style_weight: cursor_weight,
             color: cursor_color,
-            italic: cursor_italic,
+            caret_skew: cursor_skew,
         };
     }
 
@@ -1590,7 +1594,7 @@ fn rich_cursor_position(
     let last_line_y = rich_lines.last().map_or(0, |l| l.y + l.line_height);
 
     // Walk backward to find the nearest styled segment.
-    let (fallback_weight, fallback_color, fallback_cap_pt, fallback_italic, fallback_ascent) =
+    let (fallback_weight, fallback_color, fallback_cap_pt, fallback_skew, fallback_ascent) =
         rich_lines
             .iter()
             .rev()
@@ -1616,17 +1620,11 @@ fn rich_cursor_position(
                     } else {
                         0.0
                     };
-                    let is_italic = style.flags & piecetable::FLAG_ITALIC != 0;
-                    (style.weight, style.color, cap_h, is_italic, asc)
+                    let skew = fonts::rasterize::caret_skew(fi.data);
+                    (style.weight, style.color, cap_h, skew, asc)
                 })
             })
-            .unwrap_or((
-                400,
-                [32, 32, 32, 255],
-                default_height as f32 * 0.7,
-                false,
-                0.0,
-            ));
+            .unwrap_or((400, [32, 32, 32, 255], default_height as f32 * 0.7, 0.0, 0.0));
 
     // Baseline-aligned y, same as the non-fallback path.
     let mpt = scene::MPT_PER_PT as f32;
@@ -1641,12 +1639,15 @@ fn rich_cursor_position(
         height: cursor_h_mpt.max(scene::upt(2)),
         style_weight: fallback_weight,
         color: fallback_color,
-        italic: fallback_italic,
+        caret_skew: fallback_skew,
     }
 }
 
 /// Hit-test: map (x_pt, y_pt) in document coordinates to a byte offset
 /// in the logical text. Used for click-to-place-cursor in rich text.
+///
+/// When the click is below all lines, returns `text.len()` — the
+/// end-of-document position (SSOT: piece table text_len).
 pub(crate) fn rich_xy_to_byte(
     pt_buf: &[u8],
     text: &[u8],
@@ -1664,8 +1665,10 @@ pub(crate) fn rich_xy_to_byte(
             break;
         }
     }
-    // If past all lines, use the last line.
-    let line_idx = target_line.unwrap_or(rich_lines.len().saturating_sub(1));
+    // If past all lines, go to end of document (same as Cmd+Down).
+    let Some(line_idx) = target_line else {
+        return text.len();
+    };
     let Some(line) = rich_lines.get(line_idx) else {
         return 0;
     };

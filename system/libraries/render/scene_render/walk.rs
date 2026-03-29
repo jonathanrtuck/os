@@ -1163,8 +1163,8 @@ fn render_clip_path_children(
             w: nw,
             h: nh,
         };
-        let child_ox = draw_x + round_f32(node.content_transform.tx * scale);
-        let child_oy = draw_y + round_f32(node.content_transform.ty * scale);
+        let child_ox = draw_x + round_f32(node.child_offset_x * scale);
+        let child_oy = draw_y + round_f32(node.child_offset_y * scale);
         traverse_children(
             fb, graph, ctx, node, child_ox, child_oy, child_clip, scale, lru, cache, clip_cache,
         );
@@ -1188,8 +1188,8 @@ fn render_clip_path_children(
                     w: nw,
                     h: nh,
                 };
-                let child_ox = draw_x + round_f32(node.content_transform.tx * scale);
-                let child_oy = draw_y + round_f32(node.content_transform.ty * scale);
+                let child_ox = draw_x + round_f32(node.child_offset_x * scale);
+                let child_oy = draw_y + round_f32(node.child_offset_y * scale);
                 traverse_children(
                     fb, graph, ctx, node, child_ox, child_oy, child_clip, scale, lru, cache,
                     clip_cache,
@@ -1215,8 +1215,8 @@ fn render_clip_path_children(
             w: nw,
             h: nh,
         };
-        let child_ox = round_f32(node.content_transform.tx * scale);
-        let child_oy = round_f32(node.content_transform.ty * scale);
+        let child_ox = round_f32(node.child_offset_x * scale);
+        let child_oy = round_f32(node.child_offset_y * scale);
         traverse_children(
             &mut off_fb,
             graph,
@@ -1289,8 +1289,8 @@ fn render_rounded_clip_children(
             w: nw,
             h: nh,
         };
-        let child_ox = round_f32(node.content_transform.tx * scale);
-        let child_oy = round_f32(node.content_transform.ty * scale);
+        let child_ox = round_f32(node.child_offset_x * scale);
+        let child_oy = round_f32(node.child_offset_y * scale);
 
         traverse_children(
             &mut off_fb,
@@ -1346,8 +1346,8 @@ fn render_children_standard(
     } else {
         visible
     };
-    let child_ox = draw_x + round_f32(node.content_transform.tx * scale);
-    let child_oy = draw_y + round_f32(node.content_transform.ty * scale);
+    let child_ox = draw_x + round_f32(node.child_offset_x * scale);
+    let child_oy = draw_y + round_f32(node.child_offset_y * scale);
 
     traverse_children(
         fb, graph, ctx, node, child_ox, child_oy, child_clip, scale, lru, cache, clip_cache,

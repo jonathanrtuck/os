@@ -25,11 +25,11 @@ pub fn build_parent_map(nodes: &[Node], count: usize) -> [NodeId; MAX_NODES] {
 /// Compute absolute bounding rect of a node by walking up the parent chain.
 /// Returns `(x, y, width, height)` in absolute point coordinates.
 ///
-/// Each parent's `content_transform` translation is added to the accumulator
-/// because the content transform offsets a node's children. For scroll,
-/// `content_transform.ty` is negative (content shifts up), so adding it
-/// effectively subtracts the scroll offset. Without this, damage tracking
-/// would compute incorrect dirty rects for nodes inside scrolled containers.
+/// Each parent's `child_offset` is added to the accumulator because it
+/// shifts children's coordinate space. For scroll, `child_offset_y` is
+/// negative (content shifts up), so adding it effectively subtracts the
+/// scroll offset. Without this, damage tracking would compute incorrect
+/// dirty rects for nodes inside scrolled containers.
 ///
 /// When a node has a non-identity transform, the returned bounding rect is
 /// the axis-aligned bounding box (AABB) of the transformed node bounds.
@@ -46,13 +46,11 @@ pub fn abs_bounds(
     let mut cur = parent_map[id];
     while cur != NULL && (cur as usize) < nodes.len() {
         let p = &nodes[cur as usize];
-        // Add parent position and content_transform translation.
-        // For scroll: ty is negative, so this effectively subtracts the offset.
-        // Non-translation content_transforms (e.g. zoom/scale) are approximated
-        // with translation only — under-damages for zoomed content. Full AABB
-        // computation (transform_aabb) needed when zoom is implemented.
-        ax += p.x + crate::node::f32_to_mpt(p.content_transform.tx);
-        ay += p.y + crate::node::f32_to_mpt(p.content_transform.ty);
+        // Add parent position and child_offset.
+        // For scroll: child_offset_y is negative, so this effectively subtracts
+        // the scroll offset.
+        ax += p.x + crate::node::f32_to_mpt(p.child_offset_x);
+        ay += p.y + crate::node::f32_to_mpt(p.child_offset_y);
         cur = parent_map[cur as usize];
     }
 

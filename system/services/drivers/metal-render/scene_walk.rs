@@ -780,11 +780,9 @@ pub(crate) fn walk_scene(
         _ => {}
     }
 
-    // Walk children with content transform applied.
-    let tx = node.content_transform.tx;
-    let ty = node.content_transform.ty;
-    let child_base_x = abs_x + tx;
-    let child_base_y = abs_y + ty;
+    // Walk children with child_offset applied.
+    let child_base_x = abs_x + node.child_offset_x;
+    let child_base_y = abs_y + node.child_offset_y;
 
     // If this node clips children, set up clipping.
     let child_clip = if node.flags.contains(NodeFlags::CLIPS_CHILDREN) {

@@ -415,7 +415,7 @@ pub extern "C" fn _start() -> ! {
 
     // ── Incremental rendering state ─────────────────────────────────
     // Heap-allocated via alloc_zeroed because IncrementalState is ~22 KiB
-    // (prev_bounds 8K + prev_content_transform 12K + prev_content_hash 2K),
+    // (prev_bounds 8K + prev_child_offset 4K + prev_content_hash 2K),
     // far exceeding the 16 KiB user stack. Box::new() would overflow.
     // SAFETY: Layout matches IncrementalState. alloc_zeroed returns a valid,
     // zero-initialized allocation (all_bits_zero is a valid state). Non-null

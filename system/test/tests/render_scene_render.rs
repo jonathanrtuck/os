@@ -1192,14 +1192,14 @@ fn glyph_cache_keyed_on_physical_pixel_size() {
 
 // ── VAL-COORD-009: Scroll offset correct at fractional scale ──
 
-/// At scale 1.5, content_transform ty=-10 should offset children by -15 physical pixels.
+/// At scale 1.5, child_offset_y=-10 should offset children by -15 physical pixels.
 #[test]
 fn scroll_offset_fractional_scale() {
     let mono = zeroed_glyph_cache();
     let prop = zeroed_glyph_cache();
     let ctx = test_ctx_f32(&mono, &prop, 1.5);
 
-    // Build scene: root -> container (content_transform ty=-10) -> child (red, y=20)
+    // Build scene: root -> container (child_offset_y=-10) -> child (red, y=20)
     let mut nodes = vec![Node::EMPTY; 3];
 
     // Root: 150x150 physical (100x100 point at 1.5x)
@@ -1208,10 +1208,10 @@ fn scroll_offset_fractional_scale() {
     nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
     nodes[0].first_child = 1;
 
-    // Container: full size, content_transform ty = -10 (scroll down 10)
+    // Container: full size, child_offset_y = -10 (scroll down 10)
     nodes[1].width = scene::upt(100);
     nodes[1].height = scene::upt(100);
-    nodes[1].content_transform = scene::AffineTransform::translate(0.0, -10.0);
+    nodes[1].child_offset_y = -10.0;
     nodes[1].flags = NodeFlags::VISIBLE;
     nodes[1].first_child = 2;
 
@@ -1252,7 +1252,7 @@ fn scroll_offset_fractional_scale() {
         scene_render::render_scene(&mut fb, &graph, &ctx);
     }
 
-    // Child is at point y=20, container content_transform.ty=-10.
+    // Child is at point y=20, container child_offset_y=-10.
     // Effective point y = 20 + (-10) = 10.
     // Physical y = round(10 * 1.5) = 15.
     // So the red child should start at physical y=15.
@@ -1739,14 +1739,14 @@ fn rounded_rect_semi_transparent_blends() {
 /// Adding a compile-time assertion ensures shared-memory layout stability.
 #[test]
 fn node_size_compile_time_assertion_exists() {
-    // The compile-time assertion is in scene/lib.rs:
-    //   const _: () = assert!(size_of::<Node>() == 136);
+    // The compile-time assertion is in scene/node.rs:
+    //   const _: () = assert!(size_of::<Node>() == 120);
     // If the Node layout changes, the build will fail.
     // At runtime, verify the size matches.
     let size = core::mem::size_of::<Node>();
     assert_eq!(
-        size, 136,
-        "VAL-CROSS-012: Node must be exactly 136 bytes for shared-memory layout stability"
+        size, 120,
+        "VAL-CROSS-012: Node must be exactly 120 bytes for shared-memory layout stability"
     );
 }
 
@@ -2132,14 +2132,14 @@ fn offscreen_opacity_respects_clip() {
 }
 
 /// VAL-COMP-011: Scroll offset applied within offscreen buffer.
-/// content_transform ty=-10 + opacity: scroll applied correctly within offscreen rendering.
+/// child_offset_y=-10 + opacity: scroll applied correctly within offscreen rendering.
 #[test]
 fn offscreen_opacity_respects_scroll() {
     let mono = zeroed_glyph_cache();
     let prop = zeroed_glyph_cache();
     let ctx = test_ctx(&mono, &prop);
 
-    // Parent: 60x40, opacity=128, content_transform ty=-10, clips_children.
+    // Parent: 60x40, opacity=128, child_offset_y=-10, clips_children.
     // Child: 60x40 at y=0.
     let mut nodes = vec![Node::EMPTY; 3];
 
@@ -2151,11 +2151,11 @@ fn offscreen_opacity_respects_scroll() {
     nodes[1].width = scene::upt(60);
     nodes[1].height = scene::upt(40);
     nodes[1].opacity = 128;
-    nodes[1].content_transform = scene::AffineTransform::translate(0.0, -10.0);
+    nodes[1].child_offset_y = -10.0;
     nodes[1].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
     nodes[1].first_child = 2;
 
-    // Child at y=0, height 40. With content_transform ty=-10, the first
+    // Child at y=0, height 40. With child_offset_y=-10, the first
     // 10 pixels of the child should be scrolled off the top.
     nodes[2].y = scene::pt(0);
     nodes[2].width = scene::upt(60);
@@ -2179,7 +2179,7 @@ fn offscreen_opacity_respects_scroll() {
         scene_render::render_scene(&mut fb, &graph, &ctx);
     }
 
-    // The child is scrolled by content_transform ty=-10, so the child's
+    // The child is scrolled by child_offset_y=-10, so the child's
     // effective position is y=-10 (content shifts up).
     // The child is visible from y=0..30 in the offscreen buffer.
     // At y=0 in the parent, the child's row 10 is visible.

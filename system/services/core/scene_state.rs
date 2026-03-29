@@ -162,13 +162,14 @@ impl SceneState {
     }
 
     /// Update the strip slide offset (for document switch animation).
-    /// Lightweight: only changes N_STRIP's content_transform.
+    /// Lightweight: only changes N_STRIP's child_offset.
     pub fn apply_slide(&mut self, slide_offset: scene::Mpt) {
         let mut tw = self.triple();
         {
             let mut w = tw.acquire_copy();
-            w.node_mut(N_STRIP).content_transform =
-                scene::AffineTransform::translate(-scene::mpt_to_f32(slide_offset), 0.0);
+            let n = w.node_mut(N_STRIP);
+            n.child_offset_x = -scene::mpt_to_f32(slide_offset);
+            n.child_offset_y = 0.0;
             w.mark_dirty(N_STRIP);
         }
         tw.publish();

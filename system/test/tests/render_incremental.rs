@@ -220,8 +220,8 @@ fn scroll_detected_from_dirty_container() {
 
     state.update_from_frame(&nodes, 2);
 
-    // Frame 2: scroll down 50 (content_transform ty = -50).
-    nodes[0].content_transform = scene::AffineTransform::translate(0.0, -50.0);
+    // Frame 2: scroll down 50 (child_offset_y = -50).
+    nodes[0].child_offset_y = -50.0;
     let mut dirty = [0u64; DIRTY_BITMAP_WORDS];
     set_dirty_bit(&mut dirty, 0);
 
@@ -237,13 +237,13 @@ fn scroll_detected_from_dirty_container() {
 fn scroll_not_detected_when_no_children() {
     let mut state = IncrementalState::new();
 
-    // Node 0 is a leaf (no children), even if content_transform changes.
+    // Node 0 is a leaf (no children), even if child_offset changes.
     let mut nodes = vec![Node::EMPTY; 1];
     nodes[0] = visible_node(0, 0, 800, 600);
 
     state.update_from_frame(&nodes, 1);
 
-    nodes[0].content_transform = scene::AffineTransform::translate(0.0, -50.0);
+    nodes[0].child_offset_y = -50.0;
     let mut dirty = [0u64; DIRTY_BITMAP_WORDS];
     set_dirty_bit(&mut dirty, 0);
 
@@ -262,7 +262,7 @@ fn update_from_frame_populates_prev_state() {
     // Set up 3 nodes: root + 2 children.
     let mut nodes = vec![Node::EMPTY; 3];
     nodes[0] = container_node(0, 0, 800, 600, 1);
-    nodes[0].content_transform = scene::AffineTransform::translate(0.0, -10.0);
+    nodes[0].child_offset_y = -10.0;
     nodes[0].content_hash = 42;
     nodes[1] = visible_node(50, 100, 200, 30);
     nodes[1].content_hash = 99;
@@ -283,24 +283,17 @@ fn update_from_frame_populates_prev_state() {
         "nodes 0-2 should be visible in bitmap"
     );
 
-    // Check prev_bounds for node 1 (child of root at (0,0) with content_transform ty=-10).
+    // Check prev_bounds for node 1 (child of root at (0,0) with child_offset_y=-10).
     // abs_bounds: child at (50, 100), parent adds (0, 0 + mpt(-10)) = (50, 90) in points.
     // In millipoints: (50*1024, 90*1024, 200*1024, 30*1024).
     let (bx, by, bw, bh) = state.prev_bounds[1];
     assert_eq!(bx, scene::pt(50));
-    assert_eq!(
-        by,
-        scene::pt(90),
-        "should account for parent content_transform"
-    );
+    assert_eq!(by, scene::pt(90), "should account for parent child_offset");
     assert_eq!(bw, scene::upt(200));
     assert_eq!(bh, scene::upt(30));
 
-    // Check content_transform and content_hash.
-    assert_eq!(
-        state.prev_content_transform[0],
-        scene::AffineTransform::translate(0.0, -10.0)
-    );
+    // Check child_offset and content_hash.
+    assert_eq!(state.prev_child_offset[0], (0.0, -10.0));
     assert_eq!(state.prev_content_hash[0], 42);
     assert_eq!(state.prev_content_hash[1], 99);
     assert_eq!(state.prev_content_hash[2], 77);
@@ -404,13 +397,13 @@ fn detect_scroll_negative_delta() {
 
     let mut nodes = vec![Node::EMPTY; 2];
     nodes[0] = container_node(0, 0, 800, 600, 1);
-    nodes[0].content_transform = scene::AffineTransform::translate(0.0, -100.0);
+    nodes[0].child_offset_y = -100.0;
     nodes[1] = visible_node(10, 20, 100, 18);
 
     state.update_from_frame(&nodes, 2);
 
-    // Scroll up by 30 (ty goes from -100 to -70).
-    nodes[0].content_transform = scene::AffineTransform::translate(0.0, -70.0);
+    // Scroll up by 30 (child_offset_y goes from -100 to -70).
+    nodes[0].child_offset_y = -70.0;
     let mut dirty = [0u64; DIRTY_BITMAP_WORDS];
     set_dirty_bit(&mut dirty, 0);
 
@@ -752,8 +745,8 @@ fn compute_scroll_damage_replaces_container_rect() {
     nodes[1] = visible_node(10, 20, 100, 18);
     state.update_from_frame(&nodes, 2);
 
-    // Frame 2: scroll down 50 (content_transform ty = -50).
-    nodes[0].content_transform = scene::AffineTransform::translate(0.0, -50.0);
+    // Frame 2: scroll down 50 (child_offset_y = -50).
+    nodes[0].child_offset_y = -50.0;
     let mut dirty = [0u64; DIRTY_BITMAP_WORDS];
     set_dirty_bit(&mut dirty, 0); // Container is dirty.
 
