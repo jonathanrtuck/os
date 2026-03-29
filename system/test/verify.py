@@ -215,6 +215,93 @@ def assert_cursor_visible_at(arr: np.ndarray, x: int = 0, y: int = 0,
                     f"(need ≥{min_pixels}, bg=({median_r},{median_g},{median_b}))")
 
 
+def _extract_cursor_mask(arr: np.ndarray, cx: int, cy: int,
+                         half: int = 40, threshold: int = 20):
+    """Extract a 32x32 normalized binary mask of the cursor at (cx, cy).
+
+    Returns the mask as a (32, 32) bool array, or None if no cursor found.
+    """
+    h, w, _ = arr.shape
+    x0, y0 = max(0, cx - half), max(0, cy - half)
+    x1, y1 = min(w, cx + half), min(h, cy + half)
+    patch = arr[y0:y1, x0:x1]
+    if patch.size == 0:
+        return None
+
+    med = np.array([np.median(patch[:, :, c]) for c in range(3)],
+                   dtype=np.int16)
+    diff = np.abs(patch.astype(np.int16) - med).max(axis=2)
+    mask = diff > threshold
+
+    ys, xs = np.where(mask)
+    if len(xs) == 0:
+        return None
+
+    # Crop to tight bounding box, then resize to 32x32.
+    tight = mask[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
+    from PIL import Image as PILImage
+    mask_img = PILImage.fromarray(tight.astype(np.uint8) * 255, "L")
+    normalized = np.array(
+        mask_img.resize((32, 32), PILImage.Resampling.NEAREST)) > 128
+    return normalized
+
+
+def assert_cursor_shape_is(arr: np.ndarray, x: int = 0, y: int = 0,
+                           shape: str = "", refs: str = "",
+                           **_kw) -> tuple[bool, str]:
+    """Verify the cursor at (x, y) matches a named shape.
+
+    Extracts a binary mask of the cursor, then compares against all
+    reference masks in the refs directory using IoU (intersection over
+    union).  The best-matching reference must be the expected shape,
+    and the IoU must exceed 0.35 to count as a match.
+
+    Uses half=24 (tighter than cursor_visible_at) to avoid picking
+    up nearby text or UI elements — we only want the cursor itself.
+
+    Parameters:
+        x, y:   cursor position in framebuffer pixels
+        shape:  expected shape name (e.g., "pointer", "cursor-text")
+        refs:   directory containing <name>.png reference masks (32x32 L)
+    """
+    if not refs:
+        refs = str(Path(__file__).parent / "visual" / "refs")
+
+    # Use tight radius to isolate cursor from nearby text.
+    mask = _extract_cursor_mask(arr, x, y, half=24)
+    if mask is None:
+        return False, f"no cursor found at ({x},{y})"
+
+    # Load all reference masks from the directory.
+    refs_dir = Path(refs)
+    if not refs_dir.is_dir():
+        return False, f"refs directory not found: {refs}"
+
+    scores: dict[str, float] = {}
+    for ref_path in sorted(refs_dir.glob("*.png")):
+        ref_name = ref_path.stem
+        ref_img = Image.open(ref_path).convert("L")
+        ref_mask = np.array(ref_img.resize((32, 32),
+                            Image.Resampling.NEAREST)) > 128
+        intersection = np.logical_and(mask, ref_mask).sum()
+        union = np.logical_or(mask, ref_mask).sum()
+        iou = float(intersection) / float(union) if union > 0 else 0.0
+        scores[ref_name] = iou
+
+    if not scores:
+        return False, f"no reference masks found in {refs}"
+
+    best_name = max(scores, key=scores.get)
+    best_iou = scores[best_name]
+    expected_iou = scores.get(shape, 0.0)
+
+    scores_str = ", ".join(f"{k}={v:.3f}" for k, v in sorted(scores.items()))
+    passed = best_name == shape and best_iou >= 0.35
+    return passed, (f"best match: {best_name} (IoU={best_iou:.3f}), "
+                    f"expected: {shape} (IoU={expected_iou:.3f}). "
+                    f"All: [{scores_str}]")
+
+
 def assert_cursor_not_visible(arr: np.ndarray, **_kw) -> tuple[bool, str]:
     """No cursor-like content outside the page region.
 
@@ -330,6 +417,7 @@ ASSERTIONS = {
     "content_in_region":         assert_content_in_region,
     "region_not_blank":          assert_region_not_blank,
     "cursor_visible_at":         assert_cursor_visible_at,
+    "cursor_shape_is":           assert_cursor_shape_is,
     "cursor_not_visible":        assert_cursor_not_visible,
     "no_content_outside_page":   assert_no_content_outside_page,
     "pixel_is":                  assert_pixel_is,
@@ -345,6 +433,8 @@ PARAM_TYPES = {
     "max_pixels": int,
     "threshold": float,
     "ref": str,
+    "shape": str,
+    "refs": str,
 }
 
 

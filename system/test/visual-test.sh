@@ -85,7 +85,7 @@ test_cursor_page() {
     info "Test: cursor-page (cursor on white page)"
     cat > "$CAPTURE_DIR/cursor-page.events" << 'EVENTS'
 wait 60
-move 2000 800
+move 2000 2000
 wait 30
 capture /tmp/visual-tests/cursor-page.png
 EVENTS
