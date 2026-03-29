@@ -10,8 +10,8 @@ use scene::{fnv1a, Border, Color, Content, FillRule, NodeFlags, NULL};
 
 use super::{
     allocate_line_nodes, allocate_selection_rects, byte_to_line_col, chars_per_line, dc, doc_width,
-    emit_icon, layout_mono_lines, layout_rich_lines, scroll_runs, shape_chrome_text,
-    shape_rich_segment, shape_visible_runs, update_clock_inline, FontInfo, RichLine, SceneConfig,
+    emit_icon, break_rich_segments, shape_chrome_text,
+    shape_rich_segment, update_clock_inline, FontInfo, RichLine, SceneConfig,
     N_CLOCK_TEXT, N_CONTENT, N_CURSOR, N_DOC_IMAGE, N_DOC_TEXT, N_PAGE, N_ROOT, N_SHADOW, N_STRIP,
     N_TITLE_BAR, N_TITLE_ICON, N_TITLE_TEXT, WELL_KNOWN_COUNT,
 };
@@ -1226,7 +1226,7 @@ pub fn build_rich_document_content(
         line_gap: fonts.serif_line_gap,
         cap_height: fonts.serif_cap_height,
     };
-    let rich_lines = layout_rich_lines(
+    let rich_lines = break_rich_segments(
         pt_buf,
         &mut scratch,
         line_width_pt,

@@ -1,25 +1,27 @@
-//! Core — the system's central process.
+//! View Engine (C) — event loop, input routing, and scene graph building.
 //!
-//! Owns document state, understands content types, performs layout,
-//! routes input, and builds the scene graph. The compositor is a
-//! downstream consumer that renders the scene graph to pixels.
+//! Owns all view state (cursor, selection, scroll, focus, animation).
+//! Reads document buffer (RO) from A and layout results (RO) from B.
+//! Sole writer to the scene graph. Routes input to editors.
 //!
 //! # Responsibilities
 //!
-//! - Document buffer (sole writer)
-//! - Text layout (line breaking, cursor/selection positioning)
 //! - Scene graph building (writes to shared memory)
 //! - Input routing (keyboard → editor, pointer → hit testing)
-//! - Editor communication (receives write requests, sends input events)
+//! - View state (cursor position, selection, scroll, blink, animation)
+//! - Editor communication (receives cursor/selection updates, sends input events)
 //! - Clock / RTC
 //! - Scroll management
+//! - Cursor shape resolution (hit testing)
 //!
 //! # IPC channels (handle indices)
 //!
-//! Handle 1: input driver → core (keyboard events)
-//! Handle 2: core → compositor (scene update signal)
-//! Handle 3: core ↔ editor (input events out, write requests in)
-//! Handle 4: second input device (tablet) → core (optional)
+//! Handle 1: input driver → C (keyboard events)
+//! Handle 2: C → compositor (scene update signal)
+//! Handle 3: C ↔ editor (input events out, cursor/selection in)
+//! Handle 4: A → C (doc-changed notifications, undo/redo requests)
+//! Handle 5: B ↔ C (layout recompute/ready signals)
+//! Handle 6: second input device (tablet) → C (optional)
 
 #![no_std]
 #![no_main]
@@ -38,16 +40,12 @@ extern crate scene;
 mod blink;
 #[path = "documents.rs"]
 mod documents;
-#[path = "fallback.rs"]
-mod fallback;
 #[path = "input.rs"]
 mod input_handling;
 #[path = "layout/mod.rs"]
 mod layout;
 #[path = "scene_state.rs"]
 mod scene_state;
-#[path = "typography.rs"]
-mod typography;
 
 use protocol::{
     compose::{self, RtcConfig, MSG_RTC_CONFIG},
@@ -98,65 +96,6 @@ pub(crate) enum DocumentFormat {
     Rich,
 }
 
-// ── Boot state machine ─────────────────────────────────────────────
-//
-// Core boots event-driven: publishes a loading scene immediately,
-// then handles async init replies (document queries, PNG decode,
-// undo snapshot) as events while animating a spinner. Transitions
-// to the full scene when all init completes.
-
-/// PNG decode sub-state (two-phase: header query → full decode).
-#[derive(Clone, Copy)]
-enum DecodePhase {
-    /// No image to decode (no image config received).
-    None,
-    /// Header-only query sent, awaiting dimensions.
-    AwaitingHeader,
-    /// Full decode request sent, awaiting pixel data.
-    AwaitingDecode { alloc_offset: u32, pixel_bytes: u32 },
-    /// Decode complete (success or failure).
-    Done,
-}
-
-/// Document loading sub-state.
-#[derive(Clone, Copy)]
-enum DocPhase {
-    /// Query for text/rich sent, awaiting result.
-    QueryRich,
-    /// Query for text/plain sent (text/rich not found).
-    QueryPlain,
-    /// Document found, read request sent.
-    Reading {
-        file_id: u64,
-        detected_format: DocumentFormat,
-    },
-    /// No document found, create request sent.
-    Creating,
-    /// Document loaded, undo snapshot request sent.
-    AwaitingUndo,
-    /// Complete.
-    Done,
-}
-
-/// Boot-time async init state. Tracks which operations have completed.
-struct BootState {
-    spinner_angle: f32,
-    decode_phase: DecodePhase,
-    doc_phase: DocPhase,
-    image_ready: bool,
-    doc_ready: bool,
-    undo_ready: bool,
-    /// Image config saved from init channel for decode requests.
-    img_file_store_offset: u32,
-    img_file_store_length: u32,
-}
-
-impl BootState {
-    fn all_ready(&self) -> bool {
-        self.image_ready && self.doc_ready && self.undo_ready
-    }
-}
-
 /// Boot timeout: force-transition after 5 seconds regardless of pending replies.
 const BOOT_TIMEOUT_NS: u64 = 5_000_000_000;
 
@@ -197,19 +136,103 @@ const TEXT_INSET_TOP: u32 = TITLE_BAR_H + SHADOW_DEPTH + 8;
 const TEXT_INSET_X: u32 = 12;
 const TITLE_BAR_H: u32 = 36;
 
-// Undo/redo state is now managed by the document-model (A) service.
+// ── View state sub-structs ─────────────────────────────────────────
 
-pub(crate) struct CoreState {
+/// Cursor state: text cursor position, blink cycle, goal column.
+pub(crate) struct CursorState {
+    pub(crate) pos: usize,
+    pub(crate) opacity: u8,
     pub(crate) blink_phase: blink::BlinkPhase,
     pub(crate) blink_phase_start_ms: u64,
+    pub(crate) blink_id: Option<animation::AnimationId>,
+    /// Sticky goal column for Up/Down navigation (plain text).
+    pub(crate) goal_column: Option<usize>,
+    /// Sticky goal x-position (points) for Up/Down navigation (rich text).
+    pub(crate) goal_x: Option<f32>,
+}
+
+/// Selection state: anchor, range, fade, click detection.
+pub(crate) struct SelectionState {
+    /// Selection anchor: the fixed end of a selection range.
+    pub(crate) anchor: usize,
+    /// True when a selection is active.
+    pub(crate) active: bool,
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+    /// Animation ID for the selection highlight fade-in (0→255).
+    pub(crate) fade_id: Option<animation::AnimationId>,
+    /// Current selection highlight opacity (animated on selection change).
+    pub(crate) opacity: u8,
+    /// Click state for double/triple-click detection.
+    pub(crate) last_click_ms: u64,
+    pub(crate) last_click_x: u32,
+    pub(crate) last_click_y: u32,
+    pub(crate) click_count: u8,
+}
+
+/// Scroll state: spring-based smooth scrolling.
+pub(crate) struct ScrollState {
+    pub(crate) animating: bool,
+    pub(crate) offset: scene::Mpt,
+    pub(crate) spring: animation::Spring,
+    pub(crate) target: scene::Mpt,
+}
+
+/// Animation state: timeline, timer, space-switching slide animation.
+pub(crate) struct AnimationState {
+    pub(crate) timeline: animation::Timeline,
+    pub(crate) timer_active: bool,
+    pub(crate) timer_handle: sys::TimerHandle,
+    /// Which document space receives input (0=text, 1=image).
+    pub(crate) active_space: u8,
+    /// True when the slide spring is animating between spaces.
+    pub(crate) slide_animating: bool,
+    /// True on the first frame of a slide animation (clamp dt to frame interval).
+    pub(crate) slide_first_frame: bool,
+    /// Current slide offset in millipoints (0 = space 0, fb_width*MPT = space 1).
+    pub(crate) slide_offset: scene::Mpt,
+    /// Spring physics for slide animation.
+    pub(crate) slide_spring: animation::Spring,
+    /// Target slide offset in millipoints.
+    pub(crate) slide_target: scene::Mpt,
+}
+
+/// Pointer state: mouse position, visibility, cursor shape.
+pub(crate) struct PointerState {
+    pub(crate) x: u32,
+    pub(crate) y: u32,
+    /// Animation ID for the pointer fade-out (255→0, 300ms EaseOut).
+    pub(crate) fade_id: Option<animation::AnimationId>,
+    /// Timestamp (ms) of the last pointer movement event.
+    pub(crate) last_event_ms: u64,
+    /// Current pointer cursor opacity (0 = hidden, 255 = fully visible).
+    pub(crate) opacity: u8,
+    /// True when the pointer cursor is currently shown (recently moved).
+    pub(crate) visible: bool,
+    /// VA of the shared PointerState register (input driver writes, C reads).
+    pub(crate) input_state_va: usize,
+    /// VA of the shared CursorState page (C writes, compositor reads).
+    pub(crate) cursor_state_va: usize,
+    /// Last-seen packed pointer_xy value (for change detection).
+    pub(crate) last_xy: u64,
+    /// Current shape_generation written to the cursor state page.
+    pub(crate) shape_generation: u32,
+    /// Current cursor shape name (static literal for pointer identity comparison).
+    pub(crate) shape_name: &'static str,
+}
+
+// ── Top-level view state ───────────────────────────────────────────
+
+pub(crate) struct ViewState {
+    pub(crate) cursor: CursorState,
+    pub(crate) selection: SelectionState,
+    pub(crate) scroll: ScrollState,
+    pub(crate) animation: AnimationState,
+    pub(crate) pointer: PointerState,
     pub(crate) boot_counter: u64,
     /// Character advance in 16.16 fixed-point points.
-    /// Single source of truth — same precision as scene ShapedGlyph advances.
     pub(crate) char_w_fx: i32,
     pub(crate) counter_freq: u64,
-    pub(crate) cursor_blink_id: Option<animation::AnimationId>,
-    pub(crate) cursor_opacity: u8,
-    pub(crate) cursor_pos: usize,
     pub(crate) doc_buf: *mut u8,
     pub(crate) doc_capacity: usize,
     /// FileId of the active text document in the store.
@@ -220,37 +243,24 @@ pub(crate) struct CoreState {
     pub(crate) font_data_ptr: *const u8,
     pub(crate) font_data_len: usize,
     pub(crate) font_upem: u16,
-    /// Mono font typographic ascent (font units, positive above baseline).
     pub(crate) font_ascender: i16,
-    /// Mono font typographic descent (font units, negative below baseline).
     pub(crate) font_descender: i16,
-    /// Mono font line gap (font units).
     pub(crate) font_line_gap: i16,
-    /// Mono font cap height (font units, from OS/2 sCapHeight). 0 if unavailable.
     pub(crate) font_cap_height: i16,
     pub(crate) sans_font_data_ptr: *const u8,
     pub(crate) sans_font_data_len: usize,
     pub(crate) sans_font_upem: u16,
-    /// Sans font typographic ascent (font units, positive above baseline).
     pub(crate) sans_font_ascender: i16,
-    /// Sans font typographic descent (font units, negative below baseline).
     pub(crate) sans_font_descender: i16,
-    /// Sans font line gap (font units).
     pub(crate) sans_font_line_gap: i16,
-    /// Sans font cap height (font units). 0 if unavailable.
     pub(crate) sans_font_cap_height: i16,
     pub(crate) serif_font_data_ptr: *const u8,
     pub(crate) serif_font_data_len: usize,
     pub(crate) serif_font_upem: u16,
-    /// Serif font typographic ascent (font units, positive above baseline).
     pub(crate) serif_font_ascender: i16,
-    /// Serif font typographic descent (font units, negative below baseline).
     pub(crate) serif_font_descender: i16,
-    /// Serif font line gap (font units).
     pub(crate) serif_font_line_gap: i16,
-    /// Serif font cap height (font units). 0 if unavailable.
     pub(crate) serif_font_cap_height: i16,
-    // Mono italic font.
     pub(crate) mono_italic_font_data_ptr: *const u8,
     pub(crate) mono_italic_font_data_len: usize,
     pub(crate) mono_italic_font_upem: u16,
@@ -258,7 +268,6 @@ pub(crate) struct CoreState {
     pub(crate) mono_italic_font_descender: i16,
     pub(crate) mono_italic_font_line_gap: i16,
     pub(crate) mono_italic_font_cap_height: i16,
-    // Sans italic font.
     pub(crate) sans_italic_font_data_ptr: *const u8,
     pub(crate) sans_italic_font_data_len: usize,
     pub(crate) sans_italic_font_upem: u16,
@@ -266,7 +275,6 @@ pub(crate) struct CoreState {
     pub(crate) sans_italic_font_descender: i16,
     pub(crate) sans_italic_font_line_gap: i16,
     pub(crate) sans_italic_font_cap_height: i16,
-    // Serif italic font.
     pub(crate) serif_italic_font_data_ptr: *const u8,
     pub(crate) serif_italic_font_data_len: usize,
     pub(crate) serif_italic_font_upem: u16,
@@ -285,33 +293,7 @@ pub(crate) struct CoreState {
     pub(crate) image_content_id: u32,
     pub(crate) image_width: u16,
     pub(crate) image_height: u16,
-    /// Which document space receives input (0=text, 1=image).
-    pub(crate) active_space: u8,
-    /// True when the slide spring is animating between spaces.
-    pub(crate) slide_animating: bool,
-    /// True on the first frame of a slide animation (clamp dt to frame interval).
-    pub(crate) slide_first_frame: bool,
-    /// Current slide offset in millipoints (0 = space 0, fb_width*MPT = space 1).
-    pub(crate) slide_offset: scene::Mpt,
-    /// Spring physics for slide animation.
-    pub(crate) slide_spring: animation::Spring,
-    /// Target slide offset in millipoints.
-    pub(crate) slide_target: scene::Mpt,
     pub(crate) line_h: u32,
-    pub(crate) mouse_x: u32,
-    pub(crate) mouse_y: u32,
-    /// Animation ID for the pointer fade-out (255→0, 300ms EaseOut).
-    pub(crate) pointer_fade_id: Option<animation::AnimationId>,
-    /// Timestamp (ms) of the last pointer movement event.
-    pub(crate) pointer_last_event_ms: u64,
-    /// Current pointer cursor opacity (0 = hidden, 255 = fully visible).
-    pub(crate) pointer_opacity: u8,
-    /// True when the pointer cursor is currently shown (recently moved).
-    pub(crate) pointer_visible: bool,
-    /// VA of the shared PointerState register (input driver writes, core reads).
-    pub(crate) input_state_va: usize,
-    /// VA of the shared CursorState page (core writes, render service reads).
-    pub(crate) cursor_state_va: usize,
     /// VA of the layout results shared memory (read-only, B writes).
     pub(crate) layout_results_va: usize,
     /// Layout results region capacity in bytes.
@@ -320,63 +302,76 @@ pub(crate) struct CoreState {
     pub(crate) viewport_state_va: usize,
     /// Last layout generation read from B.
     pub(crate) layout_generation: u32,
-    /// Current shape_generation written to the cursor state page.
-    pub(crate) cursor_shape_generation: u32,
-    /// Current cursor shape name (static literal for pointer identity comparison).
-    pub(crate) cursor_shape_name: &'static str,
-    /// Last-seen packed pointer_xy value (for change detection).
-    pub(crate) last_pointer_xy: u64,
     pub(crate) rtc_mmio_va: usize,
     /// PL031 epoch captured once at boot — never re-read.
     pub(crate) rtc_epoch_at_boot: u64,
     /// CNTVCT value at the moment PL031 was read (for elapsed computation).
     pub(crate) boot_counter_at_rtc_read: u64,
-    pub(crate) scroll_animating: bool,
-    pub(crate) scroll_offset: scene::Mpt,
-    pub(crate) scroll_spring: animation::Spring,
-    pub(crate) scroll_target: scene::Mpt,
-    pub(crate) sel_end: usize,
-    /// Selection anchor: the fixed end of a selection range. When
-    /// `has_selection` is true, the visible range is
-    /// `[min(anchor, cursor_pos), max(anchor, cursor_pos))`.
-    pub(crate) anchor: usize,
-    /// True when a selection is active.
-    pub(crate) has_selection: bool,
-    /// Sticky goal column for Up/Down navigation. Preserved across
-    /// consecutive vertical moves, cleared on any horizontal move.
-    pub(crate) goal_column: Option<usize>,
-    /// Sticky goal x-position (points) for Up/Down navigation in rich text.
-    /// Preserved across consecutive vertical moves, cleared on horizontal moves.
-    pub(crate) goal_x: Option<f32>,
     /// Cached rich text line layout from the last scene build.
-    /// Valid until text changes (next scene build updates it).
     pub(crate) rich_lines: alloc::vec::Vec<layout::RichLine>,
-    /// Click state for double/triple-click detection.
-    pub(crate) last_click_ms: u64,
-    pub(crate) last_click_x: u32,
-    pub(crate) last_click_y: u32,
-    pub(crate) click_count: u8,
-    /// Animation ID for the selection highlight fade-in (0→255).
-    pub(crate) selection_fade_id: Option<animation::AnimationId>,
-    /// Current selection highlight opacity (animated on selection change).
-    pub(crate) selection_opacity: u8,
-    pub(crate) sel_start: usize,
-    pub(crate) timeline: animation::Timeline,
-    pub(crate) timer_active: bool,
-    pub(crate) timer_handle: sys::TimerHandle,
 }
 
-impl CoreState {
+impl ViewState {
     const fn new() -> Self {
         Self {
-            blink_phase: blink::BlinkPhase::VisibleHold,
-            blink_phase_start_ms: 0,
+            cursor: CursorState {
+                pos: 0,
+                opacity: 255,
+                blink_phase: blink::BlinkPhase::VisibleHold,
+                blink_phase_start_ms: 0,
+                blink_id: None,
+                goal_column: None,
+                goal_x: None,
+            },
+            selection: SelectionState {
+                anchor: 0,
+                active: false,
+                start: 0,
+                end: 0,
+                fade_id: None,
+                opacity: 255,
+                last_click_ms: 0,
+                last_click_x: 0,
+                last_click_y: 0,
+                click_count: 0,
+            },
+            scroll: ScrollState {
+                animating: false,
+                offset: 0,
+                spring: animation::Spring::snappy(0.0),
+                target: 0,
+            },
+            animation: AnimationState {
+                timeline: animation::Timeline::new(),
+                timer_active: false,
+                timer_handle: sys::TimerHandle(0),
+                active_space: 0,
+                slide_animating: false,
+                slide_first_frame: false,
+                slide_offset: 0,
+                slide_spring: {
+                    let mut s = animation::Spring::new(0.0, 600.0, 49.0, 1.0);
+                    s.set_settle_threshold(0.5);
+                    s
+                },
+                slide_target: 0,
+            },
+            pointer: PointerState {
+                x: 0,
+                y: 0,
+                fade_id: None,
+                last_event_ms: 0,
+                opacity: 0,
+                visible: false,
+                input_state_va: 0,
+                cursor_state_va: 0,
+                last_xy: 0,
+                shape_generation: 0,
+                shape_name: "pointer",
+            },
             boot_counter: 0,
             char_w_fx: 8 * 65536,
             counter_freq: 0,
-            cursor_blink_id: None,
-            cursor_opacity: 255,
-            cursor_pos: 0,
             doc_buf: core::ptr::null_mut(),
             doc_capacity: 0,
             doc_file_id: 0,
@@ -431,65 +426,25 @@ impl CoreState {
             image_content_id: 0,
             image_width: 0,
             image_height: 0,
-            active_space: 0,
-            slide_animating: false,
-            slide_first_frame: false,
-            slide_offset: 0,
-            slide_spring: {
-                let mut s = animation::Spring::new(0.0, 600.0, 49.0, 1.0);
-                s.set_settle_threshold(0.5);
-                s
-            },
-            slide_target: 0,
             line_h: 20,
-            mouse_x: 0,
-            mouse_y: 0,
-            pointer_fade_id: None,
-            pointer_last_event_ms: 0,
-            pointer_opacity: 0,
-            pointer_visible: false,
-            input_state_va: 0,
-            cursor_state_va: 0,
             layout_results_va: 0,
             layout_results_capacity: 0,
             viewport_state_va: 0,
             layout_generation: 0,
-            cursor_shape_generation: 0,
-            cursor_shape_name: "pointer",
-            last_pointer_xy: 0,
             rtc_mmio_va: 0,
             rtc_epoch_at_boot: 0,
             boot_counter_at_rtc_read: 0,
-            scroll_animating: false,
-            scroll_offset: 0,
-            scroll_spring: animation::Spring::snappy(0.0),
-            scroll_target: 0,
-            sel_end: 0,
-            anchor: 0,
-            has_selection: false,
-            goal_column: None,
-            goal_x: None,
             rich_lines: alloc::vec::Vec::new(),
-            last_click_ms: 0,
-            last_click_x: 0,
-            last_click_y: 0,
-            click_count: 0,
-            selection_fade_id: None,
-            selection_opacity: 255,
-            sel_start: 0,
-            timeline: animation::Timeline::new(),
-            timer_active: false,
-            timer_handle: sys::TimerHandle(0),
         }
     }
 }
 
-struct SyncState(core::cell::UnsafeCell<CoreState>);
+struct SyncState(core::cell::UnsafeCell<ViewState>);
 // SAFETY: Single-threaded userspace process.
 unsafe impl Sync for SyncState {}
-static STATE: SyncState = SyncState(core::cell::UnsafeCell::new(CoreState::new()));
+static STATE: SyncState = SyncState(core::cell::UnsafeCell::new(ViewState::new()));
 
-pub(crate) fn state() -> &'static mut CoreState {
+pub(crate) fn state() -> &'static mut ViewState {
     // SAFETY: Single-threaded userspace process. No concurrent access.
     unsafe { &mut *STATE.0.get() }
 }
@@ -782,7 +737,7 @@ fn serif_italic_font_data() -> &'static [u8] {
     }
 }
 
-/// Construct `RichFonts` from current CoreState font pointers.
+/// Construct `RichFonts` from current ViewState font pointers.
 /// Used by both scene building (main.rs) and navigation (input.rs).
 pub(crate) fn make_rich_fonts() -> scene_state::RichFonts<'static> {
     let s = state();
@@ -1128,12 +1083,12 @@ fn create_clock_timer() -> bool {
     match sys::timer_create(timeout_ns) {
         Ok(handle) => {
             let s = state();
-            s.timer_handle = handle;
-            s.timer_active = true;
+            s.animation.timer_handle = handle;
+            s.animation.timer_active = true;
             true
         }
         Err(_) => {
-            state().timer_active = false;
+            state().animation.timer_active = false;
             false
         }
     }
@@ -1147,9 +1102,9 @@ pub extern "C" fn _start() -> ! {
         s.counter_freq = sys::counter_freq();
     }
 
-    sys::print(b"  \xF0\x9F\xA7\xA0 core - starting\n");
+    sys::print(b"  \xF0\x9F\xA7\xA0 view-engine - starting\n");
 
-    // Read core config from init channel.
+    // Read view-engine config from init channel.
     // SAFETY: channel_shm_va(0) is the base of the init channel SHM region mapped by the kernel;
     // alignment guaranteed by page-boundary allocation.
     let init_ch =
@@ -1157,14 +1112,14 @@ pub extern "C" fn _start() -> ! {
     let mut msg = ipc::Message::new(0);
 
     if !init_ch.try_recv(&mut msg) || msg.msg_type != MSG_CORE_CONFIG {
-        sys::print(b"core: no config message\n");
+        sys::print(b"view-engine: no config message\n");
         sys::exit();
     }
 
     let Some(core_config::Message::CoreConfig(config)) =
         core_config::decode(msg.msg_type, &msg.payload)
     else {
-        sys::print(b"core: bad config payload\n");
+        sys::print(b"view-engine: bad config payload\n");
         sys::exit();
     };
     let fb_width = config.fb_width;
@@ -1201,11 +1156,11 @@ pub extern "C" fn _start() -> ! {
         s.viewport_state_va = lc.viewport_state_va as usize;
         sys::print(b"     layout config received\n");
     } else {
-        sys::print(b"core: no layout config\n");
+        sys::print(b"view-engine: no layout config\n");
     }
 
     if config.doc_va == 0 || config.scene_va == 0 {
-        sys::print(b"core: bad config\n");
+        sys::print(b"view-engine: bad config\n");
         sys::exit();
     }
 
@@ -1214,8 +1169,8 @@ pub extern "C" fn _start() -> ! {
         s.doc_buf = config.doc_va as *mut u8;
         s.doc_capacity = config.doc_capacity as usize;
         s.doc_len = 0;
-        s.input_state_va = config.input_state_va as usize;
-        s.cursor_state_va = config.cursor_state_va as usize;
+        s.pointer.input_state_va = config.input_state_va as usize;
+        s.pointer.cursor_state_va = config.cursor_state_va as usize;
     }
     documents::doc_write_header();
 
@@ -1497,7 +1452,7 @@ pub extern "C" fn _start() -> ! {
                         let s = state();
                         s.doc_file_id = loaded.doc_file_id;
                         s.doc_len = loaded.doc_len as usize;
-                        s.cursor_pos = loaded.cursor_pos as usize;
+                        s.cursor.pos = loaded.cursor_pos as usize;
                         s.doc_format = if loaded.format == 1 {
                             DocumentFormat::Rich
                         } else {
@@ -1614,9 +1569,9 @@ pub extern "C" fn _start() -> ! {
     // Write initial cursor shape (arrow) to cursor state page.
     {
         let s = state();
-        if s.cursor_state_va != 0 {
-            write_cursor_shape(s.cursor_state_va, &mut s.cursor_shape_generation, "pointer");
-            write_cursor_opacity(s.cursor_state_va, 0); // hidden initially
+        if s.pointer.cursor_state_va != 0 {
+            write_cursor_shape(s.pointer.cursor_state_va, &mut s.pointer.shape_generation, "pointer");
+            write_cursor_opacity(s.pointer.cursor_state_va, 0); // hidden initially
         }
     }
 
@@ -1641,13 +1596,13 @@ pub extern "C" fn _start() -> ! {
             } else {
                 documents::doc_content()
             },
-            s.cursor_pos as u32,
-            s.sel_start as u32,
-            s.sel_end as u32,
+            s.cursor.pos as u32,
+            s.selection.start as u32,
+            s.selection.end as u32,
             title_label,
             &time_buf,
             0,
-            s.cursor_opacity,
+            s.cursor.opacity,
             0,
             0,
         );
@@ -1701,15 +1656,15 @@ pub extern "C" fn _start() -> ! {
                 &scene_cfg,
                 documents::rich_buf_ref(),
                 &rich_fonts,
-                s.cursor_pos as u32,
-                s.sel_start as u32,
-                s.sel_end as u32,
+                s.cursor.pos as u32,
+                s.selection.start as u32,
+                s.selection.end as u32,
                 title_label,
                 &time_buf,
                 0,
                 true,
-                s.cursor_opacity,
-                s.active_space,
+                s.cursor.opacity,
+                s.animation.active_space,
             );
             state().rich_lines = lines;
         }
@@ -1742,8 +1697,8 @@ pub extern "C" fn _start() -> ! {
     };
 
     loop {
-        let timer_active = state().timer_active;
-        let timer_handle = state().timer_handle;
+        let timer_active = state().animation.timer_active;
+        let timer_handle = state().animation.timer_handle;
         // Compute wait timeout from active animations and blink phase.
         //
         // Scroll animation: 16ms (60fps) while active.
@@ -1763,14 +1718,14 @@ pub extern "C" fn _start() -> ! {
         // If yes, wake at display refresh rate for smooth frames.
         // If no, sleep until the next timer event or IPC wake.
         let any_animating =
-            state().scroll_animating || state().slide_animating || state().timeline.any_active();
+            state().scroll.animating || state().animation.slide_animating || state().animation.timeline.any_active();
 
         let timeout_ns: u64 = if any_animating {
             frame_interval_ns
         } else {
             let s = state();
-            let elapsed = now_ms.saturating_sub(s.blink_phase_start_ms);
-            let remaining_ms = match s.blink_phase {
+            let elapsed = now_ms.saturating_sub(s.cursor.blink_phase_start_ms);
+            let remaining_ms = match s.cursor.blink_phase {
                 blink::BlinkPhase::VisibleHold => blink::BLINK_VISIBLE_MS.saturating_sub(elapsed),
                 blink::BlinkPhase::FadeOut => blink::BLINK_FADE_OUT_MS.saturating_sub(elapsed),
                 blink::BlinkPhase::HiddenHold => blink::BLINK_HIDDEN_MS.saturating_sub(elapsed),
@@ -1950,10 +1905,10 @@ pub extern "C" fn _start() -> ! {
                         };
                         if btn.button == 0 && btn.pressed == 1 {
                             let s = state();
-                            let click_x = s.mouse_x;
-                            let click_y = s.mouse_y;
+                            let click_x = s.pointer.x;
+                            let click_y = s.pointer.y;
 
-                            if click_y >= TITLE_BAR_H && s.active_space == 0 {
+                            if click_y >= TITLE_BAR_H && s.animation.active_space == 0 {
                                 // Text origin = page position + padding.
                                 let page_x = (fb_width - page_width) / 2;
                                 let page_y_abs =
@@ -1963,7 +1918,7 @@ pub extern "C" fn _start() -> ! {
                                 let rel_x = click_x.saturating_sub(text_origin_x);
                                 let rel_y = click_y.saturating_sub(text_origin_y);
                                 let adjusted_y =
-                                    rel_y + (s.scroll_offset / scene::MPT_PER_PT) as u32;
+                                    rel_y + (s.scroll.offset / scene::MPT_PER_PT) as u32;
                                 let is_rich = state().doc_format == DocumentFormat::Rich;
                                 let byte_pos = if is_rich {
                                     // Rich text: proportional hit test using styled layout.
@@ -2047,7 +2002,7 @@ pub extern "C" fn _start() -> ! {
                                         line_gap: s2.serif_font_line_gap,
                                         cap_height: s2.serif_font_cap_height,
                                     };
-                                    let rich_lines = layout::layout_rich_lines(
+                                    let rich_lines = layout::break_rich_segments(
                                         pt_buf,
                                         &mut scratch,
                                         dw as f32,
@@ -2088,32 +2043,32 @@ pub extern "C" fn _start() -> ! {
 
                                 // Double/triple-click detection.
                                 // 400ms window, within 4pt of previous click.
-                                let dx = if click_x > s.last_click_x {
-                                    click_x - s.last_click_x
+                                let dx = if click_x > s.selection.last_click_x {
+                                    click_x - s.selection.last_click_x
                                 } else {
-                                    s.last_click_x - click_x
+                                    s.selection.last_click_x - click_x
                                 };
-                                let dy = if click_y > s.last_click_y {
-                                    click_y - s.last_click_y
+                                let dy = if click_y > s.selection.last_click_y {
+                                    click_y - s.selection.last_click_y
                                 } else {
-                                    s.last_click_y - click_y
+                                    s.selection.last_click_y - click_y
                                 };
-                                let dt = now_ms.saturating_sub(s.last_click_ms);
+                                let dt = now_ms.saturating_sub(s.selection.last_click_ms);
                                 let same_spot = dx <= 4 && dy <= 4 && dt <= 400;
 
                                 let click_count = if same_spot {
                                     // Cycle: 1 → 2 → 3 → 1 → ...
-                                    (s.click_count % 3) + 1
+                                    (s.selection.click_count % 3) + 1
                                 } else {
                                     1
                                 };
 
                                 {
                                     let s = state();
-                                    s.last_click_ms = now_ms;
-                                    s.last_click_x = click_x;
-                                    s.last_click_y = click_y;
-                                    s.click_count = click_count;
+                                    s.selection.last_click_ms = now_ms;
+                                    s.selection.last_click_x = click_x;
+                                    s.selection.last_click_y = click_y;
+                                    s.selection.click_count = click_count;
                                 }
 
                                 let cols = layout_info.cols();
@@ -2140,9 +2095,9 @@ pub extern "C" fn _start() -> ! {
                                             hi += 1;
                                         }
                                         let s = state();
-                                        s.anchor = lo;
-                                        s.cursor_pos = hi;
-                                        s.has_selection = hi > lo;
+                                        s.selection.anchor = lo;
+                                        s.cursor.pos = hi;
+                                        s.selection.active = hi > lo;
                                         input_handling::update_selection_from_anchor();
                                     }
                                     3 => {
@@ -2156,21 +2111,21 @@ pub extern "C" fn _start() -> ! {
                                             hi += 1;
                                         }
                                         let s = state();
-                                        s.anchor = lo;
-                                        s.cursor_pos = hi;
-                                        s.has_selection = hi > lo;
+                                        s.selection.anchor = lo;
+                                        s.cursor.pos = hi;
+                                        s.selection.active = hi > lo;
                                         input_handling::update_selection_from_anchor();
                                     }
                                     _ => {
                                         // Single click: position cursor, clear selection.
                                         let s = state();
-                                        s.cursor_pos = byte_pos;
+                                        s.cursor.pos = byte_pos;
                                         input_handling::clear_selection();
                                     }
                                 }
 
-                                state().goal_column = None;
-                                state().goal_x = None;
+                                state().cursor.goal_column = None;
+                                state().cursor.goal_x = None;
                                 documents::doc_write_header();
                                 input_handling::sync_cursor_to_editor(&editor_ch);
 
@@ -2202,33 +2157,33 @@ pub extern "C" fn _start() -> ! {
             // SAFETY: input_state_va points to a PointerState page mapped
             // by init. Atomic load-acquire for cross-core visibility.
             let packed = unsafe {
-                let atom = &*(s.input_state_va as *const core::sync::atomic::AtomicU64);
+                let atom = &*(s.pointer.input_state_va as *const core::sync::atomic::AtomicU64);
                 atom.load(core::sync::atomic::Ordering::Acquire)
             };
-            if packed != s.last_pointer_xy && packed != 0 {
-                s.last_pointer_xy = packed;
+            if packed != s.pointer.last_xy && packed != 0 {
+                s.pointer.last_xy = packed;
                 let x = protocol::input::PointerState::unpack_x(packed);
                 let y = protocol::input::PointerState::unpack_y(packed);
-                s.mouse_x = scale_pointer_coord(x, fb_width);
-                s.mouse_y = scale_pointer_coord(y, fb_height);
+                s.pointer.x = scale_pointer_coord(x, fb_width);
+                s.pointer.y = scale_pointer_coord(y, fb_height);
 
                 // Cancel any pending fade-out and restore full opacity.
-                if let Some(id) = s.pointer_fade_id {
-                    s.timeline.cancel(id);
-                    s.pointer_fade_id = None;
+                if let Some(id) = s.pointer.fade_id {
+                    s.animation.timeline.cancel(id);
+                    s.pointer.fade_id = None;
                 }
-                s.pointer_visible = true;
+                s.pointer.visible = true;
                 // Only trigger scene publish when opacity actually changes
                 // (pointer was fading/hidden). Position-only changes are
                 // handled by the render service reading the shared register.
-                if s.pointer_opacity != 255 {
-                    s.pointer_opacity = 255;
-                    if s.cursor_state_va != 0 {
-                        write_cursor_opacity(s.cursor_state_va, 255);
+                if s.pointer.opacity != 255 {
+                    s.pointer.opacity = 255;
+                    if s.pointer.cursor_state_va != 0 {
+                        write_cursor_opacity(s.pointer.cursor_state_va, 255);
                     }
                     changed = true;
                 }
-                s.pointer_last_event_ms = now_ms;
+                s.pointer.last_event_ms = now_ms;
 
                 pointer_position_changed = true;
             }
@@ -2244,7 +2199,7 @@ pub extern "C" fn _start() -> ! {
                     {
                         let s = state();
                         s.doc_len = dc.doc_len as usize;
-                        s.cursor_pos = dc.cursor_pos as usize;
+                        s.cursor.pos = dc.cursor_pos as usize;
                         if dc.flags & DOC_CHANGED_CLEAR_SELECTION != 0 {
                             input_handling::clear_selection();
                         }
@@ -2290,11 +2245,11 @@ pub extern "C" fn _start() -> ! {
         // Track whether the scroll position actually changed — the scene
         // dispatch needs to know so it does a full rebuild (visible lines
         // differ) instead of an incremental single-line update.
-        let scroll_before = state().scroll_offset;
-        if (changed || text_changed) && state().active_space == 0 {
+        let scroll_before = state().scroll.offset;
+        if (changed || text_changed) && state().animation.active_space == 0 {
             input_handling::update_scroll_offset(page_width, page_height, page_padding);
         }
-        let scroll_after = state().scroll_offset;
+        let scroll_after = state().scroll.offset;
         let scroll_diff = if scroll_before > scroll_after {
             scroll_before - scroll_after
         } else {
@@ -2329,7 +2284,7 @@ pub extern "C" fn _start() -> ! {
         if had_user_input {
             blink::reset_blink(state(), now_ms);
         }
-        state().timeline.tick(now_ms);
+        state().animation.timeline.tick(now_ms);
         let blink_changed = blink::advance_blink(state(), now_ms);
         if blink_changed {
             changed = true;
@@ -2346,20 +2301,20 @@ pub extern "C" fn _start() -> ! {
             text_changed = true;
         }
 
-        if state().scroll_animating {
-            let old_scroll = state().scroll_offset;
+        if state().scroll.animating {
+            let old_scroll = state().scroll.offset;
             let s = state();
-            s.scroll_spring.tick(frame_dt);
-            s.scroll_offset = scene::f32_to_mpt(s.scroll_spring.value());
+            s.scroll.spring.tick(frame_dt);
+            s.scroll.offset = scene::f32_to_mpt(s.scroll.spring.value());
 
-            if s.scroll_spring.settled() {
+            if s.scroll.spring.settled() {
                 // Snap to exact target (nearest whole-point-aligned Mpt)
                 // to avoid persistent sub-pixel jitter.
-                s.scroll_offset = scene::mpt_round_pt(s.scroll_target);
-                s.scroll_animating = false;
+                s.scroll.offset = scene::mpt_round_pt(s.scroll.target);
+                s.scroll.animating = false;
             }
 
-            let new_scroll = state().scroll_offset;
+            let new_scroll = state().scroll.offset;
             let diff = if old_scroll > new_scroll {
                 old_scroll - new_scroll
             } else {
@@ -2383,28 +2338,28 @@ pub extern "C" fn _start() -> ! {
         if selection_changed {
             let s = state();
             // Cancel any previous selection fade in progress.
-            if let Some(old_id) = s.selection_fade_id {
-                s.timeline.cancel(old_id);
+            if let Some(old_id) = s.selection.fade_id {
+                s.animation.timeline.cancel(old_id);
             }
-            s.selection_fade_id = s
-                .timeline
+            s.selection.fade_id = s
+                .animation.timeline
                 .start(0.0, 255.0, 100, animation::Easing::EaseOut, now_ms)
                 .ok();
-            s.selection_opacity = 0;
+            s.selection.opacity = 0;
         }
         // Tick the selection fade (if active).
         {
             let s = state();
-            if let Some(id) = s.selection_fade_id {
-                if s.timeline.is_active(id) {
-                    let new_val = s.timeline.value(id) as u8;
-                    if new_val != s.selection_opacity {
-                        s.selection_opacity = new_val;
+            if let Some(id) = s.selection.fade_id {
+                if s.animation.timeline.is_active(id) {
+                    let new_val = s.animation.timeline.value(id) as u8;
+                    if new_val != s.selection.opacity {
+                        s.selection.opacity = new_val;
                         changed = true;
                     }
                 } else {
-                    s.selection_opacity = 255;
-                    s.selection_fade_id = None;
+                    s.selection.opacity = 255;
+                    s.selection.fade_id = None;
                 }
             }
         }
@@ -2418,27 +2373,27 @@ pub extern "C" fn _start() -> ! {
         // The slide does NOT set `changed` — it uses its own publish
         // path (apply_slide) and compositor signal. Setting `changed`
         // would trigger an unnecessary update_cursor dispatch.
-        if state().slide_animating {
+        if state().animation.slide_animating {
             let s = state();
             // On the first frame, frame_dt includes idle sleep time
             // (up to 50ms) — advancing the spring by that much causes
             // a visible first-frame jump. Clamp to one frame interval
             // for smooth onset; subsequent frames use wall-clock dt.
-            let dt = if s.slide_first_frame {
-                s.slide_first_frame = false;
+            let dt = if s.animation.slide_first_frame {
+                s.animation.slide_first_frame = false;
                 (frame_interval_ns as f32) / 1_000_000_000.0
             } else {
                 frame_dt
             };
-            s.slide_spring.tick(dt);
-            let new_offset = scene::f32_to_mpt(s.slide_spring.value());
-            if new_offset != s.slide_offset {
-                s.slide_offset = new_offset;
+            s.animation.slide_spring.tick(dt);
+            let new_offset = scene::f32_to_mpt(s.animation.slide_spring.value());
+            if new_offset != s.animation.slide_offset {
+                s.animation.slide_offset = new_offset;
                 slide_changed = true;
             }
-            if s.slide_spring.settled() {
-                s.slide_offset = s.slide_target; // both Mpt, exact match
-                s.slide_animating = false;
+            if s.animation.slide_spring.settled() {
+                s.animation.slide_offset = s.animation.slide_target; // both Mpt, exact match
+                s.animation.slide_animating = false;
                 slide_changed = true;
             }
         }
@@ -2456,11 +2411,11 @@ pub extern "C" fn _start() -> ! {
             let s = state();
 
             // Start fade-out after 3 s of inactivity.
-            if s.pointer_visible && s.pointer_fade_id.is_none() && s.pointer_opacity == 255 {
-                let idle_ms = now_ms.saturating_sub(s.pointer_last_event_ms);
+            if s.pointer.visible && s.pointer.fade_id.is_none() && s.pointer.opacity == 255 {
+                let idle_ms = now_ms.saturating_sub(s.pointer.last_event_ms);
                 if idle_ms >= POINTER_HIDE_MS {
-                    s.pointer_fade_id = s
-                        .timeline
+                    s.pointer.fade_id = s
+                        .animation.timeline
                         .start(
                             255.0,
                             0.0,
@@ -2473,23 +2428,23 @@ pub extern "C" fn _start() -> ! {
             }
 
             // Tick pointer fade animation.
-            if let Some(id) = s.pointer_fade_id {
-                if s.timeline.is_active(id) {
-                    let new_opacity = s.timeline.value(id) as u8;
-                    if new_opacity != s.pointer_opacity {
-                        s.pointer_opacity = new_opacity;
-                        if s.cursor_state_va != 0 {
-                            write_cursor_opacity(s.cursor_state_va, new_opacity);
+            if let Some(id) = s.pointer.fade_id {
+                if s.animation.timeline.is_active(id) {
+                    let new_opacity = s.animation.timeline.value(id) as u8;
+                    if new_opacity != s.pointer.opacity {
+                        s.pointer.opacity = new_opacity;
+                        if s.pointer.cursor_state_va != 0 {
+                            write_cursor_opacity(s.pointer.cursor_state_va, new_opacity);
                         }
                         changed = true;
                     }
                 } else {
                     // Fade complete — pointer is now hidden.
-                    s.pointer_opacity = 0;
-                    s.pointer_visible = false;
-                    s.pointer_fade_id = None;
-                    if s.cursor_state_va != 0 {
-                        write_cursor_opacity(s.cursor_state_va, 0);
+                    s.pointer.opacity = 0;
+                    s.pointer.visible = false;
+                    s.pointer.fade_id = None;
+                    if s.pointer.cursor_state_va != 0 {
+                        write_cursor_opacity(s.pointer.cursor_state_va, 0);
                     }
                     changed = true;
                 }
@@ -2507,7 +2462,7 @@ pub extern "C" fn _start() -> ! {
         // position changed. B will recompute layout and signal back with
         // MSG_LAYOUT_READY. We drain the ready signal before scene dispatch.
         if text_changed || context_switched {
-            write_viewport_state(fb_width, fb_height, state().scroll_offset, page_width, page_height);
+            write_viewport_state(fb_width, fb_height, state().scroll.offset, page_width, page_height);
             signal_layout_recompute(&layout_ch);
             // Wait briefly for B to finish layout (shared memory, fast).
             let _ = sys::wait(&[LAYOUT_HANDLE.0], 5_000_000); // 5ms
@@ -2547,7 +2502,7 @@ pub extern "C" fn _start() -> ! {
 
             if context_switched {
                 let s = state();
-                let title: &[u8] = if s.active_space != 0 {
+                let title: &[u8] = if s.animation.active_space != 0 {
                     b"Image"
                 } else if is_rich_doc {
                     b"Rich Text"
@@ -2563,15 +2518,15 @@ pub extern "C" fn _start() -> ! {
                     } else {
                         documents::doc_content()
                     },
-                    s.cursor_pos as u32,
-                    s.sel_start as u32,
-                    s.sel_end as u32,
+                    s.cursor.pos as u32,
+                    s.selection.start as u32,
+                    s.selection.end as u32,
                     title,
                     &time_buf,
-                    s.scroll_offset,
-                    s.cursor_opacity,
-                    s.slide_offset,
-                    s.active_space,
+                    s.scroll.offset,
+                    s.cursor.opacity,
+                    s.animation.slide_offset,
+                    s.animation.active_space,
                 );
                 // Immediately rebuild document content with rich text layout.
                 if is_rich_doc {
@@ -2623,22 +2578,22 @@ pub extern "C" fn _start() -> ! {
                         &scene_cfg,
                         documents::rich_buf_ref(),
                         &rich_fonts,
-                        s.cursor_pos as u32,
-                        s.sel_start as u32,
-                        s.sel_end as u32,
+                        s.cursor.pos as u32,
+                        s.selection.start as u32,
+                        s.selection.end as u32,
                         title,
                         &time_buf,
-                        s.scroll_offset,
+                        s.scroll.offset,
                         true,
-                        s.cursor_opacity,
-                        s.active_space,
+                        s.cursor.opacity,
+                        s.animation.active_space,
                     );
                     state().rich_lines = lines;
                 }
             } else if text_changed && is_rich_doc {
                 // Rich text content changed — always full rebuild.
                 let s = state();
-                let title: &[u8] = if s.active_space != 0 {
+                let title: &[u8] = if s.animation.active_space != 0 {
                     b"Image"
                 } else {
                     b"Rich Text"
@@ -2691,15 +2646,15 @@ pub extern "C" fn _start() -> ! {
                     &scene_cfg,
                     documents::rich_buf_ref(),
                     &rich_fonts,
-                    s.cursor_pos as u32,
-                    s.sel_start as u32,
-                    s.sel_end as u32,
+                    s.cursor.pos as u32,
+                    s.selection.start as u32,
+                    s.selection.end as u32,
                     title,
                     &time_buf,
-                    s.scroll_offset,
+                    s.scroll.offset,
                     clock_changed,
-                    s.cursor_opacity,
-                    s.active_space,
+                    s.cursor.opacity,
+                    s.animation.active_space,
                 );
                 state().rich_lines = lines;
             } else if text_changed {
@@ -2712,15 +2667,15 @@ pub extern "C" fn _start() -> ! {
                     scene.update_document_content(
                         &scene_cfg,
                         doc,
-                        s.cursor_pos as u32,
-                        s.sel_start as u32,
-                        s.sel_end as u32,
+                        s.cursor.pos as u32,
+                        s.selection.start as u32,
+                        s.selection.end as u32,
                         b"Text",
                         &time_buf,
-                        s.scroll_offset,
+                        s.scroll.offset,
                         clock_changed,
-                        s.cursor_opacity,
-                        s.active_space,
+                        s.cursor.opacity,
+                        s.animation.active_space,
                     );
                 } else if new_line_count == prev_line_count {
                     let s = state();
@@ -2735,65 +2690,65 @@ pub extern "C" fn _start() -> ! {
                     } else {
                         80
                     };
-                    let changed_line = scene_state::byte_to_line_col(doc, s.cursor_pos, cpl).0;
+                    let changed_line = scene_state::byte_to_line_col(doc, s.cursor.pos, cpl).0;
                     scene.update_document_incremental(
                         &scene_cfg,
                         doc,
-                        s.cursor_pos as u32,
-                        s.sel_start as u32,
-                        s.sel_end as u32,
+                        s.cursor.pos as u32,
+                        s.selection.start as u32,
+                        s.selection.end as u32,
                         changed_line,
                         b"Text",
                         &time_buf,
-                        s.scroll_offset,
+                        s.scroll.offset,
                         clock_changed,
-                        s.cursor_opacity,
-                        s.active_space,
+                        s.cursor.opacity,
+                        s.animation.active_space,
                     );
                 } else if new_line_count == prev_line_count + 1 {
                     let s = state();
                     scene.update_document_insert_line(
                         &scene_cfg,
                         doc,
-                        s.cursor_pos as u32,
-                        s.sel_start as u32,
-                        s.sel_end as u32,
+                        s.cursor.pos as u32,
+                        s.selection.start as u32,
+                        s.selection.end as u32,
                         b"Text",
                         &time_buf,
-                        s.scroll_offset,
+                        s.scroll.offset,
                         clock_changed,
-                        s.cursor_opacity,
-                        s.active_space,
+                        s.cursor.opacity,
+                        s.animation.active_space,
                     );
                 } else if new_line_count + 1 == prev_line_count {
                     let s = state();
                     scene.update_document_delete_line(
                         &scene_cfg,
                         doc,
-                        s.cursor_pos as u32,
-                        s.sel_start as u32,
-                        s.sel_end as u32,
+                        s.cursor.pos as u32,
+                        s.selection.start as u32,
+                        s.selection.end as u32,
                         b"Text",
                         &time_buf,
-                        s.scroll_offset,
+                        s.scroll.offset,
                         clock_changed,
-                        s.cursor_opacity,
-                        s.active_space,
+                        s.cursor.opacity,
+                        s.animation.active_space,
                     );
                 } else {
                     let s = state();
                     scene.update_document_content(
                         &scene_cfg,
                         doc,
-                        s.cursor_pos as u32,
-                        s.sel_start as u32,
-                        s.sel_end as u32,
+                        s.cursor.pos as u32,
+                        s.selection.start as u32,
+                        s.selection.end as u32,
                         b"Text",
                         &time_buf,
-                        s.scroll_offset,
+                        s.scroll.offset,
                         clock_changed,
-                        s.cursor_opacity,
-                        s.active_space,
+                        s.cursor.opacity,
+                        s.animation.active_space,
                     );
                 }
 
@@ -2801,7 +2756,7 @@ pub extern "C" fn _start() -> ! {
             } else if selection_changed && is_rich_doc {
                 // Rich text selection — full rebuild (proportional positioning).
                 let s = state();
-                let title: &[u8] = if s.active_space != 0 {
+                let title: &[u8] = if s.animation.active_space != 0 {
                     b"Image"
                 } else {
                     b"Rich Text"
@@ -2854,15 +2809,15 @@ pub extern "C" fn _start() -> ! {
                     &scene_cfg,
                     documents::rich_buf_ref(),
                     &rich_fonts,
-                    s.cursor_pos as u32,
-                    s.sel_start as u32,
-                    s.sel_end as u32,
+                    s.cursor.pos as u32,
+                    s.selection.start as u32,
+                    s.selection.end as u32,
                     title,
                     &time_buf,
-                    s.scroll_offset,
+                    s.scroll.offset,
                     clock_changed,
-                    s.cursor_opacity,
-                    s.active_space,
+                    s.cursor.opacity,
+                    s.animation.active_space,
                 );
                 state().rich_lines = lines;
             } else if selection_changed {
@@ -2871,23 +2826,23 @@ pub extern "C" fn _start() -> ! {
                 let sel_text_h = scene_cfg
                     .page_height
                     .saturating_sub(2 * scene_cfg.text_inset_x);
-                let scroll_pt = s.scroll_offset / scene::MPT_PER_PT;
+                let scroll_pt = s.scroll.offset / scene::MPT_PER_PT;
 
                 scene.update_selection(
                     &scene_cfg,
-                    s.cursor_pos as u32,
-                    s.sel_start as u32,
-                    s.sel_end as u32,
+                    s.cursor.pos as u32,
+                    s.selection.start as u32,
+                    s.selection.end as u32,
                     documents::doc_content(),
                     sel_text_h,
                     scroll_pt,
-                    s.cursor_opacity,
+                    s.cursor.opacity,
                 );
             } else if changed && is_rich_doc {
                 // Rich text cursor-only update — full rebuild needed because
                 // proportional cursor positioning requires the styled layout.
                 let s = state();
-                let title: &[u8] = if s.active_space != 0 {
+                let title: &[u8] = if s.animation.active_space != 0 {
                     b"Image"
                 } else {
                     b"Rich Text"
@@ -2940,15 +2895,15 @@ pub extern "C" fn _start() -> ! {
                     &scene_cfg,
                     documents::rich_buf_ref(),
                     &rich_fonts,
-                    s.cursor_pos as u32,
-                    s.sel_start as u32,
-                    s.sel_end as u32,
+                    s.cursor.pos as u32,
+                    s.selection.start as u32,
+                    s.selection.end as u32,
                     title,
                     &time_buf,
-                    s.scroll_offset,
+                    s.scroll.offset,
                     clock_changed,
-                    s.cursor_opacity,
-                    s.active_space,
+                    s.cursor.opacity,
+                    s.animation.active_space,
                 );
                 state().rich_lines = lines;
             } else if changed {
@@ -2965,11 +2920,11 @@ pub extern "C" fn _start() -> ! {
 
                 scene.update_cursor(
                     &scene_cfg,
-                    s.cursor_pos as u32,
+                    s.cursor.pos as u32,
                     documents::doc_content(),
                     chars_per_line,
                     if clock_changed { Some(&time_buf) } else { None },
-                    s.cursor_opacity,
+                    s.cursor.opacity,
                 );
             } else if clock_changed {
                 // Clock changed without any other scene change — just update the clock text.
@@ -2979,19 +2934,19 @@ pub extern "C" fn _start() -> ! {
             // Apply post-build opacity (selection fade-in).
             {
                 let s = state();
-                scene.apply_opacity(255, s.selection_opacity);
+                scene.apply_opacity(255, s.selection.opacity);
             }
 
             // Apply slide offset if it changed this frame.
             if slide_changed {
-                scene.apply_slide(state().slide_offset);
+                scene.apply_slide(state().animation.slide_offset);
             }
 
             // Write cursor opacity to shared register (render driver reads).
             if needs_scene_update {
                 let s = state();
-                if s.cursor_state_va != 0 {
-                    write_cursor_opacity(s.cursor_state_va, s.pointer_opacity);
+                if s.pointer.cursor_state_va != 0 {
+                    write_cursor_opacity(s.pointer.cursor_state_va, s.pointer.opacity);
                 }
             }
         }
@@ -3005,15 +2960,15 @@ pub extern "C" fn _start() -> ! {
         // changes underneath it.
         if pointer_position_changed || needs_scene_update || slide_changed {
             let s = state();
-            if s.cursor_state_va != 0 {
+            if s.pointer.cursor_state_va != 0 {
                 let nodes = scene.latest_nodes();
                 let data_buf = scene.latest_data_buf();
-                let new_shape = resolve_cursor_shape(nodes, data_buf, s.mouse_x, s.mouse_y);
-                if !core::ptr::eq(new_shape as *const str, s.cursor_shape_name as *const str) {
-                    s.cursor_shape_name = new_shape;
+                let new_shape = resolve_cursor_shape(nodes, data_buf, s.pointer.x, s.pointer.y);
+                if !core::ptr::eq(new_shape as *const str, s.pointer.shape_name as *const str) {
+                    s.pointer.shape_name = new_shape;
                     write_cursor_shape(
-                        s.cursor_state_va,
-                        &mut s.cursor_shape_generation,
+                        s.pointer.cursor_state_va,
+                        &mut s.pointer.shape_generation,
                         new_shape,
                     );
                 }

@@ -332,45 +332,6 @@ pub fn byte_to_line_col(text: &[u8], byte_offset: usize, chars_per_line: usize) 
     )
 }
 
-/// Break text into visual lines using the unified layout library.
-///
-/// Delegates to `layout_lib::layout_paragraph` with `CharBreaker` (character-
-/// level wrapping) and unit-width metrics, then wraps each `LayoutLine`
-/// into a `LayoutRun` with color and font_size for scene graph construction.
-pub fn layout_mono_lines(
-    text: &[u8],
-    chars_per_line: usize,
-    line_height: i32,
-    color: Color,
-    font_size: u16,
-) -> Vec<LayoutRun> {
-    let metrics = UnitMetrics {
-        line_height: line_height as f32,
-    };
-    let max_width = chars_per_line as f32;
-    let para = layout_lib::layout_paragraph(
-        text,
-        &metrics,
-        max_width,
-        layout_lib::Alignment::Left,
-        &layout_lib::CharBreaker,
-    );
-
-    para.lines
-        .iter()
-        .map(|line| LayoutRun {
-            glyphs: DataRef {
-                offset: line.byte_offset,
-                length: line.byte_length,
-            },
-            glyph_count: line.byte_length as u16,
-            y: line.y,
-            color,
-            font_size,
-        })
-        .collect()
-}
-
 /// Extract source text bytes for a run using its placeholder DataRef.
 pub fn line_bytes_for_run<'a>(text: &'a [u8], run: &LayoutRun) -> &'a [u8] {
     let start = run.glyphs.offset as usize;
@@ -683,7 +644,7 @@ fn char_advance_pt(
 ///
 /// `scratch` is a caller-provided buffer for extracting logical text.
 /// `resolve_font` maps a piecetable::Style to font data + metrics.
-pub fn layout_rich_lines(
+pub fn break_rich_segments(
     pt_buf: &[u8],
     scratch: &mut [u8],
     line_width_pt: f32,
@@ -1214,30 +1175,6 @@ pub(crate) fn push_layout_results_to_scene(
         let glyphs = crate::read_glyph_data(header, run.glyph_data_offset, run.glyph_count);
         let glyph_ref = w.push_shaped_glyphs(glyphs);
         line_glyph_refs.push((glyph_ref, run.glyph_count, run.y_pt));
-    }
-
-    line_glyph_refs
-}
-
-/// Shape visible runs and collect glyph data refs for line-node
-/// construction. Used by both full and incremental scene builds.
-pub(crate) fn shape_visible_runs(
-    w: &mut scene::SceneWriter<'_>,
-    visible_runs: &[LayoutRun],
-    doc_text: &[u8],
-    font_data: &[u8],
-    font_size: u16,
-    upem: u16,
-    axes: &[fonts::rasterize::AxisValue],
-) -> Vec<(DataRef, u16, i32)> {
-    let mut line_glyph_refs: Vec<(DataRef, u16, i32)> = Vec::with_capacity(visible_runs.len());
-
-    for run in visible_runs {
-        let line_text = line_bytes_for_run(doc_text, run);
-        let shaped = shape_text(font_data, line_text, font_size, upem, axes);
-        let glyph_ref = w.push_shaped_glyphs(&shaped);
-
-        line_glyph_refs.push((glyph_ref, shaped.len() as u16, run.y));
     }
 
     line_glyph_refs

@@ -530,13 +530,13 @@ fn setup_render_pipeline(
     sys::print(b"\n");
 
     // -----------------------------------------------------------------------
-    // Phase 7: Spawn core process.
+    // Phase 7: Spawn view-engine process.
     // -----------------------------------------------------------------------
     let (core_proc, _core_ch_handle, core_channel_idx) =
-        match spawn_with_channel(CORE_ELF, next_channel) {
+        match spawn_with_channel(VIEW_ENGINE_ELF, next_channel) {
             Some(v) => v,
             None => {
-                sys::print(b"init: failed to spawn core\n");
+                sys::print(b"init: failed to spawn view-engine\n");
                 sys::exit();
             }
         };
@@ -1167,9 +1167,9 @@ fn setup_render_pipeline(
 
     sys::yield_now();
 
-    sys::print(b"     starting core\n");
+    sys::print(b"     starting view-engine\n");
 
-    start_process(core_proc, b"core");
+    start_process(core_proc, b"view-engine");
 
     sys::yield_now();
 
@@ -2115,9 +2115,9 @@ pub extern "C" fn _start() -> ! {
         child_names[child_count] = render_name;
         child_count += 1;
 
-        // Register core.
+        // Register view-engine.
         child_handles[child_count] = core_proc.0;
-        child_names[child_count] = b"core";
+        child_names[child_count] = b"view-engine";
         child_count += 1;
 
         // Register editor.

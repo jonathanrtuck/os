@@ -49,7 +49,7 @@ const INIT_EMBEDDED: &[(&str, &str)] = &[
     ("virtio-console", "VIRTIO_CONSOLE_ELF"),
     ("virtio-input", "VIRTIO_INPUT_ELF"),
     ("virtio-9p", "VIRTIO_9P_ELF"),
-    ("core", "CORE_ELF"),
+    ("view-engine", "VIEW_ENGINE_ELF"),
     ("cpu-render", "CPU_RENDER_ELF"),
     ("virgil-render", "VIRGIL_RENDER_ELF"),
     ("metal-render", "METAL_RENDER_ELF"),
@@ -86,7 +86,7 @@ const PROGRAMS: &[(&str, &str, bool, bool)] = &[
         false,
         false,
     ),
-    ("core", "services/core", false, true),
+    ("view-engine", "services/view-engine", false, true),
     ("cpu-render", "services/drivers/cpu-render", true, true),
     (
         "virgil-render",
@@ -281,11 +281,11 @@ fn main() {
         if name == "cpu-render"
             || name == "virgil-render"
             || name == "metal-render"
-            || name == "core"
+            || name == "view-engine"
         {
             externs.push(("render", render_rlib.clone()));
         }
-        if name == "core" {
+        if name == "view-engine" {
             externs.push(("animation", animation_rlib.clone()));
             externs.push(("layout", layout_rlib.clone()));
             externs.push(("piecetable", piecetable_rlib.clone()));

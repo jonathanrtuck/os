@@ -404,7 +404,7 @@ Notification for both: `channel_signal` syscall wakes the consumer from `sys::wa
 
 ---
 
-### 2.2 Core / OS Service (`services/core/`) 🟡
+### 2.2 View Engine (`services/view-engine/`) 🟡
 
 **Goal:** The OS service: sole writer to document state, scene graph builder, input router.
 
