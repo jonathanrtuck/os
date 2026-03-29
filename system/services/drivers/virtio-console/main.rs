@@ -31,6 +31,7 @@ pub extern "C" fn _start() -> ! {
     };
     let mmio_pa = config.mmio_pa;
     let irq = config.irq;
+    let init_handle = sys::ChannelHandle(config.init_handle);
     // Map the page containing the MMIO region. Virtio-mmio slots have
     // 0x200 stride, so most sit at sub-page offsets within a page.
     let page_offset = mmio_pa & (ipc::PAGE_SIZE as u64 - 1);
@@ -101,7 +102,7 @@ pub extern "C" fn _start() -> ! {
     let _ = sys::interrupt_ack(irq_handle);
     let _ = sys::dma_free(buf_va as u64, 0);
     // Signal the kernel channel to indicate we're done.
-    let _ = sys::channel_signal(sys::ChannelHandle(0));
+    let _ = sys::channel_signal(init_handle);
 
     sys::exit();
 }

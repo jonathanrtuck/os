@@ -354,7 +354,9 @@ fn setup_render_pipeline(
     let dev_config = DeviceConfig {
         mmio_pa: gpu_pa,
         irq: gpu_irq,
-        _pad: 0,
+        init_handle: 0,
+        service_handle: 0xFF,
+        _pad: [0; 2],
     };
     // SAFETY: DeviceConfig fits within 60-byte payload; msg_type matches the payload type.
     let msg = unsafe { ipc::Message::from_payload(MSG_DEVICE_CONFIG, &dev_config) };
@@ -623,7 +625,14 @@ fn setup_render_pipeline(
         layout_results_va: core_layout_results_va as u64,
         layout_results_capacity: layout_results_size as u32,
         viewport_state_va: core_viewport_state_va as u64,
-        _pad: 0,
+        // View-engine handle assignments (determined by handle_send order in Phase 8).
+        input_handle: 1,
+        compositor_handle: 2,
+        editor_handle: 3,
+        docmodel_handle: 4,
+        layout_handle: 5,
+        input2_handle: if input_devices.len() > 1 { 6 } else { 0xFF },
+        _pad: [0; 2],
     };
     // SAFETY: CoreLayoutConfig fits within 60-byte payload.
     let cl_msg =
@@ -680,7 +689,11 @@ fn setup_render_pipeline(
         content_size: content_size_val,
         img_file_store_offset: png_offset,
         img_file_store_length: png_len,
-        _pad: 0,
+        // Document-model handle assignments (determined by handle_send order).
+        editor_handle: 1,
+        decoder_handle: 2,
+        fs_handle: 3,
+        core_handle: 4,
     };
     let dm_msg = unsafe {
         ipc::Message::from_payload(
@@ -738,12 +751,14 @@ fn setup_render_pipeline(
     let layout_ch = init_channel(layout_ch_idx);
     let layout_config = LayoutEngineConfig {
         doc_va: layout_doc_va as u64,
-        doc_capacity: DOC_BUF_CAPACITY,
         content_va: layout_content_va,
-        content_size: content_size_val,
         layout_results_va: layout_results_b_va as u64,
-        layout_results_capacity: layout_results_size as u32,
         viewport_state_va: layout_viewport_va as u64,
+        doc_capacity: DOC_BUF_CAPACITY,
+        content_size: content_size_val,
+        layout_results_capacity: layout_results_size as u32,
+        core_handle: 1,
+        _pad: [0; 3],
     };
     let layout_msg =
         // SAFETY: LayoutEngineConfig fits within 60-byte payload.
@@ -796,7 +811,9 @@ fn setup_render_pipeline(
         let input_config = DeviceConfig {
             mmio_pa: input_pa,
             irq: input_irq,
-            _pad: 0,
+            init_handle: 0,
+            service_handle: 1,
+            _pad: [0; 2],
         };
         // SAFETY: same as DeviceConfig from_payload above.
         let msg = unsafe { ipc::Message::from_payload(MSG_DEVICE_CONFIG, &input_config) };
@@ -1003,7 +1020,9 @@ fn setup_render_pipeline(
                 _pad2: 0,
                 content_va: 0,
                 content_size: 0,
-                _pad3: 0,
+                init_handle: 0,
+                core_handle: 1,
+                _pad3: [0; 2],
             };
             let doc_msg = unsafe {
                 ipc::Message::from_payload(protocol::document::MSG_DOC_CONFIG, &doc_config)
@@ -1098,7 +1117,9 @@ fn setup_render_pipeline(
         let input_config = DeviceConfig {
             mmio_pa: input_pa,
             irq: input_irq,
-            _pad: 0,
+            init_handle: 0,
+            service_handle: 1,
+            _pad: [0; 2],
         };
         // SAFETY: same as DeviceConfig from_payload above.
         let msg = unsafe { ipc::Message::from_payload(MSG_DEVICE_CONFIG, &input_config) };
@@ -1395,7 +1416,9 @@ pub extern "C" fn _start() -> ! {
                 let config = DeviceConfig {
                     mmio_pa: dev_pa,
                     irq: dev_irq,
-                    _pad: 0,
+                    init_handle: 0,
+                    service_handle: 0xFF,
+                    _pad: [0; 2],
                 };
                 // SAFETY: same as DeviceConfig from_payload above.
                 let msg = unsafe { ipc::Message::from_payload(MSG_DEVICE_CONFIG, &config) };
@@ -1509,7 +1532,9 @@ pub extern "C" fn _start() -> ! {
             _pad2: 0,
             content_va: doc_content_va as u64,
             content_size: content_capacity,
-            _pad3: 0,
+            init_handle: 0,
+            core_handle: 1,
+            _pad3: [0; 2],
         };
         let doc_msg =
             unsafe { ipc::Message::from_payload(protocol::document::MSG_DOC_CONFIG, &doc_config) };
@@ -1873,7 +1898,9 @@ pub extern "C" fn _start() -> ! {
         let dev_config = DeviceConfig {
             mmio_pa: p9_pa,
             irq: p9_irq,
-            _pad: 0,
+            init_handle: 0,
+            service_handle: 0xFF,
+            _pad: [0; 2],
         };
         // SAFETY: same as DeviceConfig from_payload above.
         let cfg_msg = unsafe { ipc::Message::from_payload(MSG_DEVICE_CONFIG, &dev_config) };

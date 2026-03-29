@@ -180,6 +180,7 @@ pub extern "C" fn _start() -> ! {
         sys::print(b"virtio-input: bad device config\n");
         sys::exit();
     };
+    let service_handle = sys::ChannelHandle(config.service_handle);
     // Map MMIO region (sub-page offset for virtio-mmio slots).
     let page_offset = config.mmio_pa & (ipc::PAGE_SIZE as u64 - 1);
     let page_pa = config.mmio_pa & !(ipc::PAGE_SIZE as u64 - 1);
@@ -323,7 +324,7 @@ pub extern "C" fn _start() -> ! {
                         sys::print(b"virtio-input: ring full, event dropped\n");
                     }
 
-                    let _ = sys::channel_signal(sys::ChannelHandle(1));
+                    let _ = sys::channel_signal(service_handle);
                 } else {
                     // Update modifier state.
                     let mod_bit = modifier_bit(event.code);
@@ -373,7 +374,7 @@ pub extern "C" fn _start() -> ! {
                         sys::print(b"virtio-input: ring full, event dropped\n");
                     }
 
-                    let _ = sys::channel_signal(sys::ChannelHandle(1));
+                    let _ = sys::channel_signal(service_handle);
                 }
             } else if event.event_type == EV_ABS {
                 // Absolute pointer axis event from virtio-tablet.
@@ -412,7 +413,7 @@ pub extern "C" fn _start() -> ! {
                 atom.store(packed, core::sync::atomic::Ordering::Release);
             }
             // Signal core to wake and read the new state.
-            let _ = sys::channel_signal(sys::ChannelHandle(1));
+            let _ = sys::channel_signal(service_handle);
         }
 
         // Batch-notify after reposting all consumed buffers.

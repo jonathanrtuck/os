@@ -12,7 +12,7 @@ use protocol::{
 use super::{
     clamp_f32, content_text_layout,
     documents::{doc_content, doc_write_header},
-    EDITOR_HANDLE, KEY_1, KEY_2, KEY_A, KEY_B, KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END,
+    state, KEY_1, KEY_2, KEY_A, KEY_B, KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END,
     KEY_HOME, KEY_I, KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_TAB, KEY_UP,
 };
 
@@ -281,7 +281,7 @@ pub(crate) fn process_key_event(
             }
             doc_write_header();
             sync_cursor_to_editor(editor_ch);
-            let _ = sys::channel_signal(EDITOR_HANDLE);
+            let _ = sys::channel_signal(state().editor_handle);
             KeyAction {
                 changed: true,
                 text_changed: false,
@@ -305,7 +305,7 @@ pub(crate) fn process_key_event(
             update_selection_from_anchor();
             doc_write_header();
             sync_cursor_to_editor(editor_ch);
-            let _ = sys::channel_signal(EDITOR_HANDLE);
+            let _ = sys::channel_signal(state().editor_handle);
             KeyAction {
                 changed: true,
                 text_changed: false,
@@ -462,7 +462,7 @@ pub(crate) fn process_key_event(
                 clear_selection();
                 doc_write_header();
                 sync_cursor_to_editor(editor_ch);
-                let _ = sys::channel_signal(EDITOR_HANDLE);
+                let _ = sys::channel_signal(state().editor_handle);
                 return KeyAction {
                     changed: true,
                     text_changed: false,
@@ -515,7 +515,7 @@ pub(crate) fn process_key_event(
                 clear_selection();
                 doc_write_header();
                 sync_cursor_to_editor(editor_ch);
-                let _ = sys::channel_signal(EDITOR_HANDLE);
+                let _ = sys::channel_signal(state().editor_handle);
                 return KeyAction {
                     changed: true,
                     text_changed: false,
@@ -776,7 +776,7 @@ pub(crate) fn process_key_event(
                 super::state().cursor.pos = lo;
                 doc_write_header();
                 sync_cursor_to_editor(editor_ch);
-                let _ = sys::channel_signal(EDITOR_HANDLE);
+                let _ = sys::channel_signal(state().editor_handle);
                 return KeyAction {
                     changed: true,
                     text_changed: false, // A will notify when buffer changes
@@ -796,7 +796,7 @@ pub(crate) fn process_key_event(
                     super::state().cursor.goal_x = None;
                     doc_write_header();
                     sync_cursor_to_editor(editor_ch);
-                    let _ = sys::channel_signal(EDITOR_HANDLE);
+                    let _ = sys::channel_signal(state().editor_handle);
                     return KeyAction {
                         changed: true,
                         text_changed: false,
@@ -824,7 +824,7 @@ pub(crate) fn process_key_event(
                 super::state().cursor.pos = lo;
                 doc_write_header();
                 sync_cursor_to_editor(editor_ch);
-                let _ = sys::channel_signal(EDITOR_HANDLE);
+                let _ = sys::channel_signal(state().editor_handle);
                 return KeyAction {
                     changed: true,
                     text_changed: false,
@@ -843,7 +843,7 @@ pub(crate) fn process_key_event(
                     super::state().cursor.goal_x = None;
                     doc_write_header();
                     sync_cursor_to_editor(editor_ch);
-                    let _ = sys::channel_signal(EDITOR_HANDLE);
+                    let _ = sys::channel_signal(state().editor_handle);
                     return KeyAction {
                         changed: true,
                         text_changed: false,
@@ -909,7 +909,7 @@ pub(crate) fn forward_key_to_editor(key: &KeyEvent, editor_ch: &ipc::Channel) {
     // SAFETY: KeyEvent is a plain repr(C) struct; from_payload copies it into payload.
     let msg = unsafe { ipc::Message::from_payload(protocol::input::MSG_KEY_EVENT, key) };
     editor_ch.send(&msg);
-    let _ = sys::channel_signal(EDITOR_HANDLE);
+    let _ = sys::channel_signal(state().editor_handle);
 }
 
 pub(crate) fn update_scroll_offset(page_w: u32, page_h: u32, page_pad: u32) {

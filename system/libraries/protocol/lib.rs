@@ -129,7 +129,12 @@ pub mod device {
     pub struct DeviceConfig {
         pub mmio_pa: u64,
         pub irq: u32,
-        pub _pad: u32,
+        /// Kernel channel handle for signaling init.
+        pub init_handle: u8,
+        /// Kernel channel handle for signaling the connected service (e.g. core).
+        /// 0xFF if this driver has no service channel.
+        pub service_handle: u8,
+        pub _pad: [u8; 2],
     }
     const _: () = assert!(core::mem::size_of::<DeviceConfig>() <= 60);
 
@@ -762,7 +767,11 @@ pub mod blkfs {
         pub doc_va: u64,
         /// Document buffer capacity in bytes (content area, excluding header).
         pub doc_capacity: u32,
-        pub _pad: u32,
+        /// Kernel channel handle for signaling init.
+        pub init_handle: u8,
+        /// Kernel channel handle for the core (docmodel) channel.
+        pub core_handle: u8,
+        pub _pad: [u8; 2],
     }
     const _: () = assert!(core::mem::size_of::<FsConfig>() <= 60);
 
@@ -836,7 +845,14 @@ pub mod document_model {
         pub img_file_store_offset: u32,
         /// Byte length of the encoded image in the File Store.
         pub img_file_store_length: u32,
-        pub _pad: u32,
+        /// Kernel channel handle for the editor channel.
+        pub editor_handle: u8,
+        /// Kernel channel handle for the decoder channel.
+        pub decoder_handle: u8,
+        /// Kernel channel handle for the document service (filesystem) channel.
+        pub fs_handle: u8,
+        /// Kernel channel handle for the core (view-engine) channel.
+        pub core_handle: u8,
     }
     const _: () = assert!(core::mem::size_of::<DocModelConfig>() <= 60);
 

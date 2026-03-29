@@ -44,10 +44,6 @@ const MAX_UNDO: usize = 64;
 /// Undo coalescing window: edits within this window are grouped into one undo step.
 const COALESCE_MS: u64 = 500;
 
-const EDITOR_HANDLE: sys::ChannelHandle = sys::ChannelHandle(1);
-const DECODER_HANDLE: sys::ChannelHandle = sys::ChannelHandle(2);
-const FS_HANDLE: sys::ChannelHandle = sys::ChannelHandle(3);
-const CORE_HANDLE: sys::ChannelHandle = sys::ChannelHandle(4);
 
 /// Document format discriminant.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -158,6 +154,10 @@ struct DocModelState {
     content_size: usize,
     content_alloc: protocol::content::ContentAllocator,
     scene_generation: u32,
+    editor_handle: sys::ChannelHandle,
+    decoder_handle: sys::ChannelHandle,
+    fs_handle: sys::ChannelHandle,
+    core_handle: sys::ChannelHandle,
 }
 
 // SAFETY: DocModelState is only accessed from the single-threaded event loop.
@@ -176,6 +176,10 @@ static mut STATE: DocModelState = DocModelState {
     content_size: 0,
     content_alloc: protocol::content::ContentAllocator::empty(),
     scene_generation: 0,
+    editor_handle: sys::ChannelHandle(u8::MAX),
+    decoder_handle: sys::ChannelHandle(u8::MAX),
+    fs_handle: sys::ChannelHandle(u8::MAX),
+    core_handle: sys::ChannelHandle(u8::MAX),
 };
 
 fn state() -> &'static mut DocModelState {
@@ -361,7 +365,7 @@ fn notify_core_doc_changed(core_ch: &ipc::Channel, flags: u8) {
     // SAFETY: DocChanged is repr(C) and fits in 60-byte payload.
     let msg = unsafe { ipc::Message::from_payload(MSG_DOC_CHANGED, &payload) };
     core_ch.send(&msg);
-    let _ = sys::channel_signal(CORE_HANDLE);
+    let _ = sys::channel_signal(state().core_handle);
 }
 
 fn notify_core_doc_loaded(core_ch: &ipc::Channel) {
@@ -380,7 +384,7 @@ fn notify_core_doc_loaded(core_ch: &ipc::Channel) {
     // SAFETY: DocLoaded is repr(C) and fits in 60-byte payload.
     let msg = unsafe { ipc::Message::from_payload(MSG_DOC_LOADED, &payload) };
     core_ch.send(&msg);
-    let _ = sys::channel_signal(CORE_HANDLE);
+    let _ = sys::channel_signal(state().core_handle);
 }
 
 fn notify_core_image_decoded(core_ch: &ipc::Channel, content_id: u32, width: u16, height: u16) {
@@ -392,7 +396,7 @@ fn notify_core_image_decoded(core_ch: &ipc::Channel, content_id: u32, width: u16
     // SAFETY: ImageDecoded is repr(C) and fits in 60-byte payload.
     let msg = unsafe { ipc::Message::from_payload(MSG_IMAGE_DECODED, &payload) };
     core_ch.send(&msg);
-    let _ = sys::channel_signal(CORE_HANDLE);
+    let _ = sys::channel_signal(state().core_handle);
 }
 
 // ── Snapshot helper ─────────────────────────────────────────────────
@@ -407,10 +411,10 @@ fn take_snapshot(fs_ch: &ipc::Channel, undo_state: &mut UndoState) {
     // SAFETY: DocSnapshot is repr(C) and fits in 60-byte payload.
     let snap_msg = unsafe { ipc::Message::from_payload(MSG_DOC_SNAPSHOT, &snap_payload) };
     fs_ch.send(&snap_msg);
-    let _ = sys::channel_signal(FS_HANDLE);
+    let _ = sys::channel_signal(state().fs_handle);
 
     let mut reply = ipc::Message::new(0);
-    if fs_ch.recv_blocking(FS_HANDLE.0, &mut reply) && reply.msg_type == MSG_DOC_SNAPSHOT_RESULT {
+    if fs_ch.recv_blocking(state().fs_handle.0, &mut reply) && reply.msg_type == MSG_DOC_SNAPSHOT_RESULT {
         if let Some(protocol::document::Message::DocSnapshotResult(result)) =
             protocol::document::decode(reply.msg_type, &reply.payload)
         {
@@ -427,7 +431,7 @@ fn take_snapshot(fs_ch: &ipc::Channel, undo_state: &mut UndoState) {
                     fs_ch.send(&del_msg);
                 }
                 if n > 0 {
-                    let _ = sys::channel_signal(FS_HANDLE);
+                    let _ = sys::channel_signal(state().fs_handle);
                 }
             }
         }
@@ -449,10 +453,10 @@ fn perform_undo(
         let restore_msg =
             unsafe { ipc::Message::from_payload(MSG_DOC_RESTORE, &restore_payload) };
         fs_ch.send(&restore_msg);
-        let _ = sys::channel_signal(FS_HANDLE);
+        let _ = sys::channel_signal(state().fs_handle);
 
         let mut reply = ipc::Message::new(0);
-        if fs_ch.recv_blocking(FS_HANDLE.0, &mut reply)
+        if fs_ch.recv_blocking(state().fs_handle.0, &mut reply)
             && reply.msg_type == MSG_DOC_RESTORE_RESULT
         {
             if let Some(protocol::document::Message::DocRestoreResult(result)) =
@@ -480,10 +484,10 @@ fn perform_redo(
         let restore_msg =
             unsafe { ipc::Message::from_payload(MSG_DOC_RESTORE, &restore_payload) };
         fs_ch.send(&restore_msg);
-        let _ = sys::channel_signal(FS_HANDLE);
+        let _ = sys::channel_signal(state().fs_handle);
 
         let mut reply = ipc::Message::new(0);
-        if fs_ch.recv_blocking(FS_HANDLE.0, &mut reply)
+        if fs_ch.recv_blocking(state().fs_handle.0, &mut reply)
             && reply.msg_type == MSG_DOC_RESTORE_RESULT
         {
             if let Some(protocol::document::Message::DocRestoreResult(result)) =
@@ -510,10 +514,10 @@ fn reload_document(fs_ch: &ipc::Channel) {
     // SAFETY: DocRead is repr(C) and fits in 60-byte payload.
     let read_msg = unsafe { ipc::Message::from_payload(MSG_DOC_READ, &read_payload) };
     fs_ch.send(&read_msg);
-    let _ = sys::channel_signal(FS_HANDLE);
+    let _ = sys::channel_signal(state().fs_handle);
 
     let mut reply = ipc::Message::new(0);
-    if fs_ch.recv_blocking(FS_HANDLE.0, &mut reply) && reply.msg_type == MSG_DOC_READ_DONE {
+    if fs_ch.recv_blocking(state().fs_handle.0, &mut reply) && reply.msg_type == MSG_DOC_READ_DONE {
         if let Some(protocol::document::Message::DocReadDone(done)) =
             protocol::document::decode(reply.msg_type, &reply.payload)
         {
@@ -568,7 +572,7 @@ fn boot_load_document(
         let req_msg =
             unsafe { ipc::Message::from_payload(protocol::decode::MSG_DECODE_REQUEST, &hdr_req) };
         decoder_ch.send(&req_msg);
-        let _ = sys::channel_signal(DECODER_HANDLE);
+        let _ = sys::channel_signal(state().decoder_handle);
         decode_phase = DecodePhase::AwaitingHeader;
     }
 
@@ -584,7 +588,7 @@ fn boot_load_document(
         // SAFETY: DocQuery is repr(C) and fits in 60-byte payload.
         let query_msg = unsafe { ipc::Message::from_payload(MSG_DOC_QUERY, &query_payload) };
         fs_ch.send(&query_msg);
-        let _ = sys::channel_signal(FS_HANDLE);
+        let _ = sys::channel_signal(state().fs_handle);
     }
 
     let mut doc_phase = DocPhase::QueryRich;
@@ -601,9 +605,9 @@ fn boot_load_document(
     } as u64;
 
     loop {
-        let mut wait_handles = alloc::vec![FS_HANDLE.0];
+        let mut wait_handles = alloc::vec![state().fs_handle.0];
         if !image_ready {
-            wait_handles.push(DECODER_HANDLE.0);
+            wait_handles.push(state().decoder_handle.0);
         }
         let _ = sys::wait(&wait_handles, 100_000_000); // 100ms poll
 
@@ -636,7 +640,7 @@ fn boot_load_document(
                                     )
                                 };
                                 decoder_ch.send(&req_msg);
-                                let _ = sys::channel_signal(DECODER_HANDLE);
+                                let _ = sys::channel_signal(state().decoder_handle);
                                 decode_phase = DecodePhase::AwaitingDecode {
                                     alloc_offset,
                                     pixel_bytes,
@@ -712,7 +716,7 @@ fn boot_load_document(
                             let read_msg =
                                 unsafe { ipc::Message::from_payload(MSG_DOC_READ, &read_payload) };
                             fs_ch.send(&read_msg);
-                            let _ = sys::channel_signal(FS_HANDLE);
+                            let _ = sys::channel_signal(state().fs_handle);
                             doc_phase = DocPhase::Reading {
                                 file_id: result.file_ids[0],
                                 detected_format: DocumentFormat::Rich,
@@ -729,7 +733,7 @@ fn boot_load_document(
                                 ipc::Message::from_payload(MSG_DOC_QUERY, &query_payload)
                             };
                             fs_ch.send(&query_msg);
-                            let _ = sys::channel_signal(FS_HANDLE);
+                            let _ = sys::channel_signal(state().fs_handle);
                             doc_phase = DocPhase::QueryPlain;
                         }
                     }
@@ -749,7 +753,7 @@ fn boot_load_document(
                             let read_msg =
                                 unsafe { ipc::Message::from_payload(MSG_DOC_READ, &read_payload) };
                             fs_ch.send(&read_msg);
-                            let _ = sys::channel_signal(FS_HANDLE);
+                            let _ = sys::channel_signal(state().fs_handle);
                             doc_phase = DocPhase::Reading {
                                 file_id: result.file_ids[0],
                                 detected_format: DocumentFormat::Plain,
@@ -767,7 +771,7 @@ fn boot_load_document(
                                 ipc::Message::from_payload(MSG_DOC_CREATE, &create_payload)
                             };
                             fs_ch.send(&create_msg);
-                            let _ = sys::channel_signal(FS_HANDLE);
+                            let _ = sys::channel_signal(state().fs_handle);
                             doc_phase = DocPhase::Creating;
                         }
                     }
@@ -819,7 +823,7 @@ fn boot_load_document(
                         let snap_msg =
                             unsafe { ipc::Message::from_payload(MSG_DOC_SNAPSHOT, &snap_payload) };
                         fs_ch.send(&snap_msg);
-                        let _ = sys::channel_signal(FS_HANDLE);
+                        let _ = sys::channel_signal(state().fs_handle);
                         doc_phase = DocPhase::AwaitingUndo;
                     } else {
                         undo_ready = true;
@@ -848,7 +852,7 @@ fn boot_load_document(
                         let snap_msg =
                             unsafe { ipc::Message::from_payload(MSG_DOC_SNAPSHOT, &snap_payload) };
                         fs_ch.send(&snap_msg);
-                        let _ = sys::channel_signal(FS_HANDLE);
+                        let _ = sys::channel_signal(state().fs_handle);
                         doc_phase = DocPhase::AwaitingUndo;
                     } else {
                         undo_ready = true;
@@ -922,6 +926,10 @@ pub extern "C" fn _start() -> ! {
         s.doc_len = 0;
         s.content_va = config.content_va as usize;
         s.content_size = config.content_size as usize;
+        s.editor_handle = sys::ChannelHandle(config.editor_handle);
+        s.decoder_handle = sys::ChannelHandle(config.decoder_handle);
+        s.fs_handle = sys::ChannelHandle(config.fs_handle);
+        s.core_handle = sys::ChannelHandle(config.core_handle);
         if config.content_va != 0 && config.content_size > 0 {
             // SAFETY: content_va is mapped read-write.
             let header =
@@ -940,28 +948,28 @@ pub extern "C" fn _start() -> ! {
     // SAFETY: channel_shm_va(N) are bases of channel SHM regions mapped by kernel.
     let editor_ch = unsafe {
         ipc::Channel::from_base(
-            protocol::channel_shm_va(EDITOR_HANDLE.0 as usize),
+            protocol::channel_shm_va(state().editor_handle.0 as usize),
             ipc::PAGE_SIZE,
             1,
         )
     };
     let fs_ch = unsafe {
         ipc::Channel::from_base(
-            protocol::channel_shm_va(FS_HANDLE.0 as usize),
+            protocol::channel_shm_va(state().fs_handle.0 as usize),
             ipc::PAGE_SIZE,
             0,
         )
     };
     let decoder_ch = unsafe {
         ipc::Channel::from_base(
-            protocol::channel_shm_va(DECODER_HANDLE.0 as usize),
+            protocol::channel_shm_va(state().decoder_handle.0 as usize),
             ipc::PAGE_SIZE,
             0,
         )
     };
     let core_ch = unsafe {
         ipc::Channel::from_base(
-            protocol::channel_shm_va(CORE_HANDLE.0 as usize),
+            protocol::channel_shm_va(state().core_handle.0 as usize),
             ipc::PAGE_SIZE,
             0,
         )
@@ -1002,7 +1010,7 @@ pub extern "C" fn _start() -> ! {
         };
 
         let _ = sys::wait(
-            &[EDITOR_HANDLE.0, CORE_HANDLE.0],
+            &[state().editor_handle.0, state().core_handle.0],
             timeout_ns,
         );
 
@@ -1179,7 +1187,7 @@ pub extern "C" fn _start() -> ! {
             let commit_msg =
                 unsafe { ipc::Message::from_payload(MSG_DOC_COMMIT, &commit_payload) };
             fs_ch.send(&commit_msg);
-            let _ = sys::channel_signal(FS_HANDLE);
+            let _ = sys::channel_signal(state().fs_handle);
 
             snapshot_pending = true;
             last_edit_ms = now_ms;

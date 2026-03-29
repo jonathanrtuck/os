@@ -102,14 +102,8 @@ const BOOT_TIMEOUT_NS: u64 = 5_000_000_000;
 /// Spinner rotation increment per frame (~5° per tick at 60fps → ~1.2 sec/rev).
 const SPINNER_ANGLE_DELTA: f32 = 0.0873;
 
-const COMPOSITOR_HANDLE: sys::ChannelHandle = sys::ChannelHandle(2);
-const DOCMODEL_HANDLE: sys::ChannelHandle = sys::ChannelHandle(4);
 pub(crate) const DOC_HEADER_SIZE: usize = 64;
-const EDITOR_HANDLE: sys::ChannelHandle = sys::ChannelHandle(3);
 const FONT_SIZE: u32 = 18;
-const INPUT_HANDLE: sys::ChannelHandle = sys::ChannelHandle(1);
-const INPUT2_HANDLE: sys::ChannelHandle = sys::ChannelHandle(6);
-const LAYOUT_HANDLE: sys::ChannelHandle = sys::ChannelHandle(5);
 // Keycodes (Linux evdev).
 const KEY_BACKSPACE: u16 = 14;
 const KEY_TAB: u16 = 15;
@@ -309,6 +303,13 @@ pub(crate) struct ViewState {
     pub(crate) boot_counter_at_rtc_read: u64,
     /// Cached rich text line layout from the last scene build.
     pub(crate) rich_lines: alloc::vec::Vec<layout::RichLine>,
+    // ── Channel handles (populated from CoreLayoutConfig at boot) ────
+    pub(crate) input_handle: sys::ChannelHandle,
+    pub(crate) compositor_handle: sys::ChannelHandle,
+    pub(crate) editor_handle: sys::ChannelHandle,
+    pub(crate) docmodel_handle: sys::ChannelHandle,
+    pub(crate) layout_handle: sys::ChannelHandle,
+    pub(crate) input2_handle: sys::ChannelHandle,
 }
 
 impl ViewState {
@@ -435,6 +436,12 @@ impl ViewState {
             rtc_epoch_at_boot: 0,
             boot_counter_at_rtc_read: 0,
             rich_lines: alloc::vec::Vec::new(),
+            input_handle: sys::ChannelHandle(u8::MAX),
+            compositor_handle: sys::ChannelHandle(u8::MAX),
+            editor_handle: sys::ChannelHandle(u8::MAX),
+            docmodel_handle: sys::ChannelHandle(u8::MAX),
+            layout_handle: sys::ChannelHandle(u8::MAX),
+            input2_handle: sys::ChannelHandle(u8::MAX),
         }
     }
 }
@@ -838,7 +845,7 @@ fn write_viewport_state(
 fn signal_layout_recompute(layout_ch: &ipc::Channel) {
     let msg = ipc::Message::new(MSG_LAYOUT_RECOMPUTE);
     layout_ch.send(&msg);
-    let _ = sys::channel_signal(LAYOUT_HANDLE);
+    let _ = sys::channel_signal(state().layout_handle);
 }
 
 /// Read layout results header from shared memory.
@@ -1154,6 +1161,12 @@ pub extern "C" fn _start() -> ! {
         s.layout_results_va = lc.layout_results_va as usize;
         s.layout_results_capacity = lc.layout_results_capacity as usize;
         s.viewport_state_va = lc.viewport_state_va as usize;
+        s.input_handle = sys::ChannelHandle(lc.input_handle);
+        s.compositor_handle = sys::ChannelHandle(lc.compositor_handle);
+        s.editor_handle = sys::ChannelHandle(lc.editor_handle);
+        s.docmodel_handle = sys::ChannelHandle(lc.docmodel_handle);
+        s.layout_handle = sys::ChannelHandle(lc.layout_handle);
+        s.input2_handle = sys::ChannelHandle(lc.input2_handle);
         sys::print(b"     layout config received\n");
     } else {
         sys::print(b"view-engine: no layout config\n");
@@ -1348,23 +1361,38 @@ pub extern "C" fn _start() -> ! {
     // ── Set up IPC channels (needed before async sends) ─────────────
     // SAFETY: channel_shm_va(1..N) are bases of channel SHM regions mapped by the kernel;
     // alignment guaranteed by page-boundary allocation.
-    let input_ch =
-        unsafe { ipc::Channel::from_base(protocol::channel_shm_va(1), ipc::PAGE_SIZE, 1) };
-    let compositor_ch =
-        unsafe { ipc::Channel::from_base(protocol::channel_shm_va(2), ipc::PAGE_SIZE, 0) };
-    let editor_ch =
-        unsafe { ipc::Channel::from_base(protocol::channel_shm_va(3), ipc::PAGE_SIZE, 0) };
-    let docmodel_ch = unsafe {
+    let input_ch = unsafe {
         ipc::Channel::from_base(
-            protocol::channel_shm_va(DOCMODEL_HANDLE.0 as usize),
+            protocol::channel_shm_va(state().input_handle.0 as usize),
             ipc::PAGE_SIZE,
             1,
         )
     };
-    // SAFETY: channel_shm_va(5) is the B↔C channel mapped by the kernel.
+    let compositor_ch = unsafe {
+        ipc::Channel::from_base(
+            protocol::channel_shm_va(state().compositor_handle.0 as usize),
+            ipc::PAGE_SIZE,
+            0,
+        )
+    };
+    let editor_ch = unsafe {
+        ipc::Channel::from_base(
+            protocol::channel_shm_va(state().editor_handle.0 as usize),
+            ipc::PAGE_SIZE,
+            0,
+        )
+    };
+    let docmodel_ch = unsafe {
+        ipc::Channel::from_base(
+            protocol::channel_shm_va(state().docmodel_handle.0 as usize),
+            ipc::PAGE_SIZE,
+            1,
+        )
+    };
+    // SAFETY: layout channel SHM region is mapped by the kernel.
     let layout_ch = unsafe {
         ipc::Channel::from_base(
-            protocol::channel_shm_va(LAYOUT_HANDLE.0 as usize),
+            protocol::channel_shm_va(state().layout_handle.0 as usize),
             ipc::PAGE_SIZE,
             1,
         )
@@ -1408,7 +1436,7 @@ pub extern "C" fn _start() -> ! {
     // Signal compositor — loading scene visible almost immediately.
     let scene_msg = ipc::Message::new(MSG_SCENE_UPDATED);
     compositor_ch.send(&scene_msg);
-    let _ = sys::channel_signal(COMPOSITOR_HANDLE);
+    let _ = sys::channel_signal(state().compositor_handle);
     sys::print(b"     loading scene published\n");
 
     // ── Create animation timer ──────────────────────────────────────
@@ -1430,7 +1458,7 @@ pub extern "C" fn _start() -> ! {
     let mut boot_spinner_angle: f32 = 0.0;
 
     loop {
-        let _ = sys::wait(&[anim_timer.0, DOCMODEL_HANDLE.0], frame_interval_ns);
+        let _ = sys::wait(&[anim_timer.0, state().docmodel_handle.0], frame_interval_ns);
 
         // ── Timer tick: rotate spinner ──────────────────────────────
         if let Ok(_) = sys::wait(&[anim_timer.0], 0) {
@@ -1438,7 +1466,7 @@ pub extern "C" fn _start() -> ! {
             boot_spinner_angle += SPINNER_ANGLE_DELTA;
             scene.update_spinner(boot_spinner_angle);
             compositor_ch.send(&scene_msg);
-            let _ = sys::channel_signal(COMPOSITOR_HANDLE);
+            let _ = sys::channel_signal(state().compositor_handle);
             anim_timer = sys::timer_create(frame_interval_ns).unwrap_or(sys::TimerHandle(255));
         }
 
@@ -1491,7 +1519,7 @@ pub extern "C" fn _start() -> ! {
     // Clean up animation timer.
     let _ = sys::handle_close(anim_timer.0);
 
-    let has_input2 = match sys::wait(&[INPUT2_HANDLE.0], 0) {
+    let has_input2 = match sys::wait(&[state().input2_handle.0], 0) {
         Ok(_) => true,
         Err(sys::SyscallError::WouldBlock) => true,
         _ => false,
@@ -1501,7 +1529,7 @@ pub extern "C" fn _start() -> ! {
         // SAFETY: same invariant as channel_shm_va(1..3) from_base above.
         Some(unsafe {
             ipc::Channel::from_base(
-                protocol::channel_shm_va(INPUT2_HANDLE.0 as usize),
+                protocol::channel_shm_va(state().input2_handle.0 as usize),
                 ipc::PAGE_SIZE,
                 1,
             )
@@ -1580,7 +1608,7 @@ pub extern "C" fn _start() -> ! {
         write_viewport_state(fb_width, fb_height, 0, page_width, page_height);
         signal_layout_recompute(&layout_ch);
         // Wait for B to compute initial layout.
-        let _ = sys::wait(&[LAYOUT_HANDLE.0], 50_000_000); // 50ms
+        let _ = sys::wait(&[state().layout_handle.0], 50_000_000); // 50ms
         let mut layout_msg = ipc::Message::new(0);
         while layout_ch.try_recv(&mut layout_msg) {}
     }
@@ -1675,7 +1703,7 @@ pub extern "C" fn _start() -> ! {
 
     compositor_ch.send(&scene_msg);
 
-    let _ = sys::channel_signal(COMPOSITOR_HANDLE);
+    let _ = sys::channel_signal(state().compositor_handle);
 
     create_clock_timer();
 
@@ -1741,24 +1769,24 @@ pub extern "C" fn _start() -> ! {
         let _ = match (timer_active, has_input2) {
             (true, true) => sys::wait(
                 &[
-                    INPUT_HANDLE.0,
-                    EDITOR_HANDLE.0,
-                    DOCMODEL_HANDLE.0,
+                    state().input_handle.0,
+                    state().editor_handle.0,
+                    state().docmodel_handle.0,
                     timer_handle.0,
-                    INPUT2_HANDLE.0,
-                    LAYOUT_HANDLE.0,
+                    state().input2_handle.0,
+                    state().layout_handle.0,
                 ],
                 timeout_ns,
             ),
             (true, false) => sys::wait(
-                &[INPUT_HANDLE.0, EDITOR_HANDLE.0, DOCMODEL_HANDLE.0, timer_handle.0, LAYOUT_HANDLE.0],
+                &[state().input_handle.0, state().editor_handle.0, state().docmodel_handle.0, timer_handle.0, state().layout_handle.0],
                 timeout_ns,
             ),
             (false, true) => sys::wait(
-                &[INPUT_HANDLE.0, EDITOR_HANDLE.0, DOCMODEL_HANDLE.0, INPUT2_HANDLE.0, LAYOUT_HANDLE.0],
+                &[state().input_handle.0, state().editor_handle.0, state().docmodel_handle.0, state().input2_handle.0, state().layout_handle.0],
                 timeout_ns,
             ),
-            (false, false) => sys::wait(&[INPUT_HANDLE.0, EDITOR_HANDLE.0, DOCMODEL_HANDLE.0, LAYOUT_HANDLE.0], timeout_ns),
+            (false, false) => sys::wait(&[state().input_handle.0, state().editor_handle.0, state().docmodel_handle.0, state().layout_handle.0], timeout_ns),
         };
         let mut changed = false;
         let mut text_changed = false;
@@ -1831,7 +1859,7 @@ pub extern "C" fn _start() -> ! {
                         )
                     };
                     docmodel_ch.send(&del_msg);
-                    let _ = sys::channel_signal(DOCMODEL_HANDLE);
+                    let _ = sys::channel_signal(state().docmodel_handle);
                 }
                 had_user_input = true;
             }
@@ -1893,7 +1921,7 @@ pub extern "C" fn _start() -> ! {
                                 )
                             };
                             docmodel_ch.send(&del_msg);
-                            let _ = sys::channel_signal(DOCMODEL_HANDLE);
+                            let _ = sys::channel_signal(state().docmodel_handle);
                         }
                         had_user_input = true;
                     }
@@ -2129,7 +2157,7 @@ pub extern "C" fn _start() -> ! {
                                 documents::doc_write_header();
                                 input_handling::sync_cursor_to_editor(&editor_ch);
 
-                                let _ = sys::channel_signal(EDITOR_HANDLE);
+                                let _ = sys::channel_signal(state().editor_handle);
 
                                 changed = true;
                                 selection_changed = true;
@@ -2205,7 +2233,7 @@ pub extern "C" fn _start() -> ! {
                         }
                         // Sync cursor to editor so it tracks the new position.
                         input_handling::sync_cursor_to_editor(&editor_ch);
-                        let _ = sys::channel_signal(EDITOR_HANDLE);
+                        let _ = sys::channel_signal(state().editor_handle);
                         changed = true;
                         text_changed = true;
                     }
@@ -2234,11 +2262,11 @@ pub extern "C" fn _start() -> ! {
         if undo_requested {
             let undo_msg = ipc::Message::new(MSG_UNDO_REQUEST);
             docmodel_ch.send(&undo_msg);
-            let _ = sys::channel_signal(DOCMODEL_HANDLE);
+            let _ = sys::channel_signal(state().docmodel_handle);
         } else if redo_requested {
             let redo_msg = ipc::Message::new(MSG_REDO_REQUEST);
             docmodel_ch.send(&redo_msg);
-            let _ = sys::channel_signal(DOCMODEL_HANDLE);
+            let _ = sys::channel_signal(state().docmodel_handle);
         }
 
         // Update scroll offset for cursor/text changes.
@@ -2465,7 +2493,7 @@ pub extern "C" fn _start() -> ! {
             write_viewport_state(fb_width, fb_height, state().scroll.offset, page_width, page_height);
             signal_layout_recompute(&layout_ch);
             // Wait briefly for B to finish layout (shared memory, fast).
-            let _ = sys::wait(&[LAYOUT_HANDLE.0], 5_000_000); // 5ms
+            let _ = sys::wait(&[state().layout_handle.0], 5_000_000); // 5ms
             // Drain layout-ready signal.
             let mut layout_msg = ipc::Message::new(0);
             while layout_ch.try_recv(&mut layout_msg) {
@@ -2981,7 +3009,7 @@ pub extern "C" fn _start() -> ! {
         // register, and sends a cursor-only frame (no full scene walk).
         if needs_scene_update || pointer_position_changed {
             compositor_ch.send(&scene_msg);
-            let _ = sys::channel_signal(COMPOSITOR_HANDLE);
+            let _ = sys::channel_signal(state().compositor_handle);
         }
 
         // Update cached scene generation and sweep deferred frees.

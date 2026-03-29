@@ -19,18 +19,21 @@ pub const MSG_LAYOUT_ENGINE_CONFIG: u32 = 120;
 pub struct LayoutEngineConfig {
     /// VA of the shared document buffer (read-only for B).
     pub doc_va: u64,
-    /// Document buffer capacity (content area, excluding 64-byte header).
-    pub doc_capacity: u32,
     /// VA of the Content Region (read-only for B — fonts).
     pub content_va: u64,
-    /// Content Region size in bytes.
-    pub content_size: u32,
     /// VA of the layout results shared memory (read-write for B).
     pub layout_results_va: u64,
-    /// Layout results region capacity in bytes.
-    pub layout_results_capacity: u32,
     /// VA of the viewport state register (read-only for B).
     pub viewport_state_va: u64,
+    /// Document buffer capacity (content area, excluding 64-byte header).
+    pub doc_capacity: u32,
+    /// Content Region size in bytes.
+    pub content_size: u32,
+    /// Layout results region capacity in bytes.
+    pub layout_results_capacity: u32,
+    /// Kernel channel handle for the core (view-engine) channel.
+    pub core_handle: u8,
+    pub _pad: [u8; 3],
 }
 
 const _: () = assert!(core::mem::size_of::<LayoutEngineConfig>() <= 60);
@@ -49,7 +52,20 @@ pub struct CoreLayoutConfig {
     pub layout_results_capacity: u32,
     /// VA of the viewport state register (read-write for C).
     pub viewport_state_va: u64,
-    pub _pad: u32,
+    /// Kernel channel handle for the input driver channel.
+    pub input_handle: u8,
+    /// Kernel channel handle for the compositor (render service) channel.
+    pub compositor_handle: u8,
+    /// Kernel channel handle for the editor channel.
+    pub editor_handle: u8,
+    /// Kernel channel handle for the document-model channel.
+    pub docmodel_handle: u8,
+    /// Kernel channel handle for the layout engine channel.
+    pub layout_handle: u8,
+    /// Kernel channel handle for the second input device (tablet).
+    /// 0xFF if no second input device is present.
+    pub input2_handle: u8,
+    pub _pad: [u8; 2],
 }
 
 const _: () = assert!(core::mem::size_of::<CoreLayoutConfig>() <= 60);

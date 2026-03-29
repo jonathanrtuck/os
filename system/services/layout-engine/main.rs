@@ -30,7 +30,6 @@ use protocol::layout::{
 };
 
 const DOC_HEADER_SIZE: usize = 64;
-const CORE_HANDLE: sys::ChannelHandle = sys::ChannelHandle(1);
 
 // ── Font state ──────────────────────────────────────────────────────
 
@@ -143,6 +142,7 @@ struct LayoutEngineState {
     layout_results_capacity: usize,
     viewport_state_va: usize,
     generation: u32,
+    core_handle: sys::ChannelHandle,
     fonts: FontState,
 }
 
@@ -155,6 +155,7 @@ impl LayoutEngineState {
             layout_results_capacity: 0,
             viewport_state_va: 0,
             generation: 0,
+            core_handle: sys::ChannelHandle(u8::MAX),
             fonts: FontState::new(),
         }
     }
@@ -1140,6 +1141,7 @@ pub extern "C" fn _start() -> ! {
         s.layout_results_va = config.layout_results_va as usize;
         s.layout_results_capacity = config.layout_results_capacity as usize;
         s.viewport_state_va = config.viewport_state_va as usize;
+        s.core_handle = sys::ChannelHandle(config.core_handle);
     }
 
     // Discover fonts from Content Region.
@@ -1148,10 +1150,10 @@ pub extern "C" fn _start() -> ! {
     sys::print(b"  layout-engine: ready, waiting for recompute signals\n");
 
     // Main loop: wait for MSG_LAYOUT_RECOMPUTE, compute layout, signal back.
-    // SAFETY: channel_shm_va(1) is the B↔C channel mapped by the kernel.
+    let core_handle = state().core_handle;
     let core_ch = unsafe {
         ipc::Channel::from_base(
-            protocol::channel_shm_va(CORE_HANDLE.0 as usize),
+            protocol::channel_shm_va(core_handle.0 as usize),
             ipc::PAGE_SIZE,
             0,
         )
@@ -1160,7 +1162,7 @@ pub extern "C" fn _start() -> ! {
 
     loop {
         // Wait on core channel for recompute signal.
-        let _ = sys::wait(&[CORE_HANDLE.0], 1_000_000_000); // 1s timeout
+        let _ = sys::wait(&[core_handle.0], 1_000_000_000); // 1s timeout
 
         // Drain all recompute messages (coalesce multiple signals).
         let mut got_recompute = false;
@@ -1202,6 +1204,6 @@ pub extern "C" fn _start() -> ! {
         // Signal C that layout results are ready.
         let ready_msg = ipc::Message::new(MSG_LAYOUT_READY);
         core_ch.send(&ready_msg);
-        let _ = sys::channel_signal(CORE_HANDLE);
+        let _ = sys::channel_signal(core_handle);
     }
 }

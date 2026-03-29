@@ -285,6 +285,7 @@ pub extern "C" fn _start() -> ! {
         sys::print(b"filesystem: bad device config\n");
         sys::exit();
     };
+    let init_handle = sys::ChannelHandle(config.init_handle);
 
     // Map MMIO region.
     let mmio_pa = config.mmio_pa;
@@ -380,7 +381,7 @@ pub extern "C" fn _start() -> ! {
         Ok(f) => f,
         Err(_) => {
             sys::print(b"     FAIL: format failed\n");
-            let _ = sys::channel_signal(sys::ChannelHandle(0));
+            let _ = sys::channel_signal(init_handle);
             sys::exit();
         }
     };
@@ -390,7 +391,7 @@ pub extern "C" fn _start() -> ! {
         Ok(id) => id,
         Err(_) => {
             sys::print(b"     FAIL: create failed\n");
-            let _ = sys::channel_signal(sys::ChannelHandle(0));
+            let _ = sys::channel_signal(init_handle);
             sys::exit();
         }
     };
@@ -398,7 +399,7 @@ pub extern "C" fn _start() -> ! {
     // Initial commit (empty file).
     if let Err(_) = filesystem.commit() {
         sys::print(b"     FAIL: initial commit failed\n");
-        let _ = sys::channel_signal(sys::ChannelHandle(0));
+        let _ = sys::channel_signal(init_handle);
         sys::exit();
     }
 
@@ -415,20 +416,20 @@ pub extern "C" fn _start() -> ! {
             doc_capacity = cfg.doc_capacity as usize;
         } else {
             sys::print(b"filesystem: bad fs config\n");
-            let _ = sys::channel_signal(sys::ChannelHandle(0));
+            let _ = sys::channel_signal(init_handle);
             sys::exit();
         }
     } else {
         // No filesystem config — run without document persistence.
         sys::print(b"     no fs config, running standalone\n");
-        let _ = sys::channel_signal(sys::ChannelHandle(0));
+        let _ = sys::channel_signal(init_handle);
         sys::exit();
     }
 
     sys::print(b"     doc buffer mapped, entering IPC loop\n");
 
     // Signal init that we're ready.
-    let _ = sys::channel_signal(sys::ChannelHandle(0));
+    let _ = sys::channel_signal(init_handle);
 
     // ── IPC loop: handle commit requests from core ──────────────────
 

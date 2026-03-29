@@ -290,6 +290,9 @@ pub extern "C" fn _start() -> ! {
         sys::exit();
     };
 
+    let init_handle = sys::ChannelHandle(config.init_handle);
+    let core_handle = sys::ChannelHandle(config.core_handle);
+
     // ── Phase 2: Map MMIO, negotiate virtio, setup virtqueue ─────────
 
     let mmio_pa = config.mmio_pa;
@@ -380,7 +383,7 @@ pub extern "C" fn _start() -> ! {
             Ok(f) => (f, false),
             Err(_) => {
                 sys::print(b"document: mount failed\n");
-                let _ = sys::channel_signal(sys::ChannelHandle(0));
+                let _ = sys::channel_signal(init_handle);
                 sys::exit();
             }
         }
@@ -390,7 +393,7 @@ pub extern "C" fn _start() -> ! {
             Ok(f) => (f, true),
             Err(_) => {
                 sys::print(b"document: format failed\n");
-                let _ = sys::channel_signal(sys::ChannelHandle(0));
+                let _ = sys::channel_signal(init_handle);
                 sys::exit();
             }
         }
@@ -406,7 +409,7 @@ pub extern "C" fn _start() -> ! {
             Ok(s) => s,
             Err(_) => {
                 sys::print(b"document: store init failed\n");
-                let _ = sys::channel_signal(sys::ChannelHandle(0));
+                let _ = sys::channel_signal(init_handle);
                 sys::exit();
             }
         }
@@ -416,7 +419,7 @@ pub extern "C" fn _start() -> ! {
             Ok(s) => s,
             Err(_) => {
                 sys::print(b"document: store open failed\n");
-                let _ = sys::channel_signal(sys::ChannelHandle(0));
+                let _ = sys::channel_signal(init_handle);
                 sys::exit();
             }
         }
@@ -433,7 +436,7 @@ pub extern "C" fn _start() -> ! {
     // Signal init that we're ready by sending MSG_DOC_READY message.
     let ready_msg = ipc::Message::new(MSG_DOC_READY);
     ch.send(&ready_msg);
-    let _ = sys::channel_signal(sys::ChannelHandle(0));
+    let _ = sys::channel_signal(init_handle);
 
     // ── Phase 4.5: Boot-query loop (init channel) ────────────────────
     //
@@ -452,7 +455,7 @@ pub extern "C" fn _start() -> ! {
                 match msg.msg_type {
                     MSG_DOC_QUERY => {
                         if let Some(Message::DocQuery(q)) = decode(msg.msg_type, &msg.payload) {
-                            handle_query(&store, &q, &ch, sys::ChannelHandle(0));
+                            handle_query(&store, &q, &ch, init_handle);
                         }
                     }
 
@@ -463,7 +466,7 @@ pub extern "C" fn _start() -> ! {
                                 &r,
                                 r.target_va as usize,
                                 &ch,
-                                sys::ChannelHandle(0),
+                                init_handle,
                             );
                         }
                     }
@@ -531,7 +534,7 @@ pub extern "C" fn _start() -> ! {
 
                 MSG_DOC_QUERY => {
                     if let Some(Message::DocQuery(q)) = decode(msg.msg_type, &msg.payload) {
-                        handle_query(&store, &q, &core_ch, sys::ChannelHandle(1));
+                        handle_query(&store, &q, &core_ch, core_handle);
                     }
                 }
 
@@ -543,7 +546,7 @@ pub extern "C" fn _start() -> ! {
                         } else {
                             r.target_va as usize
                         };
-                        handle_read(&store, &r, target, &core_ch, sys::ChannelHandle(1));
+                        handle_read(&store, &r, target, &core_ch, core_handle);
                     }
                 }
 
@@ -575,7 +578,7 @@ pub extern "C" fn _start() -> ! {
                         let reply =
                             unsafe { ipc::Message::from_payload(MSG_DOC_SNAPSHOT_RESULT, &result) };
                         core_ch.send(&reply);
-                        let _ = sys::channel_signal(sys::ChannelHandle(1));
+                        let _ = sys::channel_signal(core_handle);
                     }
                 }
 
@@ -596,7 +599,7 @@ pub extern "C" fn _start() -> ! {
                         let reply =
                             unsafe { ipc::Message::from_payload(MSG_DOC_RESTORE_RESULT, &result) };
                         core_ch.send(&reply);
-                        let _ = sys::channel_signal(sys::ChannelHandle(1));
+                        let _ = sys::channel_signal(core_handle);
                     }
                 }
 
@@ -627,7 +630,7 @@ pub extern "C" fn _start() -> ! {
                         let reply =
                             unsafe { ipc::Message::from_payload(MSG_DOC_CREATE_RESULT, &result) };
                         core_ch.send(&reply);
-                        let _ = sys::channel_signal(sys::ChannelHandle(1));
+                        let _ = sys::channel_signal(core_handle);
                     }
                 }
 

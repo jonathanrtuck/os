@@ -58,7 +58,11 @@ pub struct DocConfig {
     pub content_va: u64,
     /// Content Region size in bytes.
     pub content_size: u32,
-    pub _pad3: u32,
+    /// Kernel channel handle for signaling init.
+    pub init_handle: u8,
+    /// Kernel channel handle for the core (document-model) channel.
+    pub core_handle: u8,
+    pub _pad3: [u8; 2],
 }
 const _: () = assert!(core::mem::size_of::<DocConfig>() <= 60);
 

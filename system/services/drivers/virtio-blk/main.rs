@@ -285,6 +285,7 @@ pub extern "C" fn _start() -> ! {
         sys::print(b"virtio-blk: bad device config\n");
         sys::exit();
     };
+    let init_handle = sys::ChannelHandle(config.init_handle);
 
     // Map the MMIO region. virtio-mmio slots have 0x200 stride, so most
     // sit at sub-page offsets within a page.
@@ -390,6 +391,6 @@ pub extern "C" fn _start() -> ! {
     }
 
     // Signal init that we're done.
-    let _ = sys::channel_signal(sys::ChannelHandle(0));
+    let _ = sys::channel_signal(init_handle);
     sys::exit();
 }

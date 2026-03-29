@@ -394,6 +394,7 @@ pub extern "C" fn _start() -> ! {
     };
     let mmio_pa = config.mmio_pa;
     let irq = config.irq;
+    let init_handle = sys::ChannelHandle(config.init_handle);
     // Map MMIO region.
     let page_offset = mmio_pa & (ipc::PAGE_SIZE as u64 - 1);
     let page_pa = mmio_pa & !(ipc::PAGE_SIZE as u64 - 1);
@@ -532,7 +533,7 @@ pub extern "C" fn _start() -> ! {
 
                 ch.send(&resp_msg);
 
-                let _ = sys::channel_signal(sys::ChannelHandle(0));
+                let _ = sys::channel_signal(init_handle);
 
                 continue;
             }
@@ -551,7 +552,7 @@ pub extern "C" fn _start() -> ! {
 
                 ch.send(&resp_msg);
 
-                let _ = sys::channel_signal(sys::ChannelHandle(0));
+                let _ = sys::channel_signal(init_handle);
 
                 continue;
             }
@@ -591,7 +592,7 @@ pub extern "C" fn _start() -> ! {
 
             ch.send(&resp_msg);
 
-            let _ = sys::channel_signal(sys::ChannelHandle(0));
+            let _ = sys::channel_signal(init_handle);
         }
     }
 }
