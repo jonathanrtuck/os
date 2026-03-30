@@ -126,7 +126,8 @@ const MAX_UNDO: usize = 64;
 const SHADOW_DEPTH: u32 = 0;
 const TEXT_INSET_BOTTOM: u32 = 8;
 const TEXT_INSET_TOP: u32 = TITLE_BAR_H + SHADOW_DEPTH + 8;
-const TEXT_INSET_X: u32 = 12;
+// TEXT_INSET_X removed: page_padding (24) is the SSOT for text inset,
+// passed through to write_viewport_state and scene config.
 const TITLE_BAR_H: u32 = 36;
 
 // ── View state sub-structs ─────────────────────────────────────────
@@ -752,14 +753,13 @@ fn write_viewport_state(
     scroll_y: scene::Mpt,
     page_width: u32,
     page_height: u32,
+    text_inset: u32,
 ) {
     let s = state();
     if s.viewport_state_va == 0 {
         return;
     }
-    let content_y = TITLE_BAR_H + SHADOW_DEPTH;
-    let viewport_h = fb_height.saturating_sub(content_y);
-    let text_area_h = page_height.saturating_sub(2 * TEXT_INSET_X);
+    let text_area_h = page_height.saturating_sub(2 * text_inset);
     let doc_format = match s.doc_format {
         DocumentFormat::Plain => 0u32,
         DocumentFormat::Rich => 1u32,
@@ -771,7 +771,7 @@ fn write_viewport_state(
         viewport_height_pt: text_area_h,
         page_width_pt: page_width,
         page_height_pt: page_height,
-        text_inset_x: TEXT_INSET_X,
+        text_inset_x: text_inset,
         font_size: FONT_SIZE as u16,
         _pad0: 0,
         char_width_fx: s.char_w_fx,
@@ -876,8 +876,9 @@ fn doc_text_for_range(start: usize, end: usize) -> &'static [u8] {
         }
         let buf = documents::rich_buf_ref();
         // SAFETY: single-threaded, SCRATCH only used within this function scope.
+        // text_slice expects (start, end) — not (start, length).
         unsafe {
-            let copied = piecetable::text_slice(buf, start as u32, needed as u32, &mut SCRATCH);
+            let copied = piecetable::text_slice(buf, start as u32, end as u32, &mut SCRATCH);
             &SCRATCH[..copied]
         }
     } else {
@@ -1374,11 +1375,12 @@ pub extern "C" fn _start() -> ! {
             0,
         )
     };
+    // C↔A channel: C received endpoint A (index 0) from init.
     let docmodel_ch = unsafe {
         ipc::Channel::from_base(
             protocol::channel_shm_va(state().docmodel_handle.0 as usize),
             ipc::PAGE_SIZE,
-            1,
+            0,
         )
     };
     // SAFETY: layout channel SHM region is mapped by the kernel.
@@ -1597,7 +1599,7 @@ pub extern "C" fn _start() -> ! {
 
     // Signal layout engine (B) for initial layout computation.
     {
-        write_viewport_state(fb_width, fb_height, 0, page_width, page_height);
+        write_viewport_state(fb_width, fb_height, 0, page_width, page_height, page_padding);
         signal_layout_recompute(&layout_ch);
         // Wait for B to compute initial layout.
         let _ = sys::wait(&[state().layout_handle.0], 50_000_000); // 50ms
@@ -1755,6 +1757,47 @@ pub extern "C" fn _start() -> ! {
                 let _ = sys::handle_close(timer_handle.0);
 
                 create_clock_timer();
+            }
+        }
+
+        // ── Read pointer state register (BEFORE button events) ─────
+        //
+        // The input driver writes pointer position to a shared memory
+        // register (atomic u64). Read it before draining event rings so
+        // that button events see the current position, not the previous
+        // frame's position. Critical for click coordinate accuracy and
+        // double/triple-click same-spot detection.
+        {
+            let s = state();
+            // SAFETY: input_state_va points to a PointerState page mapped
+            // by init. Atomic load-acquire for cross-core visibility.
+            let packed = unsafe {
+                let atom = &*(s.pointer.input_state_va as *const core::sync::atomic::AtomicU64);
+                atom.load(core::sync::atomic::Ordering::Acquire)
+            };
+            if packed != s.pointer.last_xy && packed != 0 {
+                s.pointer.last_xy = packed;
+                let x = protocol::input::PointerState::unpack_x(packed);
+                let y = protocol::input::PointerState::unpack_y(packed);
+                s.pointer.x = scale_pointer_coord(x, fb_width);
+                s.pointer.y = scale_pointer_coord(y, fb_height);
+
+                // Cancel any pending fade-out and restore full opacity.
+                if let Some(id) = s.pointer.fade_id {
+                    s.animation.timeline.cancel(id);
+                    s.pointer.fade_id = None;
+                }
+                s.pointer.visible = true;
+                if s.pointer.opacity != 255 {
+                    s.pointer.opacity = 255;
+                    if s.pointer.cursor_state_va != 0 {
+                        write_cursor_opacity(s.pointer.cursor_state_va, 255);
+                    }
+                    changed = true;
+                }
+                s.pointer.last_event_ms = now_ms;
+
+                pointer_position_changed = true;
             }
         }
 
@@ -1983,10 +2026,23 @@ pub extern "C" fn _start() -> ! {
                                     }
                                     3 => {
                                         // Triple-click: select entire visual line.
-                                        let lo =
-                                            input_handling::visual_line_start(text, byte_pos, cols);
-                                        let mut hi =
-                                            input_handling::visual_line_end(text, byte_pos, cols);
+                                        let (lo, mut hi) = if is_rich {
+                                            // Rich text: use B's cached LineInfo for line boundaries.
+                                            let cached = cached_line_info();
+                                            let line_idx = layout::line_info_byte_to_line(cached, byte_pos);
+                                            if line_idx < cached.len() {
+                                                let li = &cached[line_idx];
+                                                let start = li.byte_offset as usize;
+                                                let end = start + li.byte_length as usize;
+                                                (start, end)
+                                            } else {
+                                                (0, text.len())
+                                            }
+                                        } else {
+                                            let lo = input_handling::visual_line_start(text, byte_pos, cols);
+                                            let hi = input_handling::visual_line_end(text, byte_pos, cols);
+                                            (lo, hi)
+                                        };
                                         // Include the newline if present.
                                         if hi < text.len() && text[hi] == b'\n' {
                                             hi += 1;
@@ -2020,53 +2076,6 @@ pub extern "C" fn _start() -> ! {
                     }
                     _ => {}
                 }
-            }
-        }
-
-        // ── Read pointer state register ─────────────────────────────
-        //
-        // The input driver writes pointer position to a shared memory
-        // register (atomic u64). We read it once after draining all event
-        // rings. This replaces MSG_POINTER_ABS — no ring overflow possible.
-        // ── Read pointer state register ─────────────────────────────
-        //
-        // The input driver writes pointer position to a shared memory
-        // register (atomic u64). We read it once after draining all event
-        // rings. This replaces MSG_POINTER_ABS — no ring overflow possible.
-        {
-            let s = state();
-            // SAFETY: input_state_va points to a PointerState page mapped
-            // by init. Atomic load-acquire for cross-core visibility.
-            let packed = unsafe {
-                let atom = &*(s.pointer.input_state_va as *const core::sync::atomic::AtomicU64);
-                atom.load(core::sync::atomic::Ordering::Acquire)
-            };
-            if packed != s.pointer.last_xy && packed != 0 {
-                s.pointer.last_xy = packed;
-                let x = protocol::input::PointerState::unpack_x(packed);
-                let y = protocol::input::PointerState::unpack_y(packed);
-                s.pointer.x = scale_pointer_coord(x, fb_width);
-                s.pointer.y = scale_pointer_coord(y, fb_height);
-
-                // Cancel any pending fade-out and restore full opacity.
-                if let Some(id) = s.pointer.fade_id {
-                    s.animation.timeline.cancel(id);
-                    s.pointer.fade_id = None;
-                }
-                s.pointer.visible = true;
-                // Only trigger scene publish when opacity actually changes
-                // (pointer was fading/hidden). Position-only changes are
-                // handled by the render service reading the shared register.
-                if s.pointer.opacity != 255 {
-                    s.pointer.opacity = 255;
-                    if s.pointer.cursor_state_va != 0 {
-                        write_cursor_opacity(s.pointer.cursor_state_va, 255);
-                    }
-                    changed = true;
-                }
-                s.pointer.last_event_ms = now_ms;
-
-                pointer_position_changed = true;
             }
         }
 
@@ -2343,7 +2352,7 @@ pub extern "C" fn _start() -> ! {
         // position changed. B will recompute layout and signal back with
         // MSG_LAYOUT_READY. We drain the ready signal before scene dispatch.
         if text_changed || context_switched {
-            write_viewport_state(fb_width, fb_height, state().scroll.offset, page_width, page_height);
+            write_viewport_state(fb_width, fb_height, state().scroll.offset, page_width, page_height, page_padding);
             signal_layout_recompute(&layout_ch);
             // Wait briefly for B to finish layout (shared memory, fast).
             let _ = sys::wait(&[state().layout_handle.0], 5_000_000); // 5ms

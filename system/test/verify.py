@@ -417,6 +417,358 @@ def assert_pixel_diff(arr: np.ndarray, ref: str = "",
                     f"(max_allowed={max_pixels}, channel_tol={tol})")
 
 
+def assert_caret_between(arr: np.ndarray, ref: str = "",
+                         x: int = 0, y: int = 0, tol: int = 20,
+                         min_h: int = 10, max_h: int = 80,
+                         **_kw) -> tuple[bool, str]:
+    """Text caret (thin vertical line) exists near (x, y) with height in range.
+
+    Diffs against a reference (no-cursor) frame to isolate the caret.
+    Finds the tallest thin vertical feature in the diff and checks:
+    - Position within `tol` of expected (x, y)
+    - Height between min_h and max_h pixels
+    """
+    ref_arr = load(ref)
+    if arr.shape != ref_arr.shape:
+        return False, f"shape mismatch: {arr.shape} vs {ref_arr.shape}"
+
+    diff = np.abs(arr.astype(np.int16) - ref_arr.astype(np.int16)).max(axis=2)
+    mask = diff > 20
+
+    # Search near expected position
+    half = tol + 30
+    h, w = mask.shape
+    rx0 = max(0, x - half)
+    ry0 = max(0, y - half * 2)
+    rx1 = min(w, x + half)
+    ry1 = min(h, y + half * 2)
+    patch = mask[ry0:ry1, rx0:rx1]
+
+    if patch.sum() < 5:
+        return False, f"no caret-like diff near ({x},{y})"
+
+    # Find columns with vertical runs
+    best_col = -1
+    best_height = 0
+    best_top = 0
+    for cx in range(patch.shape[1]):
+        col = patch[:, cx]
+        # Find longest contiguous run of True
+        run_start = None
+        for cy in range(len(col)):
+            if col[cy]:
+                if run_start is None:
+                    run_start = cy
+            else:
+                if run_start is not None:
+                    run_h = cy - run_start
+                    if run_h > best_height:
+                        best_height = run_h
+                        best_col = cx
+                        best_top = run_start
+                    run_start = None
+        if run_start is not None:
+            run_h = len(col) - run_start
+            if run_h > best_height:
+                best_height = run_h
+                best_col = cx
+                best_top = run_start
+
+    if best_height < 5:
+        return False, f"no vertical feature found near ({x},{y})"
+
+    actual_x = rx0 + best_col
+    actual_y = ry0 + best_top + best_height // 2
+    dx = abs(actual_x - x)
+    dy = abs(actual_y - y)
+
+    pos_ok = dx <= tol and dy <= tol
+    h_ok = min_h <= best_height <= max_h
+
+    msgs = []
+    msgs.append(f"caret at ({actual_x},{ry0+best_top})-({actual_x},{ry0+best_top+best_height})")
+    msgs.append(f"height={best_height} (range {min_h}..{max_h})")
+    msgs.append(f"offset=({dx},{dy}) tol={tol}")
+    if not pos_ok:
+        msgs.append("POSITION OUT OF RANGE")
+    if not h_ok:
+        msgs.append("HEIGHT OUT OF RANGE")
+
+    return pos_ok and h_ok, " | ".join(msgs)
+
+
+def assert_weight_varies(arr: np.ndarray, x0: int = 0, y0: int = 0,
+                         x1: int = 0, y1: int = 0,
+                         segments: int = 3,
+                         **_kw) -> tuple[bool, str]:
+    """Font weight variation — dark pixel density increases left-to-right.
+
+    Divides the region into `segments` vertical bands and checks that
+    they have different dark-pixel densities (not all the same weight).
+    """
+    h, w, _ = arr.shape
+    x0, y0 = max(0, x0), max(0, y0)
+    x1, y1 = min(w, x1), min(h, y1)
+    region = arr[y0:y1, x0:x1]
+    if region.size == 0:
+        return False, "empty region"
+
+    # Dark pixel = any channel < 160 (text on white page)
+    dark = (region.min(axis=2) < 160)
+    rw = x1 - x0
+    seg_w = rw // segments
+    densities = []
+    for i in range(segments):
+        sx0 = i * seg_w
+        sx1 = sx0 + seg_w
+        band = dark[:, sx0:sx1]
+        density = band.sum() / max(1, band.size)
+        densities.append(density)
+
+    # Check that densities are not all the same (vary by > 20%)
+    if max(densities) < 0.001:
+        return False, f"no dark content in region"
+    ratio = min(densities) / max(densities) if max(densities) > 0 else 1.0
+    varies = ratio < 0.80  # at least 20% variation
+    msg = f"densities={[f'{d:.4f}' for d in densities]} ratio={ratio:.3f}"
+    return varies, msg
+
+
+def assert_italic_slant(arr: np.ndarray, ref: str = "",
+                        x0: int = 0, y0: int = 0,
+                        x1: int = 0, y1: int = 0,
+                        threshold: float = 0.80,
+                        **_kw) -> tuple[bool, str]:
+    """Italic text region matches a known-good reference via SSIM.
+
+    Extracts the text band (rows with dark content) from the region,
+    resizes to match the reference dimensions, and computes structural
+    similarity.  This catches italic-font failures (wrong glyphs,
+    roman fallback, missing rendering) without relying on fragile
+    geometric lean measurement.
+    """
+    from skimage.metrics import structural_similarity as ssim
+
+    ref_arr = load(ref)
+
+    # Extract text band from test region
+    region = arr[y0:y1, x0:x1]
+    dark = region.min(axis=2) < 120
+    row_sums = dark.sum(axis=1)
+    text_rows = np.where(row_sums > 3)[0]
+    if len(text_rows) < 6:
+        return False, "no text band in region"
+    band = region[int(text_rows[0]):int(text_rows[-1]) + 1]
+
+    # Center-crop taller to match shorter (avoids resize distortion).
+    if band.shape[0] > ref_arr.shape[0]:
+        excess = band.shape[0] - ref_arr.shape[0]
+        band = band[excess // 2: excess // 2 + ref_arr.shape[0]]
+    elif ref_arr.shape[0] > band.shape[0]:
+        excess = ref_arr.shape[0] - band.shape[0]
+        ref_arr = ref_arr[excess // 2: excess // 2 + band.shape[0]]
+
+    # Ensure matching width (should always match, but be safe).
+    min_w = min(band.shape[1], ref_arr.shape[1])
+    band = band[:, :min_w]
+    ref_arr = ref_arr[:, :min_w]
+
+    score = ssim(band, ref_arr, channel_axis=2)
+    passed = score >= threshold
+    return passed, (f"SSIM={score:.4f} threshold={threshold} "
+                    f"band={band.shape[0]}x{band.shape[1]} "
+                    f"ref={ref_arr.shape[0]}x{ref_arr.shape[1]}")
+
+
+def _find_text_bands(dark, min_gap: int = 3):
+    """Find separate horizontal text bands in a dark mask.
+
+    Groups consecutive dark rows, merging bands separated by < min_gap
+    rows.  Returns list of (y_start, y_end) tuples.
+    """
+    row_sums = dark.sum(axis=1)
+    bands = []
+    in_band = False
+    start = 0
+    for ry in range(len(row_sums)):
+        if row_sums[ry] > 3:
+            if not in_band:
+                start = ry
+                in_band = True
+        else:
+            if in_band:
+                bands.append((start, ry))
+                in_band = False
+    if in_band:
+        bands.append((start, len(row_sums)))
+    # Merge bands separated by < min_gap
+    merged = []
+    for b in bands:
+        if merged and b[0] - merged[-1][1] < min_gap:
+            merged[-1] = (merged[-1][0], b[1])
+        else:
+            merged.append(b)
+    return merged
+
+
+def assert_baseline_aligned(arr: np.ndarray, x0: int = 0, y0: int = 0,
+                             x1: int = 0, y1: int = 0,
+                             tol: int = 2,
+                             **_kw) -> tuple[bool, str]:
+    """Mixed-size text in region has aligned baselines (left vs right halves).
+
+    Finds the tallest text band in the region (ignoring thin subtitle
+    tails or decoration lines from adjacent content), then uses mode-based
+    baseline comparison between left and right halves.
+    """
+    from collections import Counter
+    region = arr[y0:y1, x0:x1]
+    dark = region.min(axis=2) < 120
+
+    # Find the tallest text band (the target mixed-size line).
+    bands = _find_text_bands(dark, min_gap=3)
+    if not bands:
+        return False, "no text content in region"
+    tallest = max(bands, key=lambda b: b[1] - b[0])
+    crop_y0, crop_y1 = tallest
+    dark = dark[crop_y0:crop_y1, :]
+    if dark.shape[0] < 3:
+        return False, "text band too short"
+
+    rw = dark.shape[1]
+    mid = rw // 2
+
+    def mode_baseline(half):
+        bottoms = []
+        for cx in range(half.shape[1]):
+            col = half[:, cx]
+            dark_rows = np.where(col)[0]
+            if len(dark_rows) > 0:
+                bottoms.append(int(dark_rows[-1]))
+        if not bottoms:
+            return -1
+        return Counter(bottoms).most_common(1)[0][0]
+
+    left_base = mode_baseline(dark[:, :mid])
+    right_base = mode_baseline(dark[:, mid:])
+    if left_base < 0 or right_base < 0:
+        return False, "insufficient content in one or both halves"
+    delta = abs(left_base - right_base)
+    passed = delta <= tol
+    return passed, (f"left_baseline=y{left_base + y0 + crop_y0} "
+                    f"right_baseline=y{right_base + y0 + crop_y0} "
+                    f"delta={delta}px tol={tol}")
+
+
+def assert_underline_gap(arr: np.ndarray, x0: int = 0, y0: int = 0,
+                          x1: int = 0, y1: int = 0,
+                          min_gap: int = 0, max_gap: int = 8,
+                          **_kw) -> tuple[bool, str]:
+    """Underline decoration is below text body with correct gap.
+
+    Detects the underline by its distinctive row-density signature:
+    1-4 consecutive rows where dark pixel count exceeds 40% of text
+    width (a solid horizontal line, much denser than character rows).
+    Then finds the text body above it by searching for the last row
+    with moderate density.  The gap must be within range.
+    """
+    region = arr[y0:y1, x0:x1]
+    dark = region.min(axis=2) < 120
+    row_sums = dark.sum(axis=1)
+
+    # Text width
+    text_cols = np.where(dark.sum(axis=0) > 0)[0]
+    if len(text_cols) < 10:
+        return False, "no text content in region"
+    text_w = int(text_cols[-1] - text_cols[0])
+
+    # Underline rows: high density (> 40% of text width) in thin runs.
+    density_threshold = text_w * 0.4
+    in_run = False
+    underlines = []
+    start = 0
+    for ry in range(len(row_sums)):
+        if row_sums[ry] > density_threshold:
+            if not in_run:
+                start = ry
+                in_run = True
+        else:
+            if in_run:
+                run_h = ry - start
+                if run_h <= 4:  # underline = thin dense stripe
+                    underlines.append((start, ry))
+                in_run = False
+
+    if not underlines:
+        return False, "no underline (thin dense row run) found"
+
+    # For each underline candidate, find the text body above it.
+    for ul_start, ul_end in underlines:
+        text_bottom = -1
+        for ty in range(ul_start - 1, -1, -1):
+            if row_sums[ty] > text_w * 0.05 and row_sums[ty] <= density_threshold:
+                text_bottom = ty
+                break
+        if text_bottom < 0:
+            continue
+
+        gap = ul_start - text_bottom
+        passed = min_gap <= gap <= max_gap
+        return passed, (f"text_bottom=y{text_bottom + y0} "
+                        f"ul_top=y{ul_start + y0} "
+                        f"gap={gap}px range=[{min_gap},{max_gap}]")
+
+    return False, "underline found but no text body above it"
+
+
+def assert_caret_skewed(arr: np.ndarray, ref: str = "",
+                         x: int = 0, y: int = 0, tol: int = 30,
+                         min_lean: int = 2,
+                         **_kw) -> tuple[bool, str]:
+    """Text caret near (x, y) is skewed (non-vertical, italic lean).
+
+    Diffs against a reference (no-cursor) frame to isolate the caret,
+    then measures horizontal displacement from top to bottom of the
+    caret.  A skewed caret has at least min_lean pixels of shift.
+    """
+    ref_arr = load(ref)
+    if arr.shape != ref_arr.shape:
+        return False, f"shape mismatch: {arr.shape} vs {ref_arr.shape}"
+
+    diff = np.abs(arr.astype(np.int16) - ref_arr.astype(np.int16)).max(axis=2)
+    mask = diff > 20
+
+    half = tol + 30
+    h, w = mask.shape
+    rx0, ry0 = max(0, x - half), max(0, y - half * 2)
+    rx1, ry1 = min(w, x + half), min(h, y + half * 2)
+    patch = mask[ry0:ry1, rx0:rx1]
+
+    if patch.sum() < 5:
+        return False, f"no caret-like diff near ({x},{y})"
+
+    ys, xs = np.where(patch)
+    if len(xs) == 0:
+        return False, "no diff pixels found"
+
+    y_min, y_max = int(ys.min()), int(ys.max())
+    y_mid = (y_min + y_max) // 2
+
+    top_xs = xs[ys <= y_mid]
+    bot_xs = xs[ys > y_mid]
+
+    if len(top_xs) == 0 or len(bot_xs) == 0:
+        return False, "caret too small to measure lean"
+
+    top_com = float(top_xs.mean())
+    bot_com = float(bot_xs.mean())
+    lean = top_com - bot_com
+
+    passed = abs(lean) >= min_lean
+    return passed, (f"caret lean={lean:+.1f}px (top_com={top_com:.1f} "
+                    f"bot_com={bot_com:.1f}) min_lean={min_lean}")
+
+
 # ── Assertion registry ────────────────────────────────────────────
 
 ASSERTIONS = {
@@ -432,6 +784,12 @@ ASSERTIONS = {
     "pixel_is":                  assert_pixel_is,
     "ssim_above":                assert_ssim_above,
     "pixel_diff":                assert_pixel_diff,
+    "caret_between":             assert_caret_between,
+    "weight_varies":             assert_weight_varies,
+    "italic_slant":              assert_italic_slant,
+    "baseline_aligned":          assert_baseline_aligned,
+    "underline_gap":             assert_underline_gap,
+    "caret_skewed":              assert_caret_skewed,
 }
 
 # Parameters that should be parsed as specific types
@@ -440,7 +798,11 @@ PARAM_TYPES = {
     "r": int, "g": int, "b": int,
     "tol": int, "size": int, "margin": int, "expected": int,
     "max_pixels": int,
-    "threshold": float,
+    "min_h": int, "max_h": int,
+    "min_gap": int, "max_gap": int,
+    "min_lean": float,
+    "segments": int,
+    "threshold": float, "min_diff": float,
     "ref": str,
     "shape": str,
     "refs": str,

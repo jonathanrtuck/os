@@ -20,12 +20,14 @@ service -- no knowledge of layout, display, input, or animation.
 ## IPC Protocol
 
 ### Receives
+
 - `MSG_DOC_MODEL_CONFIG` -- Init config (doc buffer VA, Content Region, handles)
 - `MSG_WRITE_INSERT`, `MSG_WRITE_DELETE`, `MSG_WRITE_DELETE_RANGE` -- Edits from editor
 - `MSG_STYLE_APPLY`, `MSG_STYLE_SET_CURRENT` -- Style changes from editor
 - `MSG_UNDO_REQUEST`, `MSG_REDO_REQUEST` -- Undo/redo from view-engine (C)
 
 ### Sends
+
 - `MSG_DOC_LOADED` -- Initial document loaded (to C)
 - `MSG_DOC_CHANGED` -- Buffer changed after edit or undo/redo (to C)
 - `MSG_IMAGE_DECODED` -- Image decoded and registered in Content Region (to C)

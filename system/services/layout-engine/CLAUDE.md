@@ -28,10 +28,12 @@ layout results to shared memory.
 ## IPC Protocol
 
 ### Receives
+
 - `MSG_LAYOUT_ENGINE_CONFIG` -- Init config (doc buffer VA, Content Region, layout results VA)
 - `MSG_LAYOUT_RECOMPUTE` -- Recompute signal from C (viewport changed or document changed)
 
 ### Sends
+
 - `MSG_LAYOUT_READY` -- Layout results written, C can read them
 
 ## Shared Memory

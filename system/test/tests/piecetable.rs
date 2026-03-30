@@ -482,6 +482,62 @@ fn text_slice_partial() {
     assert_eq!(&out, b"world");
 }
 
+// ── text_slice: regression for start > 0 (length-vs-end bug) ───────────
+//
+// Bug: `doc_text_for_range` in view-engine passed `needed` (length) instead
+// of `end` to `piecetable::text_slice`. For any range not starting at byte 0,
+// start >= "end" (which was actually length), so text_slice returned 0 bytes.
+
+#[test]
+fn text_slice_from_zero_returns_correct_bytes() {
+    // This case worked even with the bug (start=0, end=8, so start < end).
+    let buf = make_with_text(b"abcdefghij", 4096);
+    let mut out = [0u8; 8];
+    let n = text_slice(&buf, 0, 8, &mut out);
+    assert_eq!(n, 8);
+    assert_eq!(&out[..8], b"abcdefgh");
+}
+
+#[test]
+fn text_slice_nonzero_start_returns_correct_bytes() {
+    // This case returned 0 with the bug: start=8, "end"=2 (length),
+    // so start(8) >= end(2) → early return 0.
+    let buf = make_with_text(b"abcdefghij", 4096);
+    let mut out = [0u8; 2];
+    let n = text_slice(&buf, 8, 10, &mut out);
+    assert_eq!(n, 2);
+    assert_eq!(&out[..2], b"ij");
+}
+
+#[test]
+fn text_slice_spans_piece_boundary() {
+    // Build a buffer with multiple pieces by inserting in the middle.
+    // "abcde" (original) → insert "XXXXX" at position 2 → "abXXXXXcde"
+    let mut buf = make_with_text(b"abcde", 4096);
+    assert!(insert_bytes(&mut buf, 2, b"XXXXX"));
+    assert_eq!(read_text(&buf), b"abXXXXXcde");
+
+    // Slice [5, 15) would span the inserted piece and original piece.
+    // text is "abXXXXXcde" (10 bytes), so [5, 10) = "Xcde\0"... no, let's be precise.
+    // Positions: a(0) b(1) X(2) X(3) X(4) X(5) X(6) c(7) d(8) e(9)
+    // Slice [5, 10) = "XXcde" — crosses from the inserted "XXXXX" piece into original "cde".
+    let mut out = [0u8; 10];
+    let n = text_slice(&buf, 5, 10, &mut out);
+    assert_eq!(n, 5);
+    assert_eq!(&out[..5], b"XXcde");
+}
+
+#[test]
+fn text_slice_mid_piece_nonzero_start() {
+    // Another case that fails with the length-vs-end bug: start in the middle
+    // of the text, not at a piece boundary.
+    let buf = make_with_text(b"hello world!", 4096);
+    let mut out = [0u8; 5];
+    let n = text_slice(&buf, 6, 11, &mut out);
+    assert_eq!(n, 5);
+    assert_eq!(&out[..5], b"world");
+}
+
 // ── byte_at out of range ────────────────────────────────────────────────
 
 #[test]

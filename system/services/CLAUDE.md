@@ -6,12 +6,12 @@ Platform services that run as userspace processes. Each is a `#![no_std]` ELF bi
 
 The monolithic `core` service has been decomposed into three processes:
 
-| Service                   | Purpose                                                                                           | Status      |
-| ------------------------- | ------------------------------------------------------------------------------------------------- | ----------- |
-| `init/`                   | Root task: reads device manifest, spawns drivers, orchestrates display pipeline                   | Scaffolding |
-| `document-model/`         | A: Document buffer owner, edit application, undo ring, decoder/document service IPC               | Scaffolding |
-| `layout-engine/`          | B: Pure layout function — line-breaking, glyph shaping, positioned runs                           | Scaffolding |
-| `view-engine/`            | C: Event loop, input routing, scene graph, cursor/selection/scroll/animation                      | Scaffolding |
+| Service           | Purpose                                                                             | Status      |
+| ----------------- | ----------------------------------------------------------------------------------- | ----------- |
+| `init/`           | Root task: reads device manifest, spawns drivers, orchestrates display pipeline     | Scaffolding |
+| `document-model/` | A: Document buffer owner, edit application, undo ring, decoder/document service IPC | Scaffolding |
+| `layout-engine/`  | B: Pure layout function — line-breaking, glyph shaping, positioned runs             | Scaffolding |
+| `view-engine/`    | C: Event loop, input routing, scene graph, cursor/selection/scroll/animation        | Scaffolding |
 
 ## Drivers and Other Services
 

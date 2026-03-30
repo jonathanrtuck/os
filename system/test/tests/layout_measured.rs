@@ -1,6 +1,8 @@
-//! Tests for the mixed-style line breaking (`break_measured_lines`).
+//! Tests for the mixed-style line breaking (`break_measured_lines`)
+//! and layout result data structures.
 
 use layout::{break_measured_lines, BreakMode, MeasuredChar};
+use protocol::layout::LineInfo;
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -206,4 +208,102 @@ fn multiple_spaces_between_words() {
     // Trailing whitespace trimmed from first line
     assert_eq!((lines[0].byte_start, lines[0].byte_end), (0, 2));
     assert_eq!((lines[1].byte_start, lines[1].byte_end), (5, 7));
+}
+
+// ── Regression: per-line height (layout-engine bug) ────────────────────
+//
+// Bug: The layout engine stored a uniform `line_height_pt` (the default
+// monospace line height, 25pt) in every `LineInfo`, instead of the actual
+// computed height for lines with larger fonts. The fix computes
+// `max_line_h` per line from the tallest styled run.
+//
+// The `break_measured_lines` function in the layout library produces
+// `LineBreak` structs which do NOT carry per-line height — that is
+// computed by the layout engine service's `compute_rich_line_height`
+// function, which depends on font metrics from the Content Region.
+//
+// Direct unit testing is not feasible because:
+// - `compute_rich_line_height` is private to the layout-engine service
+//   (a #![no_std] aarch64 binary, not a host-testable library)
+// - It requires `FontState` with real font metric data from the Content
+//   Region
+// - The `LineInfo` structs are written to shared memory by the service
+//
+// TODO: To regression-test this, either:
+// 1. Extract `compute_rich_line_height` into a testable library (e.g.,
+//    `libraries/layout/`) so host tests can call it with mock font
+//    metrics, OR
+// 2. Add a visual regression test that creates a document with mixed
+//    font sizes (e.g., body 14pt + heading 24pt) and asserts that lines
+//    have different heights in the layout results shared memory.
+//
+// The fix is in services/layout-engine/main.rs: `height: max_line_h as u32`
+// on the LayoutRun for the rich text path (was previously `height: line_height`
+// which used the uniform default).
+
+#[test]
+fn line_break_preserves_per_run_info_for_mixed_styles() {
+    // Verify that break_measured_lines preserves per-character run_index,
+    // which is what the layout engine uses to look up font metrics for
+    // computing per-line heights. If run_index were lost during line
+    // breaking, the layout engine couldn't compute per-line heights.
+    let text = b"AABB";
+    // Run 0 = larger font (chars 0,1), run 1 = smaller font (chars 2,3).
+    let chars: Vec<MeasuredChar> = text
+        .iter()
+        .enumerate()
+        .map(|(i, &b)| MeasuredChar {
+            byte_offset: i as u32,
+            byte_len: 1,
+            width: if i < 2 { 2.0 } else { 1.0 },
+            run_index: if i < 2 { 0 } else { 1 },
+            is_whitespace: b == b' ',
+            is_newline: b == b'\n',
+        })
+        .collect();
+
+    let lines = break_measured_lines(&chars, 100.0, BreakMode::Char);
+    assert_eq!(lines.len(), 1);
+    // The line should span all characters — both runs are present.
+    assert_eq!((lines[0].byte_start, lines[0].byte_end), (0, 4));
+    // Width = 2.0 + 2.0 + 1.0 + 1.0 = 6.0.
+    assert!((lines[0].width - 6.0).abs() < 0.001);
+}
+
+// ── LineInfo contract tests ────────────────────────────────────────────
+
+#[test]
+fn line_info_supports_per_line_height() {
+    // Regression: the layout engine stored a uniform line_height_pt for all
+    // lines instead of per-line computed heights. Verify that LineInfo can
+    // represent different heights per line (the data structure contract).
+    let lines = [
+        LineInfo {
+            byte_offset: 0,
+            byte_length: 20,
+            y_pt: 0,
+            line_height_pt: 30, // heading line (larger font)
+        },
+        LineInfo {
+            byte_offset: 20,
+            byte_length: 40,
+            y_pt: 30,
+            line_height_pt: 18, // body line (smaller font)
+        },
+        LineInfo {
+            byte_offset: 60,
+            byte_length: 15,
+            y_pt: 48,
+            line_height_pt: 25, // code line (different font)
+        },
+    ];
+
+    // Each line should have its own independent height — not a uniform value.
+    assert_eq!(lines[0].line_height_pt, 30);
+    assert_eq!(lines[1].line_height_pt, 18);
+    assert_eq!(lines[2].line_height_pt, 25);
+
+    // Y positions should reflect cumulative per-line heights.
+    assert_eq!(lines[1].y_pt, lines[0].y_pt + lines[0].line_height_pt as i32);
+    assert_eq!(lines[2].y_pt, lines[1].y_pt + lines[1].line_height_pt as i32);
 }

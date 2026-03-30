@@ -944,32 +944,36 @@ pub extern "C" fn _start() -> ! {
 
     // Set up IPC channels.
     // SAFETY: channel_shm_va(N) are bases of channel SHM regions mapped by kernel.
+    //
+    // Endpoint assignment: init sends endpoint A (index 0) of each channel
+    // to A, except for the core↔A channel where A receives endpoint B (index 1).
+    // The endpoint parameter must match the ChannelId endpoint index.
     let editor_ch = unsafe {
         ipc::Channel::from_base(
             protocol::channel_shm_va(state().editor_handle.0 as usize),
             ipc::PAGE_SIZE,
-            1,
+            0, // A receives endpoint A (index 0) of editor↔A channel
         )
     };
     let fs_ch = unsafe {
         ipc::Channel::from_base(
             protocol::channel_shm_va(state().fs_handle.0 as usize),
             ipc::PAGE_SIZE,
-            0,
+            0, // A receives endpoint A (index 0) of A↔document channel
         )
     };
     let decoder_ch = unsafe {
         ipc::Channel::from_base(
             protocol::channel_shm_va(state().decoder_handle.0 as usize),
             ipc::PAGE_SIZE,
-            0,
+            0, // A receives endpoint A (index 0) of A↔decoder channel
         )
     };
     let core_ch = unsafe {
         ipc::Channel::from_base(
             protocol::channel_shm_va(state().core_handle.0 as usize),
             ipc::PAGE_SIZE,
-            0,
+            1, // A receives endpoint B (index 1) of C↔A channel
         )
     };
 
