@@ -20,7 +20,15 @@ VERIFY="$SCRIPT_DIR/verify.py"
 SPEC_DIR="$SCRIPT_DIR/visual"
 CAPTURE_DIR="/tmp/visual-tests"
 KERNEL="$SYSTEM_DIR/target/aarch64-unknown-none/release/kernel"
-DISK="$SYSTEM_DIR/disk.img"
+DISK_ORIG="$SYSTEM_DIR/disk.img"
+# Each test boots the OS which can mutate disk.img (document edits persist).
+# Use a temporary copy so the original stays clean across test runs.
+# NOTE: The factory disk.img has fonts but no document content. Visual tests
+# depend on a "Style Stress Test" document that must exist on disk. If tests
+# fail with "content not found" style errors, the disk.img needs the test
+# document baked in (either via mkdisk or by saving a known-good interactive
+# session's disk.img).
+DISK="$CAPTURE_DIR/disk-test.img"
 
 # Boot wait: frames to wait before injecting events.
 # The OS needs ~25 frames to boot; 60 gives comfortable margin.
@@ -39,7 +47,7 @@ check_deps() {
     command -v hypervisor >/dev/null 2>&1 || die "hypervisor not in PATH"
     [ -x "$VENV_PYTHON" ] || die "Python venv not found at $VENV_PYTHON (run: python3 -m venv $SCRIPT_DIR/.venv && $SCRIPT_DIR/.venv/bin/pip install numpy scikit-image Pillow)"
     [ -f "$KERNEL" ] || die "Kernel not found at $KERNEL (run: cargo build --release)"
-    [ -f "$DISK" ] || die "disk.img not found at $DISK"
+    [ -f "$DISK_ORIG" ] || die "disk.img not found at $DISK_ORIG"
 }
 
 run_hypervisor() {
@@ -256,14 +264,16 @@ EVENTS
 
 test_cursor_italic() {
     info "Test: cursor-italic (caret skews near italic text)"
-    # Capture baseline (no cursor) at 1600x1200.
-    hypervisor "$KERNEL" --drive "$DISK" --background \
-        --resolution 1600x1200 \
-        --capture 90 "$CAPTURE_DIR/italic-baseline.png" \
-        --timeout "$TIMEOUT" >/dev/null 2>&1
-    # Click on italic text ("Sans 40pt Italic Magenta", y~325 at 1600x1200).
+    # Single boot: capture baseline BEFORE clicking, then click and capture
+    # with cursor. Same boot guarantees identical layout between frames,
+    # so the diff isolates only the caret (no Y-position shift noise).
+    # The hypervisor names multi-capture outputs as base-NNN.png using the
+    # event file's basename. We sort the outputs to find baseline (lower
+    # frame number) and cursor (higher frame number).
+    rm -f "$CAPTURE_DIR"/cursor-italic-*.png
     cat > "$CAPTURE_DIR/cursor-italic.events" << 'EVENTS'
 wait 60
+capture /tmp/visual-tests/italic-baseline.png
 move 500 325
 wait 5
 click 500 325
@@ -274,6 +284,16 @@ EVENTS
         --resolution 1600x1200 \
         --events "$CAPTURE_DIR/cursor-italic.events" \
         --timeout "$TIMEOUT" >/dev/null 2>&1
+    # Map frame-numbered outputs to expected filenames.
+    local baseline cursor
+    baseline=$(ls "$CAPTURE_DIR"/cursor-italic-*.png 2>/dev/null | sort | head -1)
+    cursor=$(ls "$CAPTURE_DIR"/cursor-italic-*.png 2>/dev/null | sort | tail -1)
+    if [ -z "$baseline" ] || [ -z "$cursor" ] || [ "$baseline" = "$cursor" ]; then
+        echo "  ERROR: expected 2 captures, got: $(ls "$CAPTURE_DIR"/cursor-italic-*.png 2>/dev/null | wc -l)"
+        return 1
+    fi
+    cp "$baseline" "$CAPTURE_DIR/italic-baseline.png"
+    cp "$cursor" "$CAPTURE_DIR/cursor-italic.png"
     run_verify "$CAPTURE_DIR/cursor-italic.png" "$SPEC_DIR/cursor-italic.spec"
 }
 
@@ -317,6 +337,10 @@ for test_name in $tests_to_run; do
         echo "  [SKIP] $test_name (unknown test)"
         continue
     fi
+
+    # Fresh disk copy for each test — the OS persists edits to disk.img,
+    # so each test must start from the factory state.
+    cp "$DISK_ORIG" "$DISK"
 
     output=$("$fn" 2>&1) && result=0 || result=$?
 
