@@ -379,6 +379,8 @@ impl StyleTable {
                     upem: e.upem,
                     axis_count: axis_count as u8,
                     _pad: 0,
+                    weight: 400,
+                    caret_skew: 0,
                     axes,
                 }
             })
@@ -492,6 +494,18 @@ pub fn count_lines(text: &[u8]) -> usize {
 // CoreState) for cursor navigation in rich text. They replace the old
 // RichLine-based functions that required local layout computation.
 
+/// Check if a visible run belongs to a given line by byte range overlap.
+/// After baseline alignment, runs on the same line may have different y_pt
+/// values, so we can't use y_pt equality — byte ranges are authoritative.
+#[inline]
+fn run_on_line(run: &protocol::layout::VisibleRun, li: &protocol::layout::LineInfo) -> bool {
+    let line_start = li.byte_offset as usize;
+    let line_end = line_start + li.byte_length as usize;
+    let run_start = run.byte_offset as usize;
+    let run_end = run_start + run.byte_length as usize;
+    run_start < line_end && run_end > line_start
+}
+
 /// Find which line index contains `cursor_pos`. Returns total_lines
 /// (one past last) if cursor is past all lines.
 pub(crate) fn line_info_byte_to_line(
@@ -571,7 +585,7 @@ pub(crate) fn line_info_cursor_x_mpt(
     let mut x_mpt: i32 = 0;
     for ri in 0..header.visible_run_count as usize {
         let run = crate::read_visible_run(&header, ri);
-        if run.y_pt != li.y_pt {
+        if !run_on_line(&run, li) {
             continue;
         }
         let run_start = run.byte_offset as usize;
@@ -636,7 +650,7 @@ pub(crate) fn line_info_x_to_byte(
 
     for ri in 0..header.visible_run_count as usize {
         let run = crate::read_visible_run(&header, ri);
-        if run.y_pt != li.y_pt {
+        if !run_on_line(&run, li) {
             continue;
         }
         let run_start = run.byte_offset as usize;
@@ -742,7 +756,7 @@ pub(crate) fn push_layout_results_to_scene(
         let run = crate::read_visible_run(header, i);
         let glyphs = crate::read_glyph_data(header, run.glyph_data_offset, run.glyph_count);
         let glyph_ref = w.push_shaped_glyphs(glyphs);
-        line_glyph_refs.push((glyph_ref, run.glyph_count, run.y_pt));
+        line_glyph_refs.push((glyph_ref, run.glyph_count, run.y_mpt));
     }
 
     line_glyph_refs

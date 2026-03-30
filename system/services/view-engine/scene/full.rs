@@ -5,6 +5,52 @@
 //! within an existing scene). Layout computation is handled by the
 //! layout engine (B) — this module reads pre-computed results.
 
+/// Font metrics for a run: ascender and descender in points at the run's font size,
+/// plus cursor-relevant style properties from the style registry.
+struct RunMetrics {
+    /// Ascender in points (positive, measures up from baseline).
+    ascender_pt: i32,
+    /// Descender in points (positive, measures down from baseline).
+    descender_pt: i32,
+    /// CSS font weight (100–900). Used to set cursor width.
+    weight: u16,
+    /// Caret shear factor (negative = right-leaning italic, 0 = upright).
+    /// Derived from font's hhea caretSlopeRise/Run via the style registry.
+    caret_skew: f32,
+}
+
+/// Compute per-run font metrics by looking up the style registry.
+fn run_metrics_from_registry(
+    header: &protocol::layout::LayoutResultsHeader,
+    style_id: u32,
+    font_size: u16,
+) -> RunMetrics {
+    let registry_bytes = crate::read_layout_style_registry(header);
+    if let Some(entries) = protocol::content::read_style_registry(registry_bytes) {
+        for entry in entries {
+            if entry.style_id == style_id && entry.upem > 0 {
+                let asc = (entry.ascent_fu as i32 * font_size as i32 + entry.upem as i32 - 1)
+                    / entry.upem as i32;
+                let desc = (entry.descent_fu as i32 * font_size as i32 + entry.upem as i32 - 1)
+                    / entry.upem as i32;
+                return RunMetrics {
+                    ascender_pt: asc,
+                    descender_pt: desc,
+                    weight: entry.weight,
+                    caret_skew: entry.caret_skew as f32 / 10_000.0,
+                };
+            }
+        }
+    }
+    // Fallback: approximate from font size.
+    RunMetrics {
+        ascender_pt: (font_size as i32 * 8) / 10,
+        descender_pt: (font_size as i32 * 2) / 10,
+        weight: 400,
+        caret_skew: 0.0,
+    }
+}
+
 use alloc::vec::Vec;
 
 use scene::{fnv1a, Border, Color, Content, FillRule, NodeFlags, NULL};
@@ -657,7 +703,7 @@ fn allocate_rich_line_nodes_from_b(
         if let Some(node_id) = w.alloc_node() {
             let n = w.node_mut(node_id);
             n.x = run.x_mpt;
-            n.y = scene::pt(run.y_pt);
+            n.y = run.y_mpt;
             n.width = scene::upt(doc_width);
             n.height = scene::upt(header.line_height_pt);
             n.content = Content::Glyphs {
@@ -683,14 +729,21 @@ fn allocate_rich_line_nodes_from_b(
         let seg_width_mpt: i32 = glyphs.iter().map(|g| g.x_advance >> 6).sum();
         let seg_width_pt = (seg_width_mpt >> 10).max(0) as u32;
 
-        // Underline decoration.
+        // Font metrics for baseline-relative positioning (all in millipoints).
+        let rm = run_metrics_from_registry(header, run.style_id, run.font_size);
+        let asc_mpt = rm.ascender_pt * scene::MPT_PER_PT;
+        let desc_mpt = rm.descender_pt * scene::MPT_PER_PT;
+        // Baseline = run.y_mpt + ascender (run.y_mpt is top of glyph area).
+        let baseline_y_mpt = run.y_mpt + asc_mpt;
+
+        // Underline decoration — slightly below baseline.
         if run.flags & piecetable::FLAG_UNDERLINE != 0 && seg_width_pt > 0 {
-            let underline_y = run.y_pt + (font_size as i32 * 9 / 10);
+            let underline_y_mpt = baseline_y_mpt + (desc_mpt / 3).max(scene::MPT_PER_PT);
             let thickness = (font_size as u32 / 14).max(1);
             if let Some(ul_id) = w.alloc_node() {
                 let n = w.node_mut(ul_id);
                 n.x = run.x_mpt;
-                n.y = scene::pt(underline_y);
+                n.y = underline_y_mpt;
                 n.width = scene::upt(seg_width_pt + 1);
                 n.height = scene::upt(thickness);
                 n.background = color;
@@ -705,14 +758,14 @@ fn allocate_rich_line_nodes_from_b(
             }
         }
 
-        // Strikethrough decoration.
+        // Strikethrough decoration — at ~40% of ascender above baseline (x-height center).
         if run.flags & piecetable::FLAG_STRIKETHROUGH != 0 && seg_width_pt > 0 {
-            let strike_y = run.y_pt + (font_size as i32 * 5 / 10);
+            let strike_y_mpt = baseline_y_mpt - (asc_mpt * 2 / 5);
             let thickness = (font_size as u32 / 14).max(1);
             if let Some(st_id) = w.alloc_node() {
                 let n = w.node_mut(st_id);
                 n.x = run.x_mpt;
-                n.y = scene::pt(strike_y);
+                n.y = strike_y_mpt;
                 n.width = scene::upt(seg_width_pt + 1);
                 n.height = scene::upt(thickness);
                 n.background = color;
@@ -749,10 +802,12 @@ fn rich_cursor_position_from_b(
         let mut cursor_x_mpt: i32 = 0;
         let mut cursor_color: u32 = 0x202020FF;
         let mut cursor_font_size: u16 = 14;
+        let mut cursor_style_id: u32 = 0;
+        let mut cursor_run_y_mpt: i32 = li.y_pt * scene::MPT_PER_PT;
 
         for ri in 0..header.visible_run_count as usize {
             let run = crate::read_visible_run(header, ri);
-            if run.y_pt != li.y_pt {
+            if !super::run_on_line(&run, li) {
                 continue;
             }
             let run_start = run.byte_offset as usize;
@@ -762,26 +817,30 @@ fn rich_cursor_position_from_b(
                 cursor_x_mpt = run.x_mpt;
                 cursor_color = run.color_rgba;
                 cursor_font_size = if run.font_size > 0 { run.font_size } else { 14 };
+                cursor_style_id = run.style_id;
+                cursor_run_y_mpt = run.y_mpt;
+
                 break;
             }
 
             if (cursor_pos as usize) >= run_end {
                 // Past this run — compute end x.
-                let glyphs =
-                    crate::read_glyph_data(header, run.glyph_data_offset, run.glyph_count);
+                let glyphs = crate::read_glyph_data(header, run.glyph_data_offset, run.glyph_count);
                 cursor_x_mpt = run.x_mpt;
                 for g in glyphs {
                     cursor_x_mpt += g.x_advance >> 6;
                 }
                 cursor_color = run.color_rgba;
                 cursor_font_size = if run.font_size > 0 { run.font_size } else { 14 };
+                cursor_style_id = run.style_id;
+                cursor_run_y_mpt = run.y_mpt;
+
                 continue;
             }
 
             // Cursor is within this run.
             let doc = crate::doc_text_for_range(run_start, run_end);
-            let glyphs =
-                crate::read_glyph_data(header, run.glyph_data_offset, run.glyph_count);
+            let glyphs = crate::read_glyph_data(header, run.glyph_data_offset, run.glyph_count);
             cursor_x_mpt = run.x_mpt;
             let mut byte_pos = run_start;
             let mut gi = 0usize;
@@ -798,44 +857,70 @@ fn rich_cursor_position_from_b(
             }
             cursor_color = run.color_rgba;
             cursor_font_size = if run.font_size > 0 { run.font_size } else { 14 };
+            cursor_style_id = run.style_id;
+            cursor_run_y_mpt = run.y_mpt;
             break;
         }
 
-        // Cursor height = cap height approximation from font size.
-        let cap_h_pt = cursor_font_size as f32 * 0.7;
-        let mpt = scene::MPT_PER_PT as f32;
-        let cursor_y_f = li.y_pt as f32 + (li.line_height_pt as f32 * 0.15);
-        let cursor_y = (cursor_y_f * mpt) as scene::Mpt;
-        let cursor_h_mpt = (cap_h_pt * mpt) as scene::Umpt;
+        // Cursor spans ascender to descender of the font at the cursor position.
+        // Weight and caret skew come from the style registry (set by B from font data).
+        let rm = run_metrics_from_registry(header, cursor_style_id, cursor_font_size);
+        let cursor_h_mpt =
+            ((rm.ascender_pt + rm.descender_pt) * scene::MPT_PER_PT) as scene::Umpt;
+
+        // Anchor italic shear at the baseline, not the top of the cursor.
+        // Without this, shear_x shifts the bottom left while the top stays put,
+        // making the cursor overlap the left character. By offsetting x by
+        // -caret_skew * ascender, the baseline stays at the glyph boundary.
+        let asc_mpt = rm.ascender_pt * scene::MPT_PER_PT;
+        let anchor_offset = (rm.caret_skew * asc_mpt as f32) as i32;
 
         let c = cursor_color;
         return RichCursorInfo {
-            x: cursor_x_mpt,
-            y: cursor_y,
+            x: cursor_x_mpt - anchor_offset,
+            y: cursor_run_y_mpt,
             height: cursor_h_mpt.max(scene::upt(2)),
-            style_weight: 400,
+            style_weight: rm.weight,
             color: [
                 ((c >> 24) & 0xFF) as u8,
                 ((c >> 16) & 0xFF) as u8,
                 ((c >> 8) & 0xFF) as u8,
                 (c & 0xFF) as u8,
             ],
-            caret_skew: 0.0,
+            caret_skew: rm.caret_skew,
         };
     }
 
-    // Past end — position on trailing line.
-    let last_y = cached_lines
+    // Past end — position on trailing line. Inherit style from the last run.
+    let last_y_mpt = cached_lines
         .last()
-        .map_or(0, |l| l.y_pt + l.line_height_pt as i32);
-    let mpt = scene::MPT_PER_PT as f32;
+        .map_or(0, |l| (l.y_pt + l.line_height_pt as i32) * scene::MPT_PER_PT);
+    // Look up the last visible run's style for weight/skew continuity.
+    let last_rm = if header.visible_run_count > 0 {
+        let last_run = crate::read_visible_run(header, header.visible_run_count as usize - 1);
+        let fs = if last_run.font_size > 0 {
+            last_run.font_size
+        } else {
+            14
+        };
+        run_metrics_from_registry(header, last_run.style_id, fs)
+    } else {
+        RunMetrics {
+            ascender_pt: (default_height as i32 * 8) / 10,
+            descender_pt: (default_height as i32 * 2) / 10,
+            weight: 400,
+            caret_skew: 0.0,
+        }
+    };
+    let trailing_h_mpt =
+        ((last_rm.ascender_pt + last_rm.descender_pt) * scene::MPT_PER_PT) as scene::Umpt;
     RichCursorInfo {
         x: 0,
-        y: (last_y as f32 * mpt) as scene::Mpt,
-        height: scene::upt(default_height),
-        style_weight: 400,
+        y: last_y_mpt,
+        height: trailing_h_mpt.max(scene::upt(2)),
+        style_weight: last_rm.weight,
         color: [32, 32, 32, 255],
-        caret_skew: 0.0,
+        caret_skew: last_rm.caret_skew,
     }
 }
 
@@ -1006,7 +1091,7 @@ pub fn build_rich_document_content(
         n.flags = NodeFlags::VISIBLE;
         n.next_sibling = NULL;
         n.transform = if cursor_info.caret_skew != 0.0 {
-            scene::AffineTransform::skew_x(cursor_info.caret_skew)
+            scene::AffineTransform::shear_x(cursor_info.caret_skew)
         } else {
             scene::AffineTransform::identity()
         };
@@ -1075,7 +1160,7 @@ fn allocate_rich_selection_rects(
 
         for ri in 0..header.visible_run_count as usize {
             let run = crate::read_visible_run(header, ri);
-            if run.y_pt != li.y_pt {
+            if !super::run_on_line(&run, li) {
                 continue;
             }
             let run_start = run.byte_offset as usize;
@@ -1083,15 +1168,13 @@ fn allocate_rich_selection_rects(
 
             if run_end <= clamp_lo || run_start >= clamp_hi {
                 // Run is outside the selection range on this line.
-                let glyphs =
-                    crate::read_glyph_data(header, run.glyph_data_offset, run.glyph_count);
+                let glyphs = crate::read_glyph_data(header, run.glyph_data_offset, run.glyph_count);
                 let _ = glyphs; // just need to advance past
                 continue;
             }
 
             let doc = crate::doc_text_for_range(run_start, run_end);
-            let glyphs =
-                crate::read_glyph_data(header, run.glyph_data_offset, run.glyph_count);
+            let glyphs = crate::read_glyph_data(header, run.glyph_data_offset, run.glyph_count);
 
             let s = core::str::from_utf8(doc).unwrap_or("");
             let mut byte_pos = run_start;

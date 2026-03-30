@@ -149,8 +149,9 @@ pub struct VisibleRun {
     pub glyph_count: u16,
     /// Font size in points.
     pub font_size: u16,
-    /// Y position in document coordinates (points).
-    pub y_pt: i32,
+    /// Y position in document coordinates (millipoints, 1/1024 pt).
+    /// Includes sub-point baseline alignment offset for mixed-size lines.
+    pub y_mpt: i32,
     /// Style ID for the renderer's style registry.
     pub style_id: u32,
     /// RGBA color packed as `(r << 24) | (g << 16) | (b << 8) | a`.

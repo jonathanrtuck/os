@@ -516,11 +516,17 @@ pub struct StyleRegistryEntry {
     /// Number of active axes in `axes` (0..MAX_STYLE_AXES).
     pub axis_count: u8,
     pub _pad: u8,
+    /// CSS font weight (100–900). Used by the view engine to set cursor width.
+    pub weight: u16,
+    /// Caret skew factor × 10 000 (fixed-point). Negative = right-leaning italic.
+    /// Derived from the font's `hhea` caretSlopeRise/Run fields.
+    /// Decode: `entry.caret_skew as f32 / 10_000.0`.
+    pub caret_skew: i16,
     /// Variation axis values. Only the first `axis_count` entries are meaningful.
     pub axes: [StyleAxisValue; MAX_STYLE_AXES],
 }
 
-const _: () = assert!(core::mem::size_of::<StyleRegistryEntry>() == 80);
+const _: () = assert!(core::mem::size_of::<StyleRegistryEntry>() == 84);
 
 /// Write a style registry into a byte buffer.
 ///

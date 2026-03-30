@@ -99,6 +99,20 @@ impl AffineTransform {
         }
     }
 
+    /// Horizontal shear by a pre-computed factor (not an angle).
+    /// `x' = x + factor * y`. Use when the shear ratio is already known
+    /// (e.g. from a font's `hhea` caretSlopeRun/Rise).
+    pub fn shear_x(factor: f32) -> Self {
+        Self {
+            a: 1.0,
+            b: 0.0,
+            c: factor,
+            d: 1.0,
+            tx: 0.0,
+            ty: 0.0,
+        }
+    }
+
     /// Matrix multiplication: `self × other`.
     ///
     /// The resulting transform applies `other` first, then `self`.

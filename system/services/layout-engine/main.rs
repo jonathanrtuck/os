@@ -59,12 +59,31 @@ struct FontState {
     mono_italic_data_ptr: *const u8,
     mono_italic_data_len: usize,
     mono_italic_upem: u16,
+    mono_italic_ascender: i16,
+    mono_italic_descender: i16,
+    mono_italic_line_gap: i16,
+    mono_italic_content_id: u32,
     sans_italic_data_ptr: *const u8,
     sans_italic_data_len: usize,
     sans_italic_upem: u16,
+    sans_italic_ascender: i16,
+    sans_italic_descender: i16,
+    sans_italic_line_gap: i16,
+    sans_italic_content_id: u32,
     serif_italic_data_ptr: *const u8,
     serif_italic_data_len: usize,
     serif_italic_upem: u16,
+    serif_italic_ascender: i16,
+    serif_italic_descender: i16,
+    serif_italic_line_gap: i16,
+    serif_italic_content_id: u32,
+    // Caret skew factors (from hhea caretSlopeRise/Run). Cached per font.
+    mono_caret_skew: f32,
+    sans_caret_skew: f32,
+    serif_caret_skew: f32,
+    mono_italic_caret_skew: f32,
+    sans_italic_caret_skew: f32,
+    serif_italic_caret_skew: f32,
 }
 
 impl FontState {
@@ -94,12 +113,30 @@ impl FontState {
             mono_italic_data_ptr: core::ptr::null(),
             mono_italic_data_len: 0,
             mono_italic_upem: 0,
+            mono_italic_ascender: 800,
+            mono_italic_descender: -200,
+            mono_italic_line_gap: 0,
+            mono_italic_content_id: 0,
             sans_italic_data_ptr: core::ptr::null(),
             sans_italic_data_len: 0,
             sans_italic_upem: 0,
+            sans_italic_ascender: 800,
+            sans_italic_descender: -200,
+            sans_italic_line_gap: 0,
+            sans_italic_content_id: 0,
             serif_italic_data_ptr: core::ptr::null(),
             serif_italic_data_len: 0,
             serif_italic_upem: 0,
+            serif_italic_ascender: 800,
+            serif_italic_descender: -200,
+            serif_italic_line_gap: 0,
+            serif_italic_content_id: 0,
+            mono_caret_skew: 0.0,
+            sans_caret_skew: 0.0,
+            serif_caret_skew: 0.0,
+            mono_italic_caret_skew: 0.0,
+            sans_italic_caret_skew: 0.0,
+            serif_italic_caret_skew: 0.0,
         }
     }
 
@@ -127,6 +164,84 @@ impl FontState {
         } else {
             // SAFETY: pointer and length set from Content Region mapping.
             unsafe { core::slice::from_raw_parts(self.serif_data_ptr, self.serif_data_len) }
+        }
+    }
+
+    fn mono_italic_data(&self) -> &[u8] {
+        if self.mono_italic_data_ptr.is_null() || self.mono_italic_data_len == 0 {
+            self.mono_data() // fallback to roman
+        } else {
+            unsafe {
+                core::slice::from_raw_parts(self.mono_italic_data_ptr, self.mono_italic_data_len)
+            }
+        }
+    }
+
+    fn sans_italic_data(&self) -> &[u8] {
+        if self.sans_italic_data_ptr.is_null() || self.sans_italic_data_len == 0 {
+            self.sans_data()
+        } else {
+            unsafe {
+                core::slice::from_raw_parts(self.sans_italic_data_ptr, self.sans_italic_data_len)
+            }
+        }
+    }
+
+    fn serif_italic_data(&self) -> &[u8] {
+        if self.serif_italic_data_ptr.is_null() || self.serif_italic_data_len == 0 {
+            self.serif_data()
+        } else {
+            unsafe {
+                core::slice::from_raw_parts(self.serif_italic_data_ptr, self.serif_italic_data_len)
+            }
+        }
+    }
+
+    /// Select font data/upem/content_id for a given family + italic combination.
+    fn resolve_font(&self, family: u8, italic: bool) -> (&[u8], u16, u32) {
+        if italic {
+            match family {
+                piecetable::FONT_MONO => (
+                    self.mono_italic_data(),
+                    self.mono_italic_upem,
+                    self.mono_italic_content_id,
+                ),
+                piecetable::FONT_SERIF => (
+                    self.serif_italic_data(),
+                    self.serif_italic_upem,
+                    self.serif_italic_content_id,
+                ),
+                _ => (
+                    self.sans_italic_data(),
+                    self.sans_italic_upem,
+                    self.sans_italic_content_id,
+                ),
+            }
+        } else {
+            match family {
+                piecetable::FONT_MONO => (self.mono_data(), self.mono_upem, self.mono_content_id),
+                piecetable::FONT_SERIF => {
+                    (self.serif_data(), self.serif_upem, self.serif_content_id)
+                }
+                _ => (self.sans_data(), self.sans_upem, self.sans_content_id),
+            }
+        }
+    }
+
+    /// Cached caret skew factor for a given family + italic combination.
+    fn resolve_caret_skew(&self, family: u8, italic: bool) -> f32 {
+        if italic {
+            match family {
+                piecetable::FONT_MONO => self.mono_italic_caret_skew,
+                piecetable::FONT_SERIF => self.serif_italic_caret_skew,
+                _ => self.sans_italic_caret_skew,
+            }
+        } else {
+            match family {
+                piecetable::FONT_MONO => self.mono_caret_skew,
+                piecetable::FONT_SERIF => self.serif_caret_skew,
+                _ => self.sans_caret_skew,
+            }
         }
     }
 }
@@ -209,6 +324,11 @@ struct LayoutRun {
     byte_offset: u32,
     byte_length: u32,
     y: i32,
+    /// Actual line height in points (computed from tallest run on the line).
+    height: u32,
+    /// Max ascender on this line (exact fractional points) — for baseline alignment.
+    /// Kept as f32 to avoid rounding errors when computing per-run offsets.
+    max_ascender_f: f32,
 }
 
 /// Shape text through HarfBuzz and convert from font units to points.
@@ -282,6 +402,8 @@ fn compute_plain_layout(vp: &ViewportState, text: &[u8]) {
             byte_offset: line.byte_offset,
             byte_length: line.byte_length,
             y: line.y,
+            height: line_height,
+            max_ascender_f: 0.0, // uniform for plain text
         })
         .collect();
 
@@ -295,9 +417,7 @@ fn compute_plain_layout(vp: &ViewportState, text: &[u8]) {
     // Filter visible runs.
     let visible_runs: Vec<&LayoutRun> = all_runs
         .iter()
-        .filter(|r| {
-            r.y + line_height as i32 > scroll_pt && r.y < scroll_pt + viewport_h
-        })
+        .filter(|r| r.y + r.height as i32 > scroll_pt && r.y < scroll_pt + viewport_h)
         .collect();
 
     // Shape visible runs.
@@ -306,7 +426,8 @@ fn compute_plain_layout(vp: &ViewportState, text: &[u8]) {
     let upem = fonts.mono_upem;
     let axes: &[fonts::rasterize::AxisValue] = &[];
 
-    let mut shaped_runs: Vec<(Vec<scene::ShapedGlyph>, i32)> = Vec::with_capacity(visible_runs.len());
+    let mut shaped_runs: Vec<(Vec<scene::ShapedGlyph>, i32)> =
+        Vec::with_capacity(visible_runs.len());
     for run in &visible_runs {
         let start = run.byte_offset as usize;
         let len = run.byte_length as usize;
@@ -330,6 +451,8 @@ fn compute_plain_layout(vp: &ViewportState, text: &[u8]) {
         upem: 0,
         axis_count: 0,
         _pad: 0,
+        weight: 400,
+        caret_skew: 0,
         axes: [protocol::content::StyleAxisValue {
             tag: [0; 4],
             value: 0.0,
@@ -342,6 +465,7 @@ fn compute_plain_layout(vp: &ViewportState, text: &[u8]) {
     style_entries[0].ascent_fu = mono_ascent_fu;
     style_entries[0].descent_fu = mono_descent_fu;
     style_entries[0].upem = fonts.mono_upem;
+    style_entries[0].caret_skew = (fonts.mono_caret_skew * 10_000.0) as i16;
 
     // Style 1: sans font (for chrome text).
     style_entries[1].style_id = 1;
@@ -349,6 +473,7 @@ fn compute_plain_layout(vp: &ViewportState, text: &[u8]) {
     style_entries[1].ascent_fu = fonts.sans_ascender as u16;
     style_entries[1].descent_fu = (-fonts.sans_descender) as u16;
     style_entries[1].upem = fonts.sans_upem;
+    style_entries[1].caret_skew = (fonts.sans_caret_skew * 10_000.0) as i16;
 
     let mut style_buf = [0u8; 8192];
     let style_size = protocol::content::write_style_registry(&mut style_buf, &style_entries[..2]);
@@ -475,15 +600,32 @@ fn compute_rich_layout(vp: &ViewportState, doc_buf: &[u8]) {
     let mut y = 0i32;
 
     for lb in &line_breaks {
-        let max_line_h = compute_rich_line_height(
-            doc_buf, &measured, lb, fonts, line_height as i32,
-        );
+        let (max_line_h, max_asc) =
+            compute_rich_line_metrics(doc_buf, &measured, lb, fonts, line_height as i32);
         all_runs.push(LayoutRun {
             byte_offset: lb.byte_start,
             byte_length: lb.byte_end - lb.byte_start,
             y,
+            height: max_line_h as u32,
+            max_ascender_f: max_asc,
         });
         y += max_line_h;
+    }
+
+    // Trailing empty line: if the document ends with '\n', emit a zero-length
+    // LayoutRun so C has a line for every cursor-occupiable position.
+    // This is the SSOT — click and Cmd+Down both resolve through B's lines.
+    if !text.is_empty() && text.last() == Some(&b'\n') {
+        let trailing_h = all_runs.last().map_or(line_height, |r| r.height);
+        let trailing_asc = all_runs.last().map_or(0.0, |r| r.max_ascender_f);
+        all_runs.push(LayoutRun {
+            byte_offset: text.len() as u32,
+            byte_length: 0,
+            y,
+            height: trailing_h,
+            max_ascender_f: trailing_asc,
+        });
+        y += trailing_h as i32;
     }
 
     let total_line_count = all_runs.len() as u32;
@@ -492,10 +634,15 @@ fn compute_rich_layout(vp: &ViewportState, doc_buf: &[u8]) {
     // Shape visible runs (segments within visible lines).
     let mut shaped_runs: Vec<(Vec<scene::ShapedGlyph>, i32)> = Vec::new();
     let mut visible_run_metas: Vec<RichRunMeta> = Vec::new();
+    let mut style_table = StyleTable::new();
 
     for (line_idx, run) in all_runs.iter().enumerate() {
-        if run.y + line_height as i32 <= scroll_pt || run.y > scroll_pt + viewport_h {
+        if run.y + run.height as i32 <= scroll_pt || run.y > scroll_pt + viewport_h {
             continue;
+        }
+        // Trailing empty line has no line_break entry — nothing to shape.
+        if line_idx >= line_breaks.len() {
+            break;
         }
 
         // Find segments in this line.
@@ -527,9 +674,18 @@ fn compute_rich_layout(vp: &ViewportState, doc_buf: &[u8]) {
                     // New segment — shape the previous one.
                     let seg_end = mc.byte_offset as usize;
                     shape_rich_segment_into(
-                        doc_buf, fonts, text, start, seg_end, sid, run.y,
+                        doc_buf,
+                        fonts,
+                        text,
+                        start,
+                        seg_end,
+                        sid,
+                        run.y,
+                        run.max_ascender_f,
                         &mut pen_x_mpt,
-                        &mut shaped_runs, &mut visible_run_metas,
+                        &mut shaped_runs,
+                        &mut visible_run_metas,
+                        &mut style_table,
                     );
                     seg_start = Some((mc.byte_offset as usize, styled_run.style_id));
                 }
@@ -544,42 +700,34 @@ fn compute_rich_layout(vp: &ViewportState, doc_buf: &[u8]) {
             let seg_end = (lb.byte_end as usize).min(text.len());
             // Trim trailing newlines.
             let mut end = seg_end;
-            while end > start && (end > text.len() || (end <= text.len() && end > 0 && text[end - 1] == b'\n')) {
+            while end > start
+                && (end > text.len() || (end <= text.len() && end > 0 && text[end - 1] == b'\n'))
+            {
                 end -= 1;
             }
             if end > start {
                 shape_rich_segment_into(
-                    doc_buf, fonts, text, start, end, sid, run.y,
+                    doc_buf,
+                    fonts,
+                    text,
+                    start,
+                    end,
+                    sid,
+                    run.y,
+                    run.max_ascender_f,
                     &mut pen_x_mpt,
-                    &mut shaped_runs, &mut visible_run_metas,
+                    &mut shaped_runs,
+                    &mut visible_run_metas,
+                    &mut style_table,
                 );
             }
         }
     }
 
-    // Build style registry.
-    // We need style entries for all fonts used. Build dynamically.
-    let mut style_table: Vec<(u32, u16, u16, u16)> = Vec::new();
-    add_font_style(&mut style_table, fonts.mono_content_id, fonts.mono_ascender as u16, (-fonts.mono_descender) as u16, fonts.mono_upem);
-    add_font_style(&mut style_table, fonts.sans_content_id, fonts.sans_ascender as u16, (-fonts.sans_descender) as u16, fonts.sans_upem);
-
+    // Build style registry from the dynamic style table. Each unique
+    // (content_id, weight, opsz) combination gets its own entry.
     let mut style_buf = [0u8; 8192];
-    let mut entries: Vec<protocol::content::StyleRegistryEntry> = Vec::new();
-    for (i, st) in style_table.iter().enumerate() {
-        entries.push(protocol::content::StyleRegistryEntry {
-            style_id: i as u32,
-            content_id: st.0,
-            ascent_fu: st.1,
-            descent_fu: st.2,
-            upem: st.3,
-            axis_count: 0,
-            _pad: 0,
-            axes: [protocol::content::StyleAxisValue {
-                tag: [0; 4],
-                value: 0.0,
-            }; protocol::content::MAX_STYLE_AXES],
-        });
-    }
+    let entries = style_table.to_registry_entries();
     let style_size = protocol::content::write_style_registry(&mut style_buf, &entries);
 
     // Write results. For rich text, we write all_runs as line info and
@@ -597,13 +745,99 @@ fn compute_rich_layout(vp: &ViewportState, doc_buf: &[u8]) {
     );
 }
 
-fn add_font_style(table: &mut Vec<(u32, u16, u16, u16)>, content_id: u32, asc: u16, desc: u16, upem: u16) {
-    for entry in table.iter() {
-        if entry.0 == content_id {
-            return;
+/// Dynamic style table — assigns sequential style_ids to unique
+/// (content_id, axes) combinations. Each weight/opsz/italic variant
+/// gets its own style_id so the renderer can apply the correct axes.
+struct StyleTable {
+    entries: Vec<StyleTableEntry>,
+}
+
+struct StyleTableEntry {
+    content_id: u32,
+    ascent_fu: u16,
+    descent_fu: u16,
+    upem: u16,
+    weight: u16,
+    caret_skew: i16,
+    axes: [protocol::content::StyleAxisValue; protocol::content::MAX_STYLE_AXES],
+    axis_count: u8,
+}
+
+impl StyleTable {
+    fn new() -> Self {
+        Self {
+            entries: Vec::new(),
         }
     }
-    table.push((content_id, asc, desc, upem));
+
+    /// Get or assign a style_id for the given font + axes combination.
+    fn style_id_for(
+        &mut self,
+        content_id: u32,
+        axes: &[protocol::content::StyleAxisValue],
+        ascent_fu: u16,
+        descent_fu: u16,
+        upem: u16,
+        weight: u16,
+        caret_skew: i16,
+    ) -> u32 {
+        // Linear scan for dedup (typically < 20 entries).
+        for (i, e) in self.entries.iter().enumerate() {
+            if e.content_id == content_id && e.axis_count == axes.len() as u8 {
+                let mut match_axes = true;
+                for j in 0..axes.len() {
+                    if e.axes[j].tag != axes[j].tag
+                        || (e.axes[j].value - axes[j].value).abs() > 0.01
+                    {
+                        match_axes = false;
+                        break;
+                    }
+                }
+                if match_axes {
+                    return i as u32;
+                }
+            }
+        }
+        let id = self.entries.len() as u32;
+        let mut entry_axes = [protocol::content::StyleAxisValue {
+            tag: [0; 4],
+            value: 0.0,
+        }; protocol::content::MAX_STYLE_AXES];
+        let axis_count = axes.len().min(protocol::content::MAX_STYLE_AXES);
+        for (j, a) in axes.iter().take(axis_count).enumerate() {
+            entry_axes[j] = *a;
+        }
+        self.entries.push(StyleTableEntry {
+            content_id,
+            ascent_fu,
+            descent_fu,
+            upem,
+            weight,
+            caret_skew,
+            axes: entry_axes,
+            axis_count: axis_count as u8,
+        });
+        id
+    }
+
+    fn to_registry_entries(&self) -> Vec<protocol::content::StyleRegistryEntry> {
+        self.entries
+            .iter()
+            .enumerate()
+            .map(|(i, e)| protocol::content::StyleRegistryEntry {
+                style_id: i as u32,
+                content_id: e.content_id,
+                ascent_fu: e.ascent_fu,
+                descent_fu: e.descent_fu,
+                upem: e.upem,
+                axis_count: e.axis_count,
+                _pad: 0,
+                weight: e.weight,
+                caret_skew: e.caret_skew,
+                axes: e.axes,
+            })
+            .collect()
+    }
 }
 
 fn shape_rich_segment_into(
@@ -613,31 +847,49 @@ fn shape_rich_segment_into(
     start: usize,
     end: usize,
     style_id: u8,
-    y: i32,
+    line_y: i32,
+    line_max_asc_f: f32,
     pen_x_mpt: &mut i32,
     shaped_runs: &mut Vec<(Vec<scene::ShapedGlyph>, i32)>,
     metas: &mut Vec<RichRunMeta>,
+    style_table: &mut StyleTable,
 ) {
     let Some(style) = piecetable::style(doc_buf, style_id) else {
         return;
     };
-    let fi_data = match style.font_family {
-        piecetable::FONT_MONO => fonts.mono_data(),
-        piecetable::FONT_SERIF => fonts.serif_data(),
-        _ => fonts.sans_data(),
-    };
-    let fi_upem = match style.font_family {
-        piecetable::FONT_MONO => fonts.mono_upem,
-        piecetable::FONT_SERIF => fonts.serif_upem,
-        _ => fonts.sans_upem,
-    };
-    let fi_content_id = match style.font_family {
-        piecetable::FONT_MONO => fonts.mono_content_id,
-        piecetable::FONT_SERIF => fonts.serif_content_id,
-        _ => fonts.sans_content_id,
-    };
+    let italic = style.flags & piecetable::FLAG_ITALIC != 0;
+    let (fi_data, fi_upem, fi_content_id) = fonts.resolve_font(style.font_family, italic);
 
-    let _italic = style.flags & piecetable::FLAG_ITALIC != 0;
+    // Baseline alignment: compute exact offset in millipoints.
+    // By subtracting exact f32 ascenders before rounding, mixed-size baselines align
+    // to within 1 millipoint (0.001pt) instead of ~0.3pt with integer rounding.
+    let this_asc_f = {
+        let asc_fu = if italic {
+            match style.font_family {
+                piecetable::FONT_MONO => fonts.mono_italic_ascender.abs(),
+                piecetable::FONT_SERIF => fonts.serif_italic_ascender.abs(),
+                _ => fonts.sans_italic_ascender.abs(),
+            }
+        } else {
+            match style.font_family {
+                piecetable::FONT_MONO => fonts.mono_ascender.abs(),
+                piecetable::FONT_SERIF => fonts.serif_ascender.abs(),
+                _ => fonts.sans_ascender.abs(),
+            }
+        };
+        if fi_upem > 0 {
+            asc_fu as f32 * style.font_size_pt as f32 / fi_upem as f32
+        } else {
+            0.0
+        }
+    };
+    // Compute y in millipoints: line_y (points) * 1024 + baseline_offset (millipoints).
+    let baseline_offset_mpt = if line_max_asc_f > 0.0 {
+        ((line_max_asc_f - this_asc_f) * 1024.0 + 0.5) as i32
+    } else {
+        0
+    };
+    let y_mpt = line_y * 1024 + baseline_offset_mpt;
     let font_size = style.font_size_pt as u16;
 
     let mut axes_buf = [fonts::rasterize::AxisValue {
@@ -659,11 +911,65 @@ fn shape_rich_segment_into(
     axis_count += 1;
     let axes = &axes_buf[..axis_count];
 
-    let seg_text = if end <= text.len() { &text[start..end] } else { &[] };
+    let seg_text = if end <= text.len() {
+        &text[start..end]
+    } else {
+        &[]
+    };
     let glyphs = shape_text(fi_data, seg_text, font_size, fi_upem, axes);
 
-    // Style ID 0 = mono, 1 = sans. For simplicity, map content_id.
-    let sid = if fi_content_id == fonts.mono_content_id { 0u32 } else { 1u32 };
+    // Dynamic style_id: unique per (content_id, weight, opsz) combination.
+    // Convert shaping axes to protocol axes for the style registry.
+    let mut proto_axes = [protocol::content::StyleAxisValue {
+        tag: [0; 4],
+        value: 0.0,
+    }; protocol::content::MAX_STYLE_AXES];
+    for (j, a) in axes
+        .iter()
+        .enumerate()
+        .take(protocol::content::MAX_STYLE_AXES)
+    {
+        proto_axes[j] = protocol::content::StyleAxisValue {
+            tag: a.tag,
+            value: a.value,
+        };
+    }
+    let asc_fu = if italic {
+        match style.font_family {
+            piecetable::FONT_MONO => fonts.mono_italic_ascender.unsigned_abs(),
+            piecetable::FONT_SERIF => fonts.serif_italic_ascender.unsigned_abs(),
+            _ => fonts.sans_italic_ascender.unsigned_abs(),
+        }
+    } else {
+        match style.font_family {
+            piecetable::FONT_MONO => fonts.mono_ascender.unsigned_abs(),
+            piecetable::FONT_SERIF => fonts.serif_ascender.unsigned_abs(),
+            _ => fonts.sans_ascender.unsigned_abs(),
+        }
+    };
+    let desc_fu = if italic {
+        match style.font_family {
+            piecetable::FONT_MONO => fonts.mono_italic_descender.unsigned_abs(),
+            piecetable::FONT_SERIF => fonts.serif_italic_descender.unsigned_abs(),
+            _ => fonts.sans_italic_descender.unsigned_abs(),
+        }
+    } else {
+        match style.font_family {
+            piecetable::FONT_MONO => fonts.mono_descender.unsigned_abs(),
+            piecetable::FONT_SERIF => fonts.serif_descender.unsigned_abs(),
+            _ => fonts.sans_descender.unsigned_abs(),
+        }
+    };
+    let caret_skew_fp = (fonts.resolve_caret_skew(style.font_family, italic) * 10_000.0) as i16;
+    let sid = style_table.style_id_for(
+        fi_content_id,
+        &proto_axes[..axis_count],
+        asc_fu,
+        desc_fu,
+        fi_upem,
+        style.weight,
+        caret_skew_fp,
+    );
     let color = pack_style_color(style);
 
     // Compute pen advance for this run (sum of glyph x_advances).
@@ -677,7 +983,7 @@ fn shape_rich_segment_into(
         .sum();
     *pen_x_mpt += advance_mpt;
 
-    shaped_runs.push((glyphs, y));
+    shaped_runs.push((glyphs, y_mpt));
     metas.push(RichRunMeta {
         style_id: sid,
         color_rgba: color,
@@ -697,14 +1003,18 @@ fn pack_style_color(style: &piecetable::Style) -> u32 {
     ((r as u32) << 24) | ((g as u32) << 16) | ((b as u32) << 8) | (a as u32)
 }
 
-fn compute_rich_line_height(
+/// Returns (line_height, max_ascender_f) for a rich text line.
+/// max_ascender_f is the largest ascender (exact fractional points) on the line — used
+/// for baseline alignment of mixed-size runs.
+fn compute_rich_line_metrics(
     doc_buf: &[u8],
     measured: &[layout_lib::MeasuredChar],
     lb: &layout_lib::LineBreak,
     fonts: &FontState,
     default_line_height: i32,
-) -> i32 {
+) -> (i32, f32) {
     let mut max_h = default_line_height;
+    let mut max_asc_f: f32 = 0.0;
     for mc in measured {
         if mc.byte_offset < lb.byte_start {
             continue;
@@ -719,25 +1029,49 @@ fn compute_rich_line_height(
         let Some(style) = piecetable::style(doc_buf, run.style_id) else {
             continue;
         };
-        let (asc, desc, gap, upem) = match style.font_family {
-            piecetable::FONT_MONO => (
-                fonts.mono_ascender as i32,
-                fonts.mono_descender as i32,
-                fonts.mono_line_gap as i32,
-                fonts.mono_upem,
-            ),
-            piecetable::FONT_SERIF => (
-                fonts.serif_ascender as i32,
-                fonts.serif_descender as i32,
-                fonts.serif_line_gap as i32,
-                fonts.serif_upem,
-            ),
-            _ => (
-                fonts.sans_ascender as i32,
-                fonts.sans_descender as i32,
-                fonts.sans_line_gap as i32,
-                fonts.sans_upem,
-            ),
+        let italic = style.flags & piecetable::FLAG_ITALIC != 0;
+        let (asc, desc, gap, upem) = if italic {
+            match style.font_family {
+                piecetable::FONT_MONO => (
+                    fonts.mono_italic_ascender as i32,
+                    fonts.mono_italic_descender as i32,
+                    fonts.mono_italic_line_gap as i32,
+                    fonts.mono_italic_upem,
+                ),
+                piecetable::FONT_SERIF => (
+                    fonts.serif_italic_ascender as i32,
+                    fonts.serif_italic_descender as i32,
+                    fonts.serif_italic_line_gap as i32,
+                    fonts.serif_italic_upem,
+                ),
+                _ => (
+                    fonts.sans_italic_ascender as i32,
+                    fonts.sans_italic_descender as i32,
+                    fonts.sans_italic_line_gap as i32,
+                    fonts.sans_italic_upem,
+                ),
+            }
+        } else {
+            match style.font_family {
+                piecetable::FONT_MONO => (
+                    fonts.mono_ascender as i32,
+                    fonts.mono_descender as i32,
+                    fonts.mono_line_gap as i32,
+                    fonts.mono_upem,
+                ),
+                piecetable::FONT_SERIF => (
+                    fonts.serif_ascender as i32,
+                    fonts.serif_descender as i32,
+                    fonts.serif_line_gap as i32,
+                    fonts.serif_upem,
+                ),
+                _ => (
+                    fonts.sans_ascender as i32,
+                    fonts.sans_descender as i32,
+                    fonts.sans_line_gap as i32,
+                    fonts.sans_upem,
+                ),
+            }
         };
         if upem == 0 {
             continue;
@@ -748,8 +1082,13 @@ fn compute_rich_line_height(
         if h_i > max_h {
             max_h = h_i;
         }
+        // Track the max ascender (exact fractional points) for baseline alignment.
+        let asc_exact = asc.abs() as f32 * style.font_size_pt as f32 / upem as f32;
+        if asc_exact > max_asc_f {
+            max_asc_f = asc_exact;
+        }
     }
-    max_h
+    (max_h, max_asc_f)
 }
 
 fn char_advance_pt(
@@ -804,7 +1143,8 @@ fn write_layout_results(
         glyph_data_used += (glyphs.len() as u32) * glyph_size;
     }
 
-    let style_off = layout::style_registry_offset(total_line_count, visible_run_count, glyph_data_used);
+    let style_off =
+        layout::style_registry_offset(total_line_count, visible_run_count, glyph_data_used);
     let total_needed = style_off + style_registry.len();
 
     if total_needed > capacity {
@@ -822,7 +1162,7 @@ fn write_layout_results(
             byte_offset: run.byte_offset,
             byte_length: run.byte_length,
             y_pt: run.y,
-            line_height_pt: line_height,
+            line_height_pt: run.height,
         };
         // SAFETY: offset within allocated region, LineInfo is repr(C).
         unsafe {
@@ -844,7 +1184,7 @@ fn write_layout_results(
             glyph_data_offset: glyph_cursor,
             glyph_count: glyphs.len() as u16,
             font_size: 0, // mono: font_size comes from viewport state
-            y_pt: *y,
+            y_mpt: *y * 1024, // plain text: y is in points, convert to mpt
             style_id: 0, // mono style
             color_rgba: text_color_rgba,
             byte_offset: bo,
@@ -951,7 +1291,8 @@ fn write_rich_layout_results(
         glyph_data_used += (glyphs.len() as u32) * glyph_size;
     }
 
-    let style_off = layout::style_registry_offset(total_line_count, visible_run_count, glyph_data_used);
+    let style_off =
+        layout::style_registry_offset(total_line_count, visible_run_count, glyph_data_used);
     let total_needed = style_off + style_registry.len();
 
     if total_needed > capacity {
@@ -969,7 +1310,7 @@ fn write_rich_layout_results(
             byte_offset: run.byte_offset,
             byte_length: run.byte_length,
             y_pt: run.y,
-            line_height_pt: line_height,
+            line_height_pt: run.height,
         };
         // SAFETY: within allocated region.
         unsafe {
@@ -998,7 +1339,7 @@ fn write_rich_layout_results(
             glyph_data_offset: glyph_cursor,
             glyph_count: glyphs.len() as u16,
             font_size: meta.font_size,
-            y_pt: *y,
+            y_mpt: *y, // rich text: already in millipoints from shape_rich_segment_into
             style_id: meta.style_id,
             color_rgba: meta.color_rgba,
             byte_offset: meta.byte_offset,
@@ -1073,8 +1414,7 @@ fn discover_fonts(content_va: usize, content_size: u32) {
     }
 
     // SAFETY: content_va is page-aligned mapped shared memory with valid ContentRegionHeader.
-    let header =
-        unsafe { &*(content_va as *const protocol::content::ContentRegionHeader) };
+    let header = unsafe { &*(content_va as *const protocol::content::ContentRegionHeader) };
 
     let s = state();
 
@@ -1094,6 +1434,7 @@ fn discover_fonts(content_va: usize, content_size: u32) {
             s.fonts.mono_descender = fm.descent;
             s.fonts.mono_line_gap = fm.line_gap;
         }
+        s.fonts.mono_caret_skew = fonts::rasterize::caret_skew(data);
     }
 
     // Sans font.
@@ -1111,6 +1452,7 @@ fn discover_fonts(content_va: usize, content_size: u32) {
             s.fonts.sans_descender = fm.descent;
             s.fonts.sans_line_gap = fm.line_gap;
         }
+        s.fonts.sans_caret_skew = fonts::rasterize::caret_skew(data);
     }
 
     // Serif font.
@@ -1128,9 +1470,10 @@ fn discover_fonts(content_va: usize, content_size: u32) {
             s.fonts.serif_descender = fm.descent;
             s.fonts.serif_line_gap = fm.line_gap;
         }
+        s.fonts.serif_caret_skew = fonts::rasterize::caret_skew(data);
     }
 
-    // Italic variants.
+    // Italic variants (with full metrics + content_id).
     if let Some(entry) =
         protocol::content::find_entry(&header, protocol::content::CONTENT_ID_FONT_MONO_ITALIC)
     {
@@ -1138,9 +1481,14 @@ fn discover_fonts(content_va: usize, content_size: u32) {
         let data = unsafe { core::slice::from_raw_parts(ptr, entry.length as usize) };
         s.fonts.mono_italic_data_ptr = ptr;
         s.fonts.mono_italic_data_len = entry.length as usize;
+        s.fonts.mono_italic_content_id = protocol::content::CONTENT_ID_FONT_MONO_ITALIC;
         if let Some(fm) = fonts::rasterize::font_metrics(data) {
             s.fonts.mono_italic_upem = fm.units_per_em;
+            s.fonts.mono_italic_ascender = fm.ascent;
+            s.fonts.mono_italic_descender = fm.descent;
+            s.fonts.mono_italic_line_gap = fm.line_gap;
         }
+        s.fonts.mono_italic_caret_skew = fonts::rasterize::caret_skew(data);
     }
     if let Some(entry) =
         protocol::content::find_entry(&header, protocol::content::CONTENT_ID_FONT_SANS_ITALIC)
@@ -1149,9 +1497,14 @@ fn discover_fonts(content_va: usize, content_size: u32) {
         let data = unsafe { core::slice::from_raw_parts(ptr, entry.length as usize) };
         s.fonts.sans_italic_data_ptr = ptr;
         s.fonts.sans_italic_data_len = entry.length as usize;
+        s.fonts.sans_italic_content_id = protocol::content::CONTENT_ID_FONT_SANS_ITALIC;
         if let Some(fm) = fonts::rasterize::font_metrics(data) {
             s.fonts.sans_italic_upem = fm.units_per_em;
+            s.fonts.sans_italic_ascender = fm.ascent;
+            s.fonts.sans_italic_descender = fm.descent;
+            s.fonts.sans_italic_line_gap = fm.line_gap;
         }
+        s.fonts.sans_italic_caret_skew = fonts::rasterize::caret_skew(data);
     }
     if let Some(entry) =
         protocol::content::find_entry(&header, protocol::content::CONTENT_ID_FONT_SERIF_ITALIC)
@@ -1160,9 +1513,14 @@ fn discover_fonts(content_va: usize, content_size: u32) {
         let data = unsafe { core::slice::from_raw_parts(ptr, entry.length as usize) };
         s.fonts.serif_italic_data_ptr = ptr;
         s.fonts.serif_italic_data_len = entry.length as usize;
+        s.fonts.serif_italic_content_id = protocol::content::CONTENT_ID_FONT_SERIF_ITALIC;
         if let Some(fm) = fonts::rasterize::font_metrics(data) {
             s.fonts.serif_italic_upem = fm.units_per_em;
+            s.fonts.serif_italic_ascender = fm.ascent;
+            s.fonts.serif_italic_descender = fm.descent;
+            s.fonts.serif_italic_line_gap = fm.line_gap;
         }
+        s.fonts.serif_italic_caret_skew = fonts::rasterize::caret_skew(data);
     }
 
     sys::print(b"  layout-engine: fonts discovered\n");

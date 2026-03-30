@@ -27,6 +27,8 @@ fn make_entry(style_id: u32, content_id: u32) -> StyleRegistryEntry {
         upem: 1000,
         axis_count: 2,
         _pad: 0,
+        weight: 400,
+        caret_skew: 0,
         axes,
     }
 }
@@ -56,6 +58,8 @@ fn single_entry_round_trip() {
     assert_eq!(entries[0].descent_fu, 200);
     assert_eq!(entries[0].upem, 1000);
     assert_eq!(entries[0].axis_count, 2);
+    assert_eq!(entries[0].weight, 400);
+    assert_eq!(entries[0].caret_skew, 0);
     assert_eq!(&entries[0].axes[0].tag, b"wght");
     assert_eq!(entries[0].axes[0].value, 400.0);
     assert_eq!(&entries[0].axes[1].tag, b"ital");
@@ -64,6 +68,23 @@ fn single_entry_round_trip() {
     for i in 2..MAX_STYLE_AXES {
         assert_eq!(entries[0].axes[i].value, 0.0);
     }
+}
+
+#[test]
+fn weight_and_caret_skew_round_trip() {
+    let mut buf = [0u8; 1024];
+    let mut entry = make_entry(0, 10);
+    entry.weight = 700;
+    entry.caret_skew = -1655; // Inter Italic: -(339/2048) * 10000
+    let written = write_style_registry(&mut buf, &[entry]);
+    assert!(written > 0);
+
+    let entries = read_style_registry(&buf).expect("should parse");
+    assert_eq!(entries[0].weight, 700);
+    assert_eq!(entries[0].caret_skew, -1655);
+    // Verify decode to f32
+    let skew_f32 = entries[0].caret_skew as f32 / 10_000.0;
+    assert!((skew_f32 - (-0.1655)).abs() < 0.001);
 }
 
 #[test]

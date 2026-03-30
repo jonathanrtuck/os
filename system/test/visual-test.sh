@@ -105,8 +105,180 @@ EVENTS
     run_verify "$CAPTURE_DIR/after-type.png" "$SPEC_DIR/after-type.spec"
 }
 
+test_click_placement() {
+    info "Test: click-placement (click mid-line places cursor correctly)"
+    # At 800x600, "Style Stress Test" title is on line 0 near x=230,y=55.
+    # Click mid-word, type 'Z', verify 'Z' appears in the title region.
+    # Uses move+wait before click so pointer register is fresh.
+    cat > "$CAPTURE_DIR/click-placement.events" << 'EVENTS'
+wait 60
+move 330 68
+wait 5
+click 330 68
+wait 20
+type Z
+wait 20
+capture /tmp/visual-tests/click-placement.png
+EVENTS
+    hypervisor "$KERNEL" --drive "$DISK" --background \
+        --resolution 800x600 \
+        --events "$CAPTURE_DIR/click-placement.events" \
+        --timeout "$TIMEOUT" >/dev/null 2>&1
+    run_verify "$CAPTURE_DIR/click-placement.png" "$SPEC_DIR/click-placement.spec"
+}
+
+test_dblclick_select() {
+    info "Test: dblclick-select (double-click selects word with highlight)"
+    # Double-click on "Style" at (280,60) in 800x600.
+    # Selection highlight = blue-tinted pixels in the word region.
+    cat > "$CAPTURE_DIR/dblclick-select.events" << 'EVENTS'
+wait 60
+move 280 60
+wait 5
+dblclick 280 60
+wait 20
+capture /tmp/visual-tests/dblclick-select.png
+EVENTS
+    hypervisor "$KERNEL" --drive "$DISK" --background \
+        --resolution 800x600 \
+        --events "$CAPTURE_DIR/dblclick-select.events" \
+        --timeout "$TIMEOUT" >/dev/null 2>&1
+    run_verify "$CAPTURE_DIR/dblclick-select.png" "$SPEC_DIR/dblclick-select.spec"
+}
+
+test_tripleclick_line() {
+    info "Test: tripleclick-line (triple-click selects entire line in rich text)"
+    # Triple-click on line 2 at (300,115) in 800x600.
+    # After replacing selection with 'Z', the line content changes.
+    # Verifies triple-click selects the full line (not just byte 0..0).
+    cat > "$CAPTURE_DIR/tripleclick-line.events" << 'EVENTS'
+wait 60
+move 300 115
+wait 5
+click 300 115
+wait 2
+click 300 115
+wait 2
+click 300 115
+wait 20
+type Z
+wait 20
+capture /tmp/visual-tests/tripleclick-line.png
+EVENTS
+    hypervisor "$KERNEL" --drive "$DISK" --background \
+        --resolution 800x600 \
+        --events "$CAPTURE_DIR/tripleclick-line.events" \
+        --timeout "$TIMEOUT" >/dev/null 2>&1
+    run_verify "$CAPTURE_DIR/tripleclick-line.png" "$SPEC_DIR/tripleclick-line.spec"
+}
+
+test_font_weights() {
+    info "Test: font-weights (weight variation in weight labels line)"
+    # At 1600x1200, weight labels "Thin ExLt Light...Black" span y=320-336.
+    # Verifies that different weight variants render with different stroke densities.
+    hypervisor "$KERNEL" --drive "$DISK" --background \
+        --resolution 1600x1200 \
+        --capture 90 "$CAPTURE_DIR/font-weights.png" \
+        --timeout "$TIMEOUT" >/dev/null 2>&1
+    run_verify "$CAPTURE_DIR/font-weights.png" "$SPEC_DIR/font-weights.spec"
+}
+
+test_caret_height() {
+    info "Test: caret-height (text caret has correct position and height)"
+    # Capture baseline (no cursor), then click to place cursor on subtitle line.
+    # At 1600x1200, subtitle at y~120. Caret should be 15-65px tall (font metrics).
+    hypervisor "$KERNEL" --drive "$DISK" --background \
+        --resolution 1600x1200 \
+        --capture 90 "$CAPTURE_DIR/caret-baseline.png" \
+        --timeout "$TIMEOUT" >/dev/null 2>&1
+    cat > "$CAPTURE_DIR/caret-height.events" << 'EVENTS'
+wait 60
+move 600 120
+wait 5
+click 600 120
+wait 15
+capture /tmp/visual-tests/caret-height.png
+EVENTS
+    hypervisor "$KERNEL" --drive "$DISK" --background \
+        --resolution 1600x1200 \
+        --events "$CAPTURE_DIR/caret-height.events" \
+        --timeout "$TIMEOUT" >/dev/null 2>&1
+    run_verify "$CAPTURE_DIR/caret-height.png" "$SPEC_DIR/caret-height.spec"
+}
+
+test_italic_slant() {
+    info "Test: italic-slant (italic text has visual slant vs roman)"
+    hypervisor "$KERNEL" --drive "$DISK" --background \
+        --resolution 1600x1200 \
+        --capture 90 "$CAPTURE_DIR/italic-slant.png" \
+        --timeout "$TIMEOUT" >/dev/null 2>&1
+    run_verify "$CAPTURE_DIR/italic-slant.png" "$SPEC_DIR/italic-slant.spec"
+}
+
+test_baseline_mixed() {
+    info "Test: baseline-mixed (mixed-size text baseline alignment)"
+    hypervisor "$KERNEL" --drive "$DISK" --background \
+        --resolution 1600x1200 \
+        --capture 90 "$CAPTURE_DIR/baseline-mixed.png" \
+        --timeout "$TIMEOUT" >/dev/null 2>&1
+    run_verify "$CAPTURE_DIR/baseline-mixed.png" "$SPEC_DIR/baseline-mixed.spec"
+}
+
+test_underline_below() {
+    info "Test: underline-below (underline decoration below baseline)"
+    hypervisor "$KERNEL" --drive "$DISK" --background \
+        --resolution 1600x1200 \
+        --capture 90 "$CAPTURE_DIR/underline-below.png" \
+        --timeout "$TIMEOUT" >/dev/null 2>&1
+    run_verify "$CAPTURE_DIR/underline-below.png" "$SPEC_DIR/underline-below.spec"
+}
+
+test_cursor_mixed() {
+    info "Test: cursor-mixed (click on mixed-size line places cursor correctly)"
+    # At 1600x1200, click on small text in right side of line 1.
+    # The small text follows the large "Sans 36pt Bold Green".
+    cat > "$CAPTURE_DIR/cursor-mixed.events" << 'EVENTS'
+wait 60
+move 850 160
+wait 5
+click 850 160
+wait 20
+type Z
+wait 20
+capture /tmp/visual-tests/cursor-mixed.png
+EVENTS
+    hypervisor "$KERNEL" --drive "$DISK" --background \
+        --resolution 1600x1200 \
+        --events "$CAPTURE_DIR/cursor-mixed.events" \
+        --timeout "$TIMEOUT" >/dev/null 2>&1
+    run_verify "$CAPTURE_DIR/cursor-mixed.png" "$SPEC_DIR/cursor-mixed.spec"
+}
+
+test_cursor_italic() {
+    info "Test: cursor-italic (caret skews near italic text)"
+    # Capture baseline (no cursor) at 1600x1200.
+    hypervisor "$KERNEL" --drive "$DISK" --background \
+        --resolution 1600x1200 \
+        --capture 90 "$CAPTURE_DIR/italic-baseline.png" \
+        --timeout "$TIMEOUT" >/dev/null 2>&1
+    # Click on italic text ("Sans 40pt Italic Magenta", y~325 at 1600x1200).
+    cat > "$CAPTURE_DIR/cursor-italic.events" << 'EVENTS'
+wait 60
+move 500 325
+wait 5
+click 500 325
+wait 15
+capture /tmp/visual-tests/cursor-italic.png
+EVENTS
+    hypervisor "$KERNEL" --drive "$DISK" --background \
+        --resolution 1600x1200 \
+        --events "$CAPTURE_DIR/cursor-italic.events" \
+        --timeout "$TIMEOUT" >/dev/null 2>&1
+    run_verify "$CAPTURE_DIR/cursor-italic.png" "$SPEC_DIR/cursor-italic.spec"
+}
+
 # All test names in run order.
-ALL_TESTS="boot-idle cursor-dark cursor-page after-type"
+ALL_TESTS="boot-idle cursor-dark cursor-page after-type click-placement dblclick-select tripleclick-line font-weights caret-height italic-slant baseline-mixed underline-below cursor-mixed cursor-italic"
 
 # ── Main ──────────────────────────────────────────────────────────
 
