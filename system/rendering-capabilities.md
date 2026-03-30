@@ -84,6 +84,7 @@ Hardware cursor decoupled from the content rendering pipeline:
 
 - **Shared pointer state register** — atomic u64 in init-allocated shared memory replaces MSG_POINTER_ABS ring messages. Eliminates input ring overflow for pointer events
 - **Cursor-only frames** — metal-render detects `!scene_changed && cursor_moved` and sends a lightweight cursor-plane-only command (no scene walk)
+- **Cursor shadow** — blurred, offset copy of the cursor path baked into the cursor texture (96×96px). Shadow pass renders path in shadow color at offset, 3-pass box blur (sigma=3–4px), then composited under the crisp cursor. Works with both GPU compositing and hardware cursor (NSCursor) paths
 - **State vs event distinction** at the IPC level: pointer position is continuous state (latest wins), button clicks are discrete events (every one matters)
 
 ### Coordinate system

@@ -11,8 +11,9 @@ use crate::{
     FN_FRAGMENT_SOLID, FN_FRAGMENT_TEXTURED, FN_VERTEX_MAIN, FN_VERTEX_STENCIL, IMG_TEX_DIM,
     LIB_SHADERS, PIPE_DITHER, PIPE_GLYPH, PIPE_ROUNDED_RECT, PIPE_SHADOW, PIPE_SOLID,
     PIPE_SOLID_NO_MSAA, PIPE_STENCIL_WRITE, PIPE_TEXTURED, SAMPLER_LINEAR, SAMPLER_NEAREST,
-    SAMPLE_COUNT, TEX_ATLAS, TEX_BLUR_A, TEX_BLUR_B, TEX_CURSOR_MSAA, TEX_CURSOR_RESOLVE,
-    TEX_CURSOR_SRGB, TEX_CURSOR_STENCIL, TEX_IMAGE, TEX_MSAA, TEX_RESOLVE, TEX_STENCIL,
+    SAMPLE_COUNT, TEX_ATLAS, TEX_BLUR_A, TEX_BLUR_B, TEX_CURSOR_BLUR_A, TEX_CURSOR_BLUR_B,
+    TEX_CURSOR_MSAA, TEX_CURSOR_RESOLVE, TEX_CURSOR_SRGB, TEX_CURSOR_STENCIL, TEX_IMAGE, TEX_MSAA,
+    TEX_RESOLVE, TEX_STENCIL,
 };
 
 pub(crate) fn setup_pipelines(
@@ -319,6 +320,23 @@ pub(crate) fn setup_pipelines(
         metal::PIXEL_FORMAT_BGRA8_SRGB,
         1,
         metal::USAGE_SHADER_READ | metal::USAGE_RENDER_TARGET,
+    );
+    // Cursor shadow blur ping-pong textures (1x, float16 — same format as main blur).
+    cmdbuf.create_texture(
+        TEX_CURSOR_BLUR_A,
+        CURSOR_TEX_SIZE,
+        CURSOR_TEX_SIZE,
+        metal::PIXEL_FORMAT_RGBA16F,
+        1,
+        metal::USAGE_SHADER_READ | metal::USAGE_SHADER_WRITE,
+    );
+    cmdbuf.create_texture(
+        TEX_CURSOR_BLUR_B,
+        CURSOR_TEX_SIZE,
+        CURSOR_TEX_SIZE,
+        metal::PIXEL_FORMAT_RGBA16F,
+        1,
+        metal::USAGE_SHADER_READ | metal::USAGE_SHADER_WRITE,
     );
     send_setup(device, setup_vq, irq_handle, setup_dma, &cmdbuf);
     sys::print(b"     textures created\n");

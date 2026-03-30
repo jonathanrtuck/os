@@ -46,10 +46,10 @@ mod virtio_helpers;
 use atlas::{GlyphAtlas, ATLAS_HEIGHT, ATLAS_WIDTH};
 use dma::DmaBuf;
 use path::PathPointsBuf;
-use scene_walk::{
-    emit_quad, flush_solid_vertices, flush_vertices_raw, pack_blur_params, pack_copy_params,
-    scale_pointer_coord, BlurReq, ClipRect, ImageAtlas, RenderContext,
+use render::geometry::{
+    emit_quad, pack_blur_params, pack_copy_params, scale_pointer_coord, ClipRect, ImageAtlas,
 };
+use scene_walk::{flush_solid_vertices, flush_vertices_raw, BlurReq, RenderContext};
 use virtio_helpers::{send_render, send_setup};
 
 // ── Constants ────────────────────────────────────────────────────────────
@@ -125,10 +125,25 @@ pub(crate) const TEX_CURSOR_STENCIL: u32 = 58;
 pub(crate) const TEX_CURSOR_RESOLVE: u32 = 59;
 /// Cursor final output (1x, BGRA8_sRGB — for hardware cursor plane).
 pub(crate) const TEX_CURSOR_SRGB: u32 = 60;
-/// Cursor texture size in pixels.
-const CURSOR_TEX_SIZE: u16 = 64;
+/// Cursor shadow blur ping-pong texture A (1x, RGBA16Float).
+pub(crate) const TEX_CURSOR_BLUR_A: u32 = 61;
+/// Cursor shadow blur ping-pong texture B (1x, RGBA16Float).
+pub(crate) const TEX_CURSOR_BLUR_B: u32 = 62;
+/// Cursor texture size in pixels (96 to accommodate shadow bleed).
+const CURSOR_TEX_SIZE: u16 = 96;
 /// Cursor display size in points.
 const CURSOR_SIZE_PT: f32 = 24.0;
+
+// ── Cursor shadow parameters ────────────────────────────────────────────
+
+/// Shadow offset in viewbox units (rightward).
+const CURSOR_SHADOW_DX: f32 = 1.5;
+/// Shadow offset in viewbox units (downward).
+const CURSOR_SHADOW_DY: f32 = 1.5;
+/// Shadow blur sigma in pixels.
+const CURSOR_SHADOW_SIGMA: f32 = 4.0;
+/// Shadow color: black at 25% opacity (softened further by blur).
+const CURSOR_SHADOW_COLOR: scene::Color = scene::Color::rgba(0, 0, 0, 64);
 
 /// Maximum image texture dimension. All per-frame images are packed into
 /// sub-rectangles of this single atlas texture via `ImageAtlas`.
@@ -138,10 +153,9 @@ pub(crate) const IMG_TEX_DIM: u32 = 1024;
 
 /// Maximum vertex bytes per set_vertex_bytes call (Metal's 4KB limit).
 pub(crate) const MAX_INLINE_BYTES: usize = 4096;
-/// Bytes per vertex: position(f32x2) + texCoord(f32x2) + color(f32x4) = 32.
-pub(crate) const VERTEX_BYTES: usize = 32;
 /// Max quads per inline draw call: 4096 / (6 * 32) = 21.
-pub(crate) const MAX_QUADS_PER_DRAW: usize = MAX_INLINE_BYTES / (6 * VERTEX_BYTES);
+pub(crate) const MAX_QUADS_PER_DRAW: usize =
+    MAX_INLINE_BYTES / (6 * render::geometry::VERTEX_BYTES);
 
 /// MSAA sample count (1 = no MSAA, 4 = 4x MSAA).
 pub(crate) const SAMPLE_COUNT: u8 = 4;
@@ -834,7 +848,7 @@ pub extern "C" fn _start() -> ! {
             w: vw / scale,
             h: vh / scale,
         };
-        let mut image_atlas = ImageAtlas::new();
+        let mut image_atlas = ImageAtlas::new(IMG_TEX_DIM);
         {
             let mut render_ctx = RenderContext {
                 cmdbuf: &mut cmdbuf,
@@ -1052,19 +1066,27 @@ pub extern "C" fn _start() -> ! {
             // Read cursor metadata from the shared page header.
             // SAFETY: cursor_state_va is a valid shared page, shape_generation
             // was load-acquired above so all header fields are visible.
-            let (viewbox, stroke_w, hot_x, hot_y, fill_rgba, stroke_rgba, data_len, flags) =
-                unsafe {
-                    let base = cursor_state_va as *const u8;
-                    let viewbox = (base.add(8) as *const f32).read_unaligned();
-                    let stroke_w = (base.add(12) as *const f32).read_unaligned();
-                    let hot_x = (base.add(16) as *const f32).read_unaligned();
-                    let hot_y = (base.add(20) as *const f32).read_unaligned();
-                    let fill_rgba = (base.add(24) as *const u32).read_unaligned();
-                    let stroke_rgba = (base.add(28) as *const u32).read_unaligned();
-                    let data_len = (base.add(32) as *const u32).read_unaligned();
-                    let flags = (base.add(36) as *const u32).read_unaligned();
-                    (viewbox, stroke_w, hot_x, hot_y, fill_rgba, stroke_rgba, data_len, flags)
-                };
+            let (viewbox, stroke_w, hot_x, hot_y, fill_rgba, stroke_rgba, data_len, flags) = unsafe {
+                let base = cursor_state_va as *const u8;
+                let viewbox = (base.add(8) as *const f32).read_unaligned();
+                let stroke_w = (base.add(12) as *const f32).read_unaligned();
+                let hot_x = (base.add(16) as *const f32).read_unaligned();
+                let hot_y = (base.add(20) as *const f32).read_unaligned();
+                let fill_rgba = (base.add(24) as *const u32).read_unaligned();
+                let stroke_rgba = (base.add(28) as *const u32).read_unaligned();
+                let data_len = (base.add(32) as *const u32).read_unaligned();
+                let flags = (base.add(36) as *const u32).read_unaligned();
+                (
+                    viewbox,
+                    stroke_w,
+                    hot_x,
+                    hot_y,
+                    fill_rgba,
+                    stroke_rgba,
+                    data_len,
+                    flags,
+                )
+            };
 
             if data_len > 0 && viewbox > 0.0 {
                 // Read path command bytes from the data area.
@@ -1078,51 +1100,83 @@ pub extern "C" fn _start() -> ! {
 
                 let tex_sz = CURSOR_TEX_SIZE as f32;
                 let px_scale = (CURSOR_SIZE_PT * scale_factor) / viewbox;
-                // Margin in viewbox units for stroke overflow.
-                let margin_vb = stroke_w / 2.0 + 1.0;
+
+                // Margin in viewbox units: must accommodate stroke overflow
+                // AND the shadow's offset + blur bleed.
+                let stroke_margin = stroke_w / 2.0 + 1.0;
+                let shadow_pad_vb =
+                    (CURSOR_SHADOW_DX.max(CURSOR_SHADOW_DY) + CURSOR_SHADOW_SIGMA * 3.0) / px_scale;
+                let margin_vb = stroke_margin + shadow_pad_vb;
 
                 // Unpack colors.
                 let fill_color = scene::Color::rgba(
-                    (fill_rgba >> 24) as u8, (fill_rgba >> 16) as u8,
-                    (fill_rgba >> 8) as u8, fill_rgba as u8,
+                    (fill_rgba >> 24) as u8,
+                    (fill_rgba >> 16) as u8,
+                    (fill_rgba >> 8) as u8,
+                    fill_rgba as u8,
                 );
                 let stroke_color = scene::Color::rgba(
-                    (stroke_rgba >> 24) as u8, (stroke_rgba >> 16) as u8,
-                    (stroke_rgba >> 8) as u8, stroke_rgba as u8,
+                    (stroke_rgba >> 24) as u8,
+                    (stroke_rgba >> 16) as u8,
+                    (stroke_rgba >> 8) as u8,
+                    stroke_rgba as u8,
                 );
 
-                // ── Pass 1: Render cursor to MSAA float16 (same pipeline as main scene) ──
-                cmdbuf.begin_render_pass(
-                    TEX_CURSOR_MSAA, TEX_CURSOR_RESOLVE, TEX_CURSOR_STENCIL,
-                    metal::LOAD_CLEAR, metal::STORE_MSAA_RESOLVE,
-                    0.0, 0.0, 0.0, 0.0, // clear transparent
-                );
-
-                let contours = scene::DataRef { offset: 0, length: data_len };
+                let contours = scene::DataRef {
+                    offset: 0,
+                    length: data_len,
+                };
+                let stroke_only = flags & protocol::view::CursorState::FLAG_STROKE_ONLY != 0;
                 let mut cursor_verts: Vec<u8> = Vec::new();
 
-                // Stroke pass: expand stroke geometry, render with stroke color.
+                // Shadow offset in viewbox units.
+                let shadow_dx_vb = CURSOR_SHADOW_DX / px_scale;
+                let shadow_dy_vb = CURSOR_SHADOW_DY / px_scale;
+
+                // ── Shadow pass: Render cursor path in shadow color at offset ──
+                // Renders to MSAA → resolves to CURSOR_RESOLVE, then copied
+                // to CURSOR_BLUR_A for the blur compute passes.
+                cmdbuf.begin_render_pass(
+                    TEX_CURSOR_MSAA,
+                    TEX_CURSOR_RESOLVE,
+                    TEX_CURSOR_STENCIL,
+                    metal::LOAD_CLEAR,
+                    metal::STORE_MSAA_RESOLVE,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                );
+
+                // Shadow position: cursor position + shadow offset.
+                let shadow_pos_x = margin_vb + shadow_dx_vb;
+                let shadow_pos_y = margin_vb + shadow_dy_vb;
+
+                // Re-render the same cursor paths but in shadow color.
                 let expanded = scene::stroke::expand_stroke(path_data, stroke_w);
                 if !expanded.is_empty() {
                     let stroke_contours = scene::DataRef {
-                        offset: 0, length: expanded.len() as u32,
+                        offset: 0,
+                        length: expanded.len() as u32,
                     };
                     path::draw_path_stencil_cover(
-                        &mut cmdbuf, &mut cursor_verts,
-                        &expanded, stroke_contours,
-                        stroke_color, scene::FillRule::Winding,
-                        margin_vb, margin_vb,   // node position (viewbox units)
-                        viewbox, viewbox,        // node size (viewbox units)
-                        tex_sz, tex_sz,          // viewport size (pixels)
-                        px_scale, 1.0,           // scale, opacity
+                        &mut cmdbuf,
+                        &mut cursor_verts,
+                        &expanded,
+                        stroke_contours,
+                        CURSOR_SHADOW_COLOR,
+                        scene::FillRule::Winding,
+                        shadow_pos_x,
+                        shadow_pos_y,
+                        viewbox,
+                        viewbox,
+                        tex_sz,
+                        tex_sz,
+                        px_scale,
+                        1.0,
                         path_buf,
                     );
                 }
-
-                // Body pass: fill for closed shapes, narrow inner stroke for
-                // stroke-only cursors (open paths where fill would create wedges).
-                let stroke_only =
-                    flags & protocol::view::CursorState::FLAG_STROKE_ONLY != 0;
                 if stroke_only {
                     let inner_w = stroke_w * 0.45;
                     let inner = scene::stroke::expand_stroke(path_data, inner_w);
@@ -1132,49 +1186,220 @@ pub extern "C" fn _start() -> ! {
                             length: inner.len() as u32,
                         };
                         path::draw_path_stencil_cover(
-                            &mut cmdbuf, &mut cursor_verts,
-                            &inner, inner_contours,
-                            fill_color, scene::FillRule::Winding,
-                            margin_vb, margin_vb,
-                            viewbox, viewbox,
-                            tex_sz, tex_sz,
-                            px_scale, 1.0,
+                            &mut cmdbuf,
+                            &mut cursor_verts,
+                            &inner,
+                            inner_contours,
+                            CURSOR_SHADOW_COLOR,
+                            scene::FillRule::Winding,
+                            shadow_pos_x,
+                            shadow_pos_y,
+                            viewbox,
+                            viewbox,
+                            tex_sz,
+                            tex_sz,
+                            px_scale,
+                            1.0,
                             path_buf,
                         );
                     }
                 } else {
                     path::draw_path_stencil_cover(
-                        &mut cmdbuf, &mut cursor_verts,
-                        path_data, contours,
-                        fill_color, scene::FillRule::Winding,
-                        margin_vb, margin_vb,
-                        viewbox, viewbox,
-                        tex_sz, tex_sz,
-                        px_scale, 1.0,
+                        &mut cmdbuf,
+                        &mut cursor_verts,
+                        path_data,
+                        contours,
+                        CURSOR_SHADOW_COLOR,
+                        scene::FillRule::Winding,
+                        shadow_pos_x,
+                        shadow_pos_y,
+                        viewbox,
+                        viewbox,
+                        tex_sz,
+                        tex_sz,
+                        px_scale,
+                        1.0,
                         path_buf,
                     );
                 }
                 flush_solid_vertices(&mut cmdbuf, &mut cursor_verts);
-
                 cmdbuf.end_render_pass();
 
-                // ── Pass 2: Dither/convert float16 → sRGB8 (same as main framebuffer) ──
+                // ── Blur shadow ──
+                // CURSOR_RESOLVE is already linear RGBA16F — blur directly
+                // without a color space conversion copy.
+                // First H pass reads CURSOR_RESOLVE, writes BLUR_B.
+                // First V pass reads BLUR_B, writes BLUR_A.
+                // Subsequent passes ping-pong between BLUR_A and BLUR_B.
+                let sz = CURSOR_TEX_SIZE as i32;
+                let halves = drawing::box_blur_widths(CURSOR_SHADOW_SIGMA);
+                for pass in 0..3u32 {
+                    let half = halves[pass as usize] as i32;
+                    let bp = pack_blur_params(half, sz, sz);
+
+                    // H blur: source → BLUR_B.
+                    let h_src = if pass == 0 {
+                        TEX_CURSOR_RESOLVE
+                    } else {
+                        TEX_CURSOR_BLUR_A
+                    };
+                    cmdbuf.begin_compute_pass();
+                    cmdbuf.set_compute_pipeline(CPIPE_BLUR_H);
+                    cmdbuf.set_compute_texture(h_src, 0);
+                    cmdbuf.set_compute_texture(TEX_CURSOR_BLUR_B, 1);
+                    cmdbuf.set_compute_bytes(0, &bp);
+                    cmdbuf.dispatch_threads(CURSOR_TEX_SIZE, CURSOR_TEX_SIZE, 1, 256, 1, 1);
+                    cmdbuf.end_compute_pass();
+
+                    // V blur: BLUR_B → BLUR_A.
+                    cmdbuf.begin_compute_pass();
+                    cmdbuf.set_compute_pipeline(CPIPE_BLUR_V);
+                    cmdbuf.set_compute_texture(TEX_CURSOR_BLUR_B, 0);
+                    cmdbuf.set_compute_texture(TEX_CURSOR_BLUR_A, 1);
+                    cmdbuf.set_compute_bytes(0, &bp);
+                    cmdbuf.dispatch_threads(CURSOR_TEX_SIZE, CURSOR_TEX_SIZE, 1, 1, 256, 1);
+                    cmdbuf.end_compute_pass();
+                }
+                // Blurred shadow is now in TEX_CURSOR_BLUR_A.
+
+                // ── Composite pass: blurred shadow + crisp cursor → MSAA → resolve ──
                 cmdbuf.begin_render_pass(
-                    TEX_CURSOR_SRGB, 0, 0,
-                    metal::LOAD_DONT_CARE, metal::STORE_STORE,
-                    0.0, 0.0, 0.0, 0.0,
+                    TEX_CURSOR_MSAA,
+                    TEX_CURSOR_RESOLVE,
+                    TEX_CURSOR_STENCIL,
+                    metal::LOAD_CLEAR,
+                    metal::STORE_MSAA_RESOLVE,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                );
+
+                // Draw blurred shadow as a fullscreen textured quad.
+                cmdbuf.set_render_pipeline(PIPE_TEXTURED);
+                cmdbuf.set_fragment_texture(TEX_CURSOR_BLUR_A, 0);
+                cmdbuf.set_fragment_sampler(SAMPLER_LINEAR, 0);
+                render::geometry::emit_textured_quad(
+                    &mut cursor_verts,
+                    0.0,
+                    0.0,
+                    tex_sz / px_scale,
+                    tex_sz / px_scale,
+                    tex_sz,
+                    tex_sz,
+                    px_scale,
+                    0.0,
+                    0.0,
+                    1.0,
+                    1.0,
+                    1.0,
+                    1.0,
+                    1.0,
+                    1.0,
+                );
+                flush_solid_vertices(&mut cmdbuf, &mut cursor_verts);
+                cmdbuf.set_render_pipeline(PIPE_SOLID);
+
+                // Draw crisp cursor paths on top (stroke + body).
+                if !expanded.is_empty() {
+                    let stroke_contours = scene::DataRef {
+                        offset: 0,
+                        length: expanded.len() as u32,
+                    };
+                    path::draw_path_stencil_cover(
+                        &mut cmdbuf,
+                        &mut cursor_verts,
+                        &expanded,
+                        stroke_contours,
+                        stroke_color,
+                        scene::FillRule::Winding,
+                        margin_vb,
+                        margin_vb,
+                        viewbox,
+                        viewbox,
+                        tex_sz,
+                        tex_sz,
+                        px_scale,
+                        1.0,
+                        path_buf,
+                    );
+                }
+                if stroke_only {
+                    let inner_w = stroke_w * 0.45;
+                    let inner = scene::stroke::expand_stroke(path_data, inner_w);
+                    if !inner.is_empty() {
+                        let inner_contours = scene::DataRef {
+                            offset: 0,
+                            length: inner.len() as u32,
+                        };
+                        path::draw_path_stencil_cover(
+                            &mut cmdbuf,
+                            &mut cursor_verts,
+                            &inner,
+                            inner_contours,
+                            fill_color,
+                            scene::FillRule::Winding,
+                            margin_vb,
+                            margin_vb,
+                            viewbox,
+                            viewbox,
+                            tex_sz,
+                            tex_sz,
+                            px_scale,
+                            1.0,
+                            path_buf,
+                        );
+                    }
+                } else {
+                    path::draw_path_stencil_cover(
+                        &mut cmdbuf,
+                        &mut cursor_verts,
+                        path_data,
+                        contours,
+                        fill_color,
+                        scene::FillRule::Winding,
+                        margin_vb,
+                        margin_vb,
+                        viewbox,
+                        viewbox,
+                        tex_sz,
+                        tex_sz,
+                        px_scale,
+                        1.0,
+                        path_buf,
+                    );
+                }
+                flush_solid_vertices(&mut cmdbuf, &mut cursor_verts);
+                cmdbuf.end_render_pass();
+
+                // ── Dither/convert float16 → sRGB8 (same as main framebuffer) ──
+                cmdbuf.begin_render_pass(
+                    TEX_CURSOR_SRGB,
+                    0,
+                    0,
+                    metal::LOAD_DONT_CARE,
+                    metal::STORE_STORE,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
                 );
                 cmdbuf.set_render_pipeline(PIPE_DITHER);
                 cmdbuf.set_fragment_texture(TEX_CURSOR_RESOLVE, 0);
                 cmdbuf.set_fragment_sampler(SAMPLER_NEAREST, 0);
-                // Fullscreen quad covering the cursor texture.
                 emit_quad(
                     &mut cursor_verts,
-                    0.0, 0.0,
-                    tex_sz / scale_factor, tex_sz / scale_factor,
-                    tex_sz, tex_sz,
+                    0.0,
+                    0.0,
+                    tex_sz / scale_factor,
+                    tex_sz / scale_factor,
+                    tex_sz,
+                    tex_sz,
                     scale_factor,
-                    1.0, 1.0, 1.0, 1.0,
+                    1.0,
+                    1.0,
+                    1.0,
+                    1.0,
                 );
                 flush_solid_vertices(&mut cmdbuf, &mut cursor_verts);
                 cmdbuf.end_render_pass();
@@ -1185,8 +1410,10 @@ pub extern "C" fn _start() -> ! {
 
                 cmdbuf.set_cursor_from_texture(
                     TEX_CURSOR_SRGB,
-                    CURSOR_TEX_SIZE, CURSOR_TEX_SIZE,
-                    hotspot_x_px, hotspot_y_px,
+                    CURSOR_TEX_SIZE,
+                    CURSOR_TEX_SIZE,
+                    hotspot_x_px,
+                    hotspot_y_px,
                 );
             }
         }
