@@ -2182,12 +2182,12 @@ fn affine_transform_partial_eq() {
 #[test]
 fn node_size_assertion_with_transform() {
     // VAL-XFORM-022: Node size compile-time assertion.
-    // After replacing content_transform (AffineTransform, 24B) with
-    // child_offset (f32, f32, 8B), Node shrank from 136 to 120 bytes.
+    // Node grew from 120 to 144 bytes with accessibility fields
+    // (role, level, state, name, relations).
     let size = core::mem::size_of::<Node>();
     assert_eq!(
-        size, 120,
-        "Node size should be 120 bytes with child_offset, got {}",
+        size, 144,
+        "Node size should be 144 bytes with accessibility fields, got {}",
         size
     );
 }
@@ -2703,8 +2703,8 @@ fn multiple_glyphs_nodes_coexist() {
 // ── Node size (VAL-SCENE-006) ────────────────────────────────────────
 
 #[test]
-fn node_size_is_120_bytes() {
-    assert_eq!(core::mem::size_of::<Node>(), 120);
+fn node_size_is_144_bytes() {
+    assert_eq!(core::mem::size_of::<Node>(), 144);
 }
 
 #[test]
@@ -4557,7 +4557,7 @@ fn path_cubic_to_encoding() {
 fn node_size_unchanged_with_path() {
     // VAL-CROSS-01: Node size assertion passes after adding Content::Path.
     let size = core::mem::size_of::<Node>();
-    assert_eq!(size, 120, "Node must remain 120 bytes with Path variant");
+    assert_eq!(size, 144, "Node must remain 144 bytes with Path variant");
 }
 
 #[test]

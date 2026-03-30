@@ -71,6 +71,118 @@ pub const CURSOR_POINTER: u8 = 1;
 /// Text/I-beam cursor (text content regions).
 pub const CURSOR_TEXT: u8 = 2;
 
+// ── Semantic roles ──────────────────────────────────────────────────
+//
+// Flat u8 enum for `Node::role`. A node has exactly one role.
+// ROLE_NONE means decorative — assistive technology skips it.
+// Values are grouped with gaps for future insertion without renumbering.
+
+/// No semantic meaning. Purely decorative (shadows, backgrounds).
+pub const ROLE_NONE: u8 = 0;
+
+// Document structure (1-19)
+/// The document itself — the root content surface.
+pub const ROLE_DOCUMENT: u8 = 1;
+/// Heading. Use `level` field for depth (1-6).
+pub const ROLE_HEADING: u8 = 2;
+/// Body text paragraph.
+pub const ROLE_PARAGRAPH: u8 = 3;
+/// Raster or vector image.
+pub const ROLE_IMAGE: u8 = 4;
+/// Preformatted / code block.
+pub const ROLE_CODE_BLOCK: u8 = 5;
+
+// System UI / chrome (20-39)
+/// Toolbar or title bar.
+pub const ROLE_TOOLBAR: u8 = 20;
+/// Static text label (document title, clock).
+pub const ROLE_LABEL: u8 = 21;
+/// Scrollable content viewport.
+pub const ROLE_SCROLL_VIEWPORT: u8 = 22;
+/// Decorative or informational icon.
+pub const ROLE_ICON: u8 = 23;
+
+// Editor (40-49)
+/// Text insertion cursor (caret).
+pub const ROLE_CARET: u8 = 40;
+/// Selected region highlight.
+pub const ROLE_SELECTION: u8 = 41;
+
+// Inline text semantics (50-69)
+/// Bold / strong emphasis.
+pub const ROLE_STRONG: u8 = 50;
+/// Italic / emphasis.
+pub const ROLE_EMPHASIS: u8 = 51;
+/// Inline code span.
+pub const ROLE_CODE: u8 = 52;
+
+// Future roles (values not yet assigned):
+//
+// Document structure: blockquote, list, list-item, table, table-row,
+//   table-cell, table-header, figure, caption, footnote, section,
+//   separator, annotation, link
+//
+// Inline text: subscript, superscript, insertion, deletion, highlight,
+//   abbreviation
+//
+// System UI: status-bar, menu-bar, menu, menu-item, tooltip,
+//   notification, landmark
+//
+// Widgets (80-119): button, toggle-button, text-field, search-field,
+//   checkbox, radio-button, switch, slider, progress, spinner,
+//   combobox, dropdown, tab-list, tab, tab-panel, dialog, alert
+//
+// Media (120-139): video, audio, canvas, embedded-object
+//
+// Compound document (140-159): embed-frame, split-pane
+
+// ── Accessibility state flags ──────────────────────────────────────
+//
+// Bitfield for `Node::state`. Test with `node.state & STATE_FOCUSED != 0`.
+// Multi-valued states use paired flags (e.g., ORIENTED + HORIZONTAL).
+
+/// Node currently has keyboard focus.
+pub const STATE_FOCUSED: u32 = 1 << 0;
+/// Node can receive keyboard focus.
+pub const STATE_FOCUSABLE: u32 = 1 << 1;
+/// Node is currently selected.
+pub const STATE_SELECTED: u32 = 1 << 2;
+/// Node is in edit mode (OS view/edit distinction).
+pub const STATE_EDITABLE: u32 = 1 << 3;
+/// Node is visible but not modifiable.
+pub const STATE_READ_ONLY: u32 = 1 << 4;
+/// Node is loading, decoding, or processing.
+pub const STATE_BUSY: u32 = 1 << 5;
+
+// Future state flags (bits not yet assigned):
+//
+// Core: DISABLED, EXPANDED, CHECKED, PRESSED, REQUIRED, INVALID,
+//   MODAL, MULTILINE, HAS_POPUP, DEFAULT, INDETERMINATE
+//
+// Multi-valued pairs: ORIENTED + HORIZONTAL (orientation specified +
+//   direction), CHECKABLE + CHECKED + INDETERMINATE, SORTABLE +
+//   SORT_ASCENDING
+
+// ── Accessibility relation types ───────────────────────────────────
+//
+// Encoded in the data buffer as 4-byte entries referenced by
+// `Node::relations`. Each entry: [type: u8, target: NodeId (u16), pad: u8].
+
+/// This node is named by the target node.
+pub const REL_LABELLED_BY: u8 = 1;
+/// This node is described by the target node.
+pub const REL_DESCRIBED_BY: u8 = 2;
+/// This node controls the target node's state or content.
+pub const REL_CONTROLS: u8 = 3;
+/// Reading order continues at the target node (overrides tree order).
+pub const REL_FLOWS_TO: u8 = 4;
+/// The active (focused) child within this composite widget.
+pub const REL_ACTIVE_DESCENDANT: u8 = 5;
+/// The target node explains this node's error state.
+pub const REL_ERROR_MESSAGE: u8 = 6;
+/// The target node provides extended details for this node.
+pub const REL_DETAILS: u8 = 7;
+
 // ── Node flags ──────────────────────────────────────────────────────
 
 bitflags! {
@@ -144,8 +256,28 @@ pub struct Node {
     /// 0 = inherit from parent, 1 = pointer/arrow, 2 = text/I-beam.
     /// Core reads this during hit-testing; the render driver ignores it.
     pub cursor_shape: u8,
-    /// Reserved for future fields. Must be zero.
+    /// Reserved for future cursor/hit-test fields. Must be zero.
     pub _reserved: [u8; 3],
+    // ── accessibility ──
+    /// Semantic role (see `ROLE_*` constants). Determines what assistive
+    /// technology announces and how it navigates. `ROLE_NONE` (0) means
+    /// purely decorative — AT skips this node.
+    pub role: u8,
+    /// Hierarchical depth: heading level (1-6), list nesting, tree depth.
+    /// 0 means not applicable.
+    pub level: u8,
+    /// Alignment padding. Must be zero.
+    pub _pad: [u8; 2],
+    /// Accessibility state flags (see `STATE_*` constants).
+    pub state: u32,
+    /// Accessible name: human-readable label in the data buffer (UTF-8).
+    /// `DataRef::EMPTY` means derive from content (text nodes are
+    /// self-naming via their glyph data) or no name (decorative nodes).
+    pub name: DataRef,
+    /// Typed relationships to other nodes. Encoded as packed 4-byte
+    /// entries in the data buffer: `[relation_type: u8, target: NodeId,
+    /// pad: u8]`. `DataRef::EMPTY` means no relationships.
+    pub relations: DataRef,
     // ── content ──
     pub content: Content,
 }
@@ -181,6 +313,12 @@ impl Node {
         clip_path: DataRef::EMPTY,
         cursor_shape: 0, // inherit
         _reserved: [0; 3],
+        role: ROLE_NONE,
+        level: 0,
+        _pad: [0; 2],
+        state: 0,
+        name: DataRef::EMPTY,
+        relations: DataRef::EMPTY,
         content: Content::None,
     };
 
@@ -202,11 +340,12 @@ impl Node {
     }
 }
 
-// Compile-time size assertion: Node must be exactly 136 bytes.
+// Compile-time size assertion: Node must be exactly 144 bytes.
 // This prevents silent shared-memory layout drift between core and compositor.
 // If you add a field, update this assertion and verify both sides agree.
-// Layout: 80 bytes pre-content + clip_path (8) + cursor_shape (1) + _reserved (3) + content (24) = 120.
-const _: () = assert!(core::mem::size_of::<Node>() == 120);
+// Layout: 84 (tree+geometry+decoration+transform+hash) + 8 (clip_path)
+//       + 4 (cursor_shape+_reserved) + 24 (accessibility) + 24 (content) = 144.
+const _: () = assert!(core::mem::size_of::<Node>() == 144);
 
 // ── Shared memory layout ────────────────────────────────────────────
 
