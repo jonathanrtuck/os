@@ -35,58 +35,86 @@ Three render backends existed: metal-render (Metal GPU via hypervisor, default),
 
 ---
 
-## Font Rasterization Architecture — Open Thread (2026-03-30)
+## Font Rasterization Architecture — SETTLED (2026-03-30)
 
-**Status:** Open discussion, informed by render driver consolidation above.
+**Decision:** Unify the scanline rasterizer into a shared module in `libraries/drawing/`. Separate font metrics from font rasterization in `fonts/`. Stem darkening stays font-specific.
 
-### Context: cursor bugs exposed pixel leakage
+### Context
 
-While fixing four cursor bugs (italic slant direction, weight, baseline alignment, trailing line), we traced the root cause of the baseline misalignment to integer rounding in point-based ascender computations. Fixing it required converting `VisibleRun.y_pt` to `y_mpt` (millipoints). This raised a broader question: **where do pixels belong in the architecture?**
+Cursor bugs exposed a broader question: two parallel scanline rasterizers exist (font and path), and font metrics are co-mingled with pixel rasterization in `fonts::rasterize`. After removing cpu-render (see above), the landscape simplified enough to settle this.
 
-The project convention is: points/millipoints above the render boundary, pixels only in render drivers. But the font library (`libraries/fonts/`) violates this in several places.
+### What's shared (identical geometry, divergence = bugs)
 
-### The actual problem: metrics and rasterization are co-mingled
+1. **Curve flattening.** Quadratic (TrueType) and cubic (paths) Bézier subdivision to line segments. Pure geometry — no font knowledge. One flattener handles both curve types.
 
-The font library serves two audiences with different coordinate needs:
+2. **Scanline coverage computation.** The core algorithm: line segments → fractional pixel coverage. Two implementations existed with different quality:
+   - Font rasterizer (`fonts/rasterize/scanline.rs`): exact signed-area trapezoids → continuous 0–255
+   - Path rasterizer (`render/path_raster.rs`): 8x vertical oversampling → quantized to multiples of 32
 
-| Consumer                          | Needs                                           | Coordinate system        |
-| --------------------------------- | ----------------------------------------------- | ------------------------ |
-| layout (above render boundary)    | advances, ascent, descent, line gap, caret skew | font units → millipoints |
-| presenter (above render boundary) | font metrics, glyph IDs, axis hashing           | font units → millipoints |
-| metal-render (at render boundary) | rasterized coverage, glyph atlas                | font units → pixels      |
+   The font version is strictly better. Unifying on exact area coverage gives paths better anti-aliasing for free. This is the strongest argument — not aesthetics, but the path rasterizer produces lower quality output for no reason.
 
-All three import `fonts::rasterize` because metrics functions (`font_metrics`, `glyph_h_metrics`, `caret_skew`, `AxisValue`) live in the same module as pixel rasterization (`rasterize_with_axes`, `RasterBuffer`, `scale_fu`). Nothing prevents layout from calling pixel-denominated APIs — the bug class that caused the baseline issue.
+3. **Fill rules.** Winding and even-odd as a parameter to the shared rasterizer. Font outlines use non-zero winding; paths need both.
 
-### Two rasterizers (not identical)
+### What's font-specific (stays in `fonts/`)
 
-The font rasterizer (`fonts/rasterize/scanline.rs`) and path rasterizer (`render/path_raster.rs`) use the same family of algorithm (analytic coverage, 20.12 fixed-point) but differ:
+1. **Stem darkening.** Dilation formula is empirically tuned to font metrics (upem, device size, macOS Core Text coefficients). The geometric operation (miter-joint vertex shifts) is general, but the tuning is typographic. Icons could theoretically benefit from dilation but with completely different strength curves — premature to generalize.
 
-- Font: exact signed-area trapezoids, continuous 0–255. Handles quadratic Béziers natively.
-- Path: 8x vertical oversampling, winding/even-odd fill rules. Handles cubic Béziers.
+2. **Outline extraction.** TrueType/CFF table parsing. 100% font-specific.
 
-"Merge into one" is more than deleting a file — the implementations have different quality characteristics.
+3. **Variable font interpolation.** gvar/hvar/opsz axis math. Font tables.
 
-### Reframed question
+4. **Metrics.** Ascent, descent, advances, caret skew. Font tables.
 
-The rasterizer lives in a library consumed by render services — it _executes_ at the pixel boundary. Having pixel math there is fine. The question is: **how do we make it structurally impossible for code above the render boundary to get pixel-denominated values from the font library?**
+### What's renderer-specific (stays in metal-render)
 
-### Candidate approach
+1. **Glyph caching / GPU atlas.** Performance concern owned by the renderer.
 
-Split `fonts/` API visibility at the build level:
+2. **Coordinate mapping.** Font units → pixels (via upem + font size) is different from points → pixels (via scale factor).
 
-1. **Metrics API** (font units only): `font_metrics`, `glyph_h_metrics`, `glyph_h_advance_with_axes`, `caret_skew`, `AxisValue`, `axis_values_hash`, `glyph_id_for_char`. This is what layout and presenter link against.
-2. **Rasterization API** (pixels): `rasterize_with_axes`, `RasterBuffer`, `RasterScratch`, `scale_fu`, `GlyphMetrics`, embolden. This is what metal-render links against.
+### Font library restructuring
 
-The build system compiles each service with explicit `--extern` flags. Making rasterization invisible to non-render services is a build-time decision. Layout physically can't import pixel APIs because they don't exist in what it links against.
+Move metric functions out of `fonts::rasterize` into `fonts::metrics` (or top-level re-exports):
 
-With cpu-render removed, the `GlyphCache`/`LruGlyphCache` in `fonts::cache` may become dead code (metal-render has its own GPU atlas). The "one rasterizer" question depends on whether `render/path_raster.rs` has consumers after the cleanup — presenter uses it for the loading screen, so it likely survives.
+| Function | Current module | New module | Consumers |
+| --- | --- | --- | --- |
+| `font_metrics()`, `glyph_h_metrics()`, `caret_skew()`, etc. | `rasterize` | `metrics` | layout, presenter |
+| `AxisValue`, `axis_values_hash()` | `rasterize` | `metrics` (or top-level) | layout, presenter, metal-render |
+| `glyph_id_for_char()` | `rasterize` | `metrics` | layout, presenter |
+| `rasterize_with_axes()`, `RasterBuffer`, `RasterScratch` | `rasterize` | `rasterize` (stays) | metal-render only |
+| `scale_fu()`, `GlyphMetrics` | `rasterize` | `rasterize` (stays) | metal-render only |
+| `GlyphCache`, `LruGlyphCache` | `cache` | dead code | legacy CpuBackend only |
 
-### Open sub-questions
+After this, layout and presenter import `fonts::metrics`, not `fonts::rasterize`. Pixel APIs become structurally unreachable from above the render boundary.
 
-- What exactly survives in `libraries/render/` after cpu-render removal? (Check after cleanup)
-- Does `render/path_raster.rs` have consumers beyond presenter's loading screen?
-- Should the two rasterizers eventually merge, or are their quality trade-offs worth preserving?
-- Is stem darkening genuinely font-specific, or does it generalize to thin paths (icons)?
+### Architecture
+
+```
+fonts/                          (font-specific)
+  metrics (font units)
+  outline extraction
+  stem darkening
+  shaping, variable axes
+  flatten quadratics ──┐
+                       ▼
+drawing/rasterize      ← shared: line segments + fill rule → coverage map
+                       ▲   (exact area coverage, both curve types)
+                       │
+  flatten cubics ──────┘
+  stroke expansion
+  fill rules
+render/ or paths                (path-specific)
+
+metal-render                    (renderer-specific)
+  GPU atlas, caching
+  coordinate mapping
+  compositing
+```
+
+### Dead code to clean up
+
+- `fonts::cache` (`GlyphCache`, `LruGlyphCache`) — only consumed by legacy `CpuBackend` in render library
+- `render/` `CpuBackend`, `LruRasterizer`, full scene walk — no runtime consumers after cpu-render removal
+- `render/path_raster.rs` — will be replaced by shared rasterizer (presenter's loading screen is only consumer)
 
 ---
 
