@@ -81,7 +81,7 @@ test_cursor_dark() {
     cat > "$CAPTURE_DIR/cursor-dark.events" << 'EVENTS'
 wait 150
 move 400 400
-wait 30
+wait 60
 capture /tmp/visual-tests/cursor-dark.png
 EVENTS
     run_hypervisor "$CAPTURE_DIR/cursor-dark.events" >/dev/null 2>&1
@@ -93,7 +93,7 @@ test_cursor_page() {
     cat > "$CAPTURE_DIR/cursor-page.events" << 'EVENTS'
 wait 150
 move 2000 2000
-wait 30
+wait 60
 capture /tmp/visual-tests/cursor-page.png
 EVENTS
     run_hypervisor "$CAPTURE_DIR/cursor-page.events" >/dev/null 2>&1
@@ -273,9 +273,9 @@ test_cursor_italic() {
     cat > "$CAPTURE_DIR/cursor-italic.events" << 'EVENTS'
 wait 150
 capture /tmp/visual-tests/italic-baseline.png
-move 500 325
+move 500 400
 wait 5
-click 500 325
+click 500 400
 wait 15
 capture /tmp/visual-tests/cursor-italic.png
 EVENTS
