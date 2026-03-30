@@ -134,47 +134,74 @@ fn main() {
     );
 
     let link_ld = out_dir.join("userspace.ld");
-    // Step 1: Compile shared libraries.
+    let libs = manifest_dir.join("libraries");
+
+    // Step 1: Compile shared libraries (skip if up-to-date).
     let sys_src = manifest_dir.join("libraries/sys/lib.rs");
     let sys_rlib = out_dir.join("libsys.rlib");
+    let sys_dir = libs.join("sys");
 
-    rustc_rlib(&rustc, &sys_src, &sys_rlib, "sys", &[]);
+    if needs_rebuild(&sys_rlib, &[&config_path], &[&sys_dir]) {
+        rustc_rlib(&rustc, &sys_src, &sys_rlib, "sys", &[]);
+    }
 
     let protocol_src = manifest_dir.join("libraries/protocol/lib.rs");
     let protocol_rlib = out_dir.join("libprotocol.rlib");
+    let protocol_dir = libs.join("protocol");
 
-    rustc_rlib(&rustc, &protocol_src, &protocol_rlib, "protocol", &[]);
+    if needs_rebuild(
+        &protocol_rlib,
+        &[&config_path, &pack_format_path],
+        &[&protocol_dir],
+    ) {
+        rustc_rlib(&rustc, &protocol_src, &protocol_rlib, "protocol", &[]);
+    }
 
     let animation_src = manifest_dir.join("libraries/animation/lib.rs");
     let animation_rlib = out_dir.join("libanimation.rlib");
+    let animation_dir = libs.join("animation");
 
-    rustc_rlib(&rustc, &animation_src, &animation_rlib, "animation", &[]);
+    if needs_rebuild(&animation_rlib, &[], &[&animation_dir]) {
+        rustc_rlib(&rustc, &animation_src, &animation_rlib, "animation", &[]);
+    }
 
     let layout_src = manifest_dir.join("libraries/layout/lib.rs");
     let layout_rlib = out_dir.join("liblayout.rlib");
+    let layout_dir = libs.join("layout");
 
-    rustc_rlib(&rustc, &layout_src, &layout_rlib, "layout", &[]);
+    if needs_rebuild(&layout_rlib, &[], &[&layout_dir]) {
+        rustc_rlib(&rustc, &layout_src, &layout_rlib, "layout", &[]);
+    }
 
     let piecetable_src = manifest_dir.join("libraries/piecetable/lib.rs");
     let piecetable_rlib = out_dir.join("libpiecetable.rlib");
+    let piecetable_dir = libs.join("piecetable");
 
-    rustc_rlib(&rustc, &piecetable_src, &piecetable_rlib, "piecetable", &[]);
+    if needs_rebuild(&piecetable_rlib, &[], &[&piecetable_dir]) {
+        rustc_rlib(&rustc, &piecetable_src, &piecetable_rlib, "piecetable", &[]);
+    }
 
     let virtio_src = manifest_dir.join("libraries/virtio/lib.rs");
     let virtio_rlib = out_dir.join("libvirtio.rlib");
+    let virtio_dir = libs.join("virtio");
 
-    rustc_rlib(
-        &rustc,
-        &virtio_src,
-        &virtio_rlib,
-        "virtio",
-        &[("sys", &sys_rlib)],
-    );
+    if needs_rebuild(&virtio_rlib, &[&config_path, &sys_rlib], &[&virtio_dir]) {
+        rustc_rlib(
+            &rustc,
+            &virtio_src,
+            &virtio_rlib,
+            "virtio",
+            &[("sys", &sys_rlib)],
+        );
+    }
 
     let scene_src = manifest_dir.join("libraries/scene/lib.rs");
     let scene_rlib = out_dir.join("libscene.rlib");
+    let scene_dir = libs.join("scene");
 
-    rustc_rlib(&rustc, &scene_src, &scene_rlib, "scene", &[]);
+    if needs_rebuild(&scene_rlib, &[], &[&scene_dir]) {
+        rustc_rlib(&rustc, &scene_src, &scene_rlib, "scene", &[]);
+    }
 
     // Step 1c: Generate icon data from SVGs and compile icons library.
     let icons_svg_dir = manifest_dir.join("resources/icons");
@@ -184,63 +211,83 @@ fn main() {
 
     let icons_src = manifest_dir.join("libraries/icons/lib.rs");
     let icons_rlib = out_dir.join("libicons.rlib");
+    let icons_dir = libs.join("icons");
 
-    rustc_rlib(&rustc, &icons_src, &icons_rlib, "icons", &[]);
+    if needs_rebuild(&icons_rlib, &[], &[&icons_dir]) {
+        rustc_rlib(&rustc, &icons_src, &icons_rlib, "icons", &[]);
+    }
 
     let ipc_src = manifest_dir.join("libraries/ipc/lib.rs");
     let ipc_rlib = out_dir.join("libipc.rlib");
+    let ipc_dir = libs.join("ipc");
 
-    rustc_rlib(&rustc, &ipc_src, &ipc_rlib, "ipc", &[("sys", &sys_rlib)]);
+    if needs_rebuild(&ipc_rlib, &[&config_path, &sys_rlib], &[&ipc_dir]) {
+        rustc_rlib(&rustc, &ipc_src, &ipc_rlib, "ipc", &[("sys", &sys_rlib)]);
+    }
 
     let fs_src = manifest_dir.join("libraries/fs/lib.rs");
     let fs_rlib = out_dir.join("libfs.rlib");
+    let fs_dir = libs.join("fs");
 
-    rustc_rlib(&rustc, &fs_src, &fs_rlib, "fs", &[]);
+    if needs_rebuild(&fs_rlib, &[], &[&fs_dir]) {
+        rustc_rlib(&rustc, &fs_src, &fs_rlib, "fs", &[]);
+    }
 
     let store_src = manifest_dir.join("libraries/store/lib.rs");
     let store_rlib = out_dir.join("libstore.rlib");
+    let store_dir = libs.join("store");
 
-    rustc_rlib(
-        &rustc,
-        &store_src,
-        &store_rlib,
-        "store",
-        &[("fs", &fs_rlib)],
-    );
+    if needs_rebuild(&store_rlib, &[&fs_rlib], &[&store_dir]) {
+        rustc_rlib(
+            &rustc,
+            &store_src,
+            &store_rlib,
+            "store",
+            &[("fs", &fs_rlib)],
+        );
+    }
 
     // Step 1b: Build Cargo-managed libraries (libraries with external deps).
-    // These use `cargo build` to resolve dependency graphs, then we link the
-    // resulting rlibs alongside hand-compiled libraries.
+    // Cargo handles its own incrementality for the fonts crate.
     let fonts_output = cargo_lib(&manifest_dir.join("libraries/fonts"));
 
-    // Drawing library depends on protocol and fonts (for rasterize API).
-    // The fonts library has transitive dependencies (read-fonts, etc.) in
-    // deps_dir (aarch64-unknown-none), plus proc-macro dependencies in the
-    // host release deps dir.
     let drawing_src = manifest_dir.join("libraries/drawing/lib.rs");
     let drawing_rlib = out_dir.join("libdrawing.rlib");
     let fonts_host_deps = manifest_dir.join("libraries/fonts/target/release/deps");
+    let drawing_dir = libs.join("drawing");
 
-    rustc_rlib_with_search(&rustc, &drawing_src, &drawing_rlib, "drawing", &[], &[]);
+    if needs_rebuild(&drawing_rlib, &[&config_path], &[&drawing_dir]) {
+        rustc_rlib_with_search(&rustc, &drawing_src, &drawing_rlib, "drawing", &[], &[]);
+    }
 
-    // Render library: scene graph rendering, compositing, glyph rasterization.
-    // Depends on drawing, scene, protocol, fonts (no sys, no ipc).
     let render_src = manifest_dir.join("libraries/render/lib.rs");
     let render_rlib = out_dir.join("librender.rlib");
+    let render_dir = libs.join("render");
 
-    rustc_rlib_with_search(
-        &rustc,
-        &render_src,
+    if needs_rebuild(
         &render_rlib,
-        "render",
         &[
-            ("drawing", &drawing_rlib),
-            ("scene", &scene_rlib),
-            ("protocol", &protocol_rlib),
-            ("fonts", &fonts_output.rlib),
+            &drawing_rlib,
+            &scene_rlib,
+            &protocol_rlib,
+            &fonts_output.rlib,
         ],
-        &[&fonts_output.deps_dir, &fonts_host_deps],
-    );
+        &[&render_dir],
+    ) {
+        rustc_rlib_with_search(
+            &rustc,
+            &render_src,
+            &render_rlib,
+            "render",
+            &[
+                ("drawing", &drawing_rlib),
+                ("scene", &scene_rlib),
+                ("protocol", &protocol_rlib),
+                ("fonts", &fonts_output.rlib),
+            ],
+            &[&fonts_output.deps_dir, &fonts_host_deps],
+        );
+    }
 
     // Step 2: Compile all non-init programs.
     // fuzz-helper must be compiled before fuzz (fuzz embeds it).
@@ -311,141 +358,132 @@ fn main() {
             vec![]
         };
 
-        rustc_bin(
-            &rustc,
-            &main_rs,
-            &elf_path,
-            &link_ld,
-            &externs,
-            &env_vars,
-            &search_paths,
-        );
-        println!("cargo:rerun-if-changed={}", main_rs.display());
+        // Check if this ELF needs rebuilding: source dir + externs + linker script + config.
+        let helper_path = out_dir.join("fuzz-helper.elf");
+        let mut elf_deps: Vec<&Path> = vec![link_ld.as_path(), config_path.as_path()];
+        for (_, rlib) in &externs {
+            elf_deps.push(rlib.as_path());
+        }
+        if name == "fuzz" && helper_path.exists() {
+            elf_deps.push(helper_path.as_path());
+        }
+
+        if needs_rebuild(&elf_path, &elf_deps, &[src_dir.as_path()]) {
+            rustc_bin(
+                &rustc,
+                &main_rs,
+                &elf_path,
+                &link_ld,
+                &externs,
+                &env_vars,
+                &search_paths,
+            );
+        }
     }
 
     // Step 3: Compile init (no longer embeds service ELFs — reads from pack).
     let init_src = manifest_dir.join("services/init/main.rs");
     let init_elf = out_dir.join("init.elf");
+    let init_dir = manifest_dir.join("services/init");
 
-    rustc_bin(
-        &rustc,
-        &init_src,
+    if needs_rebuild(
         &init_elf,
-        &link_ld,
         &[
-            ("sys", sys_rlib.clone()),
-            ("ipc", ipc_rlib.clone()),
-            ("protocol", protocol_rlib.clone()),
-            ("scene", scene_rlib.clone()),
+            &config_path,
+            &pack_format_path,
+            &sys_rlib,
+            &ipc_rlib,
+            &protocol_rlib,
+            &scene_rlib,
+            &link_ld,
         ],
-        &[],
-        &[],
-    );
+        &[&init_dir],
+    ) {
+        rustc_bin(
+            &rustc,
+            &init_src,
+            &init_elf,
+            &link_ld,
+            &[
+                ("sys", sys_rlib.clone()),
+                ("ipc", ipc_rlib.clone()),
+                ("protocol", protocol_rlib.clone()),
+                ("scene", scene_rlib.clone()),
+            ],
+            &[],
+            &[],
+        );
+    }
 
     // Step 4: Pack service ELFs into a flat archive and link into kernel.
     let pack_path = out_dir.join("services.pack");
-    build_service_pack(&out_dir, &pack_path);
+    let services_o = out_dir.join("services.o");
+
+    // Collect ELF paths to check freshness.
+    let elf_paths: Vec<PathBuf> = PACK_ENTRIES
+        .iter()
+        .map(|(name, _)| out_dir.join(format!("{name}.elf")))
+        .collect();
+    let pack_deps: Vec<&Path> = elf_paths.iter().map(|p| p.as_path()).collect();
+
+    if needs_rebuild(&pack_path, &pack_deps, &[]) {
+        build_service_pack(&out_dir, &pack_path);
+    }
 
     // Convert pack to a linkable .o with a .services section.
-    let services_o = out_dir.join("services.o");
-    let objcopy = find_llvm_objcopy();
-    let status = std::process::Command::new(&objcopy)
-        .arg("-I")
-        .arg("binary")
-        .arg("-O")
-        .arg("elf64-littleaarch64")
-        .arg("--rename-section")
-        .arg(".data=.services,alloc,load,readonly,contents")
-        .arg(&pack_path)
-        .arg(&services_o)
-        .status()
-        .unwrap_or_else(|e| panic!("failed to run llvm-objcopy: {e}"));
-    assert!(status.success(), "llvm-objcopy failed");
+    if needs_rebuild(&services_o, &[&pack_path], &[]) {
+        let objcopy = find_llvm_objcopy();
+        let status = std::process::Command::new(&objcopy)
+            .arg("-I")
+            .arg("binary")
+            .arg("-O")
+            .arg("elf64-littleaarch64")
+            .arg("--rename-section")
+            .arg(".data=.services,alloc,load,readonly,contents")
+            .arg(&pack_path)
+            .arg(&services_o)
+            .status()
+            .unwrap_or_else(|e| panic!("failed to run llvm-objcopy: {e}"));
+        assert!(status.success(), "llvm-objcopy failed");
+    }
 
     // Link services.o into the kernel binary.
     println!("cargo:rustc-link-arg={}", services_o.display());
-    println!("cargo:rerun-if-changed={}", init_src.display());
-    println!("cargo:rerun-if-changed={}", sys_src.display());
-    println!("cargo:rerun-if-changed={}", virtio_src.display());
-    println!("cargo:rerun-if-changed={}", drawing_src.display());
-    for inc in &[
-        "palette.rs",
-        "gamma_tables.rs",
-        "neon.rs",
-        "blend.rs",
-        "blit.rs",
-        "blur.rs",
-        "coverage.rs",
-        "fill.rs",
-        "gradient.rs",
-        "line.rs",
-        "transform.rs",
+    // Rerun build.rs when any library, service, or config source changes.
+    // Directory-level monitoring catches new/renamed files automatically.
+    // build.rs uses mtime-based freshness checks to skip unchanged artifacts.
+    for lib in &[
+        "sys",
+        "protocol",
+        "animation",
+        "layout",
+        "piecetable",
+        "virtio",
+        "scene",
+        "icons",
+        "ipc",
+        "fs",
+        "store",
+        "drawing",
+        "render",
     ] {
-        println!(
-            "cargo:rerun-if-changed={}",
-            manifest_dir.join("libraries/drawing").join(inc).display()
-        );
-    }
-    println!("cargo:rerun-if-changed={}", ipc_src.display());
-    println!("cargo:rerun-if-changed={}", fs_src.display());
-    println!("cargo:rerun-if-changed={}", store_src.display());
-    println!(
-        "cargo:rerun-if-changed={}",
-        manifest_dir.join("libraries/store/serialize.rs").display()
-    );
-    for fs_mod in &[
-        "block.rs",
-        "crc32.rs",
-        "alloc_mod.rs",
-        "superblock.rs",
-        "inode.rs",
-        "snapshot.rs",
-        "filesystem.rs",
-    ] {
-        println!(
-            "cargo:rerun-if-changed={}",
-            manifest_dir.join("libraries/fs").join(fs_mod).display()
-        );
-    }
-    println!("cargo:rerun-if-changed={}", protocol_src.display());
-    println!("cargo:rerun-if-changed={}", animation_src.display());
-    println!("cargo:rerun-if-changed={}", layout_src.display());
-    println!("cargo:rerun-if-changed={}", scene_src.display());
-    println!("cargo:rerun-if-changed={}", icons_src.display());
-    println!("cargo:rerun-if-changed={}", render_src.display());
-    for render_mod in &[
-        "scene_render.rs",
-        "compositing.rs",
-        "surface_pool.rs",
-        "damage.rs",
-        "cursor.rs",
-        "frame_scheduler.rs",
-    ] {
-        println!(
-            "cargo:rerun-if-changed={}",
-            manifest_dir
-                .join("libraries/render")
-                .join(render_mod)
-                .display()
-        );
+        println!("cargo:rerun-if-changed={}", libs.join(lib).display());
     }
     println!(
         "cargo:rerun-if-changed={}",
-        manifest_dir.join("libraries/fonts/src/lib.rs").display()
+        manifest_dir.join("libraries/fonts/src").display()
     );
-    for fonts_src in &["rasterize.rs", "cache.rs"] {
-        println!(
-            "cargo:rerun-if-changed={}",
-            manifest_dir
-                .join("libraries/fonts/src")
-                .join(fonts_src)
-                .display()
-        );
-    }
     println!(
         "cargo:rerun-if-changed={}",
         manifest_dir.join("libraries/fonts/Cargo.toml").display()
     );
+    for &(_, dir, _, _) in PROGRAMS {
+        println!(
+            "cargo:rerun-if-changed={}",
+            manifest_dir.join(dir).display()
+        );
+    }
+    println!("cargo:rerun-if-changed={}", init_dir.display());
     println!("cargo:rerun-if-changed={pack_format_path_str}");
 }
 
@@ -455,8 +493,8 @@ fn main() {
 fn build_service_pack(out_dir: &Path, pack_path: &Path) {
     let page_size = system_config::PAGE_SIZE as usize;
     let count = PACK_ENTRIES.len();
-    let header_size = pack_format::PACK_HEADER_SIZE as usize
-        + count * pack_format::PACK_ENTRY_SIZE as usize;
+    let header_size =
+        pack_format::PACK_HEADER_SIZE as usize + count * pack_format::PACK_ENTRY_SIZE as usize;
 
     // Read all ELF files and compute page-aligned offsets.
     let mut elfs: Vec<(u32, Vec<u8>)> = Vec::with_capacity(count);
@@ -485,8 +523,8 @@ fn build_service_pack(out_dir: &Path, pack_path: &Path) {
 
     // Entry table.
     for (i, &(role_id, offset, length)) in entries.iter().enumerate() {
-        let base = pack_format::PACK_HEADER_SIZE as usize
-            + i * pack_format::PACK_ENTRY_SIZE as usize;
+        let base =
+            pack_format::PACK_HEADER_SIZE as usize + i * pack_format::PACK_ENTRY_SIZE as usize;
         write_le_u32(&mut buf, base, role_id);
         write_le_u32(&mut buf, base + 4, offset as u32);
         write_le_u32(&mut buf, base + 8, length as u32);
@@ -510,6 +548,40 @@ fn build_service_pack(out_dir: &Path, pack_path: &Path) {
 
 fn align_up(value: usize, alignment: usize) -> usize {
     (value + alignment - 1) & !(alignment - 1)
+}
+
+/// Check if an artifact needs rebuilding.
+///
+/// Returns true if `output` is missing OR any file in `deps` or any `.rs`
+/// file in `src_dirs` is newer than `output`. This is standard mtime-based
+/// freshness checking (same semantics as make).
+fn needs_rebuild(output: &Path, deps: &[&Path], src_dirs: &[&Path]) -> bool {
+    let output_mtime = match std::fs::metadata(output) {
+        Ok(m) => m.modified().unwrap(),
+        Err(_) => return true,
+    };
+    for dep in deps {
+        match std::fs::metadata(dep) {
+            Ok(m) if m.modified().unwrap() > output_mtime => return true,
+            Err(_) => return true,
+            _ => {}
+        }
+    }
+    for dir in src_dirs {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|e| e == "rs") {
+                    if let Ok(m) = path.metadata() {
+                        if m.modified().unwrap() > output_mtime {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
 }
 
 fn write_le_u32(buf: &mut [u8], offset: usize, value: u32) {
