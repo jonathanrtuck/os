@@ -1,6 +1,6 @@
 # services
 
-Platform services that run as userspace processes. Each is a `#![no_std]` ELF binary embedded into init at build time.
+Platform services that run as userspace processes. Each is a `#![no_std]` ELF binary packed into the service archive and linked into the kernel. Init reads them from a memory-mapped pack region at boot.
 
 ## Core Pipeline
 

@@ -120,7 +120,7 @@ metal-render                    (renderer-specific)
 
 ## Service Pack & Incremental Build — Design Discussion (2026-03-29)
 
-**Status:** Design settled. Implementation deferred (not blocking current work).
+**Status:** IMPLEMENTED (2026-03-30). Service pack with post-link splice via llvm-objcopy. Init reads from memory-mapped pack at SERVICE_PACK_BASE.
 
 ### The problem
 

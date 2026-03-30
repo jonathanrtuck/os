@@ -126,6 +126,10 @@ const VIRTIO_IRQ_BASE: u32 = 48; // SPI 16 = GIC IRQ 48
 /// Init ELF — the only process the kernel spawns directly.
 /// Init is the proto-OS-service that spawns all other processes.
 static INIT_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/init.elf"));
+
+// Service pack: build.rs packs all service ELFs into services.pack, converts
+// it to services.o via llvm-objcopy with a .services section, and tells cargo
+// to link it. The linker script defines _services_start/_services_end.
 /// pvpanic MMIO address (kernel VA). Zero if not available.
 ///
 /// Set once during boot from the DTB "qemu,pvpanic-mmio" node. Read from the
@@ -135,6 +139,10 @@ static PVPANIC_ADDR: AtomicUsize = AtomicUsize::new(0);
 
 extern "C" {
     static __kernel_end: u8;
+    /// Start of the service pack section (linker script symbol).
+    static _services_start: u8;
+    /// End of the service pack section (linker script symbol).
+    static _services_end: u8;
 }
 
 /// Info discovered about a virtio-mmio device.
@@ -786,6 +794,31 @@ pub extern "C" fn kernel_main(dtb_pa: u64) -> ! {
     // Spawn init (suspended) — the only process the kernel creates directly.
     // Microkernel pattern: kernel provides mechanism, init provides policy.
     let (init_pid, _) = process::create_from_user_elf(INIT_ELF).expect("failed to create init");
+
+    // Map the service pack into init's address space (read-only).
+    // Init reads ELFs from this region at boot instead of compiled-in statics.
+    // SAFETY: _services_start/_services_end are linker-defined symbols; taking
+    // their address yields the kernel VA of the .services section boundaries.
+    let pack_start_kva = unsafe { &_services_start as *const u8 as u64 };
+    let pack_end_kva = unsafe { &_services_end as *const u8 as u64 };
+    let pack_size = pack_end_kva - pack_start_kva;
+    if pack_size > 0 {
+        let pack_pa = pack_start_kva - memory::KERNEL_VA_OFFSET as u64;
+        let page_count = (pack_size + paging::PAGE_SIZE - 1) / paging::PAGE_SIZE;
+        scheduler::with_process(init_pid, |process| {
+            assert!(
+                process.address_space.map_fixed_readonly(
+                    paging::SERVICE_PACK_BASE,
+                    pack_pa,
+                    page_count,
+                ),
+                "failed to map service pack into init"
+            );
+        })
+        .expect("init process not found for pack mapping");
+        serial::puts("  📦 services - pack mapped into init\n");
+    }
+
     let (ch_a, ch_b) = channel::create().expect("failed to create init channel");
     // Write device manifest to channel page 0 (kernel→init direction).
     let pages = channel::shared_pages(ch_a).expect("channel shared pages");

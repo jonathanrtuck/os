@@ -38,6 +38,10 @@ pub const KERNEL_VA_OFFSET: u64 = 0xFFFF_FFF0_0000_0000;
 /// Base VA for userspace ELF code. libraries/link.ld.in has `. = @USER_CODE_BASE@`.
 pub const USER_CODE_BASE: u64 = 0x0000_0000_0040_0000; // 4 MiB
 
+/// Base VA for the service pack mapped into init's address space (512 MiB).
+/// Read-only. Between USER_CODE_BASE (4 MiB) and CHANNEL_SHM_BASE (1 GiB).
+pub const SERVICE_PACK_BASE: u64 = 0x0000_0000_2000_0000;
+
 /// Base VA for IPC channel shared memory pages (1 GiB).
 pub const CHANNEL_SHM_BASE: u64 = 0x0000_0000_4000_0000;
 

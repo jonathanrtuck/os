@@ -341,6 +341,21 @@ impl AddressSpace {
         Some(va)
     }
 
+    /// Map physical pages at a fixed VA, read-only, without ownership transfer.
+    ///
+    /// Used to map the service pack into init's address space at
+    /// `SERVICE_PACK_BASE`. The physical frames are part of the kernel image
+    /// and must not be freed on process exit.
+    pub fn map_fixed_readonly(&mut self, va: u64, pa: u64, page_count: u64) -> bool {
+        let attrs = PageAttrs::user_ro();
+        for i in 0..page_count {
+            if !self.map_inner(va + i * PAGE_SIZE, pa + i * PAGE_SIZE, &attrs) {
+                return false;
+            }
+        }
+        true
+    }
+
     // --- Public unmap methods ---
 
     /// Unmap a channel shared page previously mapped by `map_channel_page`.

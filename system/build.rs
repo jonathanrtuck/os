@@ -1,18 +1,19 @@
-//! Build script: compiles userspace binaries into ELFs that the kernel embeds
-//! via `include_bytes!`. This keeps `cargo run --release` as the only command
-//! needed to build and boot the entire system.
+//! Build script: compiles userspace binaries into ELFs, packs them into a
+//! service archive, and splices the archive into the kernel binary.
+//! `cargo run --release` is the only command needed to build and boot.
 //!
 //! # Build order
 //!
 //! 1. Shared libraries: sys, virtio, drawing (rlibs)
 //!    1b. Cargo-managed libraries: fonts (with harfrust dependency tree)
-//! 2. All user/driver/compositor programs (ELFs)
-//! 3. Generate `init_embedded.rs` with `include_bytes!` for ELFs init needs
-//! 4. Compile init last (depends on all other ELFs via init_embedded.rs)
-//! 5. Kernel embeds only init.elf
+//! 2. All user/driver/compositor programs (ELFs), including init
+//! 3. Pack service ELFs into a flat archive (services.pack)
+//! 4. Kernel links with the pack in a .services section
 //!
-//! Init is the proto-OS-service: it embeds all other ELFs so it can spawn
-//! them at runtime. The kernel spawns only init (microkernel pattern).
+//! Init reads service ELFs from a memory-mapped pack region at boot.
+//! The kernel embeds only init.elf via include_bytes! (init changes rarely).
+//! The service pack is a separate linker section — changing a service
+//! requires only repacking + relinking, not recompiling init or the kernel.
 
 use std::{
     env,
@@ -25,6 +26,12 @@ use std::{
 mod system_config {
     #![allow(dead_code)]
     include!("system_config.rs");
+}
+
+/// Service pack format constants (SSOT). Used to write the pack header.
+mod pack_format {
+    #![allow(dead_code)]
+    include!("pack_format.rs");
 }
 
 /// Build-time icon converter: SVG → native path commands → generated Rust.
@@ -40,22 +47,23 @@ struct CargoLibOutput {
     deps_dir: PathBuf,
 }
 
-/// ELFs that init embeds (must be a subset of PROGRAMS names).
-const INIT_EMBEDDED: &[(&str, &str)] = &[
-    ("store", "STORE_ELF"),
-    ("document", "DOCUMENT_ELF"),
-    ("layout", "LAYOUT_ELF"),
-    ("virtio-blk", "VIRTIO_BLK_ELF"),
-    ("virtio-console", "VIRTIO_CONSOLE_ELF"),
-    ("virtio-input", "VIRTIO_INPUT_ELF"),
-    ("virtio-9p", "VIRTIO_9P_ELF"),
-    ("presenter", "PRESENTER_ELF"),
-    ("metal-render", "METAL_RENDER_ELF"),
-    ("png-decode", "PNG_DECODE_ELF"),
-    ("text-editor", "TEXT_EDITOR_ELF"),
-    ("rich-editor", "RICH_EDITOR_ELF"),
-    ("stress", "STRESS_ELF"),
-    ("fuzz", "FUZZ_ELF"),
+/// Services packed into the archive. (program name, role ID).
+/// Names must match PROGRAMS entries. Init looks up ELFs by role ID at boot.
+const PACK_ENTRIES: &[(&str, u32)] = &[
+    ("store", pack_format::ROLE_STORE),
+    ("document", pack_format::ROLE_DOCUMENT),
+    ("layout", pack_format::ROLE_LAYOUT),
+    ("virtio-blk", pack_format::ROLE_VIRTIO_BLK),
+    ("virtio-console", pack_format::ROLE_VIRTIO_CONSOLE),
+    ("virtio-input", pack_format::ROLE_VIRTIO_INPUT),
+    ("virtio-9p", pack_format::ROLE_VIRTIO_9P),
+    ("presenter", pack_format::ROLE_PRESENTER),
+    ("metal-render", pack_format::ROLE_METAL_RENDER),
+    ("png-decode", pack_format::ROLE_PNG_DECODE),
+    ("text-editor", pack_format::ROLE_TEXT_EDITOR),
+    ("rich-editor", pack_format::ROLE_RICH_EDITOR),
+    ("stress", pack_format::ROLE_STRESS),
+    ("fuzz", pack_format::ROLE_FUZZ),
 ];
 /// Programs compiled BEFORE init (init embeds their ELFs).
 /// Each entry is (name, source directory, needs_virtio, needs_drawing).
@@ -92,9 +100,13 @@ fn main() {
     let config_path = manifest_dir.join("system_config.rs");
     let config_path_str = config_path.to_str().unwrap();
 
-    // Every child rustc process inherits this, so include!(env!("SYSTEM_CONFIG"))
-    // resolves in all userspace libraries and programs.
+    // Every child rustc process inherits these, so include!(env!("SYSTEM_CONFIG"))
+    // and include!(env!("PACK_FORMAT")) resolve in all userspace code.
     std::env::set_var("SYSTEM_CONFIG", config_path_str);
+
+    let pack_format_path = manifest_dir.join("pack_format.rs");
+    let pack_format_path_str = pack_format_path.to_str().unwrap();
+    std::env::set_var("PACK_FORMAT", pack_format_path_str);
 
     // --- Generate linker scripts from templates ---
     generate_linker_script(
@@ -311,30 +323,9 @@ fn main() {
         println!("cargo:rerun-if-changed={}", main_rs.display());
     }
 
-    // Step 3: Generate init_embedded.rs with include_bytes! for embedded ELFs.
-    let mut embedded_code = String::new();
-
-    for &(name, const_name) in INIT_EMBEDDED {
-        let elf_path = out_dir.join(format!("{name}.elf"));
-
-        embedded_code.push_str(&format!(
-            "static {const_name}: &[u8] = include_bytes!(\"{}\");\n",
-            elf_path.display()
-        ));
-    }
-
-    let embedded_rs = out_dir.join("init_embedded.rs");
-
-    std::fs::write(&embedded_rs, &embedded_code)
-        .unwrap_or_else(|e| panic!("failed to write init_embedded.rs: {e}"));
-
-    // Step 4: Compile init last (it embeds all other ELFs).
+    // Step 3: Compile init (no longer embeds service ELFs — reads from pack).
     let init_src = manifest_dir.join("services/init/main.rs");
     let init_elf = out_dir.join("init.elf");
-    let init_env = [(
-        "INIT_EMBEDDED_RS",
-        embedded_rs.to_str().unwrap().to_string(),
-    )];
 
     rustc_bin(
         &rustc,
@@ -347,9 +338,32 @@ fn main() {
             ("protocol", protocol_rlib.clone()),
             ("scene", scene_rlib.clone()),
         ],
-        &init_env,
+        &[],
         &[],
     );
+
+    // Step 4: Pack service ELFs into a flat archive and link into kernel.
+    let pack_path = out_dir.join("services.pack");
+    build_service_pack(&out_dir, &pack_path);
+
+    // Convert pack to a linkable .o with a .services section.
+    let services_o = out_dir.join("services.o");
+    let objcopy = find_llvm_objcopy();
+    let status = std::process::Command::new(&objcopy)
+        .arg("-I")
+        .arg("binary")
+        .arg("-O")
+        .arg("elf64-littleaarch64")
+        .arg("--rename-section")
+        .arg(".data=.services,alloc,load,readonly,contents")
+        .arg(&pack_path)
+        .arg(&services_o)
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run llvm-objcopy: {e}"));
+    assert!(status.success(), "llvm-objcopy failed");
+
+    // Link services.o into the kernel binary.
+    println!("cargo:rustc-link-arg={}", services_o.display());
     println!("cargo:rerun-if-changed={}", init_src.display());
     println!("cargo:rerun-if-changed={}", sys_src.display());
     println!("cargo:rerun-if-changed={}", virtio_src.display());
@@ -432,7 +446,113 @@ fn main() {
         "cargo:rerun-if-changed={}",
         manifest_dir.join("libraries/fonts/Cargo.toml").display()
     );
+    println!("cargo:rerun-if-changed={pack_format_path_str}");
 }
+
+/// Build the service pack: a flat binary archive of service ELFs.
+///
+/// Format: [header: 16B] [entries: N×16B] [ELF data: page-aligned]
+fn build_service_pack(out_dir: &Path, pack_path: &Path) {
+    let page_size = system_config::PAGE_SIZE as usize;
+    let count = PACK_ENTRIES.len();
+    let header_size = pack_format::PACK_HEADER_SIZE as usize
+        + count * pack_format::PACK_ENTRY_SIZE as usize;
+
+    // Read all ELF files and compute page-aligned offsets.
+    let mut elfs: Vec<(u32, Vec<u8>)> = Vec::with_capacity(count);
+    for &(name, role_id) in PACK_ENTRIES {
+        let elf_path = out_dir.join(format!("{name}.elf"));
+        let data = std::fs::read(&elf_path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {e}", elf_path.display()));
+        elfs.push((role_id, data));
+    }
+
+    let mut data_offset = align_up(header_size, page_size);
+    let mut entries: Vec<(u32, usize, usize)> = Vec::with_capacity(count); // (role, offset, len)
+    for (role_id, elf_data) in &elfs {
+        entries.push((*role_id, data_offset, elf_data.len()));
+        data_offset = align_up(data_offset + elf_data.len(), page_size);
+    }
+    let total_size = data_offset;
+
+    // Build the output buffer.
+    let mut buf = vec![0u8; total_size];
+
+    // Header.
+    write_le_u32(&mut buf, 0, pack_format::PACK_MAGIC);
+    write_le_u32(&mut buf, 4, pack_format::PACK_VERSION);
+    write_le_u32(&mut buf, 8, count as u32);
+
+    // Entry table.
+    for (i, &(role_id, offset, length)) in entries.iter().enumerate() {
+        let base = pack_format::PACK_HEADER_SIZE as usize
+            + i * pack_format::PACK_ENTRY_SIZE as usize;
+        write_le_u32(&mut buf, base, role_id);
+        write_le_u32(&mut buf, base + 4, offset as u32);
+        write_le_u32(&mut buf, base + 8, length as u32);
+    }
+
+    // ELF data at page-aligned offsets.
+    for ((_, offset, len), (_, elf_data)) in entries.iter().zip(elfs.iter()) {
+        buf[*offset..*offset + *len].copy_from_slice(elf_data);
+    }
+
+    std::fs::write(pack_path, &buf)
+        .unwrap_or_else(|e| panic!("failed to write {}: {e}", pack_path.display()));
+
+    eprintln!(
+        "  service pack: {} services, {} bytes ({} pages)",
+        count,
+        total_size,
+        total_size / page_size
+    );
+}
+
+fn align_up(value: usize, alignment: usize) -> usize {
+    (value + alignment - 1) & !(alignment - 1)
+}
+
+fn write_le_u32(buf: &mut [u8], offset: usize, value: u32) {
+    buf[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+/// Find llvm-objcopy from the Rust toolchain's bundled LLVM tools.
+fn find_llvm_objcopy() -> PathBuf {
+    let sysroot = std::process::Command::new(env::var("RUSTC").unwrap())
+        .arg("--print")
+        .arg("sysroot")
+        .output()
+        .expect("failed to get sysroot");
+    let sysroot = String::from_utf8(sysroot.stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+
+    let host = std::process::Command::new(env::var("RUSTC").unwrap())
+        .arg("-vV")
+        .output()
+        .expect("failed to get rustc version");
+    let host_str = String::from_utf8(host.stdout).unwrap();
+    let host_triple = host_str
+        .lines()
+        .find(|l| l.starts_with("host:"))
+        .expect("no host: line in rustc -vV")
+        .split_whitespace()
+        .nth(1)
+        .unwrap();
+
+    let candidate = PathBuf::from(&sysroot)
+        .join("lib/rustlib")
+        .join(host_triple)
+        .join("bin/llvm-objcopy");
+    if candidate.exists() {
+        return candidate;
+    }
+
+    // Fallback: try PATH.
+    PathBuf::from("llvm-objcopy")
+}
+
 /// Compile a Rust source file as a binary ELF.
 fn rustc_bin(
     rustc: &str,

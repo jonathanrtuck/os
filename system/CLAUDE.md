@@ -23,7 +23,7 @@ cargo build --release   # Builds everything
 cargo run --release     # Builds + launches QEMU
 ```
 
-A single `cargo build` compiles shared libraries, all userspace programs, init (which embeds them as ELF blobs), and the kernel (which embeds init). See `build.rs`.
+A single `cargo build` compiles shared libraries, all userspace programs, packs service ELFs into a flat archive (service pack), and links everything into a single kernel binary. Init reads service ELFs from a memory-mapped pack region at boot. See `build.rs`.
 
 ## Test
 
@@ -44,4 +44,4 @@ cd test && ./stress.sh 45                    # Headless fuzz + stress
 - Rust nightly, `aarch64-unknown-none` target (via `rust-toolchain.toml`)
 - No std in kernel or userspace — `#![no_std]` everywhere
 - Userspace gets `alloc` via the `sys` library's GlobalAlloc backed by `memory_alloc` syscall
-- All userspace ELF binaries are embedded into init at build time
+- Service ELFs are packed into a flat archive (service pack) linked into the kernel. Init reads them from a memory-mapped region at boot — no `include_bytes!` cascade

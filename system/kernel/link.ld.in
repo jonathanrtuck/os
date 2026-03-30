@@ -45,6 +45,14 @@ SECTIONS
   }
   __rodata_end = .;
 
+  /* --- Service pack (RO, page-aligned) --- */
+  . = ALIGN(@PAGE_SIZE@);
+  _services_start = .;
+  .services : AT(ADDR(.services) - KERNEL_VA_OFFSET) {
+    KEEP(*(.services))
+  }
+  _services_end = .;
+
   /* --- Read-write, no execute (RW) --- */
   . = ALIGN(@PAGE_SIZE@);
   __data_start = .;
