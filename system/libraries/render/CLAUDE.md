@@ -5,6 +5,7 @@ Shared rendering infrastructure: scene graph tree walk, content rendering, compo
 ## Key Files
 
 - `lib.rs` -- `LruRasterizer` (on-demand glyph rasterization with LRU cache), coordinate scaling helpers
+- `geometry.rs` -- Backend-independent rendering geometry: `ClipRect`, `ImageAtlas` (row-based packer), NDC vertex emission (`emit_quad`, `emit_textured_quad`, `emit_transformed_quad`, `emit_rounded_rect_quad`, `emit_shadow_quad`), shader parameter packing (`pack_shadow_params`, `pack_rounded_rect_params`, `pack_blur_params`, `pack_copy_params`), `scale_pointer_coord`, `VERTEX_BYTES`. Extracted from metal-render so future display drivers share this math.
 - `scene_render/mod.rs` -- `SceneGraph` struct (nodes + data + content region), `RenderCtx` (glyph caches + scale factor)
 - `scene_render/walk.rs` -- Recursive tree walk: `render_scene`, `render_scene_clipped`, `render_scene_with_pool` variants. Handles backgrounds, borders, rounded corners, clipping, opacity
 - `scene_render/content.rs` -- Content rendering: `Glyphs` (shaped text), `Image`/`InlineImage` (pixel blits), `Path` (vector fill/stroke)
@@ -19,7 +20,7 @@ Shared rendering infrastructure: scene graph tree walk, content rendering, compo
 
 ## Active consumers (post cpu-render/virgil-render removal)
 
-- `metal-render` -- `frame_scheduler::frame_period_ns`
+- `metal-render` -- `frame_scheduler::frame_period_ns`, `geometry::*` (vertex emission, clip rects, atlas, parameter packing)
 - `presenter` -- `scene_render::path_raster::render_path_data` (loading screen)
 - `test/` -- `render_scene_render.rs` exercises scene walk, clip skip, damage tracking
 

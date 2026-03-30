@@ -6,7 +6,7 @@ Metal GPU driver — reads the scene graph from shared memory and renders using 
 
 - `main.rs` -- Entry point, constants, render loop orchestration (glyph pre-scan, frame submission, dither pass, blur processing, cursor plane)
 - `shaders.rs` -- Embedded MSL shader source (solid, textured, glyph, rounded-rect SDF, analytical shadow, stencil, box-blur compute, dither)
-- `scene_walk.rs` -- `RenderContext` struct, `walk_scene()` recursive tree walk, `ClipRect`, `ImageAtlas`, vertex emission helpers, flush helpers
+- `scene_walk.rs` -- `RenderContext` struct, `walk_scene()` recursive tree walk, `BlurReq`, Metal-specific flush helpers. Backend-independent geometry (vertex emission, clip rects, atlas packing, parameter packing) lives in `render::geometry`
 - `path.rs` -- Path command parsing, cubic Bezier flattening, stencil-then-cover fan tessellation (`ParsedPath`, `draw_path_stencil_cover`)
 - `pipeline.rs` -- Phase D: shader compilation, render/compute pipeline creation, depth/stencil states, samplers, texture allocation
 - `device.rs` -- Phase A-C: virtio device init, display handshake, render config reception (`DisplayConfig`, `RenderConfig`)
@@ -41,7 +41,7 @@ The scene graph is the interface. All rendering complexity (tree walk, glyph atl
 - `scene` — scene graph types + TripleReader
 - `drawing` — color types
 - `fonts` — glyph rasterization for atlas
-- `render` — frame_period_ns for cadence
+- `render` — frame_period_ns for cadence, `geometry` module for vertex emission / clip rects / atlas packing / parameter packing
 
 ## Testing
 

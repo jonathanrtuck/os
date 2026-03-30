@@ -3,11 +3,11 @@
 use alloc::vec::Vec;
 
 use protocol::metal;
+use render::geometry::{emit_quad, VERTEX_BYTES};
 
 use crate::{
-    scene_walk::{emit_quad, flush_solid_vertices},
-    DSS_NONE, DSS_STENCIL_INVERT, DSS_STENCIL_TEST, DSS_STENCIL_WINDING, MAX_INLINE_BYTES,
-    PIPE_SOLID, PIPE_STENCIL_WRITE, VERTEX_BYTES,
+    scene_walk::flush_solid_vertices, DSS_NONE, DSS_STENCIL_INVERT, DSS_STENCIL_TEST,
+    DSS_STENCIL_WINDING, MAX_INLINE_BYTES, PIPE_SOLID, PIPE_STENCIL_WRITE,
 };
 
 pub(crate) const MAX_PATH_POINTS: usize = 512;

@@ -17,6 +17,7 @@ pub mod cache;
 pub mod clip_mask;
 pub mod damage;
 pub mod frame_scheduler;
+pub mod geometry;
 pub mod incremental;
 pub mod scene_render;
 pub mod surface_pool;
