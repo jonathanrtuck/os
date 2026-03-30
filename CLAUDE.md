@@ -226,7 +226,7 @@ kill -USR1 $(pgrep hypervisor)
 - `wait 10` — wait 10 extra frames
 - `capture /tmp/out.png` — screenshot at this point
 
-**Background mode:** Always use `--background` for automated invocations (captures, event scripts, CI). It sets `.accessory` activation policy: no Dock icon, no window activation, no focus stealing. Metal rendering still works (window exists in compositing tree but ordered behind). Previously background mode was implicit with `--events`; now it's an explicit flag.
+**Background mode:** Always use `--background` for automated invocations (captures, event scripts, CI). Renders to an offscreen `MTLTexture` — no window, no CAMetalLayer, no interaction with the macOS window server. Zero focus disruption. Previously background mode was implicit with `--events`; now it's an explicit flag.
 
 ### Visual assertion tool (verify.py) — MANDATORY
 
