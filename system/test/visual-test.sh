@@ -23,16 +23,15 @@ KERNEL="$SYSTEM_DIR/target/aarch64-unknown-none/release/kernel"
 DISK_ORIG="$SYSTEM_DIR/disk.img"
 # Each test boots the OS which can mutate disk.img (document edits persist).
 # Use a temporary copy so the original stays clean across test runs.
-# NOTE: The factory disk.img has fonts but no document content. Visual tests
-# depend on a "Style Stress Test" document that must exist on disk. If tests
-# fail with "content not found" style errors, the disk.img needs the test
-# document baked in (either via mkdisk or by saving a known-good interactive
-# session's disk.img).
+# The factory disk.img (built by mkdisk) includes the "Style Stress Test"
+# rich text document with 32 styles — the visual tests depend on it.
 DISK="$CAPTURE_DIR/disk-test.img"
 
 # Boot wait: frames to wait before injecting events.
-# The OS needs ~25 frames to boot; 60 gives comfortable margin.
-BOOT_WAIT=60
+# Headless rendering (offscreen MTLTexture) has no vsync throttle, so
+# frames process fast. The OS needs ~120 frames to fully boot and render
+# the test document from a fresh factory disk; 150 gives comfortable margin.
+BOOT_WAIT=150
 # Post-event wait: frames to wait after events before capture.
 POST_WAIT=30
 # Hypervisor timeout in seconds.
@@ -71,7 +70,7 @@ run_verify() {
 test_boot_idle() {
     info "Test: boot-idle (no input, verify basic rendering)"
     hypervisor "$KERNEL" --drive "$DISK" --background \
-        --capture 30 "$CAPTURE_DIR/boot-idle.png" \
+        --capture 150 "$CAPTURE_DIR/boot-idle.png" \
         --timeout "$TIMEOUT" >/dev/null 2>&1
 
     run_verify "$CAPTURE_DIR/boot-idle.png" "$SPEC_DIR/boot-idle.spec"
@@ -80,7 +79,7 @@ test_boot_idle() {
 test_cursor_dark() {
     info "Test: cursor-dark (cursor on dark background)"
     cat > "$CAPTURE_DIR/cursor-dark.events" << 'EVENTS'
-wait 60
+wait 150
 move 400 400
 wait 30
 capture /tmp/visual-tests/cursor-dark.png
@@ -92,7 +91,7 @@ EVENTS
 test_cursor_page() {
     info "Test: cursor-page (cursor on white page)"
     cat > "$CAPTURE_DIR/cursor-page.events" << 'EVENTS'
-wait 60
+wait 150
 move 2000 2000
 wait 30
 capture /tmp/visual-tests/cursor-page.png
@@ -104,7 +103,7 @@ EVENTS
 test_after_type() {
     info "Test: after-type (keyboard input reaches document)"
     cat > "$CAPTURE_DIR/after-type.events" << 'EVENTS'
-wait 60
+wait 150
 type x
 wait 30
 capture /tmp/visual-tests/after-type.png
@@ -119,7 +118,7 @@ test_click_placement() {
     # Click mid-word, type 'Z', verify 'Z' appears in the title region.
     # Uses move+wait before click so pointer register is fresh.
     cat > "$CAPTURE_DIR/click-placement.events" << 'EVENTS'
-wait 60
+wait 150
 move 330 68
 wait 5
 click 330 68
@@ -140,7 +139,7 @@ test_dblclick_select() {
     # Double-click on "Style" at (280,60) in 800x600.
     # Selection highlight = blue-tinted pixels in the word region.
     cat > "$CAPTURE_DIR/dblclick-select.events" << 'EVENTS'
-wait 60
+wait 150
 move 280 60
 wait 5
 dblclick 280 60
@@ -160,7 +159,7 @@ test_tripleclick_line() {
     # After replacing selection with 'Z', the line content changes.
     # Verifies triple-click selects the full line (not just byte 0..0).
     cat > "$CAPTURE_DIR/tripleclick-line.events" << 'EVENTS'
-wait 60
+wait 150
 move 300 115
 wait 5
 click 300 115
@@ -186,7 +185,7 @@ test_font_weights() {
     # Verifies that different weight variants render with different stroke densities.
     hypervisor "$KERNEL" --drive "$DISK" --background \
         --resolution 1600x1200 \
-        --capture 90 "$CAPTURE_DIR/font-weights.png" \
+        --capture 150 "$CAPTURE_DIR/font-weights.png" \
         --timeout "$TIMEOUT" >/dev/null 2>&1
     run_verify "$CAPTURE_DIR/font-weights.png" "$SPEC_DIR/font-weights.spec"
 }
@@ -197,10 +196,10 @@ test_caret_height() {
     # At 1600x1200, subtitle at y~120. Caret should be 15-65px tall (font metrics).
     hypervisor "$KERNEL" --drive "$DISK" --background \
         --resolution 1600x1200 \
-        --capture 90 "$CAPTURE_DIR/caret-baseline.png" \
+        --capture 150 "$CAPTURE_DIR/caret-baseline.png" \
         --timeout "$TIMEOUT" >/dev/null 2>&1
     cat > "$CAPTURE_DIR/caret-height.events" << 'EVENTS'
-wait 60
+wait 150
 move 600 120
 wait 5
 click 600 120
@@ -218,7 +217,7 @@ test_italic_slant() {
     info "Test: italic-slant (italic text has visual slant vs roman)"
     hypervisor "$KERNEL" --drive "$DISK" --background \
         --resolution 1600x1200 \
-        --capture 90 "$CAPTURE_DIR/italic-slant.png" \
+        --capture 150 "$CAPTURE_DIR/italic-slant.png" \
         --timeout "$TIMEOUT" >/dev/null 2>&1
     run_verify "$CAPTURE_DIR/italic-slant.png" "$SPEC_DIR/italic-slant.spec"
 }
@@ -227,7 +226,7 @@ test_baseline_mixed() {
     info "Test: baseline-mixed (mixed-size text baseline alignment)"
     hypervisor "$KERNEL" --drive "$DISK" --background \
         --resolution 1600x1200 \
-        --capture 90 "$CAPTURE_DIR/baseline-mixed.png" \
+        --capture 150 "$CAPTURE_DIR/baseline-mixed.png" \
         --timeout "$TIMEOUT" >/dev/null 2>&1
     run_verify "$CAPTURE_DIR/baseline-mixed.png" "$SPEC_DIR/baseline-mixed.spec"
 }
@@ -236,7 +235,7 @@ test_underline_below() {
     info "Test: underline-below (underline decoration below baseline)"
     hypervisor "$KERNEL" --drive "$DISK" --background \
         --resolution 1600x1200 \
-        --capture 90 "$CAPTURE_DIR/underline-below.png" \
+        --capture 150 "$CAPTURE_DIR/underline-below.png" \
         --timeout "$TIMEOUT" >/dev/null 2>&1
     run_verify "$CAPTURE_DIR/underline-below.png" "$SPEC_DIR/underline-below.spec"
 }
@@ -246,7 +245,7 @@ test_cursor_mixed() {
     # At 1600x1200, click on small text in right side of line 1.
     # The small text follows the large "Sans 36pt Bold Green".
     cat > "$CAPTURE_DIR/cursor-mixed.events" << 'EVENTS'
-wait 60
+wait 150
 move 850 160
 wait 5
 click 850 160
@@ -272,7 +271,7 @@ test_cursor_italic() {
     # frame number) and cursor (higher frame number).
     rm -f "$CAPTURE_DIR"/cursor-italic-*.png
     cat > "$CAPTURE_DIR/cursor-italic.events" << 'EVENTS'
-wait 60
+wait 150
 capture /tmp/visual-tests/italic-baseline.png
 move 500 325
 wait 5
