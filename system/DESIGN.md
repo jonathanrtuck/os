@@ -64,7 +64,7 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 └───────────────────────────────────────────────────────────┘
 ```
 
-**Process model:** Kernel spawns only init. Init embeds all other ELF binaries and spawns everything else. Microkernel pattern (Fuchsia component_manager, seL4 root task). This pattern is foundational; init's implementation is scaffolding.
+**Process model:** Kernel spawns only init. Init reads service ELFs from a memory-mapped service pack and spawns everything else. Microkernel pattern (Fuchsia component_manager, seL4 root task). This pattern is foundational; init's implementation is scaffolding.
 
 **IPC:** Two mechanisms, matched to data semantics:
 
@@ -392,7 +392,7 @@ Notification for both: `channel_signal` syscall wakes the consumer from `sys::wa
 
 **What's scaffolding (the implementation):**
 
-- **Embedded ELFs via `include_bytes!`.** All binaries baked into init at compile time. Requires full rebuild to change any component. Real OS loads from a filesystem.
+- **Service pack.** Service ELFs packed into a flat archive linked into the kernel as a `.services` section. Init reads from a memory-mapped region at `SERVICE_PACK_BASE`. Changing one service requires only repacking + relinking. Real OS loads from a filesystem.
 - **Hardcoded framebuffer dimensions** (1024×768). Should come from GPU driver, not init.
 - **Linear orchestration.** Spawn render service, run 10-phase handshake, start remaining processes. No dynamic process management, no error recovery.
 - **Device manifest format.** Ad hoc packed struct (u32 count + 8-byte-aligned entries with device_id, mmio_pa, mmio_size, irq). No versioning, no extensibility. Works for 2 devices.

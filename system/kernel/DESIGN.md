@@ -93,7 +93,7 @@ The finished code's module-level docs are the authoritative reference for _what_
 
 **Why demand paging:** Avoids allocating all pages upfront. Process startup is fast (2 pages mapped vs. potentially dozens). Foundation for future memory-mapped files.
 
-**Why `include_bytes!` (no filesystem):** No filesystem exists yet. `build.rs` (at the `system/` level) compiles user programs and embeds the ELF binaries in `.rodata`. Bootstrap solution — will be replaced when the filesystem is implemented.
+**Service loading:** The kernel embeds only init via `include_bytes!`. All other service ELFs are in a flat archive (service pack) linked as a `.services` section. The kernel maps this region read-only into init's address space at `SERVICE_PACK_BASE`. Init looks up ELFs by role ID and passes them to `process_create`.
 
 **Cleanup:** On process exit, the kernel drains all handles (closing channel endpoints), invalidates TLB entries for the ASID, frees all owned page frames + page table frames, and releases the ASID. Full resource reclamation — no leaks.
 

@@ -19,7 +19,7 @@ cargo run -r   # builds everything, then launches via hypervisor (default)
 
 Use `QEMU=1 cargo run -r` for QEMU instead. Close the window or Cmd+Q to exit the hypervisor.
 
-A single `cargo build -r` compiles the full system: shared libraries, all userspace programs, init (which embeds them as ELF blobs), and the kernel (which embeds init). See `build.rs` for the build order.
+A single `cargo build -r` compiles the full system: shared libraries, all userspace programs, packs service ELFs into a flat archive, and links everything into a single kernel binary. Init reads service ELFs from a memory-mapped pack region at boot. See `build.rs` for the build order.
 
 ## testing
 
@@ -98,7 +98,7 @@ system/
     …                        — scheduler, memory, processes, IPC, devices (see kernel/README.md)
 
   services/                  — trusted userspace (EL0)
-    init/main.rs             — root task (embeds ELFs, spawns drivers, wires IPC)
+    init/main.rs             — root task (reads service pack, spawns drivers, wires IPC)
     core/                    — OS service (sole writer, scene graph builder, input router)
     drivers/
       metal-render/          — Metal render service (sole backend, via hypervisor)
