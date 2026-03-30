@@ -332,19 +332,18 @@ Notification for both: `channel_signal` syscall wakes the consumer from `sys::wa
 
 ### 1.8 Render Library (`libraries/render/`) 🟢
 
-**Goal:** Render backend that transforms a scene graph into pixels. Owns the tree walk, rasterization, compositing, damage tracking, glyph caching, and all pixel-level work. The compositor delegates all rendering to this library via the `RenderBackend` trait.
+**Goal:** Render library that transforms a scene graph into pixels. Owns the tree walk, rasterization, compositing, damage tracking, glyph caching, and all pixel-level work. Callers compose the free functions (`render_scene`, `render_scene_full`, etc.) with explicit state (glyph caches, surface pool, LRU rasterizer).
 
 **Status:** ~2,194 lines across 6 files (lib.rs, scene_render.rs, compositing.rs, surface_pool.rs, damage.rs, cursor.rs). Extracted from the compositor in Phase 1 of the rendering architecture redesign (2026-03-16).
 
 **What's foundational:**
 
-- **`RenderBackend` trait.** `fn render(&mut self, scene, target)` + `fn dirty_rects()`. One call — the backend owns tree walk, transform/clip stack, glyph cache, rasterization, compositing, and damage tracking. The compositor becomes a thin event loop that calls this.
-- **`CpuBackend` implementation.** Takes font data at construction, builds internal glyph caches, handles all content types (`FillRect`, `Glyphs`, `Image`). Encapsulates rendering state: glyph caches, damage tracker, surface pool, per-node previous-frame bounds (PREV_BOUNDS).
+- **Free-function API.** `render_scene`, `render_scene_full`, `render_scene_clipped_full` — callers compose explicit state (RenderCtx, SurfacePool, LruRasterizer, NodeCache, ClipMaskCache). No trait-based polymorphism.
 - **Content-type rendering.** `FillRect` → solid/blended rectangle fill. `Glyphs` → glyph cache lookup + coverage drawing. `Image` → bilinear resampling blit. No content-type dispatch above this layer.
 - **Damage tracking.** Change-list-driven + PREV_BOUNDS for old-position damage. Supports incremental rendering (only repaint dirty rects) and full repaints.
 - **Compositing.** Group opacity via offscreen buffers (SurfacePool), shadows, transforms, clip-skip optimization, rounded corner clipping.
 - **Procedural cursor.** Arrow cursor rendered at top z-order.
-- **Font handling boundary.** The render backend owns glyph rasterization and caching. Core owns text shaping (harfrust) and metrics. The compositor has zero font knowledge — it passes font data to `CpuBackend::new()` and never touches it again.
+- **Font handling boundary.** The render library owns glyph rasterization and caching (via LruRasterizer and GlyphCache). Core owns text shaping (harfrust) and metrics.
 
 **What's scaffolding:**
 
@@ -665,7 +664,7 @@ Core (OS Service)
 
 Compositor
   ├── sys (wait, channel_signal, exit)
-  ├── render (CpuBackend, RenderBackend — all pixel work)
+  ├── render (scene walk, compositing — all pixel work)
   ├── scene (DoubleReader — reads scene graph from shared memory)
   ├── ipc (Channel, Message — ring buffer messaging)
   └── protocol (compose, present — message types + payload structs)

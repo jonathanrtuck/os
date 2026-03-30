@@ -2,11 +2,9 @@
 
 Shared rendering infrastructure: scene graph tree walk, content rendering, compositing, and offscreen buffer management. Pure rendering library with no dependency on `sys` or `ipc`. `no_std` with `alloc`.
 
-**Note:** `CpuBackend` and `LruRasterizer` are legacy code from the removed cpu-render driver. They remain compiled (tests exercise them) but have no runtime consumers — metal-render does its own GPU rendering. These will be cleaned up in a future pass.
-
 ## Key Files
 
-- `lib.rs` -- `RenderBackend` trait, `CpuBackend` (legacy software renderer), `LruRasterizer` (on-demand glyph rasterization with LRU cache), coordinate scaling helpers
+- `lib.rs` -- `LruRasterizer` (on-demand glyph rasterization with LRU cache), coordinate scaling helpers
 - `scene_render/mod.rs` -- `SceneGraph` struct (nodes + data + content region), `RenderCtx` (glyph caches + scale factor)
 - `scene_render/walk.rs` -- Recursive tree walk: `render_scene`, `render_scene_clipped`, `render_scene_with_pool` variants. Handles backgrounds, borders, rounded corners, clipping, opacity
 - `scene_render/content.rs` -- Content rendering: `Glyphs` (shaped text), `Image`/`InlineImage` (pixel blits), `Path` (vector fill/stroke)
@@ -23,7 +21,7 @@ Shared rendering infrastructure: scene graph tree walk, content rendering, compo
 
 - `metal-render` -- `frame_scheduler::frame_period_ns`
 - `presenter` -- `scene_render::path_raster::render_path_data` (loading screen)
-- `test/` -- `render_scene_render.rs` exercises CpuBackend, scene walk, clip skip, damage tracking
+- `test/` -- `render_scene_render.rs` exercises scene walk, clip skip, damage tracking
 
 ## Dependencies
 

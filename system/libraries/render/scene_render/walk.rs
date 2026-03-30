@@ -1556,7 +1556,7 @@ pub fn render_scene_with_pool(
 
 /// Render an entire scene graph with SurfacePool + LRU glyph rasterizer.
 ///
-/// This is the full CpuBackend entry point. Non-ASCII glyphs that miss
+/// This is the full rendering entry point. Non-ASCII glyphs that miss
 /// the fixed ASCII cache are rasterized on demand and inserted into the
 /// LRU cache.
 pub fn render_scene_full(
@@ -1664,7 +1664,7 @@ pub fn render_scene_clipped_with_pool(
 }
 
 /// Render only the region within `dirty`, with SurfacePool + LRU rasterizer.
-/// This is the incremental rendering entry point for CpuBackend.
+/// This is the incremental rendering entry point.
 pub fn render_scene_clipped_full(
     fb: &mut Surface,
     graph: &SceneGraph,

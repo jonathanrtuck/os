@@ -346,31 +346,28 @@ fn lru_rasterizer_manual_insert_and_get() {
 }
 
 // ---------------------------------------------------------------------------
-// VAL-CACHE-006: CpuBackend has LRU cache initialized
+// VAL-CACHE-006: GlyphCache population
 // ---------------------------------------------------------------------------
 
 #[test]
-fn cpu_backend_lru_starts_empty() {
-    // Load the JetBrains Mono font embedded in the test binary.
+fn ascii_cache_populated_after_init() {
     let font_data = include_bytes!("../../share/jetbrains-mono.ttf");
-    let backend =
-        render::CpuBackend::new(font_data, None, 18, 96, 1.0, 1024, 768).expect("backend init");
-    assert_eq!(backend.lru.cache.len(), 0, "LRU cache should start empty");
-}
-
-#[test]
-fn cpu_backend_ascii_cache_populated() {
-    // Verify the fixed ASCII cache has entries after construction.
-    let font_data = include_bytes!("../../share/jetbrains-mono.ttf");
-    let backend =
-        render::CpuBackend::new(font_data, None, 18, 96, 1.0, 1024, 768).expect("backend init");
+    // SAFETY: GlyphCache is all-integer fields — zeroed memory is valid.
+    // No text lookups will succeed until populate_with_axes fills it.
+    let mut cache: Box<fonts::cache::GlyphCache> = unsafe {
+        let layout = std::alloc::Layout::new::<fonts::cache::GlyphCache>();
+        let ptr = std::alloc::alloc_zeroed(layout) as *mut fonts::cache::GlyphCache;
+        assert!(!ptr.is_null(), "GlyphCache allocation failed");
+        Box::from_raw(ptr)
+    };
+    cache.populate_with_axes(font_data, 18, 96, &[], 1);
 
     // 'A' (0x41) should be in the ASCII cache.
     let glyph_id = fonts::metrics::glyph_id_for_char(font_data, 'A');
     assert!(glyph_id.is_some(), "font should have glyph for 'A'");
     let glyph_id = glyph_id.unwrap();
     assert!(
-        backend.mono_cache.get(glyph_id).is_some(),
-        "ASCII 'A' should be in the fixed cache"
+        cache.get(glyph_id).is_some(),
+        "ASCII 'A' should be in the fixed cache after populate_with_axes"
     );
 }

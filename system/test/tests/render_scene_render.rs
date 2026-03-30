@@ -4,7 +4,7 @@
 //! pixel-identical output to rendering without the optimisation.
 
 use drawing::{Color, PixelFormat, Surface};
-use render::{scene_render, surface_pool, RenderBackend};
+use render::{scene_render, surface_pool};
 use scene::Node;
 // NodeFlags is already imported by the scene_render module and its
 // #[path] inclusion makes it available. Use a direct re-import from scene.
@@ -4101,22 +4101,15 @@ fn rotated_node_aabb_damage() {
 
 // ── Damage tracking with skipped frames (VAL-DMG-001 through VAL-DMG-004) ──
 
-/// Helper to create a CpuBackend for damage tracking tests.
-/// Uses real font data to satisfy the constructor, though damage tests
-/// don't exercise text rendering.
-fn test_cpu_backend(fb_w: u16, fb_h: u16) -> Box<render::CpuBackend> {
-    let mono = include_bytes!("../../share/jetbrains-mono.ttf");
-    render::CpuBackend::new(mono, None, 16, 96, 1.0, fb_w, fb_h)
-        .expect("CpuBackend::new should succeed with valid font")
-}
-
 /// Full repaint produces correct pixel output when node moves between frames.
 ///
 /// Render frame 1 (node at A), render frame 2 (node at B). The old position
 /// A should show the background because full repaint covers everything.
 #[test]
 fn full_repaint_no_stale_pixel_artifacts() {
-    let mut backend = test_cpu_backend(100, 100);
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
 
     let red = scene::Color::rgba(255, 0, 0, 255);
     let bg = scene::Color::rgba(30, 30, 30, 255);
@@ -4145,7 +4138,7 @@ fn full_repaint_no_stale_pixel_artifacts() {
         data: &data,
         content_region: &[],
     };
-    backend.render(&graph, &mut fb);
+    scene_render::render_scene(&mut fb, &graph, &ctx);
 
     // Frame 2: move child to (60, 60), full repaint again.
     let mut nodes2 = nodes.clone();
@@ -4156,7 +4149,7 @@ fn full_repaint_no_stale_pixel_artifacts() {
         data: &data,
         content_region: &[],
     };
-    backend.render(&graph2, &mut fb);
+    scene_render::render_scene(&mut fb, &graph2, &ctx);
 
     // Pixel at old position (20, 20) should be background, not red.
     let stride = 100 * 4;

@@ -1,8 +1,7 @@
 //! Three-pass box blur — converges to Gaussian by Central Limit Theorem.
 //!
-//! Used by both CpuBackend (running-sum passes on pixel buffers) and
-//! virgil-render (TGSI loop shaders on GPU textures). The algorithm is
-//! shared; the execution is leaf-node-specific.
+//! Used by the scene tree walk (running-sum passes on pixel buffers).
+//! The algorithm is shared across rendering paths.
 //!
 //! Three iterations of horizontal + vertical box blur with optimally chosen
 //! widths produce a distribution whose shape converges to a Gaussian. This
