@@ -35,7 +35,8 @@ pub(crate) fn advance_blink(state: &mut ViewState, now_ms: u64) -> bool {
             state.cursor.opacity = 255;
             if elapsed >= BLINK_VISIBLE_MS {
                 state.cursor.blink_id = state
-                    .animation.timeline
+                    .animation
+                    .timeline
                     .start(255.0, 0.0, 150, animation::Easing::EaseInOut, now_ms)
                     .ok();
                 state.cursor.blink_phase = BlinkPhase::FadeOut;
@@ -66,7 +67,8 @@ pub(crate) fn advance_blink(state: &mut ViewState, now_ms: u64) -> bool {
             state.cursor.opacity = 0;
             if elapsed >= BLINK_HIDDEN_MS {
                 state.cursor.blink_id = state
-                    .animation.timeline
+                    .animation
+                    .timeline
                     .start(0.0, 255.0, 150, animation::Easing::EaseInOut, now_ms)
                     .ok();
                 state.cursor.blink_phase = BlinkPhase::FadeIn;

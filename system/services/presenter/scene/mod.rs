@@ -523,10 +523,7 @@ pub(crate) fn line_info_byte_to_line(
 }
 
 /// Byte offset of the start of a line.
-pub(crate) fn line_info_start(
-    lines: &[protocol::layout::LineInfo],
-    line_idx: usize,
-) -> usize {
+pub(crate) fn line_info_start(lines: &[protocol::layout::LineInfo], line_idx: usize) -> usize {
     if lines.is_empty() {
         return 0;
     }
@@ -535,10 +532,7 @@ pub(crate) fn line_info_start(
 }
 
 /// Byte offset of the end of a line.
-pub(crate) fn line_info_end(
-    lines: &[protocol::layout::LineInfo],
-    line_idx: usize,
-) -> usize {
+pub(crate) fn line_info_end(lines: &[protocol::layout::LineInfo], line_idx: usize) -> usize {
     if lines.is_empty() {
         return 0;
     }

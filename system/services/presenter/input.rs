@@ -12,8 +12,8 @@ use protocol::{
 use super::{
     clamp_f32, content_text_layout,
     documents::{doc_content, doc_write_header},
-    state, KEY_1, KEY_2, KEY_A, KEY_B, KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END,
-    KEY_HOME, KEY_I, KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_TAB, KEY_UP,
+    state, KEY_1, KEY_2, KEY_A, KEY_B, KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_HOME,
+    KEY_I, KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_TAB, KEY_UP,
 };
 
 pub(crate) struct KeyAction {
@@ -29,8 +29,21 @@ pub(crate) struct KeyAction {
 
 impl KeyAction {
     /// Create a new KeyAction with the given flags and no pending delete.
-    pub(crate) fn new(changed: bool, text_changed: bool, selection_changed: bool, context_switched: bool, consumed: bool) -> Self {
-        Self { changed, text_changed, selection_changed, context_switched, consumed, pending_delete: None }
+    pub(crate) fn new(
+        changed: bool,
+        text_changed: bool,
+        selection_changed: bool,
+        context_switched: bool,
+        consumed: bool,
+    ) -> Self {
+        Self {
+            changed,
+            text_changed,
+            selection_changed,
+            context_switched,
+            consumed,
+            pending_delete: None,
+        }
     }
 }
 
@@ -189,7 +202,11 @@ pub(crate) fn process_key_event(
         if has_image {
             let s = super::state();
             // Toggle active space.
-            let new_space = if s.animation.active_space == 0 { 1u8 } else { 0u8 };
+            let new_space = if s.animation.active_space == 0 {
+                1u8
+            } else {
+                0u8
+            };
             s.animation.active_space = new_space;
             let target_pt = new_space as f32 * fb_width as f32;
             s.animation.slide_target = scene::f32_to_mpt(target_pt);
@@ -469,7 +486,7 @@ pub(crate) fn process_key_event(
                     selection_changed: true,
                     context_switched: false,
                     consumed: true,
-                pending_delete: None,
+                    pending_delete: None,
                 };
             } else if s.cursor.pos > 0 {
                 // Move back one character (UTF-8 aware for rich text).
@@ -522,7 +539,7 @@ pub(crate) fn process_key_event(
                     selection_changed: true,
                     context_switched: false,
                     consumed: true,
-                pending_delete: None,
+                    pending_delete: None,
                 };
             } else if s.cursor.pos < len {
                 // Move forward one character (UTF-8 aware for rich text).
@@ -560,16 +577,12 @@ pub(crate) fn process_key_event(
                 } else {
                     if s.cursor.goal_x.is_none() {
                         let x_mpt = super::layout::line_info_cursor_x_mpt(rl, s.cursor.pos);
-                        s.cursor.goal_x = Some((x_mpt as f32) / 1024.0);
+                        s.cursor.goal_x = Some(x_mpt);
                     }
                     if line > 0 {
-                        let gx = s.cursor.goal_x.unwrap_or(0.0);
-                        let target_x_mpt = (gx * 1024.0) as i32;
-                        s.cursor.pos = super::layout::line_info_x_to_byte(
-                            rl,
-                            line - 1,
-                            target_x_mpt,
-                        );
+                        let target_x_mpt = s.cursor.goal_x.unwrap_or(0);
+                        s.cursor.pos =
+                            super::layout::line_info_x_to_byte(rl, line - 1, target_x_mpt);
                     }
                 }
             } else {
@@ -607,12 +620,10 @@ pub(crate) fn process_key_event(
                 } else {
                     if s.cursor.goal_x.is_none() {
                         let x_mpt = super::layout::line_info_cursor_x_mpt(rl, s.cursor.pos);
-                        s.cursor.goal_x = Some((x_mpt as f32) / 1024.0);
+                        s.cursor.goal_x = Some(x_mpt);
                     }
-                    let gx = s.cursor.goal_x.unwrap_or(0.0);
-                    let target_x_mpt = (gx * 1024.0) as i32;
-                    s.cursor.pos =
-                        super::layout::line_info_x_to_byte(rl, line + 1, target_x_mpt);
+                    let target_x_mpt = s.cursor.goal_x.unwrap_or(0);
+                    s.cursor.pos = super::layout::line_info_x_to_byte(rl, line + 1, target_x_mpt);
                 }
             } else {
                 let s = super::state();
@@ -679,15 +690,13 @@ pub(crate) fn process_key_event(
                 if line < rl.len() {
                     if s.cursor.goal_x.is_none() {
                         let x_mpt = super::layout::line_info_cursor_x_mpt(rl, s.cursor.pos);
-                        s.cursor.goal_x = Some((x_mpt as f32) / 1024.0);
+                        s.cursor.goal_x = Some(x_mpt);
                     }
                     let vp_h = page_h.saturating_sub(2 * page_pad) as i32;
                     let vp = super::layout::line_info_viewport_lines(rl, vp_h);
                     let target = line.saturating_sub(vp);
-                    let gx = s.cursor.goal_x.unwrap_or(0.0);
-                    let target_x_mpt = (gx * 1024.0) as i32;
-                    s.cursor.pos =
-                        super::layout::line_info_x_to_byte(rl, target, target_x_mpt);
+                    let target_x_mpt = s.cursor.goal_x.unwrap_or(0);
+                    s.cursor.pos = super::layout::line_info_x_to_byte(rl, target, target_x_mpt);
                 }
             } else {
                 let s = super::state();
@@ -714,15 +723,13 @@ pub(crate) fn process_key_event(
                 if line < rl.len() {
                     if s.cursor.goal_x.is_none() {
                         let x_mpt = super::layout::line_info_cursor_x_mpt(rl, s.cursor.pos);
-                        s.cursor.goal_x = Some((x_mpt as f32) / 1024.0);
+                        s.cursor.goal_x = Some(x_mpt);
                     }
                     let vp_h = page_h.saturating_sub(2 * page_pad) as i32;
                     let vp = super::layout::line_info_viewport_lines(rl, vp_h);
                     let target = (line + vp).min(rl.len().saturating_sub(1));
-                    let gx = s.cursor.goal_x.unwrap_or(0.0);
-                    let target_x_mpt = (gx * 1024.0) as i32;
-                    s.cursor.pos =
-                        super::layout::line_info_x_to_byte(rl, target, target_x_mpt);
+                    let target_x_mpt = s.cursor.goal_x.unwrap_or(0);
+                    s.cursor.pos = super::layout::line_info_x_to_byte(rl, target, target_x_mpt);
                 }
             } else {
                 let s = super::state();

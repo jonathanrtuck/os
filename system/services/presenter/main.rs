@@ -48,21 +48,21 @@ mod layout;
 mod scene_state;
 
 use protocol::{
+    edit::{
+        self, CursorMove, SelectionUpdate, MSG_CURSOR_MOVE, MSG_SELECTION_UPDATE, MSG_SET_CURSOR,
+    },
     init::{
         self as init_proto, CoreConfig, FrameRateMsg, RtcConfig, MSG_CORE_CONFIG, MSG_FRAME_RATE,
         MSG_RTC_CONFIG, MSG_SCENE_UPDATED,
-    },
-    view::{
-        self as view_proto, DocChanged, DocLoaded, ImageDecoded, MSG_DOC_CHANGED, MSG_DOC_LOADED,
-        MSG_IMAGE_DECODED, MSG_REDO_REQUEST, MSG_UNDO_REQUEST, DOC_CHANGED_CLEAR_SELECTION,
-    },
-    edit::{
-        self, CursorMove, SelectionUpdate, MSG_CURSOR_MOVE, MSG_SELECTION_UPDATE, MSG_SET_CURSOR,
     },
     input::{self, KeyEvent, PointerButton, MSG_KEY_EVENT, MSG_POINTER_BUTTON},
     layout::{
         self as layout_proto, CoreLayoutConfig, LayoutResultsHeader, LineInfo, ViewportState,
         VisibleRun, MSG_CORE_LAYOUT_CONFIG, MSG_LAYOUT_READY, MSG_LAYOUT_RECOMPUTE,
+    },
+    view::{
+        self as view_proto, DocChanged, DocLoaded, ImageDecoded, DOC_CHANGED_CLEAR_SELECTION,
+        MSG_DOC_CHANGED, MSG_DOC_LOADED, MSG_IMAGE_DECODED, MSG_REDO_REQUEST, MSG_UNDO_REQUEST,
     },
 };
 
@@ -141,8 +141,8 @@ pub(crate) struct CursorState {
     pub(crate) blink_id: Option<animation::AnimationId>,
     /// Sticky goal column for Up/Down navigation (plain text).
     pub(crate) goal_column: Option<usize>,
-    /// Sticky goal x-position (points) for Up/Down navigation (rich text).
-    pub(crate) goal_x: Option<f32>,
+    /// Sticky goal x-position (millipoints) for Up/Down navigation (rich text).
+    pub(crate) goal_x: Option<i32>,
 }
 
 /// Selection state: anchor, range, fade, click detection.
@@ -837,9 +837,14 @@ fn read_visible_run(header: &LayoutResultsHeader, index: usize) -> VisibleRun {
 }
 
 /// Read glyph data from the layout results.
-fn read_glyph_data(header: &LayoutResultsHeader, offset: u32, count: u16) -> &'static [scene::ShapedGlyph] {
+fn read_glyph_data(
+    header: &LayoutResultsHeader,
+    offset: u32,
+    count: u16,
+) -> &'static [scene::ShapedGlyph] {
     let s = state();
-    let glyph_base = layout_proto::glyph_data_offset(header.total_line_count, header.visible_run_count);
+    let glyph_base =
+        layout_proto::glyph_data_offset(header.total_line_count, header.visible_run_count);
     let ptr = (s.layout_results_va + glyph_base + offset as usize) as *const scene::ShapedGlyph;
     // SAFETY: within mapped region, offset + count*16 within glyph_data_used.
     unsafe { core::slice::from_raw_parts(ptr, count as usize) }
@@ -1452,7 +1457,10 @@ pub extern "C" fn _start() -> ! {
     let mut boot_spinner_angle: f32 = 0.0;
 
     loop {
-        let _ = sys::wait(&[anim_timer.0, state().docmodel_handle.0], frame_interval_ns);
+        let _ = sys::wait(
+            &[anim_timer.0, state().docmodel_handle.0],
+            frame_interval_ns,
+        );
 
         // ── Timer tick: rotate spinner ──────────────────────────────
         if let Ok(_) = sys::wait(&[anim_timer.0], 0) {
@@ -1592,14 +1600,25 @@ pub extern "C" fn _start() -> ! {
     {
         let s = state();
         if s.pointer.cursor_state_va != 0 {
-            write_cursor_shape(s.pointer.cursor_state_va, &mut s.pointer.shape_generation, "pointer");
+            write_cursor_shape(
+                s.pointer.cursor_state_va,
+                &mut s.pointer.shape_generation,
+                "pointer",
+            );
             write_cursor_opacity(s.pointer.cursor_state_va, 0); // hidden initially
         }
     }
 
     // Signal layout service for initial layout computation.
     {
-        write_viewport_state(fb_width, fb_height, 0, page_width, page_height, page_padding);
+        write_viewport_state(
+            fb_width,
+            fb_height,
+            0,
+            page_width,
+            page_height,
+            page_padding,
+        );
         signal_layout_recompute(&layout_ch);
         // Wait for B to compute initial layout.
         let _ = sys::wait(&[state().layout_handle.0], 50_000_000); // 50ms
@@ -1696,8 +1715,9 @@ pub extern "C" fn _start() -> ! {
         // Single question: is anything visually animating?
         // If yes, wake at display refresh rate for smooth frames.
         // If no, sleep until the next timer event or IPC wake.
-        let any_animating =
-            state().scroll.animating || state().animation.slide_animating || state().animation.timeline.any_active();
+        let any_animating = state().scroll.animating
+            || state().animation.slide_animating
+            || state().animation.timeline.any_active();
 
         let timeout_ns: u64 = if any_animating {
             frame_interval_ns
@@ -1730,14 +1750,34 @@ pub extern "C" fn _start() -> ! {
                 timeout_ns,
             ),
             (true, false) => sys::wait(
-                &[state().input_handle.0, state().editor_handle.0, state().docmodel_handle.0, timer_handle.0, state().layout_handle.0],
+                &[
+                    state().input_handle.0,
+                    state().editor_handle.0,
+                    state().docmodel_handle.0,
+                    timer_handle.0,
+                    state().layout_handle.0,
+                ],
                 timeout_ns,
             ),
             (false, true) => sys::wait(
-                &[state().input_handle.0, state().editor_handle.0, state().docmodel_handle.0, state().input2_handle.0, state().layout_handle.0],
+                &[
+                    state().input_handle.0,
+                    state().editor_handle.0,
+                    state().docmodel_handle.0,
+                    state().input2_handle.0,
+                    state().layout_handle.0,
+                ],
                 timeout_ns,
             ),
-            (false, false) => sys::wait(&[state().input_handle.0, state().editor_handle.0, state().docmodel_handle.0, state().layout_handle.0], timeout_ns),
+            (false, false) => sys::wait(
+                &[
+                    state().input_handle.0,
+                    state().editor_handle.0,
+                    state().docmodel_handle.0,
+                    state().layout_handle.0,
+                ],
+                timeout_ns,
+            ),
         };
         let mut changed = false;
         let mut text_changed = false;
@@ -1845,10 +1885,7 @@ pub extern "C" fn _start() -> ! {
                     let del = protocol::edit::WriteDeleteRange { start, end };
                     // SAFETY: WriteDeleteRange is repr(C) and fits in 60-byte payload.
                     let del_msg = unsafe {
-                        ipc::Message::from_payload(
-                            protocol::edit::MSG_WRITE_DELETE_RANGE,
-                            &del,
-                        )
+                        ipc::Message::from_payload(protocol::edit::MSG_WRITE_DELETE_RANGE, &del)
                     };
                     docmodel_ch.send(&del_msg);
                     let _ = sys::channel_signal(state().docmodel_handle);
@@ -2029,7 +2066,8 @@ pub extern "C" fn _start() -> ! {
                                         let (lo, mut hi) = if is_rich {
                                             // Rich text: use B's cached LineInfo for line boundaries.
                                             let cached = cached_line_info();
-                                            let line_idx = layout::line_info_byte_to_line(cached, byte_pos);
+                                            let line_idx =
+                                                layout::line_info_byte_to_line(cached, byte_pos);
                                             if line_idx < cached.len() {
                                                 let li = &cached[line_idx];
                                                 let start = li.byte_offset as usize;
@@ -2039,8 +2077,12 @@ pub extern "C" fn _start() -> ! {
                                                 (0, text.len())
                                             }
                                         } else {
-                                            let lo = input_handling::visual_line_start(text, byte_pos, cols);
-                                            let hi = input_handling::visual_line_end(text, byte_pos, cols);
+                                            let lo = input_handling::visual_line_start(
+                                                text, byte_pos, cols,
+                                            );
+                                            let hi = input_handling::visual_line_end(
+                                                text, byte_pos, cols,
+                                            );
                                             (lo, hi)
                                         };
                                         // Include the newline if present.
@@ -2232,7 +2274,8 @@ pub extern "C" fn _start() -> ! {
                 s.animation.timeline.cancel(old_id);
             }
             s.selection.fade_id = s
-                .animation.timeline
+                .animation
+                .timeline
                 .start(0.0, 255.0, 100, animation::Easing::EaseOut, now_ms)
                 .ok();
             s.selection.opacity = 0;
@@ -2305,7 +2348,8 @@ pub extern "C" fn _start() -> ! {
                 let idle_ms = now_ms.saturating_sub(s.pointer.last_event_ms);
                 if idle_ms >= POINTER_HIDE_MS {
                     s.pointer.fade_id = s
-                        .animation.timeline
+                        .animation
+                        .timeline
                         .start(
                             255.0,
                             0.0,
@@ -2352,11 +2396,18 @@ pub extern "C" fn _start() -> ! {
         // position changed. B will recompute layout and signal back with
         // MSG_LAYOUT_READY. We drain the ready signal before scene dispatch.
         if text_changed || context_switched {
-            write_viewport_state(fb_width, fb_height, state().scroll.offset, page_width, page_height, page_padding);
+            write_viewport_state(
+                fb_width,
+                fb_height,
+                state().scroll.offset,
+                page_width,
+                page_height,
+                page_padding,
+            );
             signal_layout_recompute(&layout_ch);
             // Wait briefly for B to finish layout (shared memory, fast).
             let _ = sys::wait(&[state().layout_handle.0], 5_000_000); // 5ms
-            // Drain layout-ready signal.
+                                                                      // Drain layout-ready signal.
             let mut layout_msg = ipc::Message::new(0);
             while layout_ch.try_recv(&mut layout_msg) {
                 // MSG_LAYOUT_READY — results now in shared memory.

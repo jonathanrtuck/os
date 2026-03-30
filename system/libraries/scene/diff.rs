@@ -85,11 +85,13 @@ pub fn abs_bounds(
     }
 
     // Expand bounds by shadow overflow if the node has a shadow.
+    // Shadow properties are stored in points — convert to millipoints to
+    // match the coordinate space of bx/by/bw/bh.
     if node.has_shadow() {
-        let blur = node.shadow_blur_radius as i32;
-        let spread = node.shadow_spread as i32;
-        let off_x = node.shadow_offset_x as i32;
-        let off_y = node.shadow_offset_y as i32;
+        let blur = node.shadow_blur_radius as i32 * crate::node::MPT_PER_PT;
+        let spread = node.shadow_spread as i32 * crate::node::MPT_PER_PT;
+        let off_x = node.shadow_offset_x as i32 * crate::node::MPT_PER_PT;
+        let off_y = node.shadow_offset_y as i32 * crate::node::MPT_PER_PT;
 
         // Shadow extends by spread + blur on each side, shifted by offset.
         let extent = spread + blur;

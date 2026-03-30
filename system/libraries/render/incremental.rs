@@ -523,10 +523,12 @@ fn add_rect_clamped(
     fb_height: u16,
 ) {
     // Convert millipoints to whole points (>> 10 = / 1024).
+    // Origin floors (shifts dirty region left/up — conservative).
+    // Size ceils (ensures dirty region covers the rightmost/bottom sub-point pixels).
     let x = mpt_x >> 10;
     let y = mpt_y >> 10;
-    let w = mpt_w >> 10;
-    let h = mpt_h >> 10;
+    let w = (mpt_w + 1023) >> 10;
+    let h = (mpt_h + 1023) >> 10;
     // Clip to framebuffer: clamp origin to 0, adjust size.
     let x0 = x.max(0);
     let y0 = y.max(0);
