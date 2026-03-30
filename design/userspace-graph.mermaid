@@ -72,7 +72,7 @@ graph LR
     RICH -->|write requests via edit protocol| DOCUMENT
     PRESENTER <-->|layout requests / results| LAYOUT
     PRESENTER <-->|edit commits, undo/redo| DOCUMENT
-    DOCUMENT -->|persistence (commit, snapshot)| STORE
+    DOCUMENT -->|"persistence: commit, snapshot"| STORE
     STORE -->|block I/O| BLK
     PRESENTER -->|scene graph: shared memory| METAL
     METAL --> GPU_HW
