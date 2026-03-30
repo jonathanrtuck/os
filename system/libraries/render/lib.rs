@@ -69,7 +69,7 @@ pub struct LruRasterizer {
     /// Mono font data (owned copy for on-demand rasterization).
     font_data: Vec<u8>,
     /// Font axis values used for rasterization.
-    axes: Vec<fonts::rasterize::AxisValue>,
+    axes: Vec<fonts::metrics::AxisValue>,
     /// Scratch space for on-demand glyph rasterization (~39 KiB).
     scratch: Box<fonts::rasterize::RasterScratch>,
     /// Pixel buffer for on-demand glyph rasterization (GLYPH_MAX_W * GLYPH_MAX_H).
@@ -205,7 +205,7 @@ impl CpuBackend {
         _fb_height: u16,
     ) -> Option<Box<Self>> {
         // Validate mono font before allocating.
-        if fonts::rasterize::font_metrics(mono_font_data).is_none() {
+        if fonts::metrics::font_metrics(mono_font_data).is_none() {
             return None;
         }
 
@@ -245,7 +245,7 @@ impl CpuBackend {
             Box::from_raw(ptr)
         };
         let prop_data_slice = prop_font_data.unwrap_or(mono_font_data);
-        if fonts::rasterize::font_metrics(prop_data_slice).is_some() {
+        if fonts::metrics::font_metrics(prop_data_slice).is_some() {
             prop_cache.populate_with_axes(prop_data_slice, physical_size, dpi, &[], sf);
         } else {
             // Fallback: use mono font.

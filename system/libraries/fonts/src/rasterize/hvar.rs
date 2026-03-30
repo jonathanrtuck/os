@@ -7,10 +7,8 @@
 
 use read_fonts::{FontRef, TableProvider};
 
-use super::{
-    gvar::build_normalized_coords,
-    metrics::{glyph_h_metrics, AxisValue},
-};
+use super::gvar::build_normalized_coords;
+use crate::metrics::{glyph_h_metrics, AxisValue};
 
 /// Returns `true` if the font contains an HVAR table.
 pub fn has_hvar(font_data: &[u8]) -> bool {

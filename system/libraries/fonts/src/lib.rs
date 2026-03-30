@@ -19,6 +19,7 @@ use alloc::vec::Vec;
 pub use harfrust::Feature;
 
 pub mod cache;
+pub mod metrics;
 pub mod rasterize;
 
 /// A single shaped glyph with positioning information.
@@ -106,7 +107,7 @@ pub fn shape_with_variations(
     font_data: &[u8],
     text: &str,
     features: &[Feature],
-    axis_values: &[rasterize::AxisValue],
+    axis_values: &[metrics::AxisValue],
 ) -> Vec<ShapedGlyph> {
     if text.is_empty() {
         return Vec::new();

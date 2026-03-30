@@ -716,7 +716,7 @@ pub extern "C" fn _start() -> ! {
                     }
 
                     // Build axes from registry entry.
-                    let mut axes_buf = [fonts::rasterize::AxisValue {
+                    let mut axes_buf = [fonts::metrics::AxisValue {
                         tag: [0; 4],
                         value: 0.0,
                     }; 8];
@@ -725,7 +725,7 @@ pub extern "C" fn _start() -> ! {
                     if let Some(entry) = style_entry {
                         let mut i = 0;
                         while i < axis_count {
-                            axes_buf[i] = fonts::rasterize::AxisValue {
+                            axes_buf[i] = fonts::metrics::AxisValue {
                                 tag: entry.axes[i].tag,
                                 value: entry.axes[i].value,
                             };

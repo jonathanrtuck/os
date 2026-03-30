@@ -22,7 +22,7 @@ fn rasterize_letter_l_produces_coverage() {
         height: 128,
     };
 
-    let glyph_id = fonts::rasterize::glyph_id_for_char(JETBRAINS_MONO, 'l').unwrap();
+    let glyph_id = fonts::metrics::glyph_id_for_char(JETBRAINS_MONO, 'l').unwrap();
     let metrics =
         fonts::rasterize::rasterize(JETBRAINS_MONO, glyph_id, 16, &mut raster, &mut scratch, 1)
             .unwrap();
@@ -56,7 +56,7 @@ fn rasterize_letter_o_has_hole() {
         height: 128,
     };
 
-    let glyph_id = fonts::rasterize::glyph_id_for_char(INTER, 'O').unwrap();
+    let glyph_id = fonts::metrics::glyph_id_for_char(INTER, 'O').unwrap();
     let metrics =
         fonts::rasterize::rasterize(INTER, glyph_id, 24, &mut raster, &mut scratch, 1).unwrap();
     drop(raster); // Release mutable borrow on buf.
@@ -91,7 +91,7 @@ fn rasterize_space_returns_zero_dimensions() {
         height: 128,
     };
 
-    let glyph_id = fonts::rasterize::glyph_id_for_char(JETBRAINS_MONO, ' ').unwrap();
+    let glyph_id = fonts::metrics::glyph_id_for_char(JETBRAINS_MONO, ' ').unwrap();
     let metrics =
         fonts::rasterize::rasterize(JETBRAINS_MONO, glyph_id, 16, &mut raster, &mut scratch, 1)
             .unwrap();
@@ -107,7 +107,7 @@ fn rasterize_at_multiple_sizes() {
     // larger bitmaps (more pixels).
     let mut scratch = RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
-    let glyph_id = fonts::rasterize::glyph_id_for_char(INTER, 'A').unwrap();
+    let glyph_id = fonts::metrics::glyph_id_for_char(INTER, 'A').unwrap();
 
     let mut prev_area = 0u32;
     for size in [10, 14, 18, 24, 36] {
@@ -135,7 +135,7 @@ fn rasterize_coverage_values_bounded() {
     let mut buf = [0u8; 128 * 128];
 
     for ch in ['A', 'g', 'W', '@', '0'] {
-        let glyph_id = fonts::rasterize::glyph_id_for_char(INTER, ch).unwrap();
+        let glyph_id = fonts::metrics::glyph_id_for_char(INTER, ch).unwrap();
         let metrics = {
             let mut raster = RasterBuffer {
                 data: &mut buf,
@@ -162,8 +162,8 @@ fn rasterize_variable_font_with_axes() {
         height: 128,
     };
 
-    let glyph_id = fonts::rasterize::glyph_id_for_char(INTER, 'A').unwrap();
-    let axes = [fonts::rasterize::AxisValue {
+    let glyph_id = fonts::metrics::glyph_id_for_char(INTER, 'A').unwrap();
+    let axes = [fonts::metrics::AxisValue {
         tag: *b"wght",
         value: 400.0,
     }];

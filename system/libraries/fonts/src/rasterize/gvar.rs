@@ -9,11 +9,12 @@ use read_fonts::{FontRef, TableProvider};
 
 use super::{
     embolden::{compute_dilation, embolden_outline},
-    metrics::{font_axes, AxisValue, GlyphMetrics, RasterBuffer},
+    metrics::{GlyphMetrics, RasterBuffer},
     outline::{extract_outline, GlyphOutline, GlyphPoint, MAX_CONTOURS, MAX_GLYPH_POINTS},
     scale::{scale_fu, scale_fu_ceil, scale_fu_floor},
     scanline::{flatten_outline_from_scratch, rasterize_segments, RasterScratch},
 };
+use crate::metrics::{font_axes, AxisValue};
 
 // ---------------------------------------------------------------------------
 // Axis normalization

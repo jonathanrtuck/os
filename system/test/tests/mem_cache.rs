@@ -366,7 +366,7 @@ fn cpu_backend_ascii_cache_populated() {
         render::CpuBackend::new(font_data, None, 18, 96, 1.0, 1024, 768).expect("backend init");
 
     // 'A' (0x41) should be in the ASCII cache.
-    let glyph_id = fonts::rasterize::glyph_id_for_char(font_data, 'A');
+    let glyph_id = fonts::metrics::glyph_id_for_char(font_data, 'A');
     assert!(glyph_id.is_some(), "font should have glyph for 'A'");
     let glyph_id = glyph_id.unwrap();
     assert!(

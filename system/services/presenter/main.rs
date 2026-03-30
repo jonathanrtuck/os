@@ -1212,7 +1212,7 @@ pub extern "C" fn _start() -> ! {
                 s.font_data_ptr = font_ptr;
                 s.font_data_len = entry.length as usize;
             }
-            if let Some(fm) = fonts::rasterize::font_metrics(font_data) {
+            if let Some(fm) = fonts::metrics::font_metrics(font_data) {
                 let upem = fm.units_per_em;
                 state().font_upem = upem;
                 let asc = fm.ascent as i32;
@@ -1227,9 +1227,9 @@ pub extern "C" fn _start() -> ! {
                     0
                 };
                 let line_h = ascent_pt + descent_pt + gap_pt;
-                let space_gid = fonts::rasterize::glyph_id_for_char(font_data, ' ').unwrap_or(0);
+                let space_gid = fonts::metrics::glyph_id_for_char(font_data, ' ').unwrap_or(0);
                 let (advance_fu, _) =
-                    fonts::rasterize::glyph_h_metrics(font_data, space_gid).unwrap_or((0, 0));
+                    fonts::metrics::glyph_h_metrics(font_data, space_gid).unwrap_or((0, 0));
                 let char_w_fx = (advance_fu as i64 * size as i64 * 65536 / upem as i64) as i32;
 
                 {
@@ -1255,7 +1255,7 @@ pub extern "C" fn _start() -> ! {
             let sans_ptr = (config.content_va as usize + entry.offset as usize) as *const u8;
             // SAFETY: entry bounds validated by init; content_va region is mapped.
             let sans_data = unsafe { core::slice::from_raw_parts(sans_ptr, entry.length as usize) };
-            if let Some(fm) = fonts::rasterize::font_metrics(sans_data) {
+            if let Some(fm) = fonts::metrics::font_metrics(sans_data) {
                 let s = state();
                 s.sans_font_data_ptr = sans_ptr;
                 s.sans_font_data_len = entry.length as usize;
@@ -1278,7 +1278,7 @@ pub extern "C" fn _start() -> ! {
             // SAFETY: entry bounds validated by init; content_va region is mapped.
             let serif_data =
                 unsafe { core::slice::from_raw_parts(serif_ptr, entry.length as usize) };
-            if let Some(fm) = fonts::rasterize::font_metrics(serif_data) {
+            if let Some(fm) = fonts::metrics::font_metrics(serif_data) {
                 let s = state();
                 s.serif_font_data_ptr = serif_ptr;
                 s.serif_font_data_len = entry.length as usize;
@@ -1300,7 +1300,7 @@ pub extern "C" fn _start() -> ! {
             let ptr = (config.content_va as usize + entry.offset as usize) as *const u8;
             // SAFETY: entry bounds validated by init; content_va region is mapped.
             let data = unsafe { core::slice::from_raw_parts(ptr, entry.length as usize) };
-            if let Some(fm) = fonts::rasterize::font_metrics(data) {
+            if let Some(fm) = fonts::metrics::font_metrics(data) {
                 let s = state();
                 s.mono_italic_font_data_ptr = ptr;
                 s.mono_italic_font_data_len = entry.length as usize;
@@ -1319,7 +1319,7 @@ pub extern "C" fn _start() -> ! {
             let ptr = (config.content_va as usize + entry.offset as usize) as *const u8;
             // SAFETY: entry bounds validated by init; content_va region is mapped.
             let data = unsafe { core::slice::from_raw_parts(ptr, entry.length as usize) };
-            if let Some(fm) = fonts::rasterize::font_metrics(data) {
+            if let Some(fm) = fonts::metrics::font_metrics(data) {
                 let s = state();
                 s.sans_italic_font_data_ptr = ptr;
                 s.sans_italic_font_data_len = entry.length as usize;
@@ -1338,7 +1338,7 @@ pub extern "C" fn _start() -> ! {
             let ptr = (config.content_va as usize + entry.offset as usize) as *const u8;
             // SAFETY: entry bounds validated by init; content_va region is mapped.
             let data = unsafe { core::slice::from_raw_parts(ptr, entry.length as usize) };
-            if let Some(fm) = fonts::rasterize::font_metrics(data) {
+            if let Some(fm) = fonts::metrics::font_metrics(data) {
                 let s = state();
                 s.serif_italic_font_data_ptr = ptr;
                 s.serif_italic_font_data_len = entry.length as usize;

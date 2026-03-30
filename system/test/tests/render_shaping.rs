@@ -251,7 +251,7 @@ fn shape_empty_font_data() {
 
 #[test]
 fn varfont_inter_has_two_axes() {
-    let axes = fonts::rasterize::font_axes(INTER);
+    let axes = fonts::metrics::font_axes(INTER);
     assert_eq!(
         axes.len(),
         2,
@@ -262,7 +262,7 @@ fn varfont_inter_has_two_axes() {
 
 #[test]
 fn varfont_inter_opsz_axis() {
-    let axes = fonts::rasterize::font_axes(INTER);
+    let axes = fonts::metrics::font_axes(INTER);
     let opsz = axes.iter().find(|a| &a.tag == b"opsz");
     assert!(opsz.is_some(), "should have opsz axis");
     let opsz = opsz.unwrap();
@@ -283,7 +283,7 @@ fn varfont_inter_opsz_axis() {
 
 #[test]
 fn varfont_inter_wght_axis() {
-    let axes = fonts::rasterize::font_axes(INTER);
+    let axes = fonts::metrics::font_axes(INTER);
     let wght = axes.iter().find(|a| &a.tag == b"wght");
     assert!(wght.is_some(), "should have wght axis");
     let wght = wght.unwrap();
@@ -308,7 +308,7 @@ fn varfont_inter_wght_axis() {
 
 #[test]
 fn varfont_inter_axis_tags_exact() {
-    let axes = fonts::rasterize::font_axes(INTER);
+    let axes = fonts::metrics::font_axes(INTER);
     let tags: Vec<[u8; 4]> = axes.iter().map(|a| a.tag).collect();
     assert!(tags.contains(b"opsz"), "missing opsz axis in {:?}", tags);
     assert!(tags.contains(b"wght"), "missing wght axis in {:?}", tags);
@@ -326,7 +326,7 @@ fn varfont_inter_axis_tags_exact() {
 
 #[test]
 fn varfont_jetbrains_mono_has_wght_axis() {
-    let axes = fonts::rasterize::font_axes(JETBRAINS_MONO);
+    let axes = fonts::metrics::font_axes(JETBRAINS_MONO);
     assert!(
         !axes.is_empty(),
         "variable JetBrains Mono should have at least one axis"
@@ -351,7 +351,7 @@ fn varfont_jetbrains_mono_has_wght_axis() {
 
 #[test]
 fn varfont_jetbrains_mono_wght_range_valid() {
-    let axes = fonts::rasterize::font_axes(JETBRAINS_MONO);
+    let axes = fonts::metrics::font_axes(JETBRAINS_MONO);
     let wght = axes.iter().find(|a| &a.tag == b"wght").unwrap();
     // JetBrains Mono variable has weights from 100 to 800.
     assert_eq!(
@@ -372,7 +372,7 @@ fn varfont_jetbrains_mono_wght_range_valid() {
 
 #[test]
 fn varfont_empty_data_returns_no_axes() {
-    let axes = fonts::rasterize::font_axes(&[]);
+    let axes = fonts::metrics::font_axes(&[]);
     assert!(axes.is_empty(), "empty data should have 0 axes");
 }
 
@@ -412,7 +412,8 @@ fn varfont_jetbrains_mono_shapes_text() {
 
 /// Helper: rasterize a glyph at a given weight and return total coverage sum.
 fn rasterize_at_weight(font_data: &[u8], glyph_id: u16, size_px: u16, weight: f32) -> u32 {
-    use fonts::rasterize::{AxisValue, RasterBuffer, RasterScratch};
+    use fonts::metrics::AxisValue;
+    use fonts::rasterize::{RasterBuffer, RasterScratch};
 
     let mut buf = vec![0u8; 48 * 6 * 48];
     let mut scratch = Box::new(RasterScratch::zeroed());
@@ -442,7 +443,7 @@ fn rasterize_at_weight(font_data: &[u8], glyph_id: u16, size_px: u16, weight: f3
 
 /// Helper: look up glyph ID for a character.
 fn glyph_for_char(font_data: &[u8], ch: char) -> u16 {
-    fonts::rasterize::glyph_id_for_char(font_data, ch).expect("should find glyph for character")
+    fonts::metrics::glyph_id_for_char(font_data, ch).expect("should find glyph for character")
 }
 
 #[test]
@@ -545,7 +546,7 @@ fn varfont_out_of_range_wght_clamped_no_panic() {
 fn varfont_wght_2000_equals_max() {
     // Out-of-range wght=2000 should produce same result as max weight.
     let gid = glyph_for_char(INTER, 'H');
-    let axes = fonts::rasterize::font_axes(INTER);
+    let axes = fonts::metrics::font_axes(INTER);
     let wght = axes.iter().find(|a| &a.tag == b"wght").unwrap();
     let cov_2000 = rasterize_at_weight(INTER, gid, 18, 2000.0);
     let cov_max = rasterize_at_weight(INTER, gid, 18, wght.max_value);
@@ -585,17 +586,17 @@ fn varfont_cache_axis_values_separate_entries() {
     };
 
     // Use the new axis-aware cache API.
-    let axes_400: &[fonts::rasterize::AxisValue] = &[fonts::rasterize::AxisValue {
+    let axes_400: &[fonts::metrics::AxisValue] = &[fonts::metrics::AxisValue {
         tag: *b"wght",
         value: 400.0,
     }];
-    let axes_700: &[fonts::rasterize::AxisValue] = &[fonts::rasterize::AxisValue {
+    let axes_700: &[fonts::metrics::AxisValue] = &[fonts::metrics::AxisValue {
         tag: *b"wght",
         value: 700.0,
     }];
 
-    let hash_400 = fonts::rasterize::axis_values_hash(axes_400);
-    let hash_700 = fonts::rasterize::axis_values_hash(axes_700);
+    let hash_400 = fonts::metrics::axis_values_hash(axes_400);
+    let hash_700 = fonts::metrics::axis_values_hash(axes_700);
 
     cache.insert_with_axes(65, 18, hash_400, glyph_400.clone());
     cache.insert_with_axes(65, 18, hash_700, glyph_700.clone());
@@ -635,11 +636,11 @@ fn varfont_cache_no_axes_vs_with_axes() {
 
     // No axes = hash of 0.
     cache.insert_with_axes(65, 18, 0, glyph_default.clone());
-    let axes_700: &[fonts::rasterize::AxisValue] = &[fonts::rasterize::AxisValue {
+    let axes_700: &[fonts::metrics::AxisValue] = &[fonts::metrics::AxisValue {
         tag: *b"wght",
         value: 700.0,
     }];
-    let hash_700 = fonts::rasterize::axis_values_hash(axes_700);
+    let hash_700 = fonts::metrics::axis_values_hash(axes_700);
     cache.insert_with_axes(65, 18, hash_700, glyph_heavy.clone());
 
     let r_default = cache.get_with_axes(65, 18, 0);
@@ -655,7 +656,7 @@ fn varfont_cache_no_axes_vs_with_axes() {
 
 #[test]
 fn varfont_shape_with_variations_produces_output() {
-    use fonts::rasterize::AxisValue;
+    use fonts::metrics::AxisValue;
 
     let axes = [AxisValue {
         tag: *b"wght",
@@ -695,7 +696,7 @@ fn varfont_shape_with_no_variations_same_as_default() {
 fn opsz_calculation_three_size_dpi_combos_distinct() {
     // VAL-OPSZ-001: Optical size calculation produces different opsz values
     // for different size/DPI combinations: (10px,144dpi), (18px,96dpi), (48px,192dpi).
-    use fonts::rasterize::compute_optical_size;
+    use fonts::metrics::compute_optical_size;
 
     let opsz_a = compute_optical_size(10, 144);
     let opsz_b = compute_optical_size(18, 96);
@@ -721,7 +722,7 @@ fn opsz_calculation_three_size_dpi_combos_distinct() {
 #[test]
 fn opsz_calculation_larger_size_produces_larger_opsz() {
     // Larger rendered sizes should produce larger optical size values.
-    use fonts::rasterize::compute_optical_size;
+    use fonts::metrics::compute_optical_size;
 
     let opsz_small = compute_optical_size(10, 96);
     let opsz_large = compute_optical_size(48, 96);
@@ -738,7 +739,7 @@ fn opsz_calculation_larger_size_produces_larger_opsz() {
 fn opsz_calculation_is_point_size_based() {
     // The computation is: opsz = font_size_px * 72.0 / dpi.
     // At 72dpi, opsz == font_size_px (1:1 mapping).
-    use fonts::rasterize::compute_optical_size;
+    use fonts::metrics::compute_optical_size;
 
     let opsz = compute_optical_size(12, 72);
     // At 72 DPI, 12px == 12pt.
@@ -757,7 +758,8 @@ fn opsz_calculation_is_point_size_based() {
 
 /// Helper: rasterize a glyph with automatic optical sizing at a given font size.
 fn rasterize_with_auto_opsz(font_data: &[u8], glyph_id: u16, size_px: u16) -> Vec<u8> {
-    use fonts::rasterize::{auto_axis_values_for_opsz, RasterBuffer, RasterScratch};
+    use fonts::metrics::auto_axis_values_for_opsz;
+    use fonts::rasterize::{RasterBuffer, RasterScratch};
 
     let dpi = 96; // standard screen DPI
     let auto_axes = auto_axis_values_for_opsz(font_data, size_px, dpi);
@@ -830,7 +832,7 @@ fn opsz_auto_10px_vs_48px_different_coverage() {
 #[test]
 fn opsz_auto_returns_opsz_axis_value() {
     // The auto function should return an AxisValue with tag "opsz".
-    use fonts::rasterize::auto_axis_values_for_opsz;
+    use fonts::metrics::auto_axis_values_for_opsz;
 
     let axes = auto_axis_values_for_opsz(INTER, 18, 96);
     assert!(
@@ -842,7 +844,7 @@ fn opsz_auto_returns_opsz_axis_value() {
     let opsz_val = opsz_av.unwrap().value;
     // At 18px, 96dpi: opsz = 18 * 72 / 96 = 13.5. Inter opsz range is
     // 14–32, so it should be clamped to the min (14.0).
-    let font_axes = fonts::rasterize::font_axes(INTER);
+    let font_axes = fonts::metrics::font_axes(INTER);
     let opsz_axis = font_axes.iter().find(|a| &a.tag == b"opsz").unwrap();
     assert!(
         opsz_val >= opsz_axis.min_value && opsz_val <= opsz_axis.max_value,
@@ -862,7 +864,8 @@ fn opsz_no_op_for_non_opsz_font() {
     // VAL-OPSZ-003: When auto optical sizing is applied to a font without an
     // opsz axis (e.g., JetBrains Mono variable), rendering is unchanged
     // compared to rendering without auto-opsz. No error or crash.
-    use fonts::rasterize::{auto_axis_values_for_opsz, RasterBuffer, RasterScratch};
+    use fonts::metrics::auto_axis_values_for_opsz;
+    use fonts::rasterize::{RasterBuffer, RasterScratch};
 
     let gid = glyph_for_char(JETBRAINS_MONO, 'H');
 
@@ -928,7 +931,7 @@ fn opsz_no_op_for_non_opsz_font() {
 #[test]
 fn opsz_auto_empty_for_font_without_opsz() {
     // Fonts without an opsz axis should return empty axes.
-    use fonts::rasterize::auto_axis_values_for_opsz;
+    use fonts::metrics::auto_axis_values_for_opsz;
 
     let axes = auto_axis_values_for_opsz(JETBRAINS_MONO, 18, 96);
     assert!(
@@ -940,7 +943,7 @@ fn opsz_auto_empty_for_font_without_opsz() {
 #[test]
 fn opsz_auto_empty_for_empty_data() {
     // Empty font data should return empty without panic.
-    use fonts::rasterize::auto_axis_values_for_opsz;
+    use fonts::metrics::auto_axis_values_for_opsz;
 
     let axes = auto_axis_values_for_opsz(&[], 18, 96);
     assert!(
@@ -957,7 +960,7 @@ fn opsz_auto_empty_for_empty_data() {
 fn weight_correction_white_on_black_reduces_weight() {
     // VAL-WEIGHT-001: Light-on-dark (white on black) should produce a
     // correction factor < 1.0 (weight reduction to compensate for irradiation).
-    use fonts::rasterize::weight_correction_factor;
+    use fonts::metrics::weight_correction_factor;
 
     let factor = weight_correction_factor(255, 255, 255, 0, 0, 0);
     assert!(
@@ -971,7 +974,7 @@ fn weight_correction_white_on_black_reduces_weight() {
 fn weight_correction_black_on_white_no_reduction() {
     // VAL-WEIGHT-001: Dark-on-light (black on white) should produce a
     // correction factor >= 1.0 (no weight reduction needed).
-    use fonts::rasterize::weight_correction_factor;
+    use fonts::metrics::weight_correction_factor;
 
     let factor = weight_correction_factor(0, 0, 0, 255, 255, 255);
     assert!(
@@ -984,7 +987,7 @@ fn weight_correction_black_on_white_no_reduction() {
 #[test]
 fn weight_correction_same_color_no_reduction() {
     // Same foreground and background → no contrast → no weight change.
-    use fonts::rasterize::weight_correction_factor;
+    use fonts::metrics::weight_correction_factor;
 
     let factor = weight_correction_factor(128, 128, 128, 128, 128, 128);
     assert!(
@@ -1003,7 +1006,7 @@ fn weight_correction_monotonically_decreasing_with_contrast() {
     // VAL-WEIGHT-002: Weight correction is proportional to luminance contrast,
     // not a binary switch. 3+ contrast levels with lighter fg than bg produce
     // monotonically decreasing correction factor as contrast increases.
-    use fonts::rasterize::weight_correction_factor;
+    use fonts::metrics::weight_correction_factor;
 
     // Low contrast: light gray on dark gray.
     let factor_low = weight_correction_factor(160, 160, 160, 80, 80, 80);
@@ -1034,7 +1037,7 @@ fn weight_correction_monotonically_decreasing_with_contrast() {
 #[test]
 fn weight_correction_five_contrast_levels_monotonic() {
     // Additional granularity: 5 levels from minimal to maximal contrast.
-    use fonts::rasterize::weight_correction_factor;
+    use fonts::metrics::weight_correction_factor;
 
     let levels: [(u8, u8); 5] = [
         (140, 100), // minimal contrast
@@ -1074,10 +1077,8 @@ fn weight_correction_reduces_coverage_white_on_black() {
     // We use wght=400 (Regular) as the base weight because the font's default
     // may be at the axis minimum (100 for Inter), where a reduction would
     // clamp to the minimum and show no difference.
-    use fonts::rasterize::{
-        font_axes, rasterize_with_axes, weight_correction_factor, AxisValue, RasterBuffer,
-        RasterScratch,
-    };
+    use fonts::metrics::{font_axes, weight_correction_factor, AxisValue};
+    use fonts::rasterize::{rasterize_with_axes, RasterBuffer, RasterScratch};
 
     let gid = glyph_for_char(INTER, 'H');
 
@@ -1175,7 +1176,7 @@ fn weight_correction_reduces_coverage_white_on_black() {
 fn weight_correction_no_op_for_invalid_font_data() {
     // VAL-WEIGHT-004: Weight correction on invalid font data produces
     // no change and no error.
-    use fonts::rasterize::auto_weight_correction_axes;
+    use fonts::metrics::auto_weight_correction_axes;
 
     let axes = auto_weight_correction_axes(
         &[0, 1, 2, 3],
@@ -1199,7 +1200,7 @@ fn weight_correction_no_op_for_font_without_wght() {
     // Both Inter and JetBrains Mono have wght, so we can't easily test this
     // without a custom font. Instead, verify that the function handles
     // empty font data gracefully.
-    use fonts::rasterize::auto_weight_correction_axes;
+    use fonts::metrics::auto_weight_correction_axes;
 
     let axes = auto_weight_correction_axes(
         &[],
@@ -1264,7 +1265,7 @@ fn weight_correction_no_op_rendering_identical_with_empty_axes() {
 fn weight_correction_dark_on_light_no_change() {
     // When foreground is darker than background, no weight reduction occurs.
     // The auto function should still return a wght axis value, but at default.
-    use fonts::rasterize::{auto_weight_correction_axes, font_axes};
+    use fonts::metrics::{auto_weight_correction_axes, font_axes};
 
     let axes_result = auto_weight_correction_axes(
         INTER, 0, 0, 0, // black fg
@@ -1333,7 +1334,7 @@ fn shape_whitespace_produces_glyphs_with_advances() {
 fn font_units_to_points_conversion_correct() {
     // Verify the conversion formula: value_pt = value_fu * point_size / upem
     // For JetBrains Mono: units_per_em is typically 1000.
-    let fm = fonts::rasterize::font_metrics(JETBRAINS_MONO).expect("should parse font metrics");
+    let fm = fonts::metrics::font_metrics(JETBRAINS_MONO).expect("should parse font metrics");
     let upem = fm.units_per_em;
     assert!(upem > 0, "units_per_em should be > 0");
 

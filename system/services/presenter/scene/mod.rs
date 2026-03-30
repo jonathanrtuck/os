@@ -108,7 +108,7 @@ pub struct SceneConfig<'a> {
     pub line_height: u32,
     pub font_data: &'a [u8],
     pub upem: u16,
-    pub axes: &'a [fonts::rasterize::AxisValue],
+    pub axes: &'a [fonts::metrics::AxisValue],
     /// Content Region content_id for the mono font.
     pub mono_content_id: u32,
     /// Mono font typographic ascent (font units, positive).
@@ -309,7 +309,7 @@ pub fn byte_to_line_col(text: &[u8], byte_offset: usize, chars_per_line: usize) 
 /// A registered (content_id, axes) combination with font metrics.
 struct StyleEntry {
     content_id: u32,
-    axes: Vec<fonts::rasterize::AxisValue>,
+    axes: Vec<fonts::metrics::AxisValue>,
     ascent_fu: u16,
     descent_fu: u16,
     upem: u16,
@@ -330,7 +330,7 @@ impl StyleTable {
     pub fn style_id_for(
         &mut self,
         content_id: u32,
-        axes: &[fonts::rasterize::AxisValue],
+        axes: &[fonts::metrics::AxisValue],
         ascent_fu: u16,
         descent_fu: u16,
         upem: u16,
@@ -388,7 +388,7 @@ impl StyleTable {
     }
 }
 
-fn axes_eq(a: &[fonts::rasterize::AxisValue], b: &[fonts::rasterize::AxisValue]) -> bool {
+fn axes_eq(a: &[fonts::metrics::AxisValue], b: &[fonts::metrics::AxisValue]) -> bool {
     if a.len() != b.len() {
         return false;
     }
@@ -443,7 +443,7 @@ pub fn shape_text(
     text: &[u8],
     point_size: u16,
     upem: u16,
-    axes: &[fonts::rasterize::AxisValue],
+    axes: &[fonts::metrics::AxisValue],
 ) -> Vec<ShapedGlyph> {
     let s = alloc::string::String::from_utf8_lossy(text);
     if s.is_empty() || font_data.is_empty() || upem == 0 {

@@ -7,7 +7,7 @@
 
 use alloc::{collections::BTreeMap, vec, vec::Vec};
 
-use crate::rasterize;
+use crate::{metrics, rasterize};
 // ---------------------------------------------------------------------------
 // axis_values_hash
 // ---------------------------------------------------------------------------
@@ -129,10 +129,10 @@ impl GlyphCache {
         font_data: &[u8],
         size_px: u32,
         dpi: u16,
-        extra_axes: &[rasterize::AxisValue],
+        extra_axes: &[metrics::AxisValue],
         scale_factor: u16,
     ) {
-        let metrics = match rasterize::font_metrics(font_data) {
+        let metrics = match metrics::font_metrics(font_data) {
             Some(m) => m,
             None => return,
         };
@@ -153,8 +153,8 @@ impl GlyphCache {
 
         // Merge automatic axes (opsz) with caller-provided explicit axes.
         // Explicit axes take precedence over auto-computed ones.
-        let auto_opsz = rasterize::auto_axis_values_for_opsz(font_data, size_px as u16, dpi);
-        let mut axes: alloc::vec::Vec<rasterize::AxisValue> = alloc::vec::Vec::new();
+        let auto_opsz = metrics::auto_axis_values_for_opsz(font_data, size_px as u16, dpi);
+        let mut axes: alloc::vec::Vec<metrics::AxisValue> = alloc::vec::Vec::new();
         for av in &auto_opsz {
             if !extra_axes.iter().any(|e| e.tag == av.tag) {
                 axes.push(*av);
@@ -184,7 +184,7 @@ impl GlyphCache {
 
         for i in 0..ASCII_CACHE_COUNT {
             let codepoint = (0x20u8 + i as u8) as char;
-            let glyph_id = match rasterize::glyph_id_for_char(font_data, codepoint) {
+            let glyph_id = match metrics::glyph_id_for_char(font_data, codepoint) {
                 Some(id) => id,
                 None => continue,
             };

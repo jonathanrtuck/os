@@ -239,11 +239,10 @@ fn ctype_unknown_no_panic() {
 #[test]
 fn cross_003_auto_opsz_produces_different_rendering_than_fixed() {
     // Auto-opsz produces different rendering than fixed defaults (no opsz axis).
-    use fonts::rasterize::{
-        auto_axis_values_for_opsz, rasterize, rasterize_with_axes, RasterBuffer, RasterScratch,
-    };
+    use fonts::metrics::auto_axis_values_for_opsz;
+    use fonts::rasterize::{rasterize, rasterize_with_axes, RasterBuffer, RasterScratch};
 
-    let gid = fonts::rasterize::glyph_id_for_char(INTER, 'e').unwrap();
+    let gid = fonts::metrics::glyph_id_for_char(INTER, 'e').unwrap();
 
     // Render without auto-opsz (default axis values = no variation).
     // Use 36px so the computed opsz (36*72/96 = 27pt) differs from Inter's
@@ -306,12 +305,10 @@ fn cross_003_auto_weight_correction_produces_different_rendering_than_fixed() {
     // We compare rendering at a base weight (400) vs the auto-corrected weight.
     // The auto function computes a reduced weight for white-on-black, which
     // should produce measurably thinner glyph coverage.
-    use fonts::rasterize::{
-        auto_weight_correction_axes, rasterize_with_axes, weight_correction_factor, AxisValue,
-        RasterBuffer, RasterScratch,
-    };
+    use fonts::metrics::{auto_weight_correction_axes, weight_correction_factor, AxisValue};
+    use fonts::rasterize::{rasterize_with_axes, RasterBuffer, RasterScratch};
 
-    let gid = fonts::rasterize::glyph_id_for_char(INTER, 'H').unwrap();
+    let gid = fonts::metrics::glyph_id_for_char(INTER, 'H').unwrap();
 
     // Render at base weight (400) — the "uncorrected" rendering.
     let base_axes = [AxisValue {
@@ -390,12 +387,10 @@ fn cross_003_auto_weight_correction_produces_different_rendering_than_fixed() {
 fn cross_003_auto_perceptual_combined_differs_from_fixed() {
     // Both auto-opsz AND auto-weight-correction together produce different
     // rendering than fixed defaults, without explicit caller intervention.
-    use fonts::rasterize::{
-        auto_axis_values_for_opsz, auto_weight_correction_axes, rasterize, rasterize_with_axes,
-        AxisValue, RasterBuffer, RasterScratch,
-    };
+    use fonts::metrics::{auto_axis_values_for_opsz, auto_weight_correction_axes, AxisValue};
+    use fonts::rasterize::{rasterize, rasterize_with_axes, RasterBuffer, RasterScratch};
 
-    let gid = fonts::rasterize::glyph_id_for_char(INTER, 'g').unwrap();
+    let gid = fonts::metrics::glyph_id_for_char(INTER, 'g').unwrap();
 
     // Render with fixed defaults (no perceptual adjustments).
     // Use 36px so the computed opsz (36*72/96 = 27pt) differs from Inter's

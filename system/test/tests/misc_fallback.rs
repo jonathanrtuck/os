@@ -366,7 +366,7 @@ fn fallback_font_identifier_hash_differs_for_different_fonts() {
 #[test]
 fn fallback_font_identifier_hash_includes_axis_values() {
     // Same font index with different axis values should produce different hashes.
-    use fonts::rasterize::AxisValue;
+    use fonts::metrics::AxisValue;
 
     let axes_400 = [AxisValue {
         tag: *b"wght",

@@ -337,7 +337,7 @@ fn shape_text(
     text: &[u8],
     point_size: u16,
     upem: u16,
-    axes: &[fonts::rasterize::AxisValue],
+    axes: &[fonts::metrics::AxisValue],
 ) -> Vec<scene::ShapedGlyph> {
     let s = alloc::string::String::from_utf8_lossy(text);
     if s.is_empty() || font_data.is_empty() || upem == 0 {
@@ -424,7 +424,7 @@ fn compute_plain_layout(vp: &ViewportState, text: &[u8]) {
     let font_data = fonts.mono_data();
     let font_size = vp.font_size;
     let upem = fonts.mono_upem;
-    let axes: &[fonts::rasterize::AxisValue] = &[];
+    let axes: &[fonts::metrics::AxisValue] = &[];
 
     let mut shaped_runs: Vec<(Vec<scene::ShapedGlyph>, i32)> =
         Vec::with_capacity(visible_runs.len());
@@ -544,19 +544,19 @@ fn compute_rich_layout(vp: &ViewportState, doc_buf: &[u8]) {
             _ => fonts.sans_upem,
         };
 
-        let mut axes_buf = [fonts::rasterize::AxisValue {
+        let mut axes_buf = [fonts::metrics::AxisValue {
             tag: [0; 4],
             value: 0.0,
         }; 3];
         let mut axis_count = 0;
         if style.weight != 400 {
-            axes_buf[axis_count] = fonts::rasterize::AxisValue {
+            axes_buf[axis_count] = fonts::metrics::AxisValue {
                 tag: *b"wght",
                 value: style.weight as f32,
             };
             axis_count += 1;
         }
-        axes_buf[axis_count] = fonts::rasterize::AxisValue {
+        axes_buf[axis_count] = fonts::metrics::AxisValue {
             tag: *b"opsz",
             value: style.font_size_pt as f32,
         };
@@ -892,19 +892,19 @@ fn shape_rich_segment_into(
     let y_mpt = line_y * 1024 + baseline_offset_mpt;
     let font_size = style.font_size_pt as u16;
 
-    let mut axes_buf = [fonts::rasterize::AxisValue {
+    let mut axes_buf = [fonts::metrics::AxisValue {
         tag: *b"wght",
         value: 0.0,
     }; 3];
     let mut axis_count = 0;
     if style.weight != 400 {
-        axes_buf[axis_count] = fonts::rasterize::AxisValue {
+        axes_buf[axis_count] = fonts::metrics::AxisValue {
             tag: *b"wght",
             value: style.weight as f32,
         };
         axis_count += 1;
     }
-    axes_buf[axis_count] = fonts::rasterize::AxisValue {
+    axes_buf[axis_count] = fonts::metrics::AxisValue {
         tag: *b"opsz",
         value: font_size as f32,
     };
@@ -1096,16 +1096,16 @@ fn char_advance_pt(
     ch: char,
     font_size: u16,
     upem: u16,
-    axes: &[fonts::rasterize::AxisValue],
+    axes: &[fonts::metrics::AxisValue],
 ) -> f32 {
     if upem == 0 || font_data.is_empty() {
         return 8.0;
     }
-    let gid = fonts::rasterize::glyph_id_for_char(font_data, ch).unwrap_or(0);
+    let gid = fonts::metrics::glyph_id_for_char(font_data, ch).unwrap_or(0);
     let advance_fu = if !axes.is_empty() {
-        fonts::rasterize::glyph_h_advance_with_axes(font_data, gid, axes).unwrap_or(0) as f32
+        fonts::metrics::glyph_h_advance_with_axes(font_data, gid, axes).unwrap_or(0) as f32
     } else {
-        let (adv, _) = fonts::rasterize::glyph_h_metrics(font_data, gid).unwrap_or((0, 0));
+        let (adv, _) = fonts::metrics::glyph_h_metrics(font_data, gid).unwrap_or((0, 0));
         adv as f32
     };
     (advance_fu * font_size as f32) / upem as f32
@@ -1428,13 +1428,13 @@ fn discover_fonts(content_va: usize, content_size: u32) {
         s.fonts.mono_data_ptr = ptr;
         s.fonts.mono_data_len = entry.length as usize;
         s.fonts.mono_content_id = protocol::content::CONTENT_ID_FONT_MONO;
-        if let Some(fm) = fonts::rasterize::font_metrics(data) {
+        if let Some(fm) = fonts::metrics::font_metrics(data) {
             s.fonts.mono_upem = fm.units_per_em;
             s.fonts.mono_ascender = fm.ascent;
             s.fonts.mono_descender = fm.descent;
             s.fonts.mono_line_gap = fm.line_gap;
         }
-        s.fonts.mono_caret_skew = fonts::rasterize::caret_skew(data);
+        s.fonts.mono_caret_skew = fonts::metrics::caret_skew(data);
     }
 
     // Sans font.
@@ -1446,13 +1446,13 @@ fn discover_fonts(content_va: usize, content_size: u32) {
         s.fonts.sans_data_ptr = ptr;
         s.fonts.sans_data_len = entry.length as usize;
         s.fonts.sans_content_id = protocol::content::CONTENT_ID_FONT_SANS;
-        if let Some(fm) = fonts::rasterize::font_metrics(data) {
+        if let Some(fm) = fonts::metrics::font_metrics(data) {
             s.fonts.sans_upem = fm.units_per_em;
             s.fonts.sans_ascender = fm.ascent;
             s.fonts.sans_descender = fm.descent;
             s.fonts.sans_line_gap = fm.line_gap;
         }
-        s.fonts.sans_caret_skew = fonts::rasterize::caret_skew(data);
+        s.fonts.sans_caret_skew = fonts::metrics::caret_skew(data);
     }
 
     // Serif font.
@@ -1464,13 +1464,13 @@ fn discover_fonts(content_va: usize, content_size: u32) {
         s.fonts.serif_data_ptr = ptr;
         s.fonts.serif_data_len = entry.length as usize;
         s.fonts.serif_content_id = protocol::content::CONTENT_ID_FONT_SERIF;
-        if let Some(fm) = fonts::rasterize::font_metrics(data) {
+        if let Some(fm) = fonts::metrics::font_metrics(data) {
             s.fonts.serif_upem = fm.units_per_em;
             s.fonts.serif_ascender = fm.ascent;
             s.fonts.serif_descender = fm.descent;
             s.fonts.serif_line_gap = fm.line_gap;
         }
-        s.fonts.serif_caret_skew = fonts::rasterize::caret_skew(data);
+        s.fonts.serif_caret_skew = fonts::metrics::caret_skew(data);
     }
 
     // Italic variants (with full metrics + content_id).
@@ -1482,13 +1482,13 @@ fn discover_fonts(content_va: usize, content_size: u32) {
         s.fonts.mono_italic_data_ptr = ptr;
         s.fonts.mono_italic_data_len = entry.length as usize;
         s.fonts.mono_italic_content_id = protocol::content::CONTENT_ID_FONT_MONO_ITALIC;
-        if let Some(fm) = fonts::rasterize::font_metrics(data) {
+        if let Some(fm) = fonts::metrics::font_metrics(data) {
             s.fonts.mono_italic_upem = fm.units_per_em;
             s.fonts.mono_italic_ascender = fm.ascent;
             s.fonts.mono_italic_descender = fm.descent;
             s.fonts.mono_italic_line_gap = fm.line_gap;
         }
-        s.fonts.mono_italic_caret_skew = fonts::rasterize::caret_skew(data);
+        s.fonts.mono_italic_caret_skew = fonts::metrics::caret_skew(data);
     }
     if let Some(entry) =
         protocol::content::find_entry(&header, protocol::content::CONTENT_ID_FONT_SANS_ITALIC)
@@ -1498,13 +1498,13 @@ fn discover_fonts(content_va: usize, content_size: u32) {
         s.fonts.sans_italic_data_ptr = ptr;
         s.fonts.sans_italic_data_len = entry.length as usize;
         s.fonts.sans_italic_content_id = protocol::content::CONTENT_ID_FONT_SANS_ITALIC;
-        if let Some(fm) = fonts::rasterize::font_metrics(data) {
+        if let Some(fm) = fonts::metrics::font_metrics(data) {
             s.fonts.sans_italic_upem = fm.units_per_em;
             s.fonts.sans_italic_ascender = fm.ascent;
             s.fonts.sans_italic_descender = fm.descent;
             s.fonts.sans_italic_line_gap = fm.line_gap;
         }
-        s.fonts.sans_italic_caret_skew = fonts::rasterize::caret_skew(data);
+        s.fonts.sans_italic_caret_skew = fonts::metrics::caret_skew(data);
     }
     if let Some(entry) =
         protocol::content::find_entry(&header, protocol::content::CONTENT_ID_FONT_SERIF_ITALIC)
@@ -1514,13 +1514,13 @@ fn discover_fonts(content_va: usize, content_size: u32) {
         s.fonts.serif_italic_data_ptr = ptr;
         s.fonts.serif_italic_data_len = entry.length as usize;
         s.fonts.serif_italic_content_id = protocol::content::CONTENT_ID_FONT_SERIF_ITALIC;
-        if let Some(fm) = fonts::rasterize::font_metrics(data) {
+        if let Some(fm) = fonts::metrics::font_metrics(data) {
             s.fonts.serif_italic_upem = fm.units_per_em;
             s.fonts.serif_italic_ascender = fm.ascent;
             s.fonts.serif_italic_descender = fm.descent;
             s.fonts.serif_italic_line_gap = fm.line_gap;
         }
-        s.fonts.serif_italic_caret_skew = fonts::rasterize::caret_skew(data);
+        s.fonts.serif_italic_caret_skew = fonts::metrics::caret_skew(data);
     }
 
     sys::print(b"  layout: fonts discovered\n");
