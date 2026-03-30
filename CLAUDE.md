@@ -38,6 +38,17 @@ These rules govern how you work on this project. They are not preferences — th
 - When fixing a bug, check for the same class of bug in related code
 - If an interface is confusing enough to cause a bug, STOP and flag it — interfaces are architectural decisions in this project. Propose the fix, don't silently apply it.
 
+### 5. Update reference docs at milestone boundaries
+
+When completing a milestone (version tag), verify these files reflect the current architecture:
+
+- `design/*.mermaid` — diagrams (architecture, dependencies, pipeline, decision map, userspace)
+- `design/glossary.md` — new terms, changed definitions, removed components
+- `design/landscape.md` — if any comparison axis changed materially
+- `STATUS.md` — current state and milestone completion
+
+These files don't change during daily work but drift across milestones. A quick scan before tagging catches stale references (removed backends, decomposed processes, settled decisions still marked unsettled).
+
 Read `STATUS.md` at session start for current project state and session resume context.
 
 ## What This Is
