@@ -1,9 +1,11 @@
-%% Userspace Component Graph
-%% Two views: runtime communication (data flow) and compile-time dependencies
-
-%% ═══════════════════════════════════════════════════════════════════
-%% VIEW 1: RUNTIME COMMUNICATION (should be pipeline/tree — no cycles)
-%% ═══════════════════════════════════════════════════════════════════
+%% Userspace Component Graph — Runtime Communication
+%% Updated 2026-03-30 to reflect v0.5 architecture:
+%%   - "core" decomposed into document + layout + presenter
+%%   - cpu-render and virgil-render removed; metal-render is sole backend
+%%   - New services: store, rich-editor, png-decode
+%%
+%% Shows runtime IPC and shared memory data flow, not compile-time dependencies.
+%% For compile-time dependencies, see dependency-graph.mermaid.
 
 graph LR
     subgraph Hardware
@@ -20,17 +22,27 @@ graph LR
         BLK[virtio-blk]
     end
 
-    subgraph "OS Layer"
-        INIT[init]
-        CORE[core]
-        EDITOR[text-editor]
+    subgraph "Document Pipeline"
+        PRESENTER[presenter]
+        LAYOUT[layout]
+        DOCUMENT[document]
     end
 
-    subgraph "Render Layer (one active)"
-        METAL[metal-render]
-        CPU[cpu-render]
-        VIRGL[virgil-render]
+    subgraph Editors
+        EDITOR[text-editor]
+        RICH[rich-editor]
     end
+
+    subgraph Storage
+        STORE[store]
+    end
+
+    subgraph Rendering
+        METAL[metal-render]
+    end
+
+    INIT[init]
+    PNG[png-decode]
 
     %% Hardware → Drivers
     KB --> INPUT
@@ -38,27 +50,30 @@ graph LR
     FS_HW --> P9
     BLK_HW --> BLK
 
-    %% Boot: init orchestrates
+    %% Boot: init orchestrates all spawning and IPC wiring
     INIT -.->|spawns + config| INPUT
     INIT -.->|spawns + config| P9
     INIT -.->|spawns + config| BLK
-    INIT -.->|spawns + config| CORE
+    INIT -.->|spawns + config| PRESENTER
+    INIT -.->|spawns + config| LAYOUT
+    INIT -.->|spawns + config| DOCUMENT
+    INIT -.->|spawns + config| STORE
     INIT -.->|spawns + config| EDITOR
+    INIT -.->|spawns + config| RICH
     INIT -.->|spawns + config| METAL
-    INIT -.->|spawns + config| CPU
-    INIT -.->|spawns + config| VIRGL
-    INIT -->|fonts via shared mem| CORE
-    INIT -->|fonts via shared mem| METAL
-    INIT -->|fonts via shared mem| CPU
-    INIT -->|fonts via shared mem| VIRGL
+    INIT -.->|spawns + config| PNG
+    INIT -->|fonts via Content Region| PRESENTER
+    INIT -->|fonts via Content Region| METAL
 
     %% Runtime data flow (the pipeline)
-    INPUT -->|KEY_EVENT, POINTER_ABS, POINTER_BUTTON| CORE
-    CORE -->|KEY_EVENT| EDITOR
-    EDITOR -->|WRITE_INSERT, WRITE_DELETE| CORE
-    CORE -->|scene graph: shared mem| METAL
-    CORE -->|scene graph: shared mem| CPU
-    CORE -->|scene graph: shared mem| VIRGL
+    INPUT -->|KEY_EVENT, POINTER via state register| PRESENTER
+    PRESENTER -->|KEY_EVENT| EDITOR
+    PRESENTER -->|KEY_EVENT| RICH
+    EDITOR -->|write requests via edit protocol| DOCUMENT
+    RICH -->|write requests via edit protocol| DOCUMENT
+    PRESENTER <-->|layout requests / results| LAYOUT
+    PRESENTER <-->|edit commits, undo/redo| DOCUMENT
+    DOCUMENT -->|persistence (commit, snapshot)| STORE
+    STORE -->|block I/O| BLK
+    PRESENTER -->|scene graph: shared memory| METAL
     METAL --> GPU_HW
-    CPU --> GPU_HW
-    VIRGL --> GPU_HW

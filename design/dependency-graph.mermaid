@@ -1,23 +1,46 @@
 %% Compile-time Dependency Graph (layered DAG)
-%% Edges point downward: consumer → dependency
-%% No cycles allowed. Libraries shared across branches are the
-%% only cross-branch connections.
+%% Updated 2026-03-30 to reflect v0.5 architecture:
+%%   - "core" decomposed into document, layout (service), presenter
+%%   - cpu-render and virgil-render removed; metal-render is sole backend
+%%   - New libraries: piecetable, icons, fs, store
+%%   - New services: store, filesystem, decoders/png
+%%   - New user programs: rich-editor
+%%
+%% UNIVERSAL DEPENDENCIES (omitted from edges for readability):
+%%   Every service and program links sys, ipc, protocol.
+%%   Only non-universal edges are drawn below.
+%%
+%% Edges point downward: consumer → dependency.
+%% No cycles allowed.
 
 graph TD
     subgraph "Layer 4 — Orchestrator"
         INIT[init]
     end
 
-    subgraph "Layer 3 — Services"
-        CORE[core]
+    subgraph "Layer 3 — Document Pipeline"
+        PRESENTER[presenter]
+        LAYOUT_SVC["layout ‹service›"]
+        DOCUMENT[document]
+    end
+
+    subgraph "Layer 3 — Storage"
+        STORE_SVC["store ‹service›"]
+        FILESYSTEM[filesystem]
+    end
+
+    subgraph "Layer 3 — Drivers & Decoders"
         METAL[metal-render]
-        CPU[cpu-render]
-        VIRGL[virgil-render]
         V_INPUT[virtio-input]
         V_9P[virtio-9p]
         V_BLK[virtio-blk]
         V_CON[virtio-console]
+        PNG[png-decode]
+    end
+
+    subgraph "Layer 3 — Editors"
         EDITOR[text-editor]
+        RICH_EDITOR[rich-editor]
     end
 
     subgraph "Layer 2 — Domain Libraries"
@@ -27,6 +50,10 @@ graph TD
         SCENE[scene]
         LAYOUT[layout]
         ANIMATION[animation]
+        PIECETABLE[piecetable]
+        ICONS[icons]
+        FS[fs]
+        STORE[store]
     end
 
     subgraph "Layer 1 — Infrastructure Libraries"
@@ -39,84 +66,71 @@ graph TD
         SYS[sys]
     end
 
-    %% Layer 4 → Layer 3 (init embeds all ELFs)
+    %% Orchestrator
     INIT --> SCENE
-    INIT --> IPC
-    INIT --> PROTOCOL
-    INIT --> SYS
 
-    %% Layer 3 → Layer 2
-    CORE --> SCENE
-    CORE --> FONTS
-    CORE --> DRAWING
-    CORE --> LAYOUT
-    CORE --> ANIMATION
+    %% Document Pipeline (non-universal deps only)
+    PRESENTER --> RENDER
+    PRESENTER --> DRAWING
+    PRESENTER --> FONTS
+    PRESENTER --> SCENE
+    PRESENTER --> LAYOUT
+    PRESENTER --> ANIMATION
+    PRESENTER --> PIECETABLE
+    PRESENTER --> ICONS
 
-    METAL --> SCENE
-    METAL --> FONTS
-    METAL --> DRAWING
-    METAL --> RENDER
+    LAYOUT_SVC --> FONTS
+    LAYOUT_SVC --> LAYOUT
+    LAYOUT_SVC --> PIECETABLE
+    LAYOUT_SVC --> SCENE
 
-    CPU --> SCENE
-    CPU --> FONTS
-    CPU --> DRAWING
-    CPU --> RENDER
+    DOCUMENT --> PIECETABLE
 
-    VIRGL --> SCENE
-    VIRGL --> FONTS
-    VIRGL --> DRAWING
-    VIRGL --> RENDER
+    %% Storage
+    STORE_SVC --> VIRTIO
+    STORE_SVC --> FS
+    STORE_SVC --> STORE
 
-    %% Layer 3 → Layer 1
-    CORE --> IPC
-    CORE --> PROTOCOL
+    FILESYSTEM --> VIRTIO
+    FILESYSTEM --> FS
+
+    %% Render driver
     METAL --> VIRTIO
-    METAL --> PROTOCOL
-    CPU --> VIRTIO
-    CPU --> PROTOCOL
-    VIRGL --> VIRTIO
-    VIRGL --> PROTOCOL
+    METAL --> DRAWING
+    METAL --> FONTS
+    METAL --> RENDER
+    METAL --> SCENE
+
+    %% Virtio drivers (all share: virtio)
     V_INPUT --> VIRTIO
-    V_INPUT --> PROTOCOL
     V_9P --> VIRTIO
-    V_9P --> PROTOCOL
     V_BLK --> VIRTIO
-    V_BLK --> PROTOCOL
     V_CON --> VIRTIO
-    V_CON --> PROTOCOL
-    EDITOR --> PROTOCOL
 
-    %% Layer 3 → Layer 0
-    CORE --> SYS
-    METAL --> SYS
-    CPU --> SYS
-    VIRGL --> SYS
-    V_INPUT --> SYS
-    V_9P --> SYS
-    V_BLK --> SYS
-    V_CON --> SYS
-    EDITOR --> SYS
-    EDITOR --> IPC
+    %% Editors (non-universal deps only)
+    RICH_EDITOR --> PIECETABLE
 
-    %% Layer 2 → Layer 2 (intra-layer)
+    %% Library inter-dependencies
     RENDER --> SCENE
     RENDER --> FONTS
     RENDER --> DRAWING
     RENDER --> PROTOCOL
     DRAWING --> FONTS
     DRAWING --> PROTOCOL
+    STORE --> FS
 
-    %% Layer 1 → Layer 0
+    %% Infrastructure → Foundation
     IPC --> SYS
     VIRTIO --> SYS
 
-    %% Layer 2 → Layer 0
+    %% Domain → Foundation
     SCENE --> SYS
     LAYOUT --> SYS
     ANIMATION --> SYS
 
-    %% Style: highlight the shared-across-branches libraries
+    %% Style: highlight shared-across-branches libraries
+    style SYS fill:#2a4858,stroke:#4a8898
+    style PROTOCOL fill:#2a4858,stroke:#4a8898
     style SCENE fill:#2a4858,stroke:#4a8898
     style FONTS fill:#2a4858,stroke:#4a8898
-    style PROTOCOL fill:#2a4858,stroke:#4a8898
-    style SYS fill:#2a4858,stroke:#4a8898
+    style PIECETABLE fill:#2a4858,stroke:#4a8898

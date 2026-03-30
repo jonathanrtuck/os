@@ -7,17 +7,18 @@
 %%
 %% One-way data flow. Each translator only knows its input and output shapes.
 %%
-%% Design decisions (2026-03-16, updated 2026-03-17):
+%% Design decisions (updated 2026-03-30):
 %%   - Path-centric rendering: everything is geometric (paths, rects, glyphs, images)
-%%   - Glyph rasterization in the render backend (core shapes + lays out, backend rasterizes)
+%%   - Glyph rasterization in the render backend (pipeline shapes + lays out, backend rasterizes)
 %%   - Tree-structured scene graph with geometric content types
-%%   - Scene graph is THE interface between core and rendering
-%%   - Thick GPU drivers: each driver reads the scene graph, does its own tree walk,
-%%     renders via its hardware, and presents to display. No intermediate command list.
-%%   - CPU render path (existing) and GPU render path (Virgil3D) are independent
-%%     render services — init selects which to launch.
+%%   - Scene graph is THE interface between the document pipeline and rendering
+%%   - Thick GPU driver: metal-render reads the scene graph, does its own tree walk,
+%%     renders via Metal GPU (hypervisor passthrough), and presents to display.
+%%   - Document pipeline (presenter + layout + document) replaces the former
+%%     monolithic "core" process (decomposed v0.5).
+%%   - Sole render backend: metal-render (cpu-render and virgil-render removed v0.5).
 %%   - Visual effects (shadow, blur, opacity, transforms) are node properties,
-%%     not content types. Drivers implement them however they want.
+%%     not content types. The render service implements them however it wants.
 
 graph LR
     HW(["Hardware Events\n(evdev interrupts:\ntype, code, value)"])
@@ -28,5 +29,5 @@ graph LR
 
     HW -->|"Input Driver"| KE
     KE -->|"Editor"| WR
-    WR -->|"Core"| ST
-    ST -->|"Render Service\n(thick GPU driver:\ntree walk + render\n+ present)"| DS
+    WR -->|"Document Pipeline\n(document + layout\n+ presenter)"| ST
+    ST -->|"metal-render\n(tree walk + Metal GPU\ncommand submission\n+ present)"| DS

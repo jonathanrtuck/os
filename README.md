@@ -167,8 +167,9 @@ If you’re curious about the design, read in this order:
 1. **[Philosophy](design/philosophy.md)** — Two root principles and their consequences. The thinking framework behind every design decision.
 2. **[Foundations](design/foundations.md)** — The core idea, glossary of terms, guiding beliefs, external boundaries, content model, editing model
 3. **[Decisions](design/decisions.md)** — All 17 design decisions: settled positions with reasoning, open questions with tradeoffs, considered-and-rejected alternatives
-4. **[Architecture](design/architecture.md)** — The system’s architectural narrative: pipeline, responsibilities, decision checklist
-5. **[Journal](design/journal.md)** — Where the design exploration is right now: open threads, discussion backlog, insights
+4. **[Landscape](design/landscape.md)** — How this OS compares technically to Linux, macOS, Fuchsia, and 6 other systems
+5. **[Architecture](design/architecture.md)** — The system’s architectural narrative: pipeline, responsibilities, decision checklist
+6. **[Journal](design/journal.md)** — Where the design exploration is right now: open threads, discussion backlog, insights
 
 If you're curious about the implementation, start here:
 

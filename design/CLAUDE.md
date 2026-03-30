@@ -7,6 +7,7 @@ Design documents for the document-centric OS. This is the primary artifact of th
 - `philosophy.md` — **Read first.** Two root principles and their consequences. If you internalize these, you can predict why any component is structured the way it is.
 - `foundations.md` — The core idea, guiding beliefs, glossary, content model (3-layer type system), viewer-first design, editor augmentation model, edit protocol, undo/history architecture
 - `decisions.md` — 17 tiered decisions with tradeoffs, implementation readiness, dependency chains
+- `landscape.md` — Technical comparison against 9 other operating systems (Linux, macOS, Fuchsia, etc.)
 - `glossary.md` — System-specific terminology: architecture, content pipeline, editing, IPC, and displaced terms (words this system avoids and why)
 - `architecture.md` — The system's architectural narrative: pipeline, responsibilities, decision checklist
 - `roadmap.md` — Milestone plan (v0.5--v1.0), sequencing rationale, decision dependencies, descoped items

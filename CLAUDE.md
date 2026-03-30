@@ -61,6 +61,7 @@ Read these before making any design suggestions:
 - `design/philosophy.md` — **Read first.** Two root principles and their consequences. The thinking framework behind every design decision.
 - `design/foundations.md` — The core idea, guiding beliefs, glossary, external boundaries, content model (3-layer type system), viewer-first design, editor augmentation model, edit protocol, undo/history architecture
 - `design/decisions.md` — 17 tiered decisions with tradeoffs, implementation readiness table, dependency chains between decisions
+- `design/landscape.md` — Technical comparison against 9 other operating systems. Where this OS fits in the landscape.
 - `design/decision-map.mermaid` — Visual dependency graph of all decisions
 - `design/architecture.md` — The system's architectural narrative: one-way pipeline, what each component understands, where responsibilities live, decision checklist
 - `design/architecture.mermaid` — System architecture diagram (process layers, IPC, memory mapping)

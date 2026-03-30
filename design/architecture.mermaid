@@ -1,42 +1,56 @@
 graph TB
     %% System Architecture — Process Layers and IPC
-    %% Three layers: Kernel (EL1), OS Service (EL0 trusted), Editors (EL0 untrusted)
-    %% Primary IPC: shared memory ring buffers between editors and OS service
-    %% Documents: memory-mapped by kernel into both OS service and editors
-    %% See: Decision #16 in decisions.md
+    %% Updated 2026-03-30 to reflect v0.5 decomposition:
+    %%   "core" decomposed into document + layout + presenter
+    %%   cpu-render and virgil-render removed; metal-render is sole backend
+    %% See: architecture.md, system/DESIGN.md
 
     subgraph editors["Editors (EL0, untrusted)"]
         direction LR
         E1["Text Editor"]
-        E2["Image Editor"]
-        E3["Audio Editor"]
+        E2["Rich Editor"]
     end
 
-    subgraph service["OS Service (EL0, trusted)"]
+    subgraph pipeline["Document Pipeline (EL0)"]
         direction LR
-        RENDER["Renderer"]
-        META["Metadata DB"]
-        INPUT["Input Router"]
-        COMP["Compositor"]
+        PRESENTER["Presenter\n(scene graph,\ninput routing)"]
+        LAYOUT["Layout Engine\n(text layout,\nword breaking)"]
+        DOC["Document\n(sole writer,\npiece table)"]
+    end
+
+    subgraph services["Services & Drivers (EL0)"]
+        direction LR
+        STORE["Store\n(persistence,\nundo/redo)"]
+        METAL["metal-render\n(Metal GPU)"]
+        INPUT["virtio-input\n(keyboard, pointer)"]
+        BLK["virtio-blk"]
     end
 
     subgraph kernel["Kernel (EL1)"]
         direction LR
         HANDLE["Handle Tables"]
         MEM["Memory Mgmt"]
-        SCHED["Scheduler"]
-        VALID["IPC Validator"]
-        DRV["Drivers"]
+        SCHED["EEVDF Scheduler"]
     end
 
-    E1 <-->|"ring buffer channel"| service
-    E2 <-->|"ring buffer channel"| service
-    E3 <-->|"ring buffer channel"| service
+    E1 <-->|"edit protocol\n(ring buffer)"| PRESENTER
+    E2 <-->|"edit protocol\n(ring buffer)"| PRESENTER
 
-    editors -->|"syscalls (handle ops, channel create)"| kernel
-    service -->|"syscalls (document access, display, storage)"| kernel
+    PRESENTER <-->|"layout requests"| LAYOUT
+    PRESENTER <-->|"edits, commits"| DOC
+    DOC <-->|"persistence"| STORE
+    STORE <-->|"block I/O"| BLK
+    INPUT -->|"events, pointer state"| PRESENTER
 
-    MEM -.->|"memory-map document pages"| editors
-    MEM -.->|"memory-map document pages"| service
+    PRESENTER -->|"scene graph\n(shared memory)"| METAL
 
-    DRV --- HW["Hardware (CPU, display, storage, input devices)"]
+    editors -->|"syscalls (handles, channels)"| kernel
+    pipeline -->|"syscalls"| kernel
+    services -->|"syscalls"| kernel
+
+    MEM -.->|"memory-map\ndocument pages"| editors
+    MEM -.->|"memory-map\ndocument + scene graph"| pipeline
+
+    METAL --- HW["Display"]
+    INPUT --- KB["Keyboard / Pointer"]
+    BLK --- DISK["Disk"]
