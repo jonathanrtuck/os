@@ -10,7 +10,7 @@ Test files use category prefixes for subsetting (e.g., `cargo test kernel_` runs
 
 - `kernel_*` -- core kernel subsystems (scheduling, processes, threads, handles, syscalls, sync)
 - `mem_*` -- memory management (allocators, paging, heap, virtual memory, ASID, content allocator)
-- `render_*` -- graphics and rendering (drawing, scene, animation, blur, shaping, virgl)
+- `render_*` -- graphics and rendering (drawing, scene, animation, blur, shaping)
 - `text_*` -- text, layout, unicode, NEON
 - `ipc_*` -- IPC and channels (ring buffers, channel lifecycle, leak tests)
 - `hw_*` -- hardware and devices (device tree, interrupts, MMIO, virtqueue)

@@ -8,7 +8,7 @@ The monolithic `core` service has been decomposed into three processes:
 
 | Service      | Purpose                                                                         | Status      |
 | ------------ | ------------------------------------------------------------------------------- | ----------- |
-| `init/`      | Root task: reads device manifest, spawns drivers, orchestrates display pipeline  | Scaffolding |
+| `init/`      | Root task: reads device manifest, spawns drivers, orchestrates display pipeline | Scaffolding |
 | `document/`  | Document buffer owner, edit application, undo ring, store service IPC           | Scaffolding |
 | `layout/`    | Pure layout function — line-breaking, glyph shaping, positioned runs            | Scaffolding |
 | `presenter/` | Event loop, input routing, scene graph, cursor/selection/scroll/animation       | Scaffolding |
@@ -17,9 +17,7 @@ The monolithic `core` service has been decomposed into three processes:
 
 | Service                   | Purpose                                                                                           | Status      |
 | ------------------------- | ------------------------------------------------------------------------------------------------- | ----------- |
-| `drivers/metal-render/`   | Metal render service: native Metal GPU via hypervisor (default, 4x MSAA)                          | Scaffolding |
-| `drivers/cpu-render/`     | CPU render service: CpuBackend + virtio-gpu 2D present (QEMU fallback)                            | Scaffolding |
-| `drivers/virgil-render/`  | GPU render service: Gallium3D via virglrenderer (virgl-capable QEMU)                              | Deprecated  |
+| `drivers/metal-render/`   | Metal render service: native Metal GPU via hypervisor (sole backend, 4x MSAA)                     | Scaffolding |
 | `drivers/virtio-blk/`     | Block device driver: read/write/flush with VIRTIO_BLK_F_FLUSH negotiation (self-test, standalone) | Scaffolding |
 | `drivers/virtio-console/` | Console driver (placeholder)                                                                      | Scaffolding |
 | `drivers/virtio-input/`   | Keyboard + tablet driver: reads evdev events, forwards to presenter via IPC                       | Scaffolding |

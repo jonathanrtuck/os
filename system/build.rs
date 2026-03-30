@@ -50,8 +50,6 @@ const INIT_EMBEDDED: &[(&str, &str)] = &[
     ("virtio-input", "VIRTIO_INPUT_ELF"),
     ("virtio-9p", "VIRTIO_9P_ELF"),
     ("presenter", "PRESENTER_ELF"),
-    ("cpu-render", "CPU_RENDER_ELF"),
-    ("virgil-render", "VIRGIL_RENDER_ELF"),
     ("metal-render", "METAL_RENDER_ELF"),
     ("png-decode", "PNG_DECODE_ELF"),
     ("text-editor", "TEXT_EDITOR_ELF"),
@@ -77,13 +75,6 @@ const PROGRAMS: &[(&str, &str, bool, bool)] = &[
     ("document", "services/document", false, false),
     ("layout", "services/layout", false, false),
     ("presenter", "services/presenter", false, true),
-    ("cpu-render", "services/drivers/cpu-render", true, true),
-    (
-        "virgil-render",
-        "services/drivers/virgil-render",
-        true,
-        true,
-    ),
     ("metal-render", "services/drivers/metal-render", true, true),
     ("png-decode", "services/decoders/png", false, false),
     ("text-editor", "user/text-editor", false, false),
@@ -259,11 +250,7 @@ fn main() {
             externs.push(("scene", scene_rlib.clone()));
             externs.push(("fonts", fonts_output.rlib.clone()));
         }
-        if name == "cpu-render"
-            || name == "virgil-render"
-            || name == "metal-render"
-            || name == "presenter"
-        {
+        if name == "metal-render" || name == "presenter" {
             externs.push(("render", render_rlib.clone()));
         }
         if name == "presenter" {

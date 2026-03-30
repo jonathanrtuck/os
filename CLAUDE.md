@@ -285,20 +285,6 @@ $PYTHON system/test/verify.py /tmp/screenshot.png --assert 'pixel_is x=100 y=100
 
 Launch: `cd system && cargo run -r` (default, no env vars needed).
 
-**cpu-render (QEMU software):** Uses `screendump` via the QEMU monitor socket. This captures the guest framebuffer directly and works reliably.
-
-```sh
-cd system && QEMU=1 ./test-qemu.sh --keys "h e l l o" --boot-wait 8 --wait 3
-# screendump works for cpu-render:
-echo "screendump /tmp/qemu-screen.ppm" | nc -U /tmp/qemu-mon.sock -w 2
-python3 -c "from PIL import Image; Image.open('/tmp/qemu-screen.ppm').save('/tmp/qemu-screen.png')"
-# Then Read /tmp/qemu-screen.png
-```
-
-Launch: `cd system && QEMU=1 VIRGL=0 cargo run -r`.
-
-**virgil-render (DEPRECATED):** No longer maintained. Do not use for visual testing. Use metal-render instead.
-
 ### When to use this
 
 - Any change to: drawing library, render backends, scene walk, text editor, core, init (display pipeline setup)
@@ -311,14 +297,11 @@ Launch: `cd system && QEMU=1 VIRGL=0 cargo run -r`.
 
 Changes to the rendering pipeline must follow this process. These rules exist because a session was lost to shipping unverified rendering changes that broke the display.
 
-Two active render backends — changes may affect one or both:
+One render backend:
 
-- **metal-render** (default): scene graph → metal command buffer → virtio → hypervisor → Metal API → CAMetalLayer
-- **cpu-render**: scene graph → CpuBackend (libraries/render/) → virtio-gpu 2D → QEMU → display
+- **metal-render**: scene graph → metal command buffer → virtio → hypervisor → Metal API → CAMetalLayer
 
-(virgil-render is deprecated and no longer maintained.)
-
-Relevant code: `protocol/metal.rs`, `libraries/render/`, `services/drivers/{metal-render,cpu-render}/`, `services/core/` (scene building).
+Relevant code: `protocol/metal.rs`, `libraries/render/`, `services/drivers/metal-render/`, `services/presenter/` (scene building).
 
 ### Before implementing
 

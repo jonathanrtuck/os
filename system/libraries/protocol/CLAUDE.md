@@ -9,7 +9,6 @@ IPC message types and payload structs for all inter-process boundaries. Single s
 - `decode.rs` -- Generic decode protocol for sandboxed decoder services: `DecodeRequest`, `DecodeResponse`, `DecoderConfig`. Format-agnostic (same types for PNG, JPEG, etc.)
 - `store.rs` -- Store service protocol: 15 message types (`MSG_STORE_CONFIG` through `MSG_STORE_DELETE_SNAPSHOT`), payload structs for config, commit, query, read, snapshot, restore, create
 - `metal.rs` -- Metal command wire format for Metal-over-virtio: command headers, setup commands, render commands, compute commands. Guest pre-assigns u32 handle IDs
-- `virgl.rs` -- Virgl3D/Gallium3D protocol constants and command buffer encoding for `VIRTIO_GPU_CMD_SUBMIT_3D`
 - `build.rs` -- Sets `SYSTEM_CONFIG` env var for PAGE_SIZE
 
 ## Dependencies

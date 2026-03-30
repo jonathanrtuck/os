@@ -22,7 +22,7 @@ Input Driver → C (View Engine) → Scene Graph → Render Service → Display
 
 The monolithic `core` has been decomposed into three processes: A (document-model), B (layout-engine), C (view-engine). Protocol library consolidated to 10 modules (init, device, input, edit, layout, view, document, decode, content, metal). 2,375 tests pass.
 
-Content types: `None`, `InlineImage` (per-frame scene data), `Image` (Content Region via content_id), `Path`, `Glyphs`. Three render services: `metal-render` (default), `cpu-render`, `virgil-render`.
+Content types: `None`, `InlineImage` (per-frame scene data), `Image` (Content Region via content_id), `Path`, `Glyphs`. Sole render backend: `metal-render` (native Metal GPU via hypervisor). cpu-render and virgil-render removed (2026-03-30).
 
 **IPC:** Two mechanisms, matched to data semantics. Event rings (64-byte SPSC messages over shared memory) for discrete events where order/count matter (keys, clicks, config). State registers (atomic shared memory) for continuous data where only the latest value matters (pointer position). Both signaled via `channel_signal` syscall. **Content Region** (4 MiB shared memory with registry) for persistent decoded content (font TTF data, decoded image pixels) — init allocates, core writes, render services read. **Document IPC** (`protocol::document`): 13 message types. Core sends `MSG_DOC_COMMIT` at operation boundaries; document service reads doc buffer from shared memory. `MSG_DOC_SNAPSHOT`/`MSG_DOC_RESTORE` for undo/redo. `MSG_DOC_QUERY` for media-type/attribute queries. See `system/DESIGN.md` §0 for full details.
 
@@ -48,7 +48,7 @@ Seven-layer fs stack: `BlockDevice` trait → superblock ring → free-extent al
 
 ### System Code
 
-`system/kernel/` (33 .rs + 2 .S), `system/services/{init,document-model,layout-engine,view-engine,document,filesystem,drivers/{cpu-render,virgil-render,metal-render,virtio-blk,virtio-console,virtio-input,virtio-9p},decoders/{png}}/`, `system/libraries/{sys,virtio,drawing,fonts,animation,layout,scene,ipc,protocol,render,fs,store}/`, `system/user/{echo,text-editor,rich-editor,stress,fuzz,fuzz-helper}/`, `system/test/`, `tools/mkdisk/`. 28 syscalls. 4 SMP cores, EEVDF scheduler.
+`system/kernel/` (33 .rs + 2 .S), `system/services/{init,document-model,layout-engine,view-engine,document,filesystem,drivers/{metal-render,virtio-blk,virtio-console,virtio-input,virtio-9p},decoders/{png}}/`, `system/libraries/{sys,virtio,drawing,fonts,animation,layout,scene,ipc,protocol,render,fs,store}/`, `system/user/{echo,text-editor,rich-editor,stress,fuzz,fuzz-helper}/`, `system/test/`, `tools/mkdisk/`. 28 syscalls. 4 SMP cores, EEVDF scheduler.
 
 ## Milestone Roadmap
 

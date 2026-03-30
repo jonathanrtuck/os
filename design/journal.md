@@ -4,6 +4,92 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Render Driver Consolidation — SETTLED (2026-03-30)
+
+**Decision:** Remove cpu-render and virgil-render. Metal-render is the sole render backend.
+
+### Rationale
+
+Three render backends existed: metal-render (Metal GPU via hypervisor, default), cpu-render (software via virtio-gpu 2D for QEMU), virgil-render (Gallium3D, already deprecated). In practice only metal-render is used — all development, visual testing, and screenshot capture go through the hypervisor's built-in Metal pipeline.
+
+**Why not keep cpu-render as a fallback?**
+
+- A fallback you never test is a lie. cpu-render would be broken when actually needed.
+- Every rendering pipeline change must be maintained in two places (or one gets stale).
+- QEMU headless boot already works without any render service — init detects no GPU device and runs headless tests (fuzz + stress) directly.
+- The future bare-metal target (v0.13) needs a hardware-specific framebuffer driver, not virtio-gpu 2D. cpu-render wouldn't serve that purpose.
+
+**What this enables:**
+
+- The `GlyphCache` / `LruGlyphCache` / `CpuBackend` infrastructure in `libraries/render/` exists primarily to serve cpu-render. With that consumer gone, font caching is solely metal-render's GPU atlas.
+- Two embedded ELF blobs removed from the init→kernel `include_bytes!` chain, shrinking the 19 MB kernel binary.
+- Simplifies the font rasterization architecture question (see open thread below) — only one render driver to consider for glyph caching.
+
+### Removal scope
+
+1. Delete `services/drivers/cpu-render/` and `services/drivers/virgil-render/`
+2. Remove ELF `include_bytes!` from `build.rs` and match arms in init
+3. `VIRTIO_DEVICE_GPU` path in init falls through to headless mode
+4. Dead code cleanup in `libraries/render/` (CpuBackend, LruRasterizer, full scene walk)
+5. Remove or rewrite tests in `render_scene_render.rs` that depend on CpuBackend infrastructure
+
+---
+
+## Font Rasterization Architecture — Open Thread (2026-03-30)
+
+**Status:** Open discussion, informed by render driver consolidation above.
+
+### Context: cursor bugs exposed pixel leakage
+
+While fixing four cursor bugs (italic slant direction, weight, baseline alignment, trailing line), we traced the root cause of the baseline misalignment to integer rounding in point-based ascender computations. Fixing it required converting `VisibleRun.y_pt` to `y_mpt` (millipoints). This raised a broader question: **where do pixels belong in the architecture?**
+
+The project convention is: points/millipoints above the render boundary, pixels only in render drivers. But the font library (`libraries/fonts/`) violates this in several places.
+
+### The actual problem: metrics and rasterization are co-mingled
+
+The font library serves two audiences with different coordinate needs:
+
+| Consumer                          | Needs                                           | Coordinate system        |
+| --------------------------------- | ----------------------------------------------- | ------------------------ |
+| layout (above render boundary)    | advances, ascent, descent, line gap, caret skew | font units → millipoints |
+| presenter (above render boundary) | font metrics, glyph IDs, axis hashing           | font units → millipoints |
+| metal-render (at render boundary) | rasterized coverage, glyph atlas                | font units → pixels      |
+
+All three import `fonts::rasterize` because metrics functions (`font_metrics`, `glyph_h_metrics`, `caret_skew`, `AxisValue`) live in the same module as pixel rasterization (`rasterize_with_axes`, `RasterBuffer`, `scale_fu`). Nothing prevents layout from calling pixel-denominated APIs — the bug class that caused the baseline issue.
+
+### Two rasterizers (not identical)
+
+The font rasterizer (`fonts/rasterize/scanline.rs`) and path rasterizer (`render/path_raster.rs`) use the same family of algorithm (analytic coverage, 20.12 fixed-point) but differ:
+
+- Font: exact signed-area trapezoids, continuous 0–255. Handles quadratic Béziers natively.
+- Path: 8x vertical oversampling, winding/even-odd fill rules. Handles cubic Béziers.
+
+"Merge into one" is more than deleting a file — the implementations have different quality characteristics.
+
+### Reframed question
+
+The rasterizer lives in a library consumed by render services — it _executes_ at the pixel boundary. Having pixel math there is fine. The question is: **how do we make it structurally impossible for code above the render boundary to get pixel-denominated values from the font library?**
+
+### Candidate approach
+
+Split `fonts/` API visibility at the build level:
+
+1. **Metrics API** (font units only): `font_metrics`, `glyph_h_metrics`, `glyph_h_advance_with_axes`, `caret_skew`, `AxisValue`, `axis_values_hash`, `glyph_id_for_char`. This is what layout and presenter link against.
+2. **Rasterization API** (pixels): `rasterize_with_axes`, `RasterBuffer`, `RasterScratch`, `scale_fu`, `GlyphMetrics`, embolden. This is what metal-render links against.
+
+The build system compiles each service with explicit `--extern` flags. Making rasterization invisible to non-render services is a build-time decision. Layout physically can't import pixel APIs because they don't exist in what it links against.
+
+With cpu-render removed, the `GlyphCache`/`LruGlyphCache` in `fonts::cache` may become dead code (metal-render has its own GPU atlas). The "one rasterizer" question depends on whether `render/path_raster.rs` has consumers after the cleanup — presenter uses it for the loading screen, so it likely survives.
+
+### Open sub-questions
+
+- What exactly survives in `libraries/render/` after cpu-render removal? (Check after cleanup)
+- Does `render/path_raster.rs` have consumers beyond presenter's loading screen?
+- Should the two rasterizers eventually merge, or are their quality trade-offs worth preserving?
+- Is stem darkening genuinely font-specific, or does it generalize to thin paths (icons)?
+
+---
+
 ## Service Pack & Incremental Build — Design Discussion (2026-03-29)
 
 **Status:** Design settled. Implementation deferred (not blocking current work).

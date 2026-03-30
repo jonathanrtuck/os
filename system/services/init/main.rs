@@ -84,10 +84,10 @@ include!(env!("INIT_EMBEDDED_RS"));
 /// Channel shared memory base. The kernel's channel is at page 0.
 /// Channels created by init are at subsequent 2-page pairs.
 use protocol::init::{
-    CompositorConfig, CoreConfig, DocConfig, EditorConfig, FrameRateMsg, GpuConfig,
-    ImageConfig, RtcConfig, MSG_COMPOSITOR_CONFIG, MSG_CORE_CONFIG, MSG_DISPLAY_INFO,
-    MSG_DOC_CONFIG, MSG_EDITOR_CONFIG, MSG_FRAME_RATE, MSG_FS_READ_REQUEST,
-    MSG_FS_READ_RESPONSE, MSG_GPU_CONFIG, MSG_GPU_READY, MSG_IMAGE_CONFIG, MSG_RTC_CONFIG,
+    CompositorConfig, CoreConfig, DocConfig, EditorConfig, FrameRateMsg, GpuConfig, ImageConfig,
+    RtcConfig, MSG_COMPOSITOR_CONFIG, MSG_CORE_CONFIG, MSG_DISPLAY_INFO, MSG_DOC_CONFIG,
+    MSG_EDITOR_CONFIG, MSG_FRAME_RATE, MSG_FS_READ_REQUEST, MSG_FS_READ_RESPONSE, MSG_GPU_CONFIG,
+    MSG_GPU_READY, MSG_IMAGE_CONFIG, MSG_RTC_CONFIG,
 };
 use protocol::{
     device::{DeviceConfig, MSG_DEVICE_CONFIG},
@@ -109,9 +109,6 @@ const VIRTIO_DEVICE_GPU: u32 = 16;
 const VIRTIO_DEVICE_INPUT: u32 = 18;
 const VIRTIO_DEVICE_9P: u32 = 9;
 const VIRTIO_DEVICE_METAL: u32 = 22;
-/// Virtio MMIO register offsets for feature probing.
-const MMIO_DEVICE_FEATURES: usize = 0x010;
-const MMIO_DEVICE_FEATURES_SEL: usize = 0x014;
 /// Pseudo device ID for the PL031 RTC (matches kernel's DEVICE_ID_PL031_RTC).
 const DEVICE_PL031_RTC: u32 = 200;
 const PAGE_SIZE: usize = ipc::PAGE_SIZE;
@@ -322,53 +319,6 @@ fn spawn_with_channel(
     Some((proc_handle, ch_a, channel_idx))
 }
 
-/// Probe a virtio-gpu device for VIRTIO_GPU_F_VIRGL (bit 0) support.
-///
-/// Maps the device MMIO region, reads the feature register, and checks
-/// whether the device advertises 3D virgl capability. This determines
-/// whether init spawns virgil-render (GPU-accelerated) or the CPU
-/// fallback pipeline (compositor + virtio-gpu 2D).
-///
-/// # Safety
-/// Reads two MMIO registers (DeviceFeaturesSel, DeviceFeatures).
-/// Does not change device state — safe to call before driver negotiation.
-fn probe_virgl(gpu_pa: u64) -> bool {
-    let page_pa = gpu_pa & !(PAGE_SIZE as u64 - 1);
-    let page_offset = (gpu_pa & (PAGE_SIZE as u64 - 1)) as usize;
-
-    let va = match sys::device_map(page_pa, PAGE_SIZE as u64) {
-        Ok(v) => v,
-        Err(_) => {
-            sys::print(b"     virgl probe: device_map failed, assuming no virgl\n");
-            return false;
-        }
-    };
-
-    let base = va + page_offset;
-
-    // SAFETY: MMIO register reads. DeviceFeaturesSel at +0x14 selects which
-    // 32-bit page of features to read. DeviceFeatures at +0x10 returns the
-    // selected page. Writing sel=0 selects bits [31:0]. These are read-only
-    // probes that don't alter device state.
-    unsafe {
-        core::ptr::write_volatile((base + MMIO_DEVICE_FEATURES_SEL) as *mut u32, 0);
-    }
-
-    // SAFETY: same MMIO probe as above — reading DeviceFeatures at +0x10.
-    let features = unsafe { core::ptr::read_volatile((base + MMIO_DEVICE_FEATURES) as *const u32) };
-
-    // VIRTIO_GPU_F_VIRGL = bit 0
-    let has_virgl = features & 1 != 0;
-
-    if has_virgl {
-        sys::print(b"     virgl probe: 3D support detected\n");
-    } else {
-        sys::print(b"     virgl probe: no 3D support, using CPU fallback\n");
-    }
-
-    has_virgl
-}
-
 // ---------------------------------------------------------------------------
 // Phase 1: Parse device manifest
 // ---------------------------------------------------------------------------
@@ -456,22 +406,12 @@ fn parse_device_manifest(next_channel: &mut usize) -> DeviceManifest {
             continue;
         }
 
-        // For GPU devices, probe for virgl support to select the right driver.
-        let use_virgl = if dev_id == VIRTIO_DEVICE_GPU {
-            probe_virgl(dev_pa)
-        } else {
-            false
-        };
-
         let elf: &[u8] = match dev_id {
             VIRTIO_DEVICE_BLK => STORE_ELF,
             VIRTIO_DEVICE_CONSOLE => VIRTIO_CONSOLE_ELF,
             VIRTIO_DEVICE_GPU => {
-                if use_virgl {
-                    VIRGIL_RENDER_ELF
-                } else {
-                    CPU_RENDER_ELF
-                }
+                sys::print(b"     skipping legacy virtio-gpu (no driver)\n");
+                continue;
             }
             VIRTIO_DEVICE_METAL => METAL_RENDER_ELF,
             VIRTIO_DEVICE_INPUT => VIRTIO_INPUT_ELF,
@@ -519,10 +459,6 @@ fn parse_device_manifest(next_channel: &mut usize) -> DeviceManifest {
         };
 
         match dev_id {
-            VIRTIO_DEVICE_GPU => {
-                let rtype: u8 = if use_virgl { 1 } else { 0 };
-                manifest.gpu = Some((proc_h, ch_h, channel_idx, dev_pa, dev_irq, rtype));
-            }
             VIRTIO_DEVICE_METAL => {
                 manifest.gpu = Some((proc_h, ch_h, channel_idx, dev_pa, dev_irq, 2));
             }
@@ -2145,8 +2081,9 @@ fn wire_service_channels(
                 core_handle: 1,
                 _pad3: [0; 2],
             };
-            let doc_msg =
-                unsafe { ipc::Message::from_payload(protocol::store::MSG_STORE_CONFIG, &doc_config) };
+            let doc_msg = unsafe {
+                ipc::Message::from_payload(protocol::store::MSG_STORE_CONFIG, &doc_config)
+            };
             fs_ch_obj.send(&doc_msg);
 
             // Create A ↔ document service channel.
@@ -2547,9 +2484,7 @@ pub extern "C" fn _start() -> ! {
         manifest.gpu
     {
         let render_name: &[u8] = match render_type {
-            2 => b"metal",
-            1 => b"virgl",
-            _ => b"cpu-render",
+            _ => b"metal",
         };
         let (core_proc, editor_proc) = spawn_render_pipeline(
             render_name,

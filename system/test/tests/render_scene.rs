@@ -6422,7 +6422,7 @@ fn mpt_spring_settle_roundtrip() {
 //
 // End-to-end verification that stroke expansion + rendering produces
 // correct output. Exercises the same expand_stroke → render_path_data
-// pipeline used by both metal-render (stencil) and cpu-render (scanline).
+// pipeline used by metal-render (stencil) and the render library (scanline).
 
 /// Count path commands by type in expanded output (reuses parse_path_commands).
 fn count_points_after_flatten(data: &[u8]) -> usize {

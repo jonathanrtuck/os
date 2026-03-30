@@ -31,12 +31,12 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 │  ┌────────┐ ┌─────────┐ ┌──────────────────────────────┐  │
 │  │  Init  │ │  Core   │ │      Render Services         │  │  🟡/🟢
 │  │ (root  │ │ (OS svc)│ │ ┌─────────────┐ ┌──────────┐ │  │
-│  │  task) │ │         │ │ │metal-render │ │cpu-render│ │  │
-│  │        │ │   sole  │ │ │  (Metal GPU)│ │ (CpuBack │ │  │
-│  │        │ │  writer │ │ │   DEFAULT   │ │  +gpu 2D)│ │  │
-│  └────────┘ └───┬─────┘ │ └─────────────┘ └──────────┘ │  │
+│  │  task) │ │         │ │ ┌─────────────┐              │  │
+│  │        │ │   sole  │ │ │metal-render │              │  │
+│  │        │ │  writer │ │ │  (Metal GPU)│              │  │
+│  └────────┘ └───┬─────┘ │ └─────────────┘              │  │
 │      input→core │       │                              │  │
-│   editor↔core   │       │  virgil-render: DEPRECATED   │  │
+│   editor↔core   │       │                              │  │
 │                 │       │                              │  │
 │          core→render    └──────────────────────────────┘  │
 │          (scene graph,                                    │
@@ -317,7 +317,7 @@ Notification for both: `channel_signal` syscall wakes the consumer from `sys::wa
 **APIs:**
 
 - `SceneWriter` — builds/mutates a scene graph in a `&mut [u8]` buffer. Provides `alloc_node()`, `node_mut()`, `push_data()`, `add_child()`, `commit()`. Also exposes read-back via `nodes()` and `data_buf()` for single-process use.
-- `SceneReader` — read-only access to a scene graph buffer. Provides `node()`, `nodes()`, `data()`, `data_buf()`. This is the API render services (metal-render, cpu-render) use when reading from shared memory.
+- `SceneReader` — read-only access to a scene graph buffer. Provides `node()`, `nodes()`, `data()`, `data_buf()`. This is the API render services (metal-render) use when reading from shared memory.
 - `DoubleWriter` / `DoubleReader` — double-buffered wrapper over two `SCENE_SIZE` regions (`DOUBLE_SCENE_SIZE = 2 × SCENE_SIZE`). The writer writes to the back buffer (lower generation), then `swap()` atomically publishes it as the new front by bumping its generation counter. The reader always reads the front buffer (higher generation). No locks — they never access the same buffer. A release fence before the generation write and an acquire fence after the generation read ensure cross-core visibility on AArch64.
 
 **Incremental update support (2026-03-15 rendering pipeline optimization):**
@@ -437,29 +437,9 @@ This pattern — show UI immediately, init async, transition on completion — a
 
 ---
 
-### 2.2b CPU Render Service (`services/drivers/cpu-render/`) 🟢
+### 2.2b–c CPU Render / Virgil Render — REMOVED (2026-03-30)
 
-**Goal:** Thick render service for software rendering. Reads scene graph from shared memory, rasterizes via CpuBackend, presents via virtio-gpu 2D commands. Used for QEMU integration testing.
-
-**Status (2026-03-18):** 3 files (main.rs ~457 lines, gpu.rs ~524 lines, frame_scheduler.rs ~173 lines). Merged from the former `services/compositor/` and `services/drivers/virtio-gpu/`. The old directories are deleted — no parallel implementations remain.
-
-**What's foundational (the approach):**
-
-- **Single-process thick driver.** Tree walk, rasterization, compositing, and GPU presentation in one process. No cross-process IPC for frame submission.
-- **Render backend delegation.** All pixel work (tree walk, rasterization, compositing, damage tracking, glyph caching) lives in `libraries/render/`. The service constructs a `CpuBackend`, passes font data, and calls it.
-- **Self-allocates framebuffers** via `dma_alloc`. Same init handshake as other render services.
-- **Frame scheduler.** Timer-driven rendering at configurable cadence (default 60fps). Event coalescing, idle optimization, frame budgeting (skip overdue ticks), idle-to-active wakeup for low-latency response after idle periods.
-- **Complete 2D command implementation** (create resource, attach backing, set scanout, transfer, flush, get display info). Interrupt-driven I/O.
-
-**What's scaffolding (the implementation):**
-
-- **Hardcoded font size and DPI** (18px, 96 DPI). Should come from system configuration.
-
-### 2.2c Virgil Render Service (`services/drivers/virgil-render/`) ⚫
-
-**DEPRECATED.** v0.3 research spike that proved GPU-accelerated rendering through QEMU's virglrenderer (Gallium3D → ANGLE → Metal). No longer maintained — metal-render is the primary render path. Will be removed in a future milestone.
-
-**Historical status (2026-03-18):** 5 files (~1,800 lines). All four content types rendered via GPU. TGSI shaders, VBO management, glyph atlas, stencil-then-cover path rendering (blocked on ANGLE). Required custom QEMU build (akihikodaki/v) with virglrenderer + ANGLE/Metal backend.
+cpu-render (software via virtio-gpu 2D) and virgil-render (Gallium3D via virglrenderer) have been removed. metal-render is the sole render backend. See `design/journal.md` "Render Driver Consolidation" for rationale.
 
 ---
 
@@ -632,7 +612,7 @@ These are the things that limit what can be built above the kernel today, ordere
 1. **Input driver** — `wait(IRQ)` → read event → send to core → repost buffer → loop
 2. **Core** — `wait(input_channel | editor_channel)` → route events → update document → rebuild scene graph → signal render service → loop
 3. **Editor** — `wait(core_channel)` → receive input → compute write requests → send to core → loop
-4. **Render service** (metal-render or cpu-render) — `wait(scene_update_channel | frame_timer)` → read scene graph → render → present → loop
+4. **Render service** (metal-render) — `wait(scene_update_channel | frame_timer)` → read scene graph → render → present → loop
 
 Init probes GPU, calls `setup_render_pipeline()`, starts all processes, then idles via `yield_now()`.
 
