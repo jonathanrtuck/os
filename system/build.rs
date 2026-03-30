@@ -18,7 +18,7 @@
 use std::{
     env,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Child, Command},
 };
 
 /// System-wide constants (SSOT). Included as a module so build.rs can use
@@ -136,134 +136,157 @@ fn main() {
     let link_ld = out_dir.join("userspace.ld");
     let libs = manifest_dir.join("libraries");
 
-    // Step 1: Compile shared libraries (skip if up-to-date).
+    // Step 1: Compile shared libraries in two waves (parallel within each wave).
+    //
+    // Wave 1 (independent): sys, protocol, animation, layout, piecetable,
+    //   scene, icons, fs, drawing + fonts(cargo). No inter-dependencies.
+    // Wave 2 (dependent): virtio(sys), ipc(sys), store(fs),
+    //   render(drawing, scene, protocol, fonts).
     let sys_src = manifest_dir.join("libraries/sys/lib.rs");
     let sys_rlib = out_dir.join("libsys.rlib");
     let sys_dir = libs.join("sys");
-
-    if needs_rebuild(&sys_rlib, &[&config_path], &[&sys_dir]) {
-        rustc_rlib(&rustc, &sys_src, &sys_rlib, "sys", &[]);
-    }
-
     let protocol_src = manifest_dir.join("libraries/protocol/lib.rs");
     let protocol_rlib = out_dir.join("libprotocol.rlib");
     let protocol_dir = libs.join("protocol");
+    let animation_src = manifest_dir.join("libraries/animation/lib.rs");
+    let animation_rlib = out_dir.join("libanimation.rlib");
+    let animation_dir = libs.join("animation");
+    let layout_src = manifest_dir.join("libraries/layout/lib.rs");
+    let layout_rlib = out_dir.join("liblayout.rlib");
+    let layout_dir = libs.join("layout");
+    let piecetable_src = manifest_dir.join("libraries/piecetable/lib.rs");
+    let piecetable_rlib = out_dir.join("libpiecetable.rlib");
+    let piecetable_dir = libs.join("piecetable");
+    let scene_src = manifest_dir.join("libraries/scene/lib.rs");
+    let scene_rlib = out_dir.join("libscene.rlib");
+    let scene_dir = libs.join("scene");
+    let fs_src = manifest_dir.join("libraries/fs/lib.rs");
+    let fs_rlib = out_dir.join("libfs.rlib");
+    let fs_dir = libs.join("fs");
+    let drawing_src = manifest_dir.join("libraries/drawing/lib.rs");
+    let drawing_rlib = out_dir.join("libdrawing.rlib");
+    let drawing_dir = libs.join("drawing");
 
+    // Generate icon data before compiling icons library.
+    let icons_svg_dir = manifest_dir.join("resources/icons");
+    let icons_data_rs = manifest_dir.join("libraries/icons/data.rs");
+    build_icons::generate_icon_data(&icons_svg_dir, &icons_data_rs);
+    println!("cargo:rerun-if-changed={}", icons_svg_dir.display());
+    let icons_src = manifest_dir.join("libraries/icons/lib.rs");
+    let icons_rlib = out_dir.join("libicons.rlib");
+    let icons_dir = libs.join("icons");
+
+    // Wave 1: spawn all independent rlibs in parallel.
+    let mut wave1 = Vec::new();
+
+    if needs_rebuild(&sys_rlib, &[&config_path], &[&sys_dir]) {
+        wave1.push(start(
+            "sys",
+            rlib_cmd(&rustc, &sys_src, &sys_rlib, "sys", &[]),
+        ));
+    }
     if needs_rebuild(
         &protocol_rlib,
         &[&config_path, &pack_format_path],
         &[&protocol_dir],
     ) {
-        rustc_rlib(&rustc, &protocol_src, &protocol_rlib, "protocol", &[]);
+        wave1.push(start(
+            "protocol",
+            rlib_cmd(&rustc, &protocol_src, &protocol_rlib, "protocol", &[]),
+        ));
     }
-
-    let animation_src = manifest_dir.join("libraries/animation/lib.rs");
-    let animation_rlib = out_dir.join("libanimation.rlib");
-    let animation_dir = libs.join("animation");
-
     if needs_rebuild(&animation_rlib, &[], &[&animation_dir]) {
-        rustc_rlib(&rustc, &animation_src, &animation_rlib, "animation", &[]);
+        wave1.push(start(
+            "animation",
+            rlib_cmd(&rustc, &animation_src, &animation_rlib, "animation", &[]),
+        ));
     }
-
-    let layout_src = manifest_dir.join("libraries/layout/lib.rs");
-    let layout_rlib = out_dir.join("liblayout.rlib");
-    let layout_dir = libs.join("layout");
-
     if needs_rebuild(&layout_rlib, &[], &[&layout_dir]) {
-        rustc_rlib(&rustc, &layout_src, &layout_rlib, "layout", &[]);
+        wave1.push(start(
+            "layout",
+            rlib_cmd(&rustc, &layout_src, &layout_rlib, "layout", &[]),
+        ));
     }
-
-    let piecetable_src = manifest_dir.join("libraries/piecetable/lib.rs");
-    let piecetable_rlib = out_dir.join("libpiecetable.rlib");
-    let piecetable_dir = libs.join("piecetable");
-
     if needs_rebuild(&piecetable_rlib, &[], &[&piecetable_dir]) {
-        rustc_rlib(&rustc, &piecetable_src, &piecetable_rlib, "piecetable", &[]);
+        wave1.push(start(
+            "piecetable",
+            rlib_cmd(&rustc, &piecetable_src, &piecetable_rlib, "piecetable", &[]),
+        ));
+    }
+    if needs_rebuild(&scene_rlib, &[], &[&scene_dir]) {
+        wave1.push(start(
+            "scene",
+            rlib_cmd(&rustc, &scene_src, &scene_rlib, "scene", &[]),
+        ));
+    }
+    if needs_rebuild(&icons_rlib, &[], &[&icons_dir]) {
+        wave1.push(start(
+            "icons",
+            rlib_cmd(&rustc, &icons_src, &icons_rlib, "icons", &[]),
+        ));
+    }
+    if needs_rebuild(&fs_rlib, &[], &[&fs_dir]) {
+        wave1.push(start("fs", rlib_cmd(&rustc, &fs_src, &fs_rlib, "fs", &[])));
+    }
+    if needs_rebuild(&drawing_rlib, &[&config_path], &[&drawing_dir]) {
+        wave1.push(start(
+            "drawing",
+            rlib_cmd(&rustc, &drawing_src, &drawing_rlib, "drawing", &[]),
+        ));
     }
 
+    // Fonts (Cargo-managed): cargo handles incrementality internally.
+    let fonts_output = cargo_lib(&manifest_dir.join("libraries/fonts"));
+    let fonts_host_deps = manifest_dir.join("libraries/fonts/target/release/deps");
+
+    wait_all(wave1);
+
+    // Wave 2: rlibs that depend on wave 1 outputs.
     let virtio_src = manifest_dir.join("libraries/virtio/lib.rs");
     let virtio_rlib = out_dir.join("libvirtio.rlib");
     let virtio_dir = libs.join("virtio");
-
-    if needs_rebuild(&virtio_rlib, &[&config_path, &sys_rlib], &[&virtio_dir]) {
-        rustc_rlib(
-            &rustc,
-            &virtio_src,
-            &virtio_rlib,
-            "virtio",
-            &[("sys", &sys_rlib)],
-        );
-    }
-
-    let scene_src = manifest_dir.join("libraries/scene/lib.rs");
-    let scene_rlib = out_dir.join("libscene.rlib");
-    let scene_dir = libs.join("scene");
-
-    if needs_rebuild(&scene_rlib, &[], &[&scene_dir]) {
-        rustc_rlib(&rustc, &scene_src, &scene_rlib, "scene", &[]);
-    }
-
-    // Step 1c: Generate icon data from SVGs and compile icons library.
-    let icons_svg_dir = manifest_dir.join("resources/icons");
-    let icons_data_rs = manifest_dir.join("libraries/icons/data.rs");
-    build_icons::generate_icon_data(&icons_svg_dir, &icons_data_rs);
-    println!("cargo:rerun-if-changed={}", icons_svg_dir.display());
-
-    let icons_src = manifest_dir.join("libraries/icons/lib.rs");
-    let icons_rlib = out_dir.join("libicons.rlib");
-    let icons_dir = libs.join("icons");
-
-    if needs_rebuild(&icons_rlib, &[], &[&icons_dir]) {
-        rustc_rlib(&rustc, &icons_src, &icons_rlib, "icons", &[]);
-    }
-
     let ipc_src = manifest_dir.join("libraries/ipc/lib.rs");
     let ipc_rlib = out_dir.join("libipc.rlib");
     let ipc_dir = libs.join("ipc");
-
-    if needs_rebuild(&ipc_rlib, &[&config_path, &sys_rlib], &[&ipc_dir]) {
-        rustc_rlib(&rustc, &ipc_src, &ipc_rlib, "ipc", &[("sys", &sys_rlib)]);
-    }
-
-    let fs_src = manifest_dir.join("libraries/fs/lib.rs");
-    let fs_rlib = out_dir.join("libfs.rlib");
-    let fs_dir = libs.join("fs");
-
-    if needs_rebuild(&fs_rlib, &[], &[&fs_dir]) {
-        rustc_rlib(&rustc, &fs_src, &fs_rlib, "fs", &[]);
-    }
-
     let store_src = manifest_dir.join("libraries/store/lib.rs");
     let store_rlib = out_dir.join("libstore.rlib");
     let store_dir = libs.join("store");
-
-    if needs_rebuild(&store_rlib, &[&fs_rlib], &[&store_dir]) {
-        rustc_rlib(
-            &rustc,
-            &store_src,
-            &store_rlib,
-            "store",
-            &[("fs", &fs_rlib)],
-        );
-    }
-
-    // Step 1b: Build Cargo-managed libraries (libraries with external deps).
-    // Cargo handles its own incrementality for the fonts crate.
-    let fonts_output = cargo_lib(&manifest_dir.join("libraries/fonts"));
-
-    let drawing_src = manifest_dir.join("libraries/drawing/lib.rs");
-    let drawing_rlib = out_dir.join("libdrawing.rlib");
-    let fonts_host_deps = manifest_dir.join("libraries/fonts/target/release/deps");
-    let drawing_dir = libs.join("drawing");
-
-    if needs_rebuild(&drawing_rlib, &[&config_path], &[&drawing_dir]) {
-        rustc_rlib_with_search(&rustc, &drawing_src, &drawing_rlib, "drawing", &[], &[]);
-    }
-
     let render_src = manifest_dir.join("libraries/render/lib.rs");
     let render_rlib = out_dir.join("librender.rlib");
     let render_dir = libs.join("render");
 
+    let mut wave2 = Vec::new();
+
+    if needs_rebuild(&virtio_rlib, &[&config_path, &sys_rlib], &[&virtio_dir]) {
+        wave2.push(start(
+            "virtio",
+            rlib_cmd(
+                &rustc,
+                &virtio_src,
+                &virtio_rlib,
+                "virtio",
+                &[("sys", &sys_rlib)],
+            ),
+        ));
+    }
+    if needs_rebuild(&ipc_rlib, &[&config_path, &sys_rlib], &[&ipc_dir]) {
+        wave2.push(start(
+            "ipc",
+            rlib_cmd(&rustc, &ipc_src, &ipc_rlib, "ipc", &[("sys", &sys_rlib)]),
+        ));
+    }
+    if needs_rebuild(&store_rlib, &[&fs_rlib], &[&store_dir]) {
+        wave2.push(start(
+            "store",
+            rlib_cmd(
+                &rustc,
+                &store_src,
+                &store_rlib,
+                "store",
+                &[("fs", &fs_rlib)],
+            ),
+        ));
+    }
     if needs_rebuild(
         &render_rlib,
         &[
@@ -274,24 +297,36 @@ fn main() {
         ],
         &[&render_dir],
     ) {
-        rustc_rlib_with_search(
-            &rustc,
-            &render_src,
-            &render_rlib,
+        wave2.push(start(
             "render",
-            &[
-                ("drawing", &drawing_rlib),
-                ("scene", &scene_rlib),
-                ("protocol", &protocol_rlib),
-                ("fonts", &fonts_output.rlib),
-            ],
-            &[&fonts_output.deps_dir, &fonts_host_deps],
-        );
+            rlib_cmd_with_search(
+                &rustc,
+                &render_src,
+                &render_rlib,
+                "render",
+                &[
+                    ("drawing", &drawing_rlib),
+                    ("scene", &scene_rlib),
+                    ("protocol", &protocol_rlib),
+                    ("fonts", &fonts_output.rlib),
+                ],
+                &[&fonts_output.deps_dir, &fonts_host_deps],
+            ),
+        ));
     }
 
-    // Step 2: Compile all non-init programs.
-    // fuzz-helper must be compiled before fuzz (fuzz embeds it).
-    for &(name, dir, needs_virtio, needs_drawing) in PROGRAMS {
+    wait_all(wave2);
+
+    // Step 2: Compile all programs + init in parallel.
+    // Two sub-waves: wave 3 = everything except fuzz, wave 4 = fuzz (needs fuzz-helper).
+    let mut wave3 = Vec::new();
+
+    // Helper to build externs for a program.
+    let build_program_cmd = |name: &str,
+                             dir: &str,
+                             needs_virtio: bool,
+                             needs_drawing: bool|
+     -> (PathBuf, PathBuf, Command) {
         let src_dir = manifest_dir.join(dir);
         let main_rs = src_dir.join("main.rs");
         let elf_path = out_dir.join(format!("{name}.elf"));
@@ -332,56 +367,45 @@ fn main() {
             externs.push(("store", store_rlib.clone()));
         }
 
-        // Fuzz embeds fuzz-helper (generate embedded RS, same pattern as init).
-        let mut env_vars = Vec::new();
-
-        if name == "fuzz" {
-            let helper_elf = out_dir.join("fuzz-helper.elf");
-            let fuzz_embedded = format!(
-                "static HELPER_ELF: &[u8] = include_bytes!(\"{}\");\n",
-                helper_elf.display()
-            );
-            let fuzz_embedded_rs = out_dir.join("fuzz_embedded.rs");
-            std::fs::write(&fuzz_embedded_rs, &fuzz_embedded)
-                .unwrap_or_else(|e| panic!("failed to write fuzz_embedded.rs: {e}"));
-
-            env_vars.push((
-                "FUZZ_EMBEDDED_RS",
-                fuzz_embedded_rs.to_str().unwrap().to_string(),
-            ));
-        }
-
-        // Add fonts library search paths for programs that need drawing or fonts.
         let search_paths: Vec<&Path> = if needs_drawing || name == "layout" {
             vec![&fonts_output.deps_dir, &fonts_host_deps]
         } else {
             vec![]
         };
 
-        // Check if this ELF needs rebuilding: source dir + externs + linker script + config.
-        let helper_path = out_dir.join("fuzz-helper.elf");
-        let mut elf_deps: Vec<&Path> = vec![link_ld.as_path(), config_path.as_path()];
-        for (_, rlib) in &externs {
-            elf_deps.push(rlib.as_path());
-        }
-        if name == "fuzz" && helper_path.exists() {
-            elf_deps.push(helper_path.as_path());
+        let cmd = bin_cmd(
+            &rustc,
+            &main_rs,
+            &elf_path,
+            &link_ld,
+            &externs,
+            &[],
+            &search_paths,
+        );
+        (src_dir, elf_path, cmd)
+    };
+
+    for &(name, dir, needs_virtio, needs_drawing) in PROGRAMS {
+        if name == "fuzz" {
+            continue; // fuzz needs fuzz-helper — compiled in wave 4.
         }
 
+        let (src_dir, elf_path, cmd) = build_program_cmd(name, dir, needs_virtio, needs_drawing);
+
+        let mut elf_deps: Vec<&Path> = vec![link_ld.as_path(), config_path.as_path()];
+        // All programs depend on at least sys + ipc + protocol rlibs.
+        elf_deps.extend_from_slice(&[
+            sys_rlib.as_path(),
+            ipc_rlib.as_path(),
+            protocol_rlib.as_path(),
+        ]);
+
         if needs_rebuild(&elf_path, &elf_deps, &[src_dir.as_path()]) {
-            rustc_bin(
-                &rustc,
-                &main_rs,
-                &elf_path,
-                &link_ld,
-                &externs,
-                &env_vars,
-                &search_paths,
-            );
+            wave3.push(start(name, cmd));
         }
     }
 
-    // Step 3: Compile init (no longer embeds service ELFs — reads from pack).
+    // Init also in wave 3 (no dependency on other programs).
     let init_src = manifest_dir.join("services/init/main.rs");
     let init_elf = out_dir.join("init.elf");
     let init_dir = manifest_dir.join("services/init");
@@ -399,20 +423,71 @@ fn main() {
         ],
         &[&init_dir],
     ) {
-        rustc_bin(
-            &rustc,
-            &init_src,
-            &init_elf,
-            &link_ld,
-            &[
-                ("sys", sys_rlib.clone()),
-                ("ipc", ipc_rlib.clone()),
-                ("protocol", protocol_rlib.clone()),
-                ("scene", scene_rlib.clone()),
-            ],
-            &[],
-            &[],
+        wave3.push(start(
+            "init",
+            bin_cmd(
+                &rustc,
+                &init_src,
+                &init_elf,
+                &link_ld,
+                &[
+                    ("sys", sys_rlib.clone()),
+                    ("ipc", ipc_rlib.clone()),
+                    ("protocol", protocol_rlib.clone()),
+                    ("scene", scene_rlib.clone()),
+                ],
+                &[],
+                &[],
+            ),
+        ));
+    }
+
+    wait_all(wave3);
+
+    // Wave 4: fuzz (depends on fuzz-helper.elf from wave 3).
+    {
+        let (src_dir, elf_path, _) = build_program_cmd("fuzz", "user/fuzz", false, false);
+        let helper_elf = out_dir.join("fuzz-helper.elf");
+        let fuzz_embedded = format!(
+            "static HELPER_ELF: &[u8] = include_bytes!(\"{}\");\n",
+            helper_elf.display()
         );
+        let fuzz_embedded_rs = out_dir.join("fuzz_embedded.rs");
+        std::fs::write(&fuzz_embedded_rs, &fuzz_embedded)
+            .unwrap_or_else(|e| panic!("failed to write fuzz_embedded.rs: {e}"));
+
+        let mut elf_deps: Vec<&Path> = vec![
+            link_ld.as_path(),
+            config_path.as_path(),
+            sys_rlib.as_path(),
+            ipc_rlib.as_path(),
+            protocol_rlib.as_path(),
+        ];
+        if helper_elf.exists() {
+            elf_deps.push(helper_elf.as_path());
+        }
+
+        if needs_rebuild(&elf_path, &elf_deps, &[src_dir.as_path()]) {
+            run(
+                "fuzz",
+                bin_cmd(
+                    &rustc,
+                    &src_dir.join("main.rs"),
+                    &elf_path,
+                    &link_ld,
+                    &[
+                        ("sys", sys_rlib.clone()),
+                        ("ipc", ipc_rlib.clone()),
+                        ("protocol", protocol_rlib.clone()),
+                    ],
+                    &[(
+                        "FUZZ_EMBEDDED_RS",
+                        fuzz_embedded_rs.to_str().unwrap().to_string(),
+                    )],
+                    &[],
+                ),
+            );
+        }
     }
 
     // Step 4: Pack service ELFs into a flat archive and link into kernel.
@@ -625,16 +700,16 @@ fn find_llvm_objcopy() -> PathBuf {
     PathBuf::from("llvm-objcopy")
 }
 
-/// Compile a Rust source file as a binary ELF.
-fn rustc_bin(
+/// Build a rustc command for a binary ELF (does not run it).
+fn bin_cmd(
     rustc: &str,
-    src: &PathBuf,
-    output: &PathBuf,
+    src: &Path,
+    output: &Path,
     link_ld: &Path,
     externs: &[(&str, PathBuf)],
     env_vars: &[(&str, String)],
     extra_search_paths: &[&Path],
-) {
+) -> Command {
     let mut cmd = Command::new(rustc);
 
     cmd.arg("--target=aarch64-unknown-none")
@@ -652,7 +727,6 @@ fn rustc_bin(
             system_config::PAGE_SIZE
         ));
 
-    // Add search path so rustc can resolve transitive rlib dependencies.
     if let Some(first) = externs.first() {
         if let Some(dir) = first.1.parent() {
             cmd.arg(format!("-L{}", dir.display()));
@@ -669,33 +743,19 @@ fn rustc_bin(
         cmd.env(key, value);
     }
 
-    let status = cmd
-        .arg("-o")
-        .arg(output)
-        .arg(src)
-        .status()
-        .unwrap_or_else(|e| {
-            panic!(
-                "failed to invoke rustc for {}: {e}",
-                src.file_name().unwrap().to_str().unwrap()
-            )
-        });
-
-    assert!(
-        status.success(),
-        "failed to build {}",
-        output.file_name().unwrap().to_str().unwrap()
-    );
+    cmd.arg("-o").arg(output).arg(src);
+    cmd
 }
-/// Compile a Rust source file as an rlib with additional library search paths.
-fn rustc_rlib_with_search(
+
+/// Build a rustc command for an rlib with search paths (does not run it).
+fn rlib_cmd_with_search(
     rustc: &str,
-    src: &PathBuf,
-    output: &PathBuf,
+    src: &Path,
+    output: &Path,
     crate_name: &str,
     externs: &[(&str, &PathBuf)],
     search_paths: &[&Path],
-) {
+) -> Command {
     let mut cmd = Command::new(rustc);
 
     cmd.arg("--target=aarch64-unknown-none")
@@ -719,50 +779,45 @@ fn rustc_rlib_with_search(
         cmd.arg(format!("--extern={name}={}", path.display()));
     }
 
-    let status = cmd
-        .arg("-o")
-        .arg(output)
-        .arg(src)
-        .status()
-        .unwrap_or_else(|e| panic!("failed to invoke rustc for {crate_name}: {e}"));
-
-    assert!(status.success(), "failed to build {crate_name}.rlib");
+    cmd.arg("-o").arg(output).arg(src);
+    cmd
 }
-/// Compile a Rust source file as an rlib.
-fn rustc_rlib(
+
+/// Build a rustc command for an rlib (does not run it).
+fn rlib_cmd(
     rustc: &str,
-    src: &PathBuf,
-    output: &PathBuf,
+    src: &Path,
+    output: &Path,
     crate_name: &str,
     externs: &[(&str, &PathBuf)],
-) {
-    let mut cmd = Command::new(rustc);
+) -> Command {
+    rlib_cmd_with_search(rustc, src, output, crate_name, externs, &[])
+}
 
-    cmd.arg("--target=aarch64-unknown-none")
-        .arg("--edition=2021")
-        .arg("--crate-type=rlib")
-        .arg(format!("--crate-name={crate_name}"))
-        .args(["-C", "panic=abort"])
-        .args(["-C", "opt-level=s"]);
-
-    if let Some(first) = externs.first() {
-        if let Some(dir) = first.1.parent() {
-            cmd.arg(format!("-L{}", dir.display()));
-        }
-    }
-
-    for &(name, path) in externs {
-        cmd.arg(format!("--extern={name}={}", path.display()));
-    }
-
+/// Run a command synchronously and assert success.
+fn run(name: &str, mut cmd: Command) {
     let status = cmd
-        .arg("-o")
-        .arg(output)
-        .arg(src)
         .status()
-        .unwrap_or_else(|e| panic!("failed to invoke rustc for {crate_name}: {e}"));
+        .unwrap_or_else(|e| panic!("failed to start {name}: {e}"));
+    assert!(status.success(), "failed to build {name}");
+}
 
-    assert!(status.success(), "failed to build {crate_name}.rlib");
+/// Spawn a command and return the child process.
+fn start(name: &str, mut cmd: Command) -> (&str, Child) {
+    let child = cmd
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to start {name}: {e}"));
+    (name, child)
+}
+
+/// Wait for all spawned children to finish. Panics if any failed.
+fn wait_all(children: Vec<(&str, Child)>) {
+    for (name, mut child) in children {
+        let status = child
+            .wait()
+            .unwrap_or_else(|e| panic!("{name}: wait failed: {e}"));
+        assert!(status.success(), "failed to build {name}");
+    }
 }
 
 /// Build a Cargo-managed library for the bare-metal target.
