@@ -1,26 +1,25 @@
-%% Rendering Pipeline — Data Shapes and Translators
-%%
-%% The rendering pipeline is a series of data transformations. Each data shape
-%% (rounded box) is an interface — the contract between two components. Each
-%% translator (label on the arrow) is a black box that converts one shape to
-%% the next. The logic is fully encapsulated inside each translator.
-%%
-%% One-way data flow. Each translator only knows its input and output shapes.
-%%
-%% Design decisions (updated 2026-03-30):
-%%   - Path-centric rendering: everything is geometric (paths, rects, glyphs, images)
-%%   - Glyph rasterization in the render backend (pipeline shapes + lays out, backend rasterizes)
-%%   - Tree-structured scene graph with geometric content types
-%%   - Scene graph is THE interface between the document pipeline and rendering
-%%   - Thick GPU driver: metal-render reads the scene graph, does its own tree walk,
-%%     renders via Metal GPU (hypervisor passthrough), and presents to display.
-%%   - Document pipeline (presenter + layout + document) replaces the former
-%%     monolithic "core" process (decomposed v0.5).
-%%   - Sole render backend: metal-render (cpu-render and virgil-render removed v0.5).
-%%   - Visual effects (shadow, blur, opacity, transforms) are node properties,
-%%     not content types. The render service implements them however it wants.
-
 graph LR
+    %% Rendering Pipeline — Data Shapes and Translators
+    %%
+    %% The rendering pipeline is a series of data transformations. Each data shape
+    %% (rounded box) is an interface — the contract between two components. Each
+    %% translator (label on the arrow) is a black box that converts one shape to
+    %% the next. The logic is fully encapsulated inside each translator.
+    %%
+    %% One-way data flow. Each translator only knows its input and output shapes.
+    %%
+    %% Design decisions (updated 2026-03-30):
+    %%   - Path-centric rendering: everything is geometric (paths, rects, glyphs, images)
+    %%   - Glyph rasterization in the render backend (pipeline shapes + lays out, backend rasterizes)
+    %%   - Tree-structured scene graph with geometric content types
+    %%   - Scene graph is THE interface between the document pipeline and rendering
+    %%   - Thick GPU driver: metal-render reads the scene graph, does its own tree walk,
+    %%     renders via Metal GPU (hypervisor passthrough), and presents to display.
+    %%   - Document pipeline (presenter + layout + document) replaces the former
+    %%     monolithic "core" process (decomposed v0.5).
+    %%   - Sole render backend: metal-render (cpu-render and virgil-render removed v0.5).
+    %%   - Visual effects (shadow, blur, opacity, transforms) are node properties,
+    %%     not content types. The render service implements them however it wants.
     HW(["Hardware Events\n(evdev interrupts:\ntype, code, value)"])
     KE(["Key Events\n(logical key +\nmodifier set)"])
     WR(["Write Requests\n(insert, delete,\nmove_cursor,\nset_selection)"])

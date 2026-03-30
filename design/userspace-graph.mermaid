@@ -1,13 +1,12 @@
-%% Userspace Component Graph — Runtime Communication
-%% Updated 2026-03-30 to reflect v0.5 architecture:
-%%   - "core" decomposed into document + layout + presenter
-%%   - cpu-render and virgil-render removed; metal-render is sole backend
-%%   - New services: store, rich-editor, png-decode
-%%
-%% Shows runtime IPC and shared memory data flow, not compile-time dependencies.
-%% For compile-time dependencies, see dependency-graph.mermaid.
-
 graph LR
+    %% Userspace Component Graph — Runtime Communication
+    %% Updated 2026-03-30 to reflect v0.5 architecture:
+    %%   - "core" decomposed into document + layout + presenter
+    %%   - cpu-render and virgil-render removed; metal-render is sole backend
+    %%   - New services: store, rich-editor, png-decode
+    %%
+    %% Shows runtime IPC and shared memory data flow, not compile-time dependencies.
+    %% For compile-time dependencies, see dependency-graph.mermaid.
     subgraph Hardware
         KB[Keyboard]
         TABLET[Tablet]

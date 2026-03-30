@@ -1,19 +1,18 @@
-%% Compile-time Dependency Graph (layered DAG)
-%% Updated 2026-03-30 to reflect v0.5 architecture:
-%%   - "core" decomposed into document, layout (service), presenter
-%%   - cpu-render and virgil-render removed; metal-render is sole backend
-%%   - New libraries: piecetable, icons, fs, store
-%%   - New services: store, filesystem, decoders/png
-%%   - New user programs: rich-editor
-%%
-%% UNIVERSAL DEPENDENCIES (omitted from edges for readability):
-%%   Every service and program links sys, ipc, protocol.
-%%   Only non-universal edges are drawn below.
-%%
-%% Edges point downward: consumer → dependency.
-%% No cycles allowed.
-
 graph TD
+    %% Compile-time Dependency Graph (layered DAG)
+    %% Updated 2026-03-30 to reflect v0.5 architecture:
+    %%   - "core" decomposed into document, layout (service), presenter
+    %%   - cpu-render and virgil-render removed; metal-render is sole backend
+    %%   - New libraries: piecetable, icons, fs, store
+    %%   - New services: store, filesystem, decoders/png
+    %%   - New user programs: rich-editor
+    %%
+    %% UNIVERSAL DEPENDENCIES (omitted from edges for readability):
+    %%   Every service and program links sys, ipc, protocol.
+    %%   Only non-universal edges are drawn below.
+    %%
+    %% Edges point downward: consumer → dependency.
+    %% No cycles allowed.
     subgraph "Layer 4 — Orchestrator"
         INIT[init]
     end
