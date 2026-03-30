@@ -144,6 +144,7 @@ pub(crate) fn clear_selection() {
     s.selection.anchor = 0;
     s.selection.start = 0;
     s.selection.end = 0;
+    s.selection.dragging = false;
     if s.doc_format == super::DocumentFormat::Rich {
         super::documents::rich_set_selection(0, 0);
     }

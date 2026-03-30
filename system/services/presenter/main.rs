@@ -145,7 +145,7 @@ pub(crate) struct CursorState {
     pub(crate) goal_x: Option<i32>,
 }
 
-/// Selection state: anchor, range, fade, click detection.
+/// Selection state: anchor, range, fade, click detection, drag tracking.
 pub(crate) struct SelectionState {
     /// Selection anchor: the fixed end of a selection range.
     pub(crate) anchor: usize,
@@ -162,6 +162,13 @@ pub(crate) struct SelectionState {
     pub(crate) last_click_x: u32,
     pub(crate) last_click_y: u32,
     pub(crate) click_count: u8,
+    /// True while the left mouse button is held after a mouse-down on text.
+    /// While dragging, pointer movement extends the selection from the anchor.
+    pub(crate) dragging: bool,
+    /// For double/triple-click-drag: the original anchor word/line boundaries.
+    /// Selection snaps to word (click_count=2) or line (click_count=3) increments.
+    pub(crate) drag_origin_start: usize,
+    pub(crate) drag_origin_end: usize,
 }
 
 /// Scroll state: spring-based smooth scrolling.
@@ -335,6 +342,9 @@ impl ViewState {
                 last_click_x: 0,
                 last_click_y: 0,
                 click_count: 0,
+                dragging: false,
+                drag_origin_start: 0,
+                drag_origin_end: 0,
             },
             scroll: ScrollState {
                 animating: false,
@@ -2096,11 +2106,23 @@ pub extern "C" fn _start() -> ! {
                                         input_handling::update_selection_from_anchor();
                                     }
                                     _ => {
-                                        // Single click: position cursor, clear selection.
+                                        // Single click: position cursor, set anchor for potential drag.
+                                        // clear_selection() resets anchor to 0, so set it after.
+                                        input_handling::clear_selection();
                                         let s = state();
                                         s.cursor.pos = byte_pos;
-                                        input_handling::clear_selection();
+                                        s.selection.anchor = byte_pos;
                                     }
+                                }
+
+                                // Start drag tracking. For double/triple-click, remember
+                                // the original word/line boundaries so drag extends in
+                                // those increments (matching macOS behavior).
+                                {
+                                    let s = state();
+                                    s.selection.dragging = true;
+                                    s.selection.drag_origin_start = s.selection.anchor;
+                                    s.selection.drag_origin_end = s.cursor.pos;
                                 }
 
                                 state().cursor.goal_column = None;
@@ -2114,10 +2136,157 @@ pub extern "C" fn _start() -> ! {
                                 selection_changed = true;
                                 had_user_input = true;
                             }
+                        } else if btn.button == 0 && btn.pressed == 0 {
+                            // Button release: end drag.
+                            state().selection.dragging = false;
                         }
                     }
                     _ => {}
                 }
+            }
+        }
+
+        // ── Drag selection: update on pointer move while button held ──
+        if pointer_position_changed && state().selection.dragging {
+            let s = state();
+            let drag_x = s.pointer.x;
+            let drag_y = s.pointer.y;
+            let click_count = s.selection.click_count;
+
+            if drag_y >= TITLE_BAR_H && s.animation.active_space == 0 {
+                let page_x = (fb_width - page_width) / 2;
+                let page_y_abs = content_y + (content_h.saturating_sub(page_height)) / 2;
+                let text_origin_x = page_x + page_padding;
+                let text_origin_y = page_y_abs + page_padding;
+                let rel_x = drag_x.saturating_sub(text_origin_x);
+                let rel_y = drag_y.saturating_sub(text_origin_y);
+                let adjusted_y = rel_y + (s.scroll.offset / scene::MPT_PER_PT) as u32;
+                let is_rich = s.doc_format == DocumentFormat::Rich;
+
+                let byte_pos = if is_rich {
+                    layout::rich_xy_to_byte(rel_x as f32, adjusted_y as f32)
+                } else {
+                    let li = content_text_layout(page_width, page_padding);
+                    let t = documents::doc_content();
+                    li.xy_to_byte(t, rel_x, adjusted_y)
+                };
+
+                match click_count {
+                    2 => {
+                        // Word-granularity drag: extend in word-sized increments.
+                        let text_buf: alloc::vec::Vec<u8>;
+                        let text: &[u8] = if is_rich {
+                            let tl = documents::rich_text_len();
+                            text_buf = {
+                                let mut v = alloc::vec![0u8; tl];
+                                documents::rich_copy_text(&mut v);
+                                v
+                            };
+                            &text_buf
+                        } else {
+                            text_buf = alloc::vec::Vec::new();
+                            documents::doc_content()
+                        };
+
+                        let s = state();
+                        let origin_start = s.selection.drag_origin_start;
+                        let origin_end = s.selection.drag_origin_end;
+
+                        if byte_pos < origin_start {
+                            // Dragging before the origin word: snap backward to word start.
+                            let lo = input_handling::word_boundary_backward(text, byte_pos);
+                            s.selection.anchor = origin_end;
+                            s.cursor.pos = lo;
+                        } else if byte_pos >= origin_end {
+                            // Dragging after the origin word: snap forward to word end.
+                            let mut hi = byte_pos;
+                            while hi < text.len() && !layout_lib::is_whitespace(text[hi]) {
+                                hi += 1;
+                            }
+                            s.selection.anchor = origin_start;
+                            s.cursor.pos = hi;
+                        } else {
+                            // Still within the origin word: keep original selection.
+                            s.selection.anchor = origin_start;
+                            s.cursor.pos = origin_end;
+                        }
+                        s.selection.active = s.selection.anchor != s.cursor.pos;
+                    }
+                    3 => {
+                        // Line-granularity drag: extend in line-sized increments.
+                        let text_buf: alloc::vec::Vec<u8>;
+                        let text: &[u8] = if is_rich {
+                            let tl = documents::rich_text_len();
+                            text_buf = {
+                                let mut v = alloc::vec![0u8; tl];
+                                documents::rich_copy_text(&mut v);
+                                v
+                            };
+                            &text_buf
+                        } else {
+                            text_buf = alloc::vec::Vec::new();
+                            documents::doc_content()
+                        };
+
+                        let s = state();
+                        let origin_start = s.selection.drag_origin_start;
+                        let origin_end = s.selection.drag_origin_end;
+                        let cols = content_text_layout(page_width, page_padding).cols();
+
+                        if byte_pos < origin_start {
+                            let lo = if is_rich {
+                                let cached = cached_line_info();
+                                let li_idx = layout::line_info_byte_to_line(cached, byte_pos);
+                                if li_idx < cached.len() {
+                                    cached[li_idx].byte_offset as usize
+                                } else {
+                                    0
+                                }
+                            } else {
+                                input_handling::visual_line_start(text, byte_pos, cols)
+                            };
+                            s.selection.anchor = origin_end;
+                            s.cursor.pos = lo;
+                        } else if byte_pos >= origin_end {
+                            let mut hi = if is_rich {
+                                let cached = cached_line_info();
+                                let li_idx = layout::line_info_byte_to_line(cached, byte_pos);
+                                if li_idx < cached.len() {
+                                    let li = &cached[li_idx];
+                                    (li.byte_offset + li.byte_length) as usize
+                                } else {
+                                    text.len()
+                                }
+                            } else {
+                                input_handling::visual_line_end(text, byte_pos, cols)
+                            };
+                            if hi < text.len() && text[hi] == b'\n' {
+                                hi += 1;
+                            }
+                            s.selection.anchor = origin_start;
+                            s.cursor.pos = hi;
+                        } else {
+                            s.selection.anchor = origin_start;
+                            s.cursor.pos = origin_end;
+                        }
+                        s.selection.active = s.selection.anchor != s.cursor.pos;
+                    }
+                    _ => {
+                        // Character-granularity drag.
+                        let s = state();
+                        s.cursor.pos = byte_pos;
+                        s.selection.active = s.selection.anchor != byte_pos;
+                    }
+                }
+
+                input_handling::update_selection_from_anchor();
+                documents::doc_write_header();
+                input_handling::sync_cursor_to_editor(&editor_ch);
+                let _ = sys::channel_signal(state().editor_handle);
+
+                changed = true;
+                selection_changed = true;
+                had_user_input = true;
             }
         }
 
@@ -2267,18 +2436,32 @@ pub extern "C" fn _start() -> ! {
         // When the selection changes, start a fade-in animation from
         // opacity 0→255 over 100ms. The animation value is applied to
         // selection nodes after each scene build.
+        //
+        // Exception: during an active drag, skip the fade-in and show the
+        // highlight at full opacity immediately. Without this, every pointer
+        // move restarts the 100ms fade from 0, so the highlight never becomes
+        // visible until the drag ends.
         if selection_changed {
             let s = state();
-            // Cancel any previous selection fade in progress.
-            if let Some(old_id) = s.selection.fade_id {
-                s.animation.timeline.cancel(old_id);
+            if s.selection.dragging {
+                // Drag in progress — full opacity, no animation.
+                if let Some(old_id) = s.selection.fade_id {
+                    s.animation.timeline.cancel(old_id);
+                    s.selection.fade_id = None;
+                }
+                s.selection.opacity = 255;
+            } else {
+                // Discrete selection change (click, keyboard) — fade in.
+                if let Some(old_id) = s.selection.fade_id {
+                    s.animation.timeline.cancel(old_id);
+                }
+                s.selection.fade_id = s
+                    .animation
+                    .timeline
+                    .start(0.0, 255.0, 100, animation::Easing::EaseOut, now_ms)
+                    .ok();
+                s.selection.opacity = 0;
             }
-            s.selection.fade_id = s
-                .animation
-                .timeline
-                .start(0.0, 255.0, 100, animation::Easing::EaseOut, now_ms)
-                .ok();
-            s.selection.opacity = 0;
         }
         // Tick the selection fade (if active).
         {

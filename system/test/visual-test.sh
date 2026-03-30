@@ -179,6 +179,25 @@ EVENTS
     run_verify "$CAPTURE_DIR/tripleclick-line.png" "$SPEC_DIR/tripleclick-line.spec"
 }
 
+test_drag_select() {
+    info "Test: drag-select (click-drag creates selection highlight)"
+    # At 800x600, drag across part of the title "Style Stress Test".
+    # Drag from (250,60) to (400,60) to select "Stress Test" region.
+    cat > "$CAPTURE_DIR/drag-select.events" << 'EVENTS'
+wait 150
+move 250 60
+wait 5
+drag 250 60 400 60
+wait 20
+capture /tmp/visual-tests/drag-select.png
+EVENTS
+    hypervisor "$KERNEL" --drive "$DISK" --background \
+        --resolution 800x600 \
+        --events "$CAPTURE_DIR/drag-select.events" \
+        --timeout "$TIMEOUT" >/dev/null 2>&1
+    run_verify "$CAPTURE_DIR/drag-select.png" "$SPEC_DIR/drag-select.spec"
+}
+
 test_font_weights() {
     info "Test: font-weights (weight variation in weight labels line)"
     # At 1600x1200, weight labels "Thin ExLt Light...Black" span y=320-336.
@@ -297,7 +316,7 @@ EVENTS
 }
 
 # All test names in run order.
-ALL_TESTS="boot-idle cursor-dark cursor-page after-type click-placement dblclick-select tripleclick-line font-weights caret-height italic-slant baseline-mixed underline-below cursor-mixed cursor-italic"
+ALL_TESTS="boot-idle cursor-dark cursor-page after-type click-placement dblclick-select tripleclick-line drag-select font-weights caret-height italic-slant baseline-mixed underline-below cursor-mixed cursor-italic"
 
 # ── Main ──────────────────────────────────────────────────────────
 

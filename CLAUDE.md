@@ -223,6 +223,7 @@ kill -USR1 $(pgrep hypervisor)
 - `move 100 200` — move pointer to (x, y) without clicking
 - `click 100 200` — left click at (x, y) in framebuffer pixels (matches `--resolution`)
 - `dblclick 100 200` — double click at (x, y) in framebuffer pixels
+- `drag 100 200 300 200` — drag from (x1, y1) to (x2, y2) over ~10 frames
 - `wait 10` — wait 10 extra frames
 - `capture /tmp/out.png` — screenshot at this point
 
