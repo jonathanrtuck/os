@@ -47,10 +47,13 @@ pub fn font_metrics(font_data: &[u8]) -> Option<FontMetrics> {
 
 /// Compute the caret skew factor from a font's hhea table.
 ///
-/// Returns the horizontal shear factor for `skew_x()`: negative for
+/// Returns the horizontal shear factor for italic carets: negative for
 /// right-leaning italic, zero for upright. Derived from the font's
 /// `caretSlopeRise` and `caretSlopeRun` fields — the font designer's
 /// intended caret angle, not a guess.
+///
+/// The returned value is `tan(angle)`. To use with `AffineTransform::skew`,
+/// convert back to an angle with `factor.atan()`.
 pub fn caret_skew(font_data: &[u8]) -> f32 {
     let font = match FontRef::new(font_data) {
         Ok(f) => f,
@@ -65,7 +68,7 @@ pub fn caret_skew(font_data: &[u8]) -> f32 {
     if rise == 0 {
         return 0.0;
     }
-    // Negate: hhea run is positive for right-leaning italic, but skew_x
+    // Negate: hhea run is positive for right-leaning italic, but skew
     // needs negative to shift the bottom left (leaning the top right).
     -(run as f32) / (rise as f32)
 }

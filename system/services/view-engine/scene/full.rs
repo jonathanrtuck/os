@@ -865,8 +865,7 @@ fn rich_cursor_position_from_b(
         // Cursor spans ascender to descender of the font at the cursor position.
         // Weight and caret skew come from the style registry (set by B from font data).
         let rm = run_metrics_from_registry(header, cursor_style_id, cursor_font_size);
-        let cursor_h_mpt =
-            ((rm.ascender_pt + rm.descender_pt) * scene::MPT_PER_PT) as scene::Umpt;
+        let cursor_h_mpt = ((rm.ascender_pt + rm.descender_pt) * scene::MPT_PER_PT) as scene::Umpt;
 
         // Anchor italic shear at the baseline, not the top of the cursor.
         // Without this, shear_x shifts the bottom left while the top stays put,
@@ -892,9 +891,9 @@ fn rich_cursor_position_from_b(
     }
 
     // Past end — position on trailing line. Inherit style from the last run.
-    let last_y_mpt = cached_lines
-        .last()
-        .map_or(0, |l| (l.y_pt + l.line_height_pt as i32) * scene::MPT_PER_PT);
+    let last_y_mpt = cached_lines.last().map_or(0, |l| {
+        (l.y_pt + l.line_height_pt as i32) * scene::MPT_PER_PT
+    });
     // Look up the last visible run's style for weight/skew continuity.
     let last_rm = if header.visible_run_count > 0 {
         let last_run = crate::read_visible_run(header, header.visible_run_count as usize - 1);
@@ -1091,7 +1090,7 @@ pub fn build_rich_document_content(
         n.flags = NodeFlags::VISIBLE;
         n.next_sibling = NULL;
         n.transform = if cursor_info.caret_skew != 0.0 {
-            scene::AffineTransform::shear_x(cursor_info.caret_skew)
+            scene::AffineTransform::skew(atan_f32(cursor_info.caret_skew), 0.0)
         } else {
             scene::AffineTransform::identity()
         };
@@ -1266,4 +1265,24 @@ pub(crate) fn rich_xy_to_byte(x_pt: f32, y_pt: f32) -> usize {
     let target_x_mpt = (x_pt * scene::MPT_PER_PT as f32) as i32;
 
     super::line_info_x_to_byte(cached_lines, line_idx, target_x_mpt)
+}
+
+// ── Math helper ────────────────────────────────────────────────────
+
+/// Arctangent approximation (7th-order minimax, max error ~0.0005 rad).
+/// Converts a shear factor (tangent) back to the angle for `AffineTransform::skew`.
+fn atan_f32(x: f32) -> f32 {
+    if x > 1.0 {
+        core::f32::consts::FRAC_PI_2 - atan_inner(1.0 / x)
+    } else if x < -1.0 {
+        -core::f32::consts::FRAC_PI_2 - atan_inner(1.0 / x)
+    } else {
+        atan_inner(x)
+    }
+}
+
+fn atan_inner(x: f32) -> f32 {
+    let x2 = x * x;
+    x * (0.999_866_0
+        + x2 * (-0.330_299_5 + x2 * (0.180_141_0 + x2 * (-0.085_133_0 + x2 * 0.020_835_1))))
 }

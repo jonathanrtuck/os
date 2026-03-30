@@ -11,7 +11,7 @@ Scene graph data structures for the compositor interface. Core builds a tree of 
 - `reader.rs` -- `SceneReader`: read-only accessor for scene graph shared memory
 - `triple.rs` -- `TripleScene`: lock-free mailbox with 3 buffers (writer never blocks, reader gets latest). `TRIPLE_SCENE_SIZE` = 3 scenes + 16-byte control region
 - `diff.rs` -- `build_parent_map`, `abs_bounds` for computing absolute node positions
-- `transform.rs` -- `AffineTransform` (6-element 2D affine matrix): `skew_x(angle)`, `shear_x(factor)` (pre-computed shear for caret slope)
+- `transform.rs` -- `AffineTransform` (6-element 2D affine matrix): `skew(x_angle, y_angle)` for two-axis skew
 - `stroke.rs` -- Stroke expansion: convert stroked paths to filled outlines with round joins/caps (cubic Bezier arc approximation)
 - `svg_path.rs` -- SVG path `d` attribute parser: M/L/H/V/C/S/Q/A/Z commands to native path format. Arc-to-cubic conversion. Subset parser for icon sets
 

@@ -85,28 +85,17 @@ impl AffineTransform {
         }
     }
 
-    /// Horizontal skew (shear) by `angle` radians.
-    /// The x-coordinate is shifted proportional to the y-coordinate:
-    /// `x' = x + tan(angle) * y`.
-    pub fn skew_x(angle: f32) -> Self {
+    /// Skew by `(x_angle, y_angle)` radians.
+    ///
+    /// `x' = x + tan(x_angle) * y`
+    /// `y' = tan(y_angle) * x + y`
+    ///
+    /// For horizontal-only skew, pass `y_angle = 0.0`.
+    pub fn skew(x_angle: f32, y_angle: f32) -> Self {
         Self {
             a: 1.0,
-            b: 0.0,
-            c: tan_f32(angle),
-            d: 1.0,
-            tx: 0.0,
-            ty: 0.0,
-        }
-    }
-
-    /// Horizontal shear by a pre-computed factor (not an angle).
-    /// `x' = x + factor * y`. Use when the shear ratio is already known
-    /// (e.g. from a font's `hhea` caretSlopeRun/Rise).
-    pub fn shear_x(factor: f32) -> Self {
-        Self {
-            a: 1.0,
-            b: 0.0,
-            c: factor,
+            b: tan_f32(y_angle),
+            c: tan_f32(x_angle),
             d: 1.0,
             tx: 0.0,
             ty: 0.0,

@@ -1777,9 +1777,9 @@ fn affine_transform_rotate_180() {
 }
 
 #[test]
-fn affine_transform_skew_x() {
+fn affine_transform_skew_x_only() {
     let angle = 0.5_f32; // ~26.6 degrees
-    let t = AffineTransform::skew_x(angle);
+    let t = AffineTransform::skew(angle, 0.0);
     assert_eq!(t.a, 1.0);
     assert_eq!(t.d, 1.0);
     // c = tan(angle) ≈ 0.5463
@@ -1790,6 +1790,38 @@ fn affine_transform_skew_x() {
         t.c
     );
     assert_eq!(t.b, 0.0);
+}
+
+#[test]
+fn affine_transform_skew_y_only() {
+    let angle = 0.3_f32;
+    let t = AffineTransform::skew(0.0, angle);
+    assert_eq!(t.a, 1.0);
+    assert_eq!(t.d, 1.0);
+    assert_eq!(t.c, 0.0);
+    let expected_b = angle.tan();
+    assert!(
+        (t.b - expected_b).abs() < 1e-5,
+        "b should be tan(0.3), got {}",
+        t.b
+    );
+}
+
+#[test]
+fn affine_transform_skew_both_axes() {
+    let t = AffineTransform::skew(0.5, 0.3);
+    let expected_c = 0.5_f32.tan();
+    let expected_b = 0.3_f32.tan();
+    assert!(
+        (t.c - expected_c).abs() < 1e-5,
+        "c should be tan(0.5), got {}",
+        t.c
+    );
+    assert!(
+        (t.b - expected_b).abs() < 1e-5,
+        "b should be tan(0.3), got {}",
+        t.b
+    );
 }
 
 #[test]
@@ -2098,10 +2130,10 @@ fn affine_transform_negative_scale_mirror() {
 }
 
 #[test]
-fn affine_transform_skew_x_parallelogram() {
-    // VAL-XFORM-011: skew_x(0.5) on 40x40: bottom edge shifts 20px right.
-    let t = AffineTransform::skew_x(0.5_f32.atan()); // tan(angle) = 0.5
-                                                     // Bottom-left corner (0, 40): x' = 0 + 0.5*40 = 20, y' = 40
+fn affine_transform_skew_parallelogram() {
+    // VAL-XFORM-011: skew(atan(0.5), 0) on 40x40: bottom edge shifts 20px right.
+    let t = AffineTransform::skew(0.5_f32.atan(), 0.0); // tan(angle) = 0.5
+                                                        // Bottom-left corner (0, 40): x' = 0 + 0.5*40 = 20, y' = 40
     let (px, _py) = t.transform_point(0.0, 40.0);
     assert!(
         (px - 20.0).abs() < 1e-4,
