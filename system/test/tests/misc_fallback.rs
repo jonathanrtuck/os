@@ -4,7 +4,7 @@
 
 extern crate alloc;
 
-#[path = "../../services/view-engine/fallback.rs"]
+#[path = "../../services/presenter/fallback.rs"]
 mod fallback;
 
 use fallback::{ContentType, FallbackChain};

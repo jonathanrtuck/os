@@ -484,7 +484,7 @@ fn text_slice_partial() {
 
 // ── text_slice: regression for start > 0 (length-vs-end bug) ───────────
 //
-// Bug: `doc_text_for_range` in view-engine passed `needed` (length) instead
+// Bug: `doc_text_for_range` in presenter passed `needed` (length) instead
 // of `end` to `piecetable::text_slice`. For any range not starting at byte 0,
 // start >= "end" (which was actually length), so text_slice returned 0 bytes.
 

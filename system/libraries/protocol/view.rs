@@ -1,9 +1,9 @@
-//! View protocol — C → compositor (cursor state) and A ↔ C notifications.
+//! View protocol — presenter → compositor (cursor state) and document ↔ presenter notifications.
 //!
-//! Merges the cursor shared state protocol and the document-model ↔
-//! view-engine notification messages into a single view boundary module.
+//! Merges the cursor shared state protocol and the document ↔
+//! presenter notification messages into a single view boundary module.
 
-// ── Cursor state (shared memory: C writes, compositor reads) ────────
+// ── Cursor state (shared memory: presenter writes, compositor reads) ────────
 
 /// Byte offset where path command data begins in the cursor state page.
 pub const CURSOR_DATA_OFFSET: usize = 40;
@@ -69,9 +69,9 @@ impl CursorState {
 
 const _: () = assert!(core::mem::size_of::<CursorState>() == CURSOR_DATA_OFFSET);
 
-// ── Document-model ↔ view-engine notifications ──────────────────────
+// ── Document ↔ presenter notifications ───────────────────────────
 
-/// Initial document loaded during boot (A → C).
+/// Initial document loaded during boot (document → presenter).
 pub const MSG_DOC_LOADED: u32 = 111;
 
 #[repr(C)]
@@ -89,7 +89,7 @@ pub struct DocLoaded {
 }
 const _: () = assert!(core::mem::size_of::<DocLoaded>() <= 60);
 
-/// Document buffer changed (A → C, after edit or undo/redo).
+/// Document buffer changed (document → presenter, after edit or undo/redo).
 pub const MSG_DOC_CHANGED: u32 = 112;
 
 #[repr(C)]
@@ -108,13 +108,13 @@ const _: () = assert!(core::mem::size_of::<DocChanged>() <= 60);
 /// Flag: core should clear selection (used after undo/redo).
 pub const DOC_CHANGED_CLEAR_SELECTION: u8 = 1;
 
-/// Undo request (C → A).
+/// Undo request (presenter → document).
 pub const MSG_UNDO_REQUEST: u32 = 113;
 
-/// Redo request (C → A).
+/// Redo request (presenter → document).
 pub const MSG_REDO_REQUEST: u32 = 114;
 
-/// Image decoded and registered in Content Region (A → C).
+/// Image decoded and registered in Content Region (document → presenter).
 pub const MSG_IMAGE_DECODED: u32 = 115;
 
 #[repr(C)]
@@ -131,7 +131,7 @@ const _: () = assert!(core::mem::size_of::<ImageDecoded>() <= 60);
 
 // ── Decode ──────────────────────────────────────────────────────────
 
-/// A ↔ C notification messages.
+/// document ↔ presenter notification messages.
 #[derive(Clone, Copy, Debug)]
 pub enum Message {
     DocLoaded(DocLoaded),

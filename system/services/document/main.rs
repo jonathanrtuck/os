@@ -1,649 +1,1221 @@
-//! Document service — metadata-aware document store over virtio-blk.
+//! Document service — sole owner of the document buffer.
 //!
-//! Replaces the filesystem service. Owns the virtio-blk device directly
-//! (maps MMIO, does DMA I/O) and builds a COW filesystem + store layer
-//! on top. The store library handles all document/metadata logic; this
-//! service is a thin IPC translator.
+//! Applies all edits (insert, delete, style) from editors via IPC.
+//! Manages the undo ring: COW snapshots at edit boundaries.
+//! Communicates with the document service (persistence, queries, snapshots).
+//! Communicates with decoder services (image decode into Content Region).
+//! Signals layout + presenter when the buffer changes so it can re-layout and re-render.
 //!
-//! IPC loop handles:
-//!   - MSG_DOC_COMMIT:   read doc buffer, write to file, commit
-//!   - MSG_DOC_QUERY:    run store query, return matching file IDs
-//!   - MSG_DOC_READ:     read file content to shared memory
-//!   - MSG_DOC_SNAPSHOT: create snapshot of specified files
-//!   - MSG_DOC_RESTORE:  restore a previous snapshot
+//! # IPC channels (handle indices)
+//!
+//! Handle 1: document <-> editor (receives write operations from editor)
+//! Handle 2: document <-> store service (persistence, snapshot, restore)
+//! Handle 3: document <-> decoder (image decode requests/responses)
+//! Handle 4: document <-> presenter (sends doc-changed notifications, receives undo/redo requests)
 
 #![no_std]
 #![no_main]
 
 extern crate alloc;
+extern crate piecetable;
 
-use alloc::boxed::Box;
-use core::cell::RefCell;
+use protocol::{
+    edit::{
+        self, MSG_CURSOR_MOVE, MSG_SELECTION_UPDATE, MSG_STYLE_APPLY, MSG_STYLE_SET_CURRENT,
+        MSG_WRITE_DELETE, MSG_WRITE_DELETE_RANGE, MSG_WRITE_INSERT,
+    },
+    init::{DocConfig, MSG_DOC_CONFIG},
+    store::{
+        StoreCommit, StoreCreate, StoreCreateResult, StoreDeleteSnapshot, StoreQuery,
+        StoreQueryResult, StoreRead, StoreReadDone, StoreRestore, StoreSnapshot,
+        StoreSnapshotResult, MSG_STORE_COMMIT, MSG_STORE_CREATE, MSG_STORE_CREATE_RESULT,
+        MSG_STORE_DELETE_SNAPSHOT, MSG_STORE_QUERY, MSG_STORE_QUERY_RESULT, MSG_STORE_READ,
+        MSG_STORE_READ_DONE, MSG_STORE_RESTORE, MSG_STORE_RESTORE_RESULT, MSG_STORE_SNAPSHOT,
+        MSG_STORE_SNAPSHOT_RESULT,
+    },
+    view::{
+        DocChanged, DocLoaded, ImageDecoded, DOC_CHANGED_CLEAR_SELECTION, MSG_DOC_CHANGED,
+        MSG_DOC_LOADED, MSG_IMAGE_DECODED, MSG_REDO_REQUEST, MSG_UNDO_REQUEST,
+    },
+};
 
-use protocol::document::*;
+const DOC_HEADER_SIZE: usize = 64;
+const MAX_UNDO: usize = 64;
 
-mod system_config {
-    #![allow(dead_code)]
-    include!(env!("SYSTEM_CONFIG"));
+/// Undo coalescing window: edits within this window are grouped into one undo step.
+const COALESCE_MS: u64 = 500;
+
+/// Document format discriminant.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DocumentFormat {
+    Plain,
+    Rich,
 }
 
-const PAGE_SIZE: usize = system_config::PAGE_SIZE as usize;
+/// Undo/redo state: fixed-size ring of COW snapshot IDs.
+struct UndoState {
+    snapshots: [u64; MAX_UNDO],
+    count: usize,
+    position: usize,
+}
 
-const SECTOR_SIZE: usize = 512;
-
-/// Counter frequency in Hz, set once at boot for timestamp computation.
-static COUNTER_FREQ: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-
-/// Clock source for fs library timestamps (nanos since boot).
-/// Uses the ARM generic timer (CNTVCT_EL0 / CNTFRQ_EL0).
-fn clock_nanos() -> u64 {
-    let freq = COUNTER_FREQ.load(core::sync::atomic::Ordering::Relaxed);
-    if freq == 0 {
-        return 0;
+impl UndoState {
+    const fn new() -> Self {
+        Self {
+            snapshots: [0; MAX_UNDO],
+            count: 0,
+            position: 0,
+        }
     }
-    let count = sys::counter();
-    // nanos = count * 1_000_000_000 / freq. Use 128-bit to avoid overflow.
-    ((count as u128 * 1_000_000_000) / freq as u128) as u64
-}
 
-// virtio-blk request types.
-const VIRTIO_BLK_T_IN: u32 = 0;
-const VIRTIO_BLK_T_OUT: u32 = 1;
-const VIRTIO_BLK_T_FLUSH: u32 = 4;
+    fn set_initial(&mut self, snap_id: u64) {
+        self.snapshots[0] = snap_id;
+        self.count = 1;
+        self.position = 0;
+    }
 
-// virtio-blk feature bits.
-const VIRTIO_BLK_F_FLUSH: u64 = 1 << 9;
+    fn push(&mut self, snap_id: u64, discarded: &mut [u64; MAX_UNDO]) -> usize {
+        let mut n = 0;
+        for i in (self.position + 1)..self.count {
+            discarded[n] = self.snapshots[i];
+            n += 1;
+        }
+        self.count = self.position + 1;
 
-// virtio-blk status codes.
-const VIRTIO_BLK_S_OK: u8 = 0;
-
-const VIRTQ_REQUEST: u32 = 0;
-const DATA_OFFSET: usize = 16;
-
-/// Block request header (16 bytes, device-readable).
-#[repr(C)]
-struct BlkReqHeader {
-    req_type: u32,
-    reserved: u32,
-    sector: u64,
-}
-
-// ── VirtioBlockDevice ────────────────────────────────────────────────
-
-/// Mutable I/O state — borrowed via `RefCell` for interior mutability.
-struct IoState {
-    device: virtio::Device,
-    vq: virtio::Virtqueue,
-    irq_handle: sys::InterruptHandle,
-    buf_va: usize,
-    buf_pa: u64,
-}
-
-/// `BlockDevice` implementation over virtio-blk transport.
-struct VirtioBlockDevice {
-    io: RefCell<IoState>,
-    capacity_sectors: u64,
-    has_flush: bool,
-}
-
-impl IoState {
-    /// Submit a virtio-blk request and wait for completion.
-    fn submit(&mut self, req_type: u32, sector: u64, data_bytes: u32) -> u8 {
-        let buf_ptr = self.buf_va as *mut u8;
-
-        // SAFETY: buf_va points to DMA allocation with at least 16 bytes for header.
-        unsafe {
-            let header = buf_ptr as *mut BlkReqHeader;
-            (*header).req_type = req_type;
-            (*header).reserved = 0;
-            (*header).sector = sector;
+        if self.count >= MAX_UNDO {
+            discarded[n] = self.snapshots[0];
+            n += 1;
+            let dst = &mut self.snapshots;
+            for i in 0..MAX_UNDO - 1 {
+                dst[i] = dst[i + 1];
+            }
+            self.count -= 1;
+            self.position -= 1;
         }
 
-        let header_pa = self.buf_pa;
-        let status_offset = DATA_OFFSET + data_bytes as usize;
-        let status_pa = self.buf_pa + status_offset as u64;
+        self.snapshots[self.count] = snap_id;
+        self.count += 1;
+        self.position = self.count - 1;
+        n
+    }
 
-        // SAFETY: status_offset is within the DMA buffer.
-        unsafe { *buf_ptr.add(status_offset) = 0xFF };
-
-        if data_bytes == 0 {
-            self.vq
-                .push_chain(&[(header_pa, 16, false), (status_pa, 1, true)]);
+    fn undo(&mut self) -> Option<u64> {
+        if self.position > 0 {
+            self.position -= 1;
+            Some(self.snapshots[self.position])
         } else {
-            let data_pa = self.buf_pa + DATA_OFFSET as u64;
-            let data_writable = req_type == VIRTIO_BLK_T_IN;
-            self.vq.push_chain(&[
-                (header_pa, 16, false),
-                (data_pa, data_bytes, data_writable),
-                (status_pa, 1, true),
-            ]);
+            None
         }
-
-        self.device.notify(VIRTQ_REQUEST);
-        let _ = sys::wait(&[self.irq_handle.0], u64::MAX);
-        self.device.ack_interrupt();
-        self.vq.pop_used();
-        let _ = sys::interrupt_ack(self.irq_handle);
-
-        // SAFETY: device has written the status byte.
-        unsafe { *buf_ptr.add(status_offset) }
     }
 
-    /// Pointer to the data area within the DMA buffer.
-    fn data_ptr(&self) -> *mut u8 {
-        (self.buf_va + DATA_OFFSET) as *mut u8
+    fn redo(&mut self) -> Option<u64> {
+        if self.count > 0 && self.position < self.count - 1 {
+            self.position += 1;
+            Some(self.snapshots[self.position])
+        } else {
+            None
+        }
     }
 }
 
-impl fs::BlockDevice for VirtioBlockDevice {
-    fn read_block(&self, index: u32, buf: &mut [u8]) -> Result<(), fs::FsError> {
-        let mut io = self.io.borrow_mut();
-        let sectors_per_block = fs::BLOCK_SIZE / SECTOR_SIZE as u32;
-        let sector = index as u64 * sectors_per_block as u64;
-        let status = io.submit(VIRTIO_BLK_T_IN, sector, fs::BLOCK_SIZE);
-        if status != VIRTIO_BLK_S_OK {
-            return Err(fs::FsError::Io);
-        }
+/// PNG decode sub-state.
+#[derive(Clone, Copy)]
+enum DecodePhase {
+    None,
+    AwaitingHeader,
+    AwaitingDecode { alloc_offset: u32, pixel_bytes: u32 },
+    Done,
+}
 
-        // SAFETY: data area has fs::BLOCK_SIZE bytes after a successful read.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                io.data_ptr(),
-                buf.as_mut_ptr(),
-                fs::BLOCK_SIZE as usize,
-            );
-        }
-        Ok(())
+/// Document loading sub-state.
+#[derive(Clone, Copy)]
+enum DocPhase {
+    QueryRich,
+    QueryPlain,
+    Reading {
+        file_id: u64,
+        detected_format: DocumentFormat,
+    },
+    Creating,
+    AwaitingUndo,
+    Done,
+}
+
+// ── Mutable state ───────────────────────────────────────────────────
+
+struct DocModelState {
+    doc_buf: *mut u8,
+    doc_capacity: usize,
+    doc_len: usize,
+    doc_file_id: u64,
+    doc_format: DocumentFormat,
+    cursor_pos: usize,
+    content_va: usize,
+    content_size: usize,
+    content_alloc: protocol::content::ContentAllocator,
+    editor_handle: sys::ChannelHandle,
+    decoder_handle: sys::ChannelHandle,
+    fs_handle: sys::ChannelHandle,
+    core_handle: sys::ChannelHandle,
+}
+
+// SAFETY: DocModelState is only accessed from the single-threaded event loop.
+// The raw pointer fields (doc_buf) point to shared memory mapped by the kernel.
+unsafe impl Send for DocModelState {}
+unsafe impl Sync for DocModelState {}
+
+static mut STATE: DocModelState = DocModelState {
+    doc_buf: core::ptr::null_mut(),
+    doc_capacity: 0,
+    doc_len: 0,
+    doc_file_id: 0,
+    doc_format: DocumentFormat::Plain,
+    cursor_pos: 0,
+    content_va: 0,
+    content_size: 0,
+    content_alloc: protocol::content::ContentAllocator::empty(),
+    editor_handle: sys::ChannelHandle(u8::MAX),
+    decoder_handle: sys::ChannelHandle(u8::MAX),
+    fs_handle: sys::ChannelHandle(u8::MAX),
+    core_handle: sys::ChannelHandle(u8::MAX),
+};
+
+fn state() -> &'static mut DocModelState {
+    // SAFETY: single-threaded, no reentrancy.
+    unsafe { &mut STATE }
+}
+
+// ── Document buffer operations (plain text) ─────────────────────────
+
+fn doc_content() -> &'static [u8] {
+    let s = state();
+    // SAFETY: doc_buf valid, doc_len <= doc_capacity.
+    unsafe { core::slice::from_raw_parts(s.doc_buf.add(DOC_HEADER_SIZE), s.doc_len) }
+}
+
+fn doc_insert(pos: usize, byte: u8) -> bool {
+    let s = state();
+    if s.doc_len >= s.doc_capacity || pos > s.doc_len {
+        return false;
     }
-
-    fn write_block(&mut self, index: u32, data: &[u8]) -> Result<(), fs::FsError> {
-        let mut io = self.io.borrow_mut();
-        let sectors_per_block = fs::BLOCK_SIZE / SECTOR_SIZE as u32;
-        let sector = index as u64 * sectors_per_block as u64;
-
-        // SAFETY: data area has space for fs::BLOCK_SIZE bytes.
-        unsafe {
-            core::ptr::copy_nonoverlapping(data.as_ptr(), io.data_ptr(), fs::BLOCK_SIZE as usize);
+    // SAFETY: doc_buf valid, bounds checked.
+    unsafe {
+        let base = s.doc_buf.add(DOC_HEADER_SIZE);
+        if pos < s.doc_len {
+            core::ptr::copy(base.add(pos), base.add(pos + 1), s.doc_len - pos);
         }
-
-        let status = io.submit(VIRTIO_BLK_T_OUT, sector, fs::BLOCK_SIZE);
-        if status != VIRTIO_BLK_S_OK {
-            return Err(fs::FsError::Io);
-        }
-        Ok(())
+        *base.add(pos) = byte;
     }
+    s.doc_len += 1;
+    doc_write_header();
+    true
+}
 
-    fn flush(&mut self) -> Result<(), fs::FsError> {
-        if !self.has_flush {
-            return Ok(());
-        }
-        let mut io = self.io.borrow_mut();
-        let status = io.submit(VIRTIO_BLK_T_FLUSH, 0, 0);
-        if status != VIRTIO_BLK_S_OK {
-            return Err(fs::FsError::Io);
-        }
-        Ok(())
+fn doc_delete(pos: usize) -> bool {
+    let s = state();
+    if s.doc_len == 0 || pos >= s.doc_len {
+        return false;
     }
+    // SAFETY: doc_buf valid, bounds checked.
+    unsafe {
+        let base = s.doc_buf.add(DOC_HEADER_SIZE);
+        if pos + 1 < s.doc_len {
+            core::ptr::copy(base.add(pos + 1), base.add(pos), s.doc_len - pos - 1);
+        }
+    }
+    s.doc_len -= 1;
+    doc_write_header();
+    true
+}
 
-    fn block_count(&self) -> u32 {
-        let sectors_per_block = fs::BLOCK_SIZE / SECTOR_SIZE as u32;
-        (self.capacity_sectors / sectors_per_block as u64) as u32
+fn doc_delete_range(start: usize, end: usize) -> bool {
+    let s = state();
+    if start >= end || start >= s.doc_len || end > s.doc_len {
+        return false;
+    }
+    let del_count = end - start;
+    // SAFETY: doc_buf valid, bounds checked.
+    unsafe {
+        let base = s.doc_buf.add(DOC_HEADER_SIZE);
+        if end < s.doc_len {
+            core::ptr::copy(base.add(end), base.add(start), s.doc_len - end);
+        }
+    }
+    s.doc_len -= del_count;
+    doc_write_header();
+    true
+}
+
+fn doc_write_header() {
+    let s = state();
+    // SAFETY: doc_buf valid.
+    unsafe {
+        core::ptr::write_volatile(s.doc_buf as *mut u64, s.doc_len as u64);
+        core::ptr::write_volatile(s.doc_buf.add(8) as *mut u64, s.cursor_pos as u64);
     }
 }
 
-// ── Shared IPC handlers (used by both boot-query and main loops) ─────
+// ── Rich text operations ────────────────────────────────────────────
 
-fn build_query(q: &DocQuery) -> store::Query {
-    let query_str = core::str::from_utf8(&q.data[..q.data_len as usize]).unwrap_or("");
-    match q.query_type {
-        0 => store::Query::MediaType(alloc::string::String::from(query_str)),
-        1 => store::Query::Type(alloc::string::String::from(query_str)),
-        2 => {
-            if let Some(sep) = query_str.find('\0') {
-                store::Query::Attribute {
-                    key: alloc::string::String::from(&query_str[..sep]),
-                    value: alloc::string::String::from(&query_str[sep + 1..]),
+fn rich_buf() -> &'static mut [u8] {
+    let s = state();
+    let cap = s.doc_capacity.saturating_sub(DOC_HEADER_SIZE);
+    // SAFETY: doc_buf valid.
+    unsafe { core::slice::from_raw_parts_mut(s.doc_buf.add(DOC_HEADER_SIZE), cap) }
+}
+
+fn rich_buf_ref() -> &'static [u8] {
+    let s = state();
+    let cap = s.doc_capacity.saturating_sub(DOC_HEADER_SIZE);
+    // SAFETY: doc_buf valid.
+    unsafe { core::slice::from_raw_parts(s.doc_buf.add(DOC_HEADER_SIZE), cap) }
+}
+
+fn rich_total_size() -> usize {
+    let buf = rich_buf_ref();
+    let h = piecetable::header(buf);
+    piecetable::HEADER_SIZE
+        + h.style_count as usize * 12
+        + h.piece_count as usize * 16
+        + h.original_len as usize
+        + h.add_len as usize
+}
+
+fn rich_sync_header() {
+    let s = state();
+    let total = rich_total_size();
+    s.doc_len = total;
+    // SAFETY: doc_buf valid.
+    unsafe {
+        core::ptr::write_volatile(s.doc_buf as *mut u64, total as u64);
+        core::ptr::write_volatile(s.doc_buf.add(8) as *mut u64, s.cursor_pos as u64);
+    }
+}
+
+fn rich_insert(pos: usize, byte: u8) -> bool {
+    let buf = rich_buf();
+    let ok = piecetable::insert(buf, pos as u32, byte);
+    if ok {
+        rich_sync_header();
+    }
+    ok
+}
+
+fn rich_delete(pos: usize) -> bool {
+    let buf = rich_buf();
+    let ok = piecetable::delete(buf, pos as u32);
+    if ok {
+        rich_sync_header();
+    }
+    ok
+}
+
+fn rich_delete_range(start: usize, end: usize) -> bool {
+    let buf = rich_buf();
+    let ok = piecetable::delete_range(buf, start as u32, end as u32);
+    if ok {
+        rich_sync_header();
+    }
+    ok
+}
+
+fn rich_apply_style(start: usize, end: usize, style_id: u8) {
+    let buf = rich_buf();
+    piecetable::apply_style(buf, start as u32, end as u32, style_id);
+    rich_sync_header();
+}
+
+fn rich_set_current_style(style_id: u8) {
+    let buf = rich_buf();
+    piecetable::set_current_style(buf, style_id);
+}
+
+fn rich_text_len() -> usize {
+    let buf = rich_buf_ref();
+    piecetable::text_len(buf) as usize
+}
+
+fn rich_cursor_pos() -> usize {
+    let buf = rich_buf_ref();
+    piecetable::cursor_pos(buf) as usize
+}
+
+fn rich_set_cursor_pos(pos: usize) {
+    let buf = rich_buf();
+    piecetable::set_cursor_pos(buf, pos as u32);
+}
+
+fn rich_next_operation() -> u32 {
+    let buf = rich_buf();
+    piecetable::next_operation(buf)
+}
+
+// ── Notification helpers ────────────────────────────────────────────
+
+fn notify_core_doc_changed(core_ch: &ipc::Channel, flags: u8) {
+    let s = state();
+    let payload = DocChanged {
+        doc_len: s.doc_len as u32,
+        cursor_pos: s.cursor_pos as u32,
+        flags,
+        _pad: [0; 3],
+    };
+    // SAFETY: DocChanged is repr(C) and fits in 60-byte payload.
+    let msg = unsafe { ipc::Message::from_payload(MSG_DOC_CHANGED, &payload) };
+    core_ch.send(&msg);
+    let _ = sys::channel_signal(state().core_handle);
+}
+
+fn notify_core_doc_loaded(core_ch: &ipc::Channel) {
+    let s = state();
+    let payload = DocLoaded {
+        doc_len: s.doc_len as u32,
+        cursor_pos: s.cursor_pos as u32,
+        doc_file_id: s.doc_file_id,
+        format: if s.doc_format == DocumentFormat::Rich {
+            1
+        } else {
+            0
+        },
+        _pad: [0; 3],
+    };
+    // SAFETY: DocLoaded is repr(C) and fits in 60-byte payload.
+    let msg = unsafe { ipc::Message::from_payload(MSG_DOC_LOADED, &payload) };
+    core_ch.send(&msg);
+    let _ = sys::channel_signal(state().core_handle);
+}
+
+fn notify_core_image_decoded(core_ch: &ipc::Channel, content_id: u32, width: u16, height: u16) {
+    let payload = ImageDecoded {
+        content_id,
+        width,
+        height,
+    };
+    // SAFETY: ImageDecoded is repr(C) and fits in 60-byte payload.
+    let msg = unsafe { ipc::Message::from_payload(MSG_IMAGE_DECODED, &payload) };
+    core_ch.send(&msg);
+    let _ = sys::channel_signal(state().core_handle);
+}
+
+// ── Snapshot helper ─────────────────────────────────────────────────
+
+fn take_snapshot(fs_ch: &ipc::Channel, undo_state: &mut UndoState) {
+    let file_id = state().doc_file_id;
+    let snap_payload = StoreSnapshot {
+        file_count: 1,
+        _pad: 0,
+        file_ids: [file_id, 0, 0, 0, 0, 0],
+    };
+    // SAFETY: StoreSnapshot is repr(C) and fits in 60-byte payload.
+    let snap_msg = unsafe { ipc::Message::from_payload(MSG_STORE_SNAPSHOT, &snap_payload) };
+    fs_ch.send(&snap_msg);
+    let _ = sys::channel_signal(state().fs_handle);
+
+    let mut reply = ipc::Message::new(0);
+    if fs_ch.recv_blocking(state().fs_handle.0, &mut reply)
+        && reply.msg_type == MSG_STORE_SNAPSHOT_RESULT
+    {
+        if let Some(protocol::store::Message::StoreSnapshotResult(result)) =
+            protocol::store::decode(reply.msg_type, &reply.payload)
+        {
+            if result.status == 0 {
+                let mut discarded = [0u64; MAX_UNDO];
+                let n = undo_state.push(result.snapshot_id, &mut discarded);
+                for &snap in &discarded[..n] {
+                    let del = StoreDeleteSnapshot { snapshot_id: snap };
+                    // SAFETY: StoreDeleteSnapshot is repr(C), fits in 60 bytes.
+                    let del_msg =
+                        unsafe { ipc::Message::from_payload(MSG_STORE_DELETE_SNAPSHOT, &del) };
+                    fs_ch.send(&del_msg);
                 }
-            } else {
-                store::Query::MediaType(alloc::string::String::from(""))
+                if n > 0 {
+                    let _ = sys::channel_signal(state().fs_handle);
+                }
             }
         }
-        _ => store::Query::MediaType(alloc::string::String::from("")),
     }
 }
 
-fn handle_query(store: &store::Store, q: &DocQuery, ch: &ipc::Channel, signal: sys::ChannelHandle) {
-    let results = store.query(&build_query(q));
-    let count = results.len().min(6) as u32;
+// ── Undo/redo implementation ────────────────────────────────────────
 
-    let mut result = DocQueryResult {
-        count,
+fn perform_undo(fs_ch: &ipc::Channel, core_ch: &ipc::Channel, undo_state: &mut UndoState) {
+    if let Some(snap_id) = undo_state.undo() {
+        let restore_payload = StoreRestore {
+            snapshot_id: snap_id,
+        };
+        // SAFETY: StoreRestore is repr(C) and fits in 60-byte payload.
+        let restore_msg =
+            unsafe { ipc::Message::from_payload(MSG_STORE_RESTORE, &restore_payload) };
+        fs_ch.send(&restore_msg);
+        let _ = sys::channel_signal(state().fs_handle);
+
+        let mut reply = ipc::Message::new(0);
+        if fs_ch.recv_blocking(state().fs_handle.0, &mut reply)
+            && reply.msg_type == MSG_STORE_RESTORE_RESULT
+        {
+            if let Some(protocol::store::Message::StoreRestoreResult(result)) =
+                protocol::store::decode(reply.msg_type, &reply.payload)
+            {
+                if result.status == 0 {
+                    reload_document(fs_ch);
+                    notify_core_doc_changed(core_ch, DOC_CHANGED_CLEAR_SELECTION);
+                }
+            }
+        }
+    }
+}
+
+fn perform_redo(fs_ch: &ipc::Channel, core_ch: &ipc::Channel, undo_state: &mut UndoState) {
+    if let Some(snap_id) = undo_state.redo() {
+        let restore_payload = StoreRestore {
+            snapshot_id: snap_id,
+        };
+        // SAFETY: StoreRestore is repr(C) and fits in 60-byte payload.
+        let restore_msg =
+            unsafe { ipc::Message::from_payload(MSG_STORE_RESTORE, &restore_payload) };
+        fs_ch.send(&restore_msg);
+        let _ = sys::channel_signal(state().fs_handle);
+
+        let mut reply = ipc::Message::new(0);
+        if fs_ch.recv_blocking(state().fs_handle.0, &mut reply)
+            && reply.msg_type == MSG_STORE_RESTORE_RESULT
+        {
+            if let Some(protocol::store::Message::StoreRestoreResult(result)) =
+                protocol::store::decode(reply.msg_type, &reply.payload)
+            {
+                if result.status == 0 {
+                    reload_document(fs_ch);
+                    notify_core_doc_changed(core_ch, DOC_CHANGED_CLEAR_SELECTION);
+                }
+            }
+        }
+    }
+}
+
+/// Re-read document content from the document service after undo/redo restore.
+fn reload_document(fs_ch: &ipc::Channel) {
+    let s = state();
+    let read_payload = StoreRead {
+        file_id: s.doc_file_id,
+        target_va: 0,
+        capacity: s.doc_capacity as u32,
         _pad: 0,
-        file_ids: [0u64; 6],
     };
-    for (i, fid) in results.iter().take(6).enumerate() {
-        result.file_ids[i] = fid.0;
-    }
+    // SAFETY: StoreRead is repr(C) and fits in 60-byte payload.
+    let read_msg = unsafe { ipc::Message::from_payload(MSG_STORE_READ, &read_payload) };
+    fs_ch.send(&read_msg);
+    let _ = sys::channel_signal(state().fs_handle);
 
-    // SAFETY: DocQueryResult is #[repr(C)] and fits in 60-byte payload.
-    let reply = unsafe { ipc::Message::from_payload(MSG_DOC_QUERY_RESULT, &result) };
-    ch.send(&reply);
-    let _ = sys::channel_signal(signal);
+    let mut reply = ipc::Message::new(0);
+    if fs_ch.recv_blocking(state().fs_handle.0, &mut reply) && reply.msg_type == MSG_STORE_READ_DONE
+    {
+        if let Some(protocol::store::Message::StoreReadDone(done)) =
+            protocol::store::decode(reply.msg_type, &reply.payload)
+        {
+            if done.status == 0 {
+                let s = state();
+                s.doc_len = done.len as usize;
+                if s.doc_format == DocumentFormat::Rich {
+                    let text_len = rich_text_len();
+                    s.cursor_pos = rich_cursor_pos();
+                    if s.cursor_pos > text_len {
+                        s.cursor_pos = text_len;
+                    }
+                } else {
+                    if s.cursor_pos > s.doc_len {
+                        s.cursor_pos = s.doc_len;
+                    }
+                    doc_write_header();
+                }
+            }
+        }
+    }
 }
 
-fn handle_read(
-    store: &store::Store,
-    r: &DocRead,
-    target: usize,
-    ch: &ipc::Channel,
-    signal: sys::ChannelHandle,
+// ── Boot: load document ─────────────────────────────────────────────
+
+const BOOT_TIMEOUT_NS: u64 = 5_000_000_000;
+
+/// Boot state machine: queries document service, reads document, takes initial snapshot.
+fn boot_load_document(
+    fs_ch: &ipc::Channel,
+    decoder_ch: &ipc::Channel,
+    core_ch: &ipc::Channel,
+    undo_state: &mut UndoState,
+    img_offset: u32,
+    img_length: u32,
 ) {
-    let file_id = fs::FileId(r.file_id);
-    let capacity = r.capacity as usize;
+    let mut msg = ipc::Message::new(0);
 
-    let mut done = DocReadDone {
-        file_id: r.file_id,
-        len: 0,
-        status: 1,
-    };
+    // Start async decode if image present.
+    let mut decode_phase = DecodePhase::None;
+    let has_image = img_length > 0;
+    if has_image {
+        let hdr_req = protocol::decode::DecodeRequest {
+            file_offset: img_offset,
+            file_length: img_length,
+            content_offset: 0,
+            max_output: 0,
+            request_id: 1,
+            flags: protocol::decode::DECODE_FLAG_HEADER_ONLY,
+        };
+        // SAFETY: DecodeRequest is repr(C) and fits in 60-byte payload.
+        let req_msg =
+            unsafe { ipc::Message::from_payload(protocol::decode::MSG_DECODE_REQUEST, &hdr_req) };
+        decoder_ch.send(&req_msg);
+        let _ = sys::channel_signal(state().decoder_handle);
+        decode_phase = DecodePhase::AwaitingHeader;
+    }
 
-    // SAFETY: target points to shared memory mapped by init (Content Region or doc buffer).
-    let buf = unsafe { core::slice::from_raw_parts_mut(target as *mut u8, capacity) };
+    // Query for text/rich document.
+    {
+        let media = b"text/rich";
+        let mut query_payload = StoreQuery {
+            query_type: 0,
+            data_len: media.len() as u32,
+            data: [0u8; 48],
+        };
+        query_payload.data[..media.len()].copy_from_slice(media);
+        // SAFETY: StoreQuery is repr(C) and fits in 60-byte payload.
+        let query_msg = unsafe { ipc::Message::from_payload(MSG_STORE_QUERY, &query_payload) };
+        fs_ch.send(&query_msg);
+        let _ = sys::channel_signal(state().fs_handle);
+    }
 
-    match store.read(file_id, 0, buf) {
-        Ok(n) => {
-            done.len = n as u32;
-            done.status = 0;
+    let mut doc_phase = DocPhase::QueryRich;
+    let mut image_ready = !has_image;
+    let mut doc_ready = false;
+    let mut undo_ready = false;
+
+    let counter_freq = sys::counter_freq();
+    let boot_start = sys::counter();
+    let boot_timeout_ticks = if counter_freq > 0 {
+        BOOT_TIMEOUT_NS as u128 * counter_freq as u128 / 1_000_000_000
+    } else {
+        u128::MAX
+    } as u64;
+
+    loop {
+        let mut wait_handles = alloc::vec![state().fs_handle.0];
+        if !image_ready {
+            wait_handles.push(state().decoder_handle.0);
         }
-        Err(_) => {
-            done.status = 1;
+        let _ = sys::wait(&wait_handles, 100_000_000); // 100ms poll
+
+        // ── Decoder replies ─────────────────────────────────────────
+        while !image_ready && decoder_ch.try_recv(&mut msg) {
+            if let Some(protocol::decode::Message::Response(resp)) =
+                protocol::decode::decode(msg.msg_type, &msg.payload)
+            {
+                match decode_phase {
+                    DecodePhase::AwaitingHeader => {
+                        if resp.status == protocol::decode::DecodeStatus::HeaderOk as u8
+                            && resp.width > 0
+                            && resp.height > 0
+                        {
+                            let pixel_bytes = resp.width as u32 * resp.height as u32 * 4;
+                            let s = state();
+                            if let Some(alloc_offset) = s.content_alloc.allocate(pixel_bytes) {
+                                let dec_req = protocol::decode::DecodeRequest {
+                                    file_offset: img_offset,
+                                    file_length: img_length,
+                                    content_offset: alloc_offset,
+                                    max_output: pixel_bytes,
+                                    request_id: 2,
+                                    flags: 0,
+                                };
+                                let req_msg = unsafe {
+                                    ipc::Message::from_payload(
+                                        protocol::decode::MSG_DECODE_REQUEST,
+                                        &dec_req,
+                                    )
+                                };
+                                decoder_ch.send(&req_msg);
+                                let _ = sys::channel_signal(state().decoder_handle);
+                                decode_phase = DecodePhase::AwaitingDecode {
+                                    alloc_offset,
+                                    pixel_bytes,
+                                };
+                            } else {
+                                image_ready = true;
+                                decode_phase = DecodePhase::Done;
+                            }
+                        } else {
+                            image_ready = true;
+                            decode_phase = DecodePhase::Done;
+                        }
+                    }
+                    DecodePhase::AwaitingDecode {
+                        alloc_offset,
+                        pixel_bytes: _,
+                    } => {
+                        if resp.status == protocol::decode::DecodeStatus::Ok as u8 {
+                            let s = state();
+                            // SAFETY: content_va is mapped read-write.
+                            let header = unsafe {
+                                &mut *(s.content_va as *mut protocol::content::ContentRegionHeader)
+                            };
+                            let entry_idx = header.entry_count as usize;
+                            if entry_idx < protocol::content::MAX_CONTENT_ENTRIES {
+                                let content_id = protocol::content::CONTENT_ID_DYNAMIC_START;
+                                header.entries[entry_idx] = protocol::content::ContentEntry {
+                                    content_id,
+                                    offset: alloc_offset,
+                                    length: resp.bytes_written,
+                                    class: protocol::content::ContentClass::Pixels as u8,
+                                    _pad: [0; 3],
+                                    width: resp.width as u16,
+                                    height: resp.height as u16,
+                                    generation: 0,
+                                };
+                                header.entry_count += 1;
+                                notify_core_image_decoded(
+                                    core_ch,
+                                    content_id,
+                                    resp.width as u16,
+                                    resp.height as u16,
+                                );
+                                sys::print(b"     PNG decoded into Content Region\n");
+                            }
+                        } else {
+                            sys::print(b"     PNG decode failed\n");
+                        }
+                        image_ready = true;
+                        decode_phase = DecodePhase::Done;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // ── Document service replies ────────────────────────────────
+        while fs_ch.try_recv(&mut msg) {
+            match doc_phase {
+                DocPhase::QueryRich => {
+                    if let Some(protocol::store::Message::StoreQueryResult(result)) =
+                        protocol::store::decode(msg.msg_type, &msg.payload)
+                    {
+                        if result.count > 0 {
+                            let s = state();
+                            let read_payload = StoreRead {
+                                file_id: result.file_ids[0],
+                                target_va: 0,
+                                capacity: s.doc_capacity as u32,
+                                _pad: 0,
+                            };
+                            let read_msg = unsafe {
+                                ipc::Message::from_payload(MSG_STORE_READ, &read_payload)
+                            };
+                            fs_ch.send(&read_msg);
+                            let _ = sys::channel_signal(state().fs_handle);
+                            doc_phase = DocPhase::Reading {
+                                file_id: result.file_ids[0],
+                                detected_format: DocumentFormat::Rich,
+                            };
+                        } else {
+                            let media = b"text/plain";
+                            let mut query_payload = StoreQuery {
+                                query_type: 0,
+                                data_len: media.len() as u32,
+                                data: [0u8; 48],
+                            };
+                            query_payload.data[..media.len()].copy_from_slice(media);
+                            let query_msg = unsafe {
+                                ipc::Message::from_payload(MSG_STORE_QUERY, &query_payload)
+                            };
+                            fs_ch.send(&query_msg);
+                            let _ = sys::channel_signal(state().fs_handle);
+                            doc_phase = DocPhase::QueryPlain;
+                        }
+                    }
+                }
+                DocPhase::QueryPlain => {
+                    if let Some(protocol::store::Message::StoreQueryResult(result)) =
+                        protocol::store::decode(msg.msg_type, &msg.payload)
+                    {
+                        if result.count > 0 {
+                            let s = state();
+                            let read_payload = StoreRead {
+                                file_id: result.file_ids[0],
+                                target_va: 0,
+                                capacity: s.doc_capacity as u32,
+                                _pad: 0,
+                            };
+                            let read_msg = unsafe {
+                                ipc::Message::from_payload(MSG_STORE_READ, &read_payload)
+                            };
+                            fs_ch.send(&read_msg);
+                            let _ = sys::channel_signal(state().fs_handle);
+                            doc_phase = DocPhase::Reading {
+                                file_id: result.file_ids[0],
+                                detected_format: DocumentFormat::Plain,
+                            };
+                        } else {
+                            sys::print(b"     creating new text document\n");
+                            let media = b"text/plain";
+                            let mut create_payload = StoreCreate {
+                                media_type_len: media.len() as u32,
+                                _pad: 0,
+                                media_type: [0u8; 52],
+                            };
+                            create_payload.media_type[..media.len()].copy_from_slice(media);
+                            let create_msg = unsafe {
+                                ipc::Message::from_payload(MSG_STORE_CREATE, &create_payload)
+                            };
+                            fs_ch.send(&create_msg);
+                            let _ = sys::channel_signal(state().fs_handle);
+                            doc_phase = DocPhase::Creating;
+                        }
+                    }
+                }
+                DocPhase::Reading {
+                    file_id,
+                    detected_format,
+                } => {
+                    if let Some(protocol::store::Message::StoreReadDone(done)) =
+                        protocol::store::decode(msg.msg_type, &msg.payload)
+                    {
+                        if done.status == 0 && done.len > 0 {
+                            let s = state();
+                            s.doc_file_id = file_id;
+                            // SAFETY: doc_buf valid, done.len <= capacity.
+                            let content_start = unsafe {
+                                core::slice::from_raw_parts(
+                                    s.doc_buf.add(DOC_HEADER_SIZE),
+                                    done.len as usize,
+                                )
+                            };
+                            if detected_format == DocumentFormat::Rich
+                                && done.len >= 64
+                                && piecetable::validate(content_start)
+                            {
+                                s.doc_format = DocumentFormat::Rich;
+                                s.doc_len = done.len as usize;
+                                s.cursor_pos = rich_cursor_pos();
+                                doc_write_header();
+                                sys::print(b"     rich text document loaded\n");
+                            } else {
+                                s.doc_format = DocumentFormat::Plain;
+                                s.doc_len = done.len as usize;
+                                doc_write_header();
+                                sys::print(b"     plain text document loaded\n");
+                            }
+                        } else {
+                            state().doc_file_id = file_id;
+                            state().doc_format = detected_format;
+                        }
+                    }
+                    doc_ready = true;
+                    if state().doc_file_id != 0 {
+                        let snap_payload = StoreSnapshot {
+                            file_count: 1,
+                            _pad: 0,
+                            file_ids: [state().doc_file_id, 0, 0, 0, 0, 0],
+                        };
+                        let snap_msg = unsafe {
+                            ipc::Message::from_payload(MSG_STORE_SNAPSHOT, &snap_payload)
+                        };
+                        fs_ch.send(&snap_msg);
+                        let _ = sys::channel_signal(state().fs_handle);
+                        doc_phase = DocPhase::AwaitingUndo;
+                    } else {
+                        undo_ready = true;
+                        doc_phase = DocPhase::Done;
+                    }
+                }
+                DocPhase::Creating => {
+                    if let Some(protocol::store::Message::StoreCreateResult(result)) =
+                        protocol::store::decode(msg.msg_type, &msg.payload)
+                    {
+                        if result.status == 0 {
+                            state().doc_file_id = result.file_id;
+                            state().doc_format = DocumentFormat::Plain;
+                            sys::print(b"     text document created\n");
+                        } else {
+                            sys::print(b"     warning: document create failed\n");
+                        }
+                    }
+                    doc_ready = true;
+                    if state().doc_file_id != 0 {
+                        let snap_payload = StoreSnapshot {
+                            file_count: 1,
+                            _pad: 0,
+                            file_ids: [state().doc_file_id, 0, 0, 0, 0, 0],
+                        };
+                        let snap_msg = unsafe {
+                            ipc::Message::from_payload(MSG_STORE_SNAPSHOT, &snap_payload)
+                        };
+                        fs_ch.send(&snap_msg);
+                        let _ = sys::channel_signal(state().fs_handle);
+                        doc_phase = DocPhase::AwaitingUndo;
+                    } else {
+                        undo_ready = true;
+                        doc_phase = DocPhase::Done;
+                    }
+                }
+                DocPhase::AwaitingUndo => {
+                    if let Some(protocol::store::Message::StoreSnapshotResult(result)) =
+                        protocol::store::decode(msg.msg_type, &msg.payload)
+                    {
+                        if result.status == 0 {
+                            undo_state.set_initial(result.snapshot_id);
+                            sys::print(b"     initial undo snapshot taken\n");
+                        }
+                    }
+                    undo_ready = true;
+                    doc_phase = DocPhase::Done;
+                }
+                DocPhase::Done => {}
+            }
+        }
+
+        if image_ready && doc_ready && undo_ready {
+            sys::print(b"     boot complete\n");
+            break;
+        }
+
+        if sys::counter() - boot_start > boot_timeout_ticks {
+            sys::print(b"     boot timeout - proceeding\n");
+            break;
         }
     }
 
-    // SAFETY: DocReadDone is #[repr(C)] and fits in 60-byte payload.
-    let reply = unsafe { ipc::Message::from_payload(MSG_DOC_READ_DONE, &done) };
-    ch.send(&reply);
-    let _ = sys::channel_signal(signal);
+    // Notify core that the document is loaded.
+    notify_core_doc_loaded(core_ch);
 }
 
-// ── Entry point ──────────────────────────────────────────────────────
+// ── Entry point ─────────────────────────────────────────────────────
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    sys::print(b"  \xF0\x9F\x93\x84 document - starting\n");
+    sys::print(b"  \xF0\x9F\x93\x84 document starting\n");
 
-    // ── Phase 1: Receive config from init ────────────────────────────
-
-    // SAFETY: CHANNEL_SHM_BASE points to init-allocated shared memory pages.
-    let ch = unsafe { ipc::Channel::from_base(protocol::CHANNEL_SHM_BASE, ipc::PAGE_SIZE, 1) };
+    // Read config from init channel.
+    // SAFETY: channel_shm_va(0) is the init channel SHM region.
+    let init_ch =
+        unsafe { ipc::Channel::from_base(protocol::channel_shm_va(0), ipc::PAGE_SIZE, 1) };
     let mut msg = ipc::Message::new(0);
 
-    if !ch.try_recv(&mut msg) || msg.msg_type != MSG_DOC_CONFIG {
+    if !init_ch.try_recv(&mut msg) || msg.msg_type != MSG_DOC_CONFIG {
         sys::print(b"document: no config message\n");
         sys::exit();
     }
 
-    let config = if let Some(Message::DocConfig(c)) = decode(msg.msg_type, &msg.payload) {
-        c
-    } else {
+    let Some(protocol::init::DocMessage::DocConfig(config)) =
+        protocol::init::decode_doc(msg.msg_type, &msg.payload)
+    else {
+        sys::print(b"document: bad config payload\n");
+        sys::exit();
+    };
+
+    if config.doc_va == 0 {
         sys::print(b"document: bad config\n");
         sys::exit();
-    };
-
-    let init_handle = sys::ChannelHandle(config.init_handle);
-    let core_handle = sys::ChannelHandle(config.core_handle);
-
-    // ── Phase 2: Map MMIO, negotiate virtio, setup virtqueue ─────────
-
-    let mmio_pa = config.mmio_pa;
-    let page_offset = mmio_pa & (PAGE_SIZE as u64 - 1);
-    let page_pa = mmio_pa & !(PAGE_SIZE as u64 - 1);
-    let page_va = sys::device_map(page_pa, PAGE_SIZE as u64).unwrap_or_else(|_| {
-        sys::print(b"document: device_map failed\n");
-        sys::exit();
-    });
-    let device = virtio::Device::new(page_va + page_offset as usize);
-
-    let (ok, accepted) = device.negotiate_features(VIRTIO_BLK_F_FLUSH);
-    if !ok {
-        sys::print(b"document: negotiate failed\n");
-        sys::exit();
     }
-    let has_flush = accepted & VIRTIO_BLK_F_FLUSH != 0;
 
-    let irq_handle: sys::InterruptHandle =
-        sys::interrupt_register(config.irq).unwrap_or_else(|_| {
-            sys::print(b"document: interrupt_register failed\n");
-            sys::exit();
-        });
-
-    let capacity_sectors = device.config_read64(0);
-
-    let queue_size = core::cmp::min(
-        device.queue_max_size(VIRTQ_REQUEST),
-        virtio::DEFAULT_QUEUE_SIZE,
-    );
-    let vq_order = virtio::Virtqueue::allocation_order(queue_size);
-    let mut vq_pa: u64 = 0;
-    let vq_va = sys::dma_alloc(vq_order, &mut vq_pa).unwrap_or_else(|_| {
-        sys::print(b"document: dma_alloc (vq) failed\n");
-        sys::exit();
-    });
-    let vq_pages = 1usize << vq_order;
-    // SAFETY: vq_va is a valid DMA allocation; zeroing before use.
-    unsafe { core::ptr::write_bytes(vq_va as *mut u8, 0, vq_pages * PAGE_SIZE) };
-
-    let vq = virtio::Virtqueue::new(queue_size, vq_va, vq_pa);
-    device.setup_queue(
-        VIRTQ_REQUEST,
-        queue_size,
-        vq.desc_pa(),
-        vq.avail_pa(),
-        vq.used_pa(),
-    );
-    device.driver_ok();
-
-    let mut buf_pa: u64 = 0;
-    let buf_va = sys::dma_alloc(1, &mut buf_pa).unwrap_or_else(|_| {
-        sys::print(b"document: dma_alloc (buf) failed\n");
-        sys::exit();
-    });
-    // SAFETY: buf_va is a valid DMA allocation of 2 pages; zeroing before use.
-    unsafe { core::ptr::write_bytes(buf_va as *mut u8, 0, 2 * PAGE_SIZE) };
-
-    let blk = VirtioBlockDevice {
-        io: RefCell::new(IoState {
-            device,
-            vq,
-            irq_handle,
-            buf_va,
-            buf_pa,
-        }),
-        capacity_sectors,
-        has_flush,
-    };
-
-    // ── Phase 3: Mount or format filesystem, open or init store ──────
-
-    // Check if the disk has a valid filesystem by reading block 0's magic.
-    // This avoids consuming the device in a failed mount attempt.
-    let has_filesystem = {
-        let mut hdr = alloc::vec![0u8; fs::BLOCK_SIZE as usize];
-        fs::BlockDevice::read_block(&blk, 0, &mut hdr).is_ok()
-            && u64::from_le_bytes(hdr[0..8].try_into().unwrap_or([0; 8]))
-                == u64::from_le_bytes(*b"docOScow")
-    };
-
-    // Initialize the counter frequency for inode timestamps.
-    COUNTER_FREQ.store(sys::counter_freq(), core::sync::atomic::Ordering::Relaxed);
-
-    let (filesystem, needs_store_init) = if has_filesystem {
-        sys::print(b"     mounting existing filesystem...\n");
-        match fs::Filesystem::mount(blk) {
-            Ok(f) => (f, false),
-            Err(_) => {
-                sys::print(b"document: mount failed\n");
-                let _ = sys::channel_signal(init_handle);
-                sys::exit();
-            }
+    {
+        let s = state();
+        s.doc_buf = config.doc_va as *mut u8;
+        s.doc_capacity = config.doc_capacity as usize;
+        s.doc_len = 0;
+        s.content_va = config.content_va as usize;
+        s.content_size = config.content_size as usize;
+        s.editor_handle = sys::ChannelHandle(config.editor_handle);
+        s.decoder_handle = sys::ChannelHandle(config.decoder_handle);
+        s.fs_handle = sys::ChannelHandle(config.fs_handle);
+        s.core_handle = sys::ChannelHandle(config.core_handle);
+        if config.content_va != 0 && config.content_size > 0 {
+            // SAFETY: content_va is mapped read-write.
+            let header =
+                unsafe { &*(config.content_va as *const protocol::content::ContentRegionHeader) };
+            s.content_alloc = protocol::content::ContentAllocator::new(
+                header.next_alloc,
+                config.content_size as u32,
+            );
         }
-    } else {
-        sys::print(b"     formatting new filesystem...\n");
-        match fs::Filesystem::format(blk) {
-            Ok(f) => (f, true),
-            Err(_) => {
-                sys::print(b"document: format failed\n");
-                let _ = sys::channel_signal(init_handle);
-                sys::exit();
-            }
-        }
-    };
+    }
+    doc_write_header();
 
-    let mut filesystem = filesystem;
-    filesystem.set_time_source(clock_nanos);
-    let fs_box: Box<dyn fs::Files> = Box::new(filesystem);
+    sys::print(b"     config received\n");
 
-    let mut store = if needs_store_init {
-        sys::print(b"     initializing new store\n");
-        match store::Store::init(fs_box) {
-            Ok(s) => s,
-            Err(_) => {
-                sys::print(b"document: store init failed\n");
-                let _ = sys::channel_signal(init_handle);
-                sys::exit();
-            }
-        }
-    } else {
-        sys::print(b"     opening existing store\n");
-        match store::Store::open(fs_box) {
-            Ok(s) => s,
-            Err(_) => {
-                sys::print(b"document: store open failed\n");
-                let _ = sys::channel_signal(init_handle);
-                sys::exit();
-            }
-        }
-    };
-
-    // ── Phase 4: Signal ready ────────────────────────────────────────
-
-    sys::print(b"     document service ready\n");
-
-    let doc_va = config.doc_va as usize;
-    let doc_capacity = config.doc_capacity as usize;
-    let content_va = config.content_va as usize;
-
-    // Signal init that we're ready by sending MSG_DOC_READY message.
-    let ready_msg = ipc::Message::new(MSG_DOC_READY);
-    ch.send(&ready_msg);
-    let _ = sys::channel_signal(init_handle);
-
-    // ── Phase 4.5: Boot-query loop (init channel) ────────────────────
+    // Set up IPC channels.
+    // SAFETY: channel_shm_va(N) are bases of channel SHM regions mapped by kernel.
     //
-    // Init sends font queries and read requests on handle 0 during boot.
-    // We handle them here until MSG_DOC_BOOT_DONE signals the end.
+    // Endpoint assignment: init sends endpoint A (index 0) of each channel
+    // to document, except for the presenter↔document channel where document receives endpoint B (index 1).
+    // The endpoint parameter must match the ChannelId endpoint index.
+    let editor_ch = unsafe {
+        ipc::Channel::from_base(
+            protocol::channel_shm_va(state().editor_handle.0 as usize),
+            ipc::PAGE_SIZE,
+            0, // document receives endpoint A (index 0) of editor↔document channel
+        )
+    };
+    let fs_ch = unsafe {
+        ipc::Channel::from_base(
+            protocol::channel_shm_va(state().fs_handle.0 as usize),
+            ipc::PAGE_SIZE,
+            0, // document receives endpoint A (index 0) of document↔store channel
+        )
+    };
+    let decoder_ch = unsafe {
+        ipc::Channel::from_base(
+            protocol::channel_shm_va(state().decoder_handle.0 as usize),
+            ipc::PAGE_SIZE,
+            0, // document receives endpoint A (index 0) of document↔decoder channel
+        )
+    };
+    let core_ch = unsafe {
+        ipc::Channel::from_base(
+            protocol::channel_shm_va(state().core_handle.0 as usize),
+            ipc::PAGE_SIZE,
+            1, // document receives endpoint B (index 1) of presenter↔document channel
+        )
+    };
 
-    if content_va != 0 {
-        sys::print(b"     entering boot-query phase\n");
+    // ── Boot: load document and decode image ────────────────────────
+    let mut undo_state = UndoState::new();
+    boot_load_document(
+        &fs_ch,
+        &decoder_ch,
+        &core_ch,
+        &mut undo_state,
+        config.img_file_store_offset,
+        config.img_file_store_length,
+    );
 
-        loop {
-            let _ = sys::wait(&[0], u64::MAX);
+    sys::print(b"     entering event loop\n");
 
-            let mut boot_done = false;
-
-            while ch.try_recv(&mut msg) {
-                match msg.msg_type {
-                    MSG_DOC_QUERY => {
-                        if let Some(Message::DocQuery(q)) = decode(msg.msg_type, &msg.payload) {
-                            handle_query(&store, &q, &ch, init_handle);
-                        }
-                    }
-
-                    MSG_DOC_READ => {
-                        if let Some(Message::DocRead(r)) = decode(msg.msg_type, &msg.payload) {
-                            handle_read(
-                                &store,
-                                &r,
-                                r.target_va as usize,
-                                &ch,
-                                init_handle,
-                            );
-                        }
-                    }
-
-                    MSG_DOC_BOOT_DONE => {
-                        boot_done = true;
-                        break;
-                    }
-
-                    _ => {}
-                }
-            }
-
-            if boot_done {
-                break;
-            }
-        }
-
-        sys::print(b"     boot-query phase complete\n");
-    }
-
-    // ── Phase 5: IPC loop ────────────────────────────────────────────
-
-    // Core channel: handle 1 (sent by init via handle_send).
-    // SAFETY: channel_shm_va(1) points to init-allocated shared memory pages.
-    let core_ch =
-        unsafe { ipc::Channel::from_base(protocol::channel_shm_va(1), ipc::PAGE_SIZE, 1) };
+    // ── Main event loop ─────────────────────────────────────────────
+    let counter_freq = sys::counter_freq();
+    let mut snapshot_pending = false;
+    let mut last_edit_ms: u64 = 0;
 
     loop {
-        let _ = sys::wait(&[1], u64::MAX);
+        let now_ms = if counter_freq > 0 {
+            sys::counter() * 1000 / counter_freq
+        } else {
+            0
+        };
 
-        while core_ch.try_recv(&mut msg) {
+        // Compute timeout: if snapshot pending, wake for coalesce deadline.
+        let timeout_ns = if snapshot_pending {
+            let snap_deadline_ms = last_edit_ms + COALESCE_MS;
+            let snap_remaining_ms = snap_deadline_ms.saturating_sub(now_ms);
+            snap_remaining_ms.saturating_mul(1_000_000).max(1_000_000)
+        } else {
+            u64::MAX
+        };
+
+        let _ = sys::wait(
+            &[state().editor_handle.0, state().core_handle.0],
+            timeout_ns,
+        );
+
+        let now_ms = if counter_freq > 0 {
+            sys::counter() * 1000 / counter_freq
+        } else {
+            0
+        };
+
+        let mut text_changed = false;
+
+        // ── Process editor write requests ───────────────────────────
+        let is_rich = state().doc_format == DocumentFormat::Rich;
+        while editor_ch.try_recv(&mut msg) {
             match msg.msg_type {
-                MSG_DOC_COMMIT => {
-                    if let Some(Message::DocCommit(c)) = decode(msg.msg_type, &msg.payload) {
-                        let file_id = fs::FileId(c.file_id);
-                        // Read document content from shared buffer.
-                        // Header: [0..8) = content_len (u64), [8..16) = cursor_pos,
-                        //          [16..64) = reserved, [64..) = content
-                        // SAFETY: doc_va points to doc buffer header; first u64 is content_len.
-                        let content_len =
-                            unsafe { core::ptr::read_volatile(doc_va as *const u64) as usize };
-
-                        let actual_len = if content_len > doc_capacity {
-                            doc_capacity
+                MSG_WRITE_INSERT => {
+                    let Some(edit::Message::WriteInsert(insert)) =
+                        edit::decode(msg.msg_type, &msg.payload)
+                    else {
+                        continue;
+                    };
+                    let pos = insert.position as usize;
+                    let ok = if is_rich {
+                        rich_insert(pos, insert.byte)
+                    } else {
+                        doc_insert(pos, insert.byte)
+                    };
+                    if ok {
+                        let s = state();
+                        s.cursor_pos = pos + 1;
+                        if is_rich {
+                            rich_set_cursor_pos(s.cursor_pos);
+                        }
+                        text_changed = true;
+                    }
+                }
+                MSG_WRITE_DELETE => {
+                    let Some(edit::Message::WriteDelete(del)) =
+                        edit::decode(msg.msg_type, &msg.payload)
+                    else {
+                        continue;
+                    };
+                    let pos = del.position as usize;
+                    let ok = if is_rich {
+                        rich_delete(pos)
+                    } else {
+                        doc_delete(pos)
+                    };
+                    if ok {
+                        let s = state();
+                        s.cursor_pos = pos;
+                        if is_rich {
+                            rich_set_cursor_pos(s.cursor_pos);
+                        }
+                        text_changed = true;
+                    }
+                }
+                MSG_WRITE_DELETE_RANGE => {
+                    let Some(edit::Message::WriteDeleteRange(dr)) =
+                        edit::decode(msg.msg_type, &msg.payload)
+                    else {
+                        continue;
+                    };
+                    let start = dr.start as usize;
+                    let end = dr.end as usize;
+                    let ok = if is_rich {
+                        rich_delete_range(start, end)
+                    } else {
+                        doc_delete_range(start, end)
+                    };
+                    if ok {
+                        let s = state();
+                        s.cursor_pos = start;
+                        if is_rich {
+                            rich_set_cursor_pos(s.cursor_pos);
+                        }
+                        text_changed = true;
+                    }
+                }
+                MSG_CURSOR_MOVE => {
+                    let Some(edit::Message::CursorMove(cm)) =
+                        edit::decode(msg.msg_type, &msg.payload)
+                    else {
+                        continue;
+                    };
+                    let pos = cm.position as usize;
+                    let doc_text_len = if is_rich {
+                        rich_text_len()
+                    } else {
+                        state().doc_len
+                    };
+                    if pos <= doc_text_len {
+                        state().cursor_pos = pos;
+                        if is_rich {
+                            rich_set_cursor_pos(pos);
                         } else {
-                            content_len
-                        };
-
-                        // SAFETY: doc_va + 64 points to content area in shared memory,
-                        // mapped read-only by init. actual_len bounded by doc_capacity.
-                        let content = unsafe {
-                            core::slice::from_raw_parts((doc_va + 64) as *const u8, actual_len)
-                        };
-
-                        if let Err(_) = store.write(file_id, 0, content) {
-                            sys::print(b"document: commit write failed\n");
-                        } else if let Err(_) = store.truncate(file_id, actual_len as u64) {
-                            sys::print(b"document: commit truncate failed\n");
-                        } else if let Err(_) = store.commit() {
-                            sys::print(b"document: commit flush failed\n");
+                            doc_write_header();
                         }
                     }
                 }
-
-                MSG_DOC_QUERY => {
-                    if let Some(Message::DocQuery(q)) = decode(msg.msg_type, &msg.payload) {
-                        handle_query(&store, &q, &core_ch, core_handle);
-                    }
+                MSG_SELECTION_UPDATE => {
+                    // Selection state is managed by core — just forward.
                 }
-
-                MSG_DOC_READ => {
-                    if let Some(Message::DocRead(r)) = decode(msg.msg_type, &msg.payload) {
-                        // target_va=0 means "write to the shared doc buffer".
-                        let target = if r.target_va == 0 {
-                            doc_va + 64
-                        } else {
-                            r.target_va as usize
-                        };
-                        handle_read(&store, &r, target, &core_ch, core_handle);
+                MSG_STYLE_APPLY => {
+                    if !is_rich {
+                        continue;
                     }
+                    let Some(edit::Message::StyleApply(sa)) =
+                        edit::decode(msg.msg_type, &msg.payload)
+                    else {
+                        continue;
+                    };
+                    rich_apply_style(sa.start as usize, sa.end as usize, sa.style_id);
+                    text_changed = true;
                 }
-
-                MSG_DOC_SNAPSHOT => {
-                    if let Some(Message::DocSnapshot(s)) = decode(msg.msg_type, &msg.payload) {
-                        let count = (s.file_count as usize).min(6);
-                        let mut files = alloc::vec::Vec::with_capacity(count);
-                        for i in 0..count {
-                            files.push(fs::FileId(s.file_ids[i]));
-                        }
-
-                        let mut result = DocSnapshotResult {
-                            snapshot_id: 0,
-                            status: 1,
-                            _pad: 0,
-                        };
-
-                        match store.snapshot(&files) {
-                            Ok(sid) => {
-                                result.snapshot_id = sid.0;
-                                result.status = 0;
-                            }
-                            Err(_) => {
-                                result.status = 1;
-                            }
-                        }
-
-                        // SAFETY: DocSnapshotResult is #[repr(C)] and fits in 60-byte payload.
-                        let reply =
-                            unsafe { ipc::Message::from_payload(MSG_DOC_SNAPSHOT_RESULT, &result) };
-                        core_ch.send(&reply);
-                        let _ = sys::channel_signal(core_handle);
+                MSG_STYLE_SET_CURRENT => {
+                    if !is_rich {
+                        continue;
                     }
+                    let Some(edit::Message::StyleSetCurrent(sc)) =
+                        edit::decode(msg.msg_type, &msg.payload)
+                    else {
+                        continue;
+                    };
+                    rich_set_current_style(sc.style_id);
                 }
-
-                MSG_DOC_RESTORE => {
-                    if let Some(Message::DocRestore(r)) = decode(msg.msg_type, &msg.payload) {
-                        let mut result = DocRestoreResult { status: 1, _pad: 0 };
-
-                        match store.restore(fs::SnapshotId(r.snapshot_id)) {
-                            Ok(()) => {
-                                result.status = 0;
-                            }
-                            Err(_) => {
-                                result.status = 1;
-                            }
-                        }
-
-                        // SAFETY: DocRestoreResult is #[repr(C)] and fits in 60-byte payload.
-                        let reply =
-                            unsafe { ipc::Message::from_payload(MSG_DOC_RESTORE_RESULT, &result) };
-                        core_ch.send(&reply);
-                        let _ = sys::channel_signal(core_handle);
-                    }
-                }
-
-                MSG_DOC_CREATE => {
-                    if let Some(Message::DocCreate(c)) = decode(msg.msg_type, &msg.payload) {
-                        let mt_len = (c.media_type_len as usize).min(c.media_type.len());
-                        let media_type = core::str::from_utf8(&c.media_type[..mt_len])
-                            .unwrap_or("application/octet-stream");
-
-                        let mut result = DocCreateResult {
-                            file_id: 0,
-                            status: 1,
-                            _pad: 0,
-                        };
-
-                        match store.create(media_type) {
-                            Ok(fid) => {
-                                let _ = store.commit();
-                                result.file_id = fid.0;
-                                result.status = 0;
-                            }
-                            Err(_) => {
-                                result.status = 1;
-                            }
-                        }
-
-                        // SAFETY: DocCreateResult is #[repr(C)] and fits in 60-byte payload.
-                        let reply =
-                            unsafe { ipc::Message::from_payload(MSG_DOC_CREATE_RESULT, &result) };
-                        core_ch.send(&reply);
-                        let _ = sys::channel_signal(core_handle);
-                    }
-                }
-
-                MSG_DOC_DELETE_SNAPSHOT => {
-                    if let Some(Message::DocDeleteSnapshot(d)) = decode(msg.msg_type, &msg.payload)
-                    {
-                        // Fire-and-forget: best-effort cleanup, no response.
-                        let _ = store.delete_snapshot(fs::SnapshotId(d.snapshot_id));
-                    }
-                }
-
                 _ => {}
             }
+        }
+
+        // ── Process core requests (undo/redo + delete range) ─────────
+        let mut undo_requested = false;
+        let mut redo_requested = false;
+        while core_ch.try_recv(&mut msg) {
+            match msg.msg_type {
+                MSG_UNDO_REQUEST => {
+                    undo_requested = true;
+                }
+                MSG_REDO_REQUEST => {
+                    redo_requested = true;
+                }
+                // Core forwards selection/word delete as MSG_WRITE_DELETE_RANGE.
+                MSG_WRITE_DELETE_RANGE => {
+                    let Some(edit::Message::WriteDeleteRange(dr)) =
+                        edit::decode(msg.msg_type, &msg.payload)
+                    else {
+                        continue;
+                    };
+                    let start = dr.start as usize;
+                    let end = dr.end as usize;
+                    let ok = if is_rich {
+                        rich_delete_range(start, end)
+                    } else {
+                        doc_delete_range(start, end)
+                    };
+                    if ok {
+                        let s = state();
+                        s.cursor_pos = start;
+                        if is_rich {
+                            rich_set_cursor_pos(s.cursor_pos);
+                        }
+                        text_changed = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // ── Persist + snapshot ──────────────────────────────────────
+        if text_changed {
+            let file_id = state().doc_file_id;
+            let commit_payload = StoreCommit { file_id };
+            // SAFETY: StoreCommit is repr(C) and fits in 60-byte payload.
+            let commit_msg =
+                unsafe { ipc::Message::from_payload(MSG_STORE_COMMIT, &commit_payload) };
+            fs_ch.send(&commit_msg);
+            let _ = sys::channel_signal(state().fs_handle);
+
+            snapshot_pending = true;
+            last_edit_ms = now_ms;
+
+            // Notify core that the document buffer changed.
+            notify_core_doc_changed(&core_ch, 0);
+        }
+
+        // Flush pending snapshot on typing pause.
+        if snapshot_pending && !text_changed && now_ms.saturating_sub(last_edit_ms) >= COALESCE_MS {
+            if state().doc_format == DocumentFormat::Rich {
+                rich_next_operation();
+            }
+            take_snapshot(&fs_ch, &mut undo_state);
+            snapshot_pending = false;
+        }
+
+        // Flush pending snapshot before undo/redo.
+        if snapshot_pending && (undo_requested || redo_requested) {
+            if state().doc_format == DocumentFormat::Rich {
+                rich_next_operation();
+            }
+            take_snapshot(&fs_ch, &mut undo_state);
+            snapshot_pending = false;
+        }
+
+        if undo_requested {
+            perform_undo(&fs_ch, &core_ch, &mut undo_state);
+        } else if redo_requested {
+            perform_redo(&fs_ch, &core_ch, &mut undo_state);
         }
     }
 }

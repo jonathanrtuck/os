@@ -146,13 +146,13 @@ const _: () = assert!(core::mem::size_of::<EditorConfig>() <= 60);
 
 // ── Document-model config ───────────────────────────────────────────
 
-/// Config message sent by init to the document-model process.
-pub const MSG_DOC_MODEL_CONFIG: u32 = 110;
+/// Config message sent by init to the document process.
+pub const MSG_DOC_CONFIG: u32 = 110;
 
-/// Document-model process configuration.
+/// Document process configuration.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct DocModelConfig {
+pub struct DocConfig {
     /// VA of the shared document buffer (read-write for A).
     pub doc_va: u64,
     /// Document buffer capacity (content area, excluding 64-byte header).
@@ -171,10 +171,10 @@ pub struct DocModelConfig {
     pub decoder_handle: u8,
     /// Kernel channel handle for the document service (filesystem) channel.
     pub fs_handle: u8,
-    /// Kernel channel handle for the core (view-engine) channel.
+    /// Kernel channel handle for the core (presenter) channel.
     pub core_handle: u8,
 }
-const _: () = assert!(core::mem::size_of::<DocModelConfig>() <= 60);
+const _: () = assert!(core::mem::size_of::<DocConfig>() <= 60);
 
 // ── Legacy 9P filesystem (init ↔ virtio-9p driver) ──────────────────
 
@@ -206,7 +206,7 @@ pub fn decode_gpu(msg_type: u32, payload: &[u8; crate::PAYLOAD_SIZE]) -> Option<
     }
 }
 
-/// View-engine config messages (init → view-engine).
+/// View-engine config messages (init → presenter).
 #[derive(Clone, Copy, Debug)]
 pub enum CoreMessage {
     CoreConfig(CoreConfig),
@@ -259,10 +259,7 @@ pub enum EditorMessage {
     EditorConfig(EditorConfig),
 }
 
-pub fn decode_editor(
-    msg_type: u32,
-    payload: &[u8; crate::PAYLOAD_SIZE],
-) -> Option<EditorMessage> {
+pub fn decode_editor(msg_type: u32, payload: &[u8; crate::PAYLOAD_SIZE]) -> Option<EditorMessage> {
     match msg_type {
         MSG_EDITOR_CONFIG => Some(EditorMessage::EditorConfig(unsafe {
             crate::decode_payload(payload)
@@ -271,18 +268,15 @@ pub fn decode_editor(
     }
 }
 
-/// Document-model config messages (init → document-model).
+/// Document config messages (init → document).
 #[derive(Clone, Copy, Debug)]
-pub enum DocModelMessage {
-    DocModelConfig(DocModelConfig),
+pub enum DocMessage {
+    DocConfig(DocConfig),
 }
 
-pub fn decode_doc_model(
-    msg_type: u32,
-    payload: &[u8; crate::PAYLOAD_SIZE],
-) -> Option<DocModelMessage> {
+pub fn decode_doc(msg_type: u32, payload: &[u8; crate::PAYLOAD_SIZE]) -> Option<DocMessage> {
     match msg_type {
-        MSG_DOC_MODEL_CONFIG => Some(DocModelMessage::DocModelConfig(unsafe {
+        MSG_DOC_CONFIG => Some(DocMessage::DocConfig(unsafe {
             crate::decode_payload(payload)
         })),
         _ => None,

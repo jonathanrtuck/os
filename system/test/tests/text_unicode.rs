@@ -7,7 +7,7 @@ extern crate alloc;
 
 use scene::*;
 
-#[path = "../../services/view-engine/fallback.rs"]
+#[path = "../../services/presenter/fallback.rs"]
 mod fallback;
 
 use fallback::FallbackChain;

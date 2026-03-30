@@ -1,6 +1,6 @@
 //! Incremental scene graph updates — stub.
 //!
-//! With layout computation moved to the layout engine (B), the view engine
+//! With layout computation moved to the layout service, the view engine
 //! no longer performs local line-breaking. These functions always return
 //! `false`, causing the caller to fall through to the full compaction
 //! rebuild path which reads B's pre-computed layout results.

@@ -1,4 +1,4 @@
-//! View Engine (C) — event loop, input routing, and scene graph building.
+//! Presenter service — event loop, input routing, and scene graph building.
 //!
 //! Owns all view state (cursor, selection, scroll, focus, animation).
 //! Reads document buffer (RO) from A and layout results (RO) from B.
@@ -16,11 +16,11 @@
 //!
 //! # IPC channels (handle indices)
 //!
-//! Handle 1: input driver → C (keyboard events)
-//! Handle 2: C → compositor (scene update signal)
-//! Handle 3: C ↔ editor (input events out, cursor/selection in)
+//! Handle 1: input driver → presenter (keyboard events)
+//! Handle 2: presenter → compositor (scene update signal)
+//! Handle 3: presenter ↔ editor (input events out, cursor/selection in)
 //! Handle 4: A → C (doc-changed notifications, undo/redo requests)
-//! Handle 5: B ↔ C (layout recompute/ready signals)
+//! Handle 5: layout ↔ presenter (layout recompute/ready signals)
 //! Handle 6: second input device (tablet) → C (optional)
 
 #![no_std]
@@ -744,7 +744,7 @@ fn serif_italic_font_data() -> &'static [u8] {
     }
 }
 
-// ── Layout engine (B) communication ─────────────────────────────────
+// ── Layout service communication ─────────────────────────────────
 
 /// Write viewport state to the shared register so B can read it.
 fn write_viewport_state(
@@ -1102,9 +1102,9 @@ pub extern "C" fn _start() -> ! {
         s.counter_freq = sys::counter_freq();
     }
 
-    sys::print(b"  \xF0\x9F\xA7\xA0 view-engine - starting\n");
+    sys::print(b"  \xF0\x9F\xA7\xA0 presenter - starting\n");
 
-    // Read view-engine config from init channel.
+    // Read presenter config from init channel.
     // SAFETY: channel_shm_va(0) is the base of the init channel SHM region mapped by the kernel;
     // alignment guaranteed by page-boundary allocation.
     let init_ch =
@@ -1112,14 +1112,14 @@ pub extern "C" fn _start() -> ! {
     let mut msg = ipc::Message::new(0);
 
     if !init_ch.try_recv(&mut msg) || msg.msg_type != MSG_CORE_CONFIG {
-        sys::print(b"view-engine: no config message\n");
+        sys::print(b"presenter: no config message\n");
         sys::exit();
     }
 
     let Some(init_proto::CoreMessage::CoreConfig(config)) =
         init_proto::decode_core(msg.msg_type, &msg.payload)
     else {
-        sys::print(b"view-engine: bad config payload\n");
+        sys::print(b"presenter: bad config payload\n");
         sys::exit();
     };
     let fb_width = config.fb_width;
@@ -1162,11 +1162,11 @@ pub extern "C" fn _start() -> ! {
         s.input2_handle = sys::ChannelHandle(lc.input2_handle);
         sys::print(b"     layout config received\n");
     } else {
-        sys::print(b"view-engine: no layout config\n");
+        sys::print(b"presenter: no layout config\n");
     }
 
     if config.doc_va == 0 || config.scene_va == 0 {
-        sys::print(b"view-engine: bad config\n");
+        sys::print(b"presenter: bad config\n");
         sys::exit();
     }
 
@@ -1375,7 +1375,7 @@ pub extern "C" fn _start() -> ! {
             0,
         )
     };
-    // C↔A channel: C received endpoint A (index 0) from init.
+    // presenter↔document channel: presenter received endpoint A (index 0) from init.
     let docmodel_ch = unsafe {
         ipc::Channel::from_base(
             protocol::channel_shm_va(state().docmodel_handle.0 as usize),
@@ -1438,7 +1438,7 @@ pub extern "C" fn _start() -> ! {
 
     // ── Boot animation loop ─────────────────────────────────────────
     //
-    // Wait for document-model (A) to load the document and signal us.
+    // Wait for document service to load the document and signal us.
     // Animate spinner while waiting. A handles document queries, reads,
     // image decode, and initial undo snapshot.
     let boot_start = sys::counter();
@@ -1597,7 +1597,7 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
-    // Signal layout engine (B) for initial layout computation.
+    // Signal layout service for initial layout computation.
     {
         write_viewport_state(fb_width, fb_height, 0, page_width, page_height, page_padding);
         signal_layout_recompute(&layout_ch);
@@ -1716,7 +1716,7 @@ pub extern "C" fn _start() -> ! {
                 remaining_ms.saturating_mul(1_000_000)
             }
         };
-        // Snapshot coalescing is now managed by the document-model (A).
+        // Snapshot coalescing is now managed by the document service.
         let _ = match (timer_active, has_input2) {
             (true, true) => sys::wait(
                 &[
@@ -1840,7 +1840,7 @@ pub extern "C" fn _start() -> ! {
                 if action.context_switched {
                     context_switched = true;
                 }
-                // Forward pending delete to document-model (A).
+                // Forward pending delete to document service.
                 if let Some((start, end)) = action.pending_delete {
                     let del = protocol::edit::WriteDeleteRange { start, end };
                     // SAFETY: WriteDeleteRange is repr(C) and fits in 60-byte payload.
@@ -2079,7 +2079,7 @@ pub extern "C" fn _start() -> ! {
             }
         }
 
-        // Process document-model (A) notifications.
+        // Process document service notifications.
         // A signals core when the document buffer changes (edits, undo/redo).
         while docmodel_ch.try_recv(&mut msg) {
             match msg.msg_type {
@@ -2117,7 +2117,7 @@ pub extern "C" fn _start() -> ! {
 
         // ── Undo / redo ──────────────────────────────────────────────────
         //
-        // Forward undo/redo requests to document-model (A). A manages the
+        // Forward undo/redo requests to document service. A manages the
         // undo ring and communicates with the document service. When A
         // completes the operation, it sends MSG_DOC_CHANGED which we
         // process on the next iteration.
@@ -2346,7 +2346,7 @@ pub extern "C" fn _start() -> ! {
         // Use targeted updates for incremental changes instead of
         // rebuilding the entire scene graph every frame.
         //
-        // ── Signal layout engine (B) for recompute if needed ────────
+        // ── Signal layout service for recompute if needed ────────
         //
         // Write viewport state and signal B when document content or scroll
         // position changed. B will recompute layout and signal back with

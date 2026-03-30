@@ -2,8 +2,8 @@
 //!
 //! The kernel spawns only init. Init reads a device manifest from the kernel
 //! via channel shared memory, then spawns and orchestrates all other userspace
-//! processes: render services, input drivers, view-engine, document-model,
-//! layout-engine, text editor, etc.
+//! processes: render services, input drivers, presenter, document,
+//! layout, text editor, etc.
 //!
 //! This is the microkernel pattern: kernel provides mechanism, init provides
 //! policy. Matches Fuchsia's component_manager, seL4's root task, QNX's procnto.
@@ -12,9 +12,9 @@
 //!
 //! Init decomposes the system into three core processes:
 //!
-//!   **A — Document Model:** owns document buffer, manages undo, talks to doc service
-//!   **B — Layout Engine:** pure function from (doc + viewport) → positioned elements
-//!   **C — View Engine:** event loop, input routing, scene graph, animation
+//!   **Document:** owns document buffer, manages undo, talks to store service
+//!   **Layout:** pure function from (doc + viewport) → positioned elements
+//!   **Presenter:** event loop, input routing, scene graph, animation
 //!
 //! # Boot phases (named functions)
 //!
@@ -84,15 +84,17 @@ include!(env!("INIT_EMBEDDED_RS"));
 /// Channel shared memory base. The kernel's channel is at page 0.
 /// Channels created by init are at subsequent 2-page pairs.
 use protocol::init::{
-    CompositorConfig, CoreConfig, DocModelConfig, EditorConfig, FrameRateMsg, GpuConfig,
+    CompositorConfig, CoreConfig, DocConfig, EditorConfig, FrameRateMsg, GpuConfig,
     ImageConfig, RtcConfig, MSG_COMPOSITOR_CONFIG, MSG_CORE_CONFIG, MSG_DISPLAY_INFO,
-    MSG_DOC_MODEL_CONFIG, MSG_EDITOR_CONFIG, MSG_FRAME_RATE, MSG_FS_READ_REQUEST,
+    MSG_DOC_CONFIG, MSG_EDITOR_CONFIG, MSG_FRAME_RATE, MSG_FS_READ_REQUEST,
     MSG_FS_READ_RESPONSE, MSG_GPU_CONFIG, MSG_GPU_READY, MSG_IMAGE_CONFIG, MSG_RTC_CONFIG,
 };
-use protocol::layout::{
-    CoreLayoutConfig, LayoutEngineConfig, MSG_CORE_LAYOUT_CONFIG, MSG_LAYOUT_ENGINE_CONFIG,
+use protocol::{
+    device::{DeviceConfig, MSG_DEVICE_CONFIG},
+    layout::{
+        CoreLayoutConfig, LayoutEngineConfig, MSG_CORE_LAYOUT_CONFIG, MSG_LAYOUT_ENGINE_CONFIG,
+    },
 };
-use protocol::device::{DeviceConfig, MSG_DEVICE_CONFIG};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -136,7 +138,7 @@ const FONT_READ_TIMEOUT_NS: u64 = 5_000_000_000;
 /// uses `name` for logging when a child exits. Future restart logic can
 /// use the ELF reference and config to re-create a crashed service.
 struct ServiceDescriptor {
-    /// Human-readable name for logging (e.g. b"view-engine", b"document-model").
+    /// Human-readable name for logging (e.g. b"presenter", b"document").
     name: &'static [u8],
     /// Kernel process handle.
     process: sys::ProcessHandle,
@@ -462,7 +464,7 @@ fn parse_device_manifest(next_channel: &mut usize) -> DeviceManifest {
         };
 
         let elf: &[u8] = match dev_id {
-            VIRTIO_DEVICE_BLK => DOCUMENT_ELF,
+            VIRTIO_DEVICE_BLK => STORE_ELF,
             VIRTIO_DEVICE_CONSOLE => VIRTIO_CONSOLE_ELF,
             VIRTIO_DEVICE_GPU => {
                 if use_virgl {
@@ -640,11 +642,10 @@ fn load_fonts_native(
         });
 
     // Share document buffer with document service (read-write).
-    let fs_doc_va =
-        sys::memory_share(fs_proc, doc_pa, DOC_BUF_PAGES, false).unwrap_or_else(|_| {
-            sys::print(b"init: memory_share (doc buf) failed\n");
-            sys::exit();
-        });
+    let fs_doc_va = sys::memory_share(fs_proc, doc_pa, DOC_BUF_PAGES, false).unwrap_or_else(|_| {
+        sys::print(b"init: memory_share (doc buf) failed\n");
+        sys::exit();
+    });
 
     // Pre-create A ↔ document service channel. Endpoint B is sent to
     // the document service BEFORE it starts (handle_send requires unstarted
@@ -662,7 +663,7 @@ fn load_fonts_native(
 
     // Send config to document service via init channel.
     let fs_ch_obj = init_channel(fs_ch_idx);
-    let doc_config = protocol::document::DocConfig {
+    let doc_config = protocol::store::StoreConfig {
         mmio_pa: fs_pa,
         irq: fs_irq,
         _pad: 0,
@@ -676,7 +677,7 @@ fn load_fonts_native(
         _pad3: [0; 2],
     };
     let doc_msg =
-        unsafe { ipc::Message::from_payload(protocol::document::MSG_DOC_CONFIG, &doc_config) };
+        unsafe { ipc::Message::from_payload(protocol::store::MSG_STORE_CONFIG, &doc_config) };
     fs_ch_obj.send(&doc_msg);
 
     // Start document service.
@@ -684,7 +685,7 @@ fn load_fonts_native(
     start_process(fs_proc, b"document");
     sys::yield_now();
 
-    // Wait for MSG_DOC_READY.
+    // Wait for MSG_STORE_READY.
     sys::print(b"     waiting for document service ready\n");
     let mut ready = false;
     {
@@ -695,7 +696,7 @@ fn load_fonts_native(
             match sys::wait(&[fs_ch.0], BOOT_TIMEOUT_NS) {
                 Ok(_) => {
                     while fs_ch_obj.try_recv(&mut msg) {
-                        if msg.msg_type == protocol::document::MSG_DOC_READY {
+                        if msg.msg_type == protocol::store::MSG_STORE_READY {
                             ready = true;
                             break;
                         }
@@ -734,7 +735,7 @@ fn load_fonts_native(
     // Helper: send a query and wait for the result.
     let query_attr =
         |ch_obj: &ipc::Channel, ch_handle: sys::ChannelHandle, key: &[u8], value: &[u8]| -> u64 {
-            let mut q = protocol::document::DocQuery {
+            let mut q = protocol::store::StoreQuery {
                 query_type: 2, // attribute query
                 data_len: 0,
                 data: [0u8; 48],
@@ -746,8 +747,7 @@ fn load_fonts_native(
             q.data[key.len() + 1..key.len() + 1 + value.len()].copy_from_slice(value);
             q.data_len = total_len as u32;
 
-            let msg =
-                unsafe { ipc::Message::from_payload(protocol::document::MSG_DOC_QUERY, &q) };
+            let msg = unsafe { ipc::Message::from_payload(protocol::store::MSG_STORE_QUERY, &q) };
             ch_obj.send(&msg);
             let _ = sys::channel_signal(ch_handle);
 
@@ -758,10 +758,10 @@ fn load_fonts_native(
                 match sys::wait(&[ch_handle.0], FONT_READ_TIMEOUT_NS) {
                     Ok(_) => {
                         if ch_obj.try_recv(&mut resp)
-                            && resp.msg_type == protocol::document::MSG_DOC_QUERY_RESULT
+                            && resp.msg_type == protocol::store::MSG_STORE_QUERY_RESULT
                         {
-                            if let Some(protocol::document::Message::DocQueryResult(result)) =
-                                protocol::document::decode(resp.msg_type, &resp.payload)
+                            if let Some(protocol::store::Message::StoreQueryResult(result)) =
+                                protocol::store::decode(resp.msg_type, &resp.payload)
                             {
                                 if result.count > 0 {
                                     return result.file_ids[0];
@@ -788,13 +788,13 @@ fn load_fonts_native(
                     target_va: u64,
                     capacity: u32|
      -> u32 {
-        let r = protocol::document::DocRead {
+        let r = protocol::store::StoreRead {
             file_id,
             target_va,
             capacity,
             _pad: 0,
         };
-        let msg = unsafe { ipc::Message::from_payload(protocol::document::MSG_DOC_READ, &r) };
+        let msg = unsafe { ipc::Message::from_payload(protocol::store::MSG_STORE_READ, &r) };
         ch_obj.send(&msg);
         let _ = sys::channel_signal(ch_handle);
 
@@ -805,10 +805,10 @@ fn load_fonts_native(
             match sys::wait(&[ch_handle.0], FONT_READ_TIMEOUT_NS) {
                 Ok(_) => {
                     if ch_obj.try_recv(&mut resp)
-                        && resp.msg_type == protocol::document::MSG_DOC_READ_DONE
+                        && resp.msg_type == protocol::store::MSG_STORE_READ_DONE
                     {
-                        if let Some(protocol::document::Message::DocReadDone(done)) =
-                            protocol::document::decode(resp.msg_type, &resp.payload)
+                        if let Some(protocol::store::Message::StoreReadDone(done)) =
+                            protocol::store::decode(resp.msg_type, &resp.payload)
                         {
                             if done.status == 0 {
                                 return done.len;
@@ -934,7 +934,13 @@ fn load_fonts_native(
     sys::print(b"     loading test.png\n");
     let png_file_id = query_attr(&fs_ch_obj, fs_ch, b"name", b"test");
     let png_len = if png_file_id != 0 {
-        doc_read(&fs_ch_obj, fs_ch, png_file_id, doc_fs_va as u64, fs_capacity)
+        doc_read(
+            &fs_ch_obj,
+            fs_ch,
+            png_file_id,
+            doc_fs_va as u64,
+            fs_capacity,
+        )
     } else {
         0
     };
@@ -954,7 +960,7 @@ fn load_fonts_native(
     }
 
     // Signal end of boot-query phase.
-    let boot_done_msg = ipc::Message::new(protocol::document::MSG_DOC_BOOT_DONE);
+    let boot_done_msg = ipc::Message::new(protocol::store::MSG_STORE_BOOT_DONE);
     fs_ch_obj.send(&boot_done_msg);
     let _ = sys::channel_signal(fs_ch);
 
@@ -1074,9 +1080,7 @@ fn load_fonts_9p(
         loop {
             match sys::wait(&[ch_handle.0], FONT_READ_TIMEOUT_NS) {
                 Ok(_) => {
-                    if ch_obj.try_recv(&mut resp_msg)
-                        && resp_msg.msg_type == MSG_FS_READ_RESPONSE
-                    {
+                    if ch_obj.try_recv(&mut resp_msg) && resp_msg.msg_type == MSG_FS_READ_RESPONSE {
                         got_response = true;
                         break;
                     }
@@ -1283,13 +1287,13 @@ fn allocate_shared_regions() -> PipelineMemory {
     sys::print(b"     pointer state register: 4 KiB shared\n");
 
     // Layout results region (256 KiB = 16 pages = order 4).
-    // Shared with layout-engine (read-write) and core (read-only).
+    // Shared with layout (read-write) and core (read-only).
     let layout_results_order: u32 = 4; // 2^4 = 16 pages = 256 KiB
     let layout_results_pages: u64 = 1u64 << layout_results_order;
     let layout_results_size: usize = (layout_results_pages as usize) * PAGE_SIZE;
     let mut layout_results_pa: u64 = 0;
-    let layout_results_va =
-        sys::dma_alloc(layout_results_order, &mut layout_results_pa).unwrap_or_else(|_| {
+    let layout_results_va = sys::dma_alloc(layout_results_order, &mut layout_results_pa)
+        .unwrap_or_else(|_| {
             sys::print(b"init: dma_alloc (layout results) failed\n");
             sys::exit();
         });
@@ -1373,11 +1377,12 @@ fn configure_render_service(
         });
 
     let render_content_va = if content.content_pages > 0 {
-        sys::memory_share(gpu_proc, content.content_pa, content.content_pages, true)
-            .unwrap_or_else(|_| {
+        sys::memory_share(gpu_proc, content.content_pa, content.content_pages, true).unwrap_or_else(
+            |_| {
                 sys::print(b"init: memory_share (render content) failed\n");
                 sys::exit();
-            }) as u64
+            },
+        ) as u64
     } else {
         0u64
     };
@@ -1589,7 +1594,7 @@ fn configure_render_service(
     )
 }
 
-/// Spawn the view-engine (C) process and share all required memory regions.
+/// Spawn the presenter process and share all required memory regions.
 ///
 /// Sends CoreConfig, FrameRateMsg, and CoreLayoutConfig. Does NOT start the
 /// process — that happens in `start_all_processes()`.
@@ -1605,10 +1610,10 @@ fn spawn_view_engine(
     next_channel: &mut usize,
 ) -> (sys::ProcessHandle, usize) {
     let (core_proc, _core_ch_handle, core_channel_idx) =
-        match spawn_with_channel(VIEW_ENGINE_ELF, next_channel) {
+        match spawn_with_channel(PRESENTER_ELF, next_channel) {
             Some(v) => v,
             None => {
-                sys::print(b"init: failed to spawn view-engine\n");
+                sys::print(b"init: failed to spawn presenter\n");
                 sys::exit();
             }
         };
@@ -1620,13 +1625,11 @@ fn spawn_view_engine(
             sys::exit();
         });
     // Share scene graph with C (read-write).
-    let core_scene_va =
-        sys::memory_share(core_proc, mem.scene_pa, mem.scene_page_count, false).unwrap_or_else(
-            |_| {
-                sys::print(b"init: memory_share (core scene) failed\n");
-                sys::exit();
-            },
-        );
+    let core_scene_va = sys::memory_share(core_proc, mem.scene_pa, mem.scene_page_count, false)
+        .unwrap_or_else(|_| {
+            sys::print(b"init: memory_share (core scene) failed\n");
+            sys::exit();
+        });
     // Share Content Region with C (read-only).
     let core_content_va = if content.content_pages > 0 {
         sys::memory_share(core_proc, content.content_pa, content.content_pages, true)
@@ -1638,14 +1641,14 @@ fn spawn_view_engine(
         0u64
     };
     // Share pointer state register with C (read-only).
-    let core_input_state_va =
-        sys::memory_share(core_proc, mem.input_state_pa, 1, true).unwrap_or_else(|_| {
+    let core_input_state_va = sys::memory_share(core_proc, mem.input_state_pa, 1, true)
+        .unwrap_or_else(|_| {
             sys::print(b"init: memory_share (core input state) failed\n");
             sys::exit();
         });
     // Share cursor state page with C (read-write — C writes shape data).
-    let core_cursor_state_va =
-        sys::memory_share(core_proc, mem.cursor_state_pa, 1, false).unwrap_or_else(|_| {
+    let core_cursor_state_va = sys::memory_share(core_proc, mem.cursor_state_pa, 1, false)
+        .unwrap_or_else(|_| {
             sys::print(b"init: memory_share (core cursor state) failed\n");
             sys::exit();
         });
@@ -1661,8 +1664,8 @@ fn spawn_view_engine(
         sys::exit();
     });
     // Share viewport state with C (read-write — C writes viewport params).
-    let core_viewport_state_va =
-        sys::memory_share(core_proc, mem.viewport_state_pa, 1, false).unwrap_or_else(|_| {
+    let core_viewport_state_va = sys::memory_share(core_proc, mem.viewport_state_pa, 1, false)
+        .unwrap_or_else(|_| {
             sys::print(b"init: memory_share (viewport state to C) failed\n");
             sys::exit();
         });
@@ -1697,7 +1700,7 @@ fn spawn_view_engine(
 
     // Send layout config with handle assignments.
     // Handle order is determined by handle_send calls in wire_service_channels():
-    //   1=input, 2=compositor, 3=editor, 4=document-model, 5=layout-engine, 6+=additional inputs
+    //   1=input, 2=compositor, 3=editor, 4=document, 5=layout, 6+=additional inputs
     let core_layout_config = CoreLayoutConfig {
         layout_results_va: core_layout_results_va as u64,
         layout_results_capacity: mem.layout_results_size as u32,
@@ -1711,8 +1714,7 @@ fn spawn_view_engine(
         _pad: [0; 2],
     };
     // SAFETY: CoreLayoutConfig fits within 60-byte payload.
-    let cl_msg =
-        unsafe { ipc::Message::from_payload(MSG_CORE_LAYOUT_CONFIG, &core_layout_config) };
+    let cl_msg = unsafe { ipc::Message::from_payload(MSG_CORE_LAYOUT_CONFIG, &core_layout_config) };
     core_ch.send(&cl_msg);
 
     // Send RTC config to core.
@@ -1729,7 +1731,7 @@ fn spawn_view_engine(
     (core_proc, core_channel_idx)
 }
 
-/// Spawn the document-model (A) process and share required memory.
+/// Spawn the document process and share required memory.
 ///
 /// A owns the document buffer (read-write) and manages decoded images
 /// in the Content Region. Config includes handle assignments for
@@ -1741,38 +1743,43 @@ fn spawn_document_model(
     doc_pa: u64,
     next_channel: &mut usize,
 ) -> (sys::ProcessHandle, usize) {
-    sys::print(b"     spawning document-model\n");
+    sys::print(b"     spawning document\n");
     let (docmodel_proc, _docmodel_ch_handle, docmodel_ch_idx) =
-        match spawn_with_channel(DOCUMENT_MODEL_ELF, next_channel) {
+        match spawn_with_channel(DOCUMENT_ELF, next_channel) {
             Some(v) => v,
             None => {
-                sys::print(b"init: failed to spawn document-model\n");
+                sys::print(b"init: failed to spawn document\n");
                 sys::exit();
             }
         };
 
     // Share document buffer with A (read-write — A is sole content writer).
-    let docmodel_doc_va =
-        sys::memory_share(docmodel_proc, doc_pa, DOC_BUF_PAGES, false).unwrap_or_else(|_| {
+    let docmodel_doc_va = sys::memory_share(docmodel_proc, doc_pa, DOC_BUF_PAGES, false)
+        .unwrap_or_else(|_| {
             sys::print(b"init: memory_share (docmodel doc) failed\n");
             sys::exit();
         });
     // Share Content Region with A (read-write — A manages decoded images).
     let docmodel_content_va = if content.content_pages > 0 {
-        sys::memory_share(docmodel_proc, content.content_pa, content.content_pages, false)
-            .unwrap_or_else(|_| {
-                sys::print(b"init: memory_share (docmodel content) failed\n");
-                sys::exit();
-            }) as u64
+        sys::memory_share(
+            docmodel_proc,
+            content.content_pa,
+            content.content_pages,
+            false,
+        )
+        .unwrap_or_else(|_| {
+            sys::print(b"init: memory_share (docmodel content) failed\n");
+            sys::exit();
+        }) as u64
     } else {
         0u64
     };
 
-    // Send document-model config with handle assignments.
+    // Send document config with handle assignments.
     // Handle order determined by handle_send calls in wire_service_channels():
     //   1=editor, 2=decoder, 3=document-service, 4=core
     let docmodel_ch = init_channel(docmodel_ch_idx);
-    let docmodel_config = DocModelConfig {
+    let docmodel_config = DocConfig {
         doc_va: docmodel_doc_va as u64,
         doc_capacity: DOC_BUF_CAPACITY,
         content_va: docmodel_content_va,
@@ -1784,18 +1791,13 @@ fn spawn_document_model(
         fs_handle: 3,
         core_handle: 4,
     };
-    let dm_msg = unsafe {
-        ipc::Message::from_payload(
-            MSG_DOC_MODEL_CONFIG,
-            &docmodel_config,
-        )
-    };
+    let dm_msg = unsafe { ipc::Message::from_payload(MSG_DOC_CONFIG, &docmodel_config) };
     docmodel_ch.send(&dm_msg);
 
     (docmodel_proc, docmodel_ch_idx)
 }
 
-/// Spawn the layout-engine (B) process and share required memory.
+/// Spawn the layout process and share required memory.
 ///
 /// B reads the document buffer (RO), Content Region (RO, fonts),
 /// writes layout results (RW), and reads viewport state (RO).
@@ -1807,12 +1809,12 @@ fn spawn_layout_engine(
     doc_pa: u64,
     next_channel: &mut usize,
 ) -> (sys::ProcessHandle, usize) {
-    sys::print(b"     spawning layout-engine\n");
+    sys::print(b"     spawning layout\n");
     let (layout_proc, _layout_ch_handle, layout_ch_idx) =
-        match spawn_with_channel(LAYOUT_ENGINE_ELF, next_channel) {
+        match spawn_with_channel(LAYOUT_ELF, next_channel) {
             Some(v) => v,
             None => {
-                sys::print(b"init: failed to spawn layout-engine\n");
+                sys::print(b"init: failed to spawn layout\n");
                 sys::exit();
             }
         };
@@ -1845,8 +1847,8 @@ fn spawn_layout_engine(
         sys::exit();
     });
     // Share viewport state with B (read-only — C writes, B reads).
-    let layout_viewport_va =
-        sys::memory_share(layout_proc, mem.viewport_state_pa, 1, true).unwrap_or_else(|_| {
+    let layout_viewport_va = sys::memory_share(layout_proc, mem.viewport_state_pa, 1, true)
+        .unwrap_or_else(|_| {
             sys::print(b"init: memory_share (viewport state to B) failed\n");
             sys::exit();
         });
@@ -1869,12 +1871,12 @@ fn spawn_layout_engine(
         // SAFETY: LayoutEngineConfig fits within 60-byte payload.
         unsafe { ipc::Message::from_payload(MSG_LAYOUT_ENGINE_CONFIG, &layout_config) };
     layout_ch.send(&layout_msg);
-    sys::print(b"     layout-engine config sent\n");
+    sys::print(b"     layout config sent\n");
 
     (layout_proc, layout_ch_idx)
 }
 
-/// Wire the first input device channel to the view-engine (C) and configure
+/// Wire the first input device channel to the presenter and configure
 /// the input driver. Additional input devices are wired in `wire_additional_inputs()`.
 fn spawn_input_drivers(
     input_devices: &[(sys::ProcessHandle, usize, u64, u32)],
@@ -1921,8 +1923,8 @@ fn spawn_input_drivers(
     input_ch.send(&msg);
 
     // Share pointer state register with input driver (read-write).
-    let driver_input_state_va =
-        sys::memory_share(input_proc_handle, mem.input_state_pa, 1, false).unwrap_or_else(|_| {
+    let driver_input_state_va = sys::memory_share(input_proc_handle, mem.input_state_pa, 1, false)
+        .unwrap_or_else(|_| {
             sys::print(b"init: memory_share (input state to driver) failed\n");
             sys::exit();
         });
@@ -2024,8 +2026,8 @@ fn wire_service_channels(
         sys::exit();
     });
 
-    // Editor ↔ A channel (editor sends write operations to document-model).
-    sys::print(b"     creating editor\xE2\x86\x94document-model channel\n");
+    // Editor ↔ A channel (editor sends write operations to document).
+    sys::print(b"     creating editor\xE2\x86\x94document channel\n");
 
     let (ea_a, ea_b) = sys::channel_create().unwrap_or_else(|_| {
         sys::print(b"init: channel_create (editor-docmodel) failed\n");
@@ -2059,16 +2061,12 @@ fn wire_service_channels(
                     sys::print(b"init: memory_share (decoder file store) failed\n");
                     sys::exit();
                 });
-                let dec_content_va = sys::memory_share(
-                    dec_proc,
-                    content.content_pa,
-                    content.content_pages,
-                    false,
-                )
-                .unwrap_or_else(|_| {
-                    sys::print(b"init: memory_share (decoder content) failed\n");
-                    sys::exit();
-                });
+                let dec_content_va =
+                    sys::memory_share(dec_proc, content.content_pa, content.content_pages, false)
+                        .unwrap_or_else(|_| {
+                            sys::print(b"init: memory_share (decoder content) failed\n");
+                            sys::exit();
+                        });
 
                 // Send DecoderConfig on the init↔decoder channel.
                 let dec_ch = init_channel(dec_ch_idx);
@@ -2134,7 +2132,7 @@ fn wire_service_channels(
                 });
 
             let fs_ch_obj = init_channel(fs_ch_idx);
-            let doc_config = protocol::document::DocConfig {
+            let doc_config = protocol::store::StoreConfig {
                 mmio_pa: fs_pa,
                 irq: fs_irq,
                 _pad: 0,
@@ -2147,9 +2145,8 @@ fn wire_service_channels(
                 core_handle: 1,
                 _pad3: [0; 2],
             };
-            let doc_msg = unsafe {
-                ipc::Message::from_payload(protocol::document::MSG_DOC_CONFIG, &doc_config)
-            };
+            let doc_msg =
+                unsafe { ipc::Message::from_payload(protocol::store::MSG_STORE_CONFIG, &doc_config) };
             fs_ch_obj.send(&doc_msg);
 
             // Create A ↔ document service channel.
@@ -2187,9 +2184,9 @@ fn wire_service_channels(
         sys::exit();
     });
 
-    // B ↔ C channel (layout-engine ↔ view-engine).
+    // B ↔ C channel (layout ↔ presenter).
     // Must be sent before additional input devices.
-    sys::print(b"     creating layout-engine\xE2\x86\x94core channel\n");
+    sys::print(b"     creating layout\xE2\x86\x94presenter channel\n");
     let (bc_a, bc_b) = sys::channel_create().unwrap_or_else(|_| {
         sys::print(b"init: channel_create (layout-core) failed\n");
         sys::exit();
@@ -2206,7 +2203,7 @@ fn wire_service_channels(
     });
 
     // Additional input device channels → C (handle 6+).
-    // Must come AFTER B↔C channel so that handle 5 = layout-engine.
+    // Must come AFTER B↔C channel so that handle 5 = layout.
     for i in 1..input_devices.len() {
         let (input_proc_handle, input_ch_idx, input_pa, input_irq) = input_devices[i];
 
@@ -2261,10 +2258,10 @@ fn wire_service_channels(
 /// Start all processes in dependency order.
 ///
 /// Order: decoder → document service → input drivers → editor →
-///        document-model → layout-engine → view-engine.
-/// Document-model must start before view-engine (A loads document, C waits).
-/// Decoder must start before A (A sends decode request at boot).
-/// Document service must start before A (A queries documents at boot).
+///        document → layout → presenter.
+/// Document must start before presenter (document loads content, presenter waits).
+/// Decoder must start before document (document sends decode request at boot).
+/// Store service must start before document (document queries store at boot).
 fn start_all_processes(
     name: &[u8],
     decoder_proc: Option<sys::ProcessHandle>,
@@ -2304,21 +2301,21 @@ fn start_all_processes(
 
     sys::yield_now();
 
-    sys::print(b"     starting document-model\n");
+    sys::print(b"     starting document\n");
 
-    start_process(docmodel_proc, b"document-model");
-
-    sys::yield_now();
-
-    sys::print(b"     starting layout-engine\n");
-
-    start_process(layout_proc, b"layout-engine");
+    start_process(docmodel_proc, b"document");
 
     sys::yield_now();
 
-    sys::print(b"     starting view-engine\n");
+    sys::print(b"     starting layout\n");
 
-    start_process(core_proc, b"view-engine");
+    start_process(layout_proc, b"layout");
+
+    sys::yield_now();
+
+    sys::print(b"     starting presenter\n");
+
+    start_process(core_proc, b"presenter");
 
     sys::yield_now();
 
@@ -2380,7 +2377,7 @@ fn spawn_render_pipeline(
         next_channel,
     );
 
-    // Step 3: Spawn view-engine (C).
+    // Step 3: Spawn presenter.
     let (core_proc, _core_ch_idx) = spawn_view_engine(
         &mem,
         &content,
@@ -2391,13 +2388,11 @@ fn spawn_render_pipeline(
         next_channel,
     );
 
-    // Step 4: Spawn document-model (A).
-    let (docmodel_proc, _docmodel_ch_idx) =
-        spawn_document_model(&content, doc_pa, next_channel);
+    // Step 4: Spawn document.
+    let (docmodel_proc, _docmodel_ch_idx) = spawn_document_model(&content, doc_pa, next_channel);
 
-    // Step 5: Spawn layout-engine (B).
-    let (layout_proc, _layout_ch_idx) =
-        spawn_layout_engine(&mem, &content, doc_pa, next_channel);
+    // Step 5: Spawn layout.
+    let (layout_proc, _layout_ch_idx) = spawn_layout_engine(&mem, &content, doc_pa, next_channel);
 
     // Step 6: Wire first input device to C.
     spawn_input_drivers(input_devices, core_proc, &mem, next_channel);
@@ -2583,9 +2578,9 @@ pub extern "C" fn _start() -> ! {
         };
         service_count += 1;
 
-        // View-engine (C).
+        // Presenter.
         services[service_count] = ServiceDescriptor {
-            name: b"view-engine",
+            name: b"presenter",
             process: core_proc,
             active: true,
         };

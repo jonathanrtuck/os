@@ -1,8 +1,8 @@
-//! Layout engine (B) protocol — shared memory format and IPC messages.
+//! Layout protocol — shared memory format and IPC messages.
 //!
 //! Defines the shared memory layouts for:
-//! - Layout results (B writes, C reads): line info, visible runs, glyph data
-//! - Viewport state register (C writes, B reads): scroll, viewport, page geometry
+//! - Layout results (layout writes, presenter reads): line info, visible runs, glyph data
+//! - Viewport state register (presenter writes, layout reads): scroll, viewport, page geometry
 //!
 //! IPC signals (no payload, signal-only):
 //! - `MSG_LAYOUT_RECOMPUTE` (C → B): viewport or document changed
@@ -31,7 +31,7 @@ pub struct LayoutEngineConfig {
     pub content_size: u32,
     /// Layout results region capacity in bytes.
     pub layout_results_capacity: u32,
-    /// Kernel channel handle for the core (view-engine) channel.
+    /// Kernel channel handle for the core (presenter) channel.
     pub core_handle: u8,
     pub _pad: [u8; 3],
 }
@@ -58,7 +58,7 @@ pub struct CoreLayoutConfig {
     pub compositor_handle: u8,
     /// Kernel channel handle for the editor channel.
     pub editor_handle: u8,
-    /// Kernel channel handle for the document-model channel.
+    /// Kernel channel handle for the document channel.
     pub docmodel_handle: u8,
     /// Kernel channel handle for the layout engine channel.
     pub layout_handle: u8,
@@ -184,8 +184,7 @@ pub const fn visible_run_offset(line_count: u32) -> usize {
 /// Compute the byte offset of the glyph data section.
 #[inline]
 pub const fn glyph_data_offset(line_count: u32, run_count: u32) -> usize {
-    visible_run_offset(line_count)
-        + (run_count as usize) * core::mem::size_of::<VisibleRun>()
+    visible_run_offset(line_count) + (run_count as usize) * core::mem::size_of::<VisibleRun>()
 }
 
 /// Compute the byte offset of the style registry (after glyph data).

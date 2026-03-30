@@ -9,12 +9,12 @@
 //!
 //! - `init`     — init → any service (config messages)
 //! - `device`   — init → drivers (device config)
-//! - `input`    — input driver → view-engine
-//! - `edit`     — editor ↔ document-model, editor ↔ view-engine
-//! - `layout`   — view-engine ↔ layout-engine
-//! - `view`     — view-engine → compositor (cursor state, A↔C notifications)
-//! - `document` — document-model ↔ document service
-//! - `decode`   — document-model ↔ decoders
+//! - `input`    — input driver → presenter
+//! - `edit`     — editor ↔ document, editor ↔ presenter
+//! - `layout`   — presenter ↔ layout
+//! - `view`     — presenter → compositor (cursor state, A↔C notifications)
+//! - `store`    — document ↔ store service
+//! - `decode`   — document ↔ decoders
 //! - `content`  — shared memory layout (Content Region)
 //! - `metal`    — compositor → hypervisor (includes legacy virgl submodule)
 //!
@@ -155,7 +155,7 @@ pub mod device {
     }
 }
 
-// ── input: input driver -> view-engine ──────────────────────────────
+// ── input: input driver -> presenter ────────────────────────────────
 
 // ── (remaining inline modules: input, edit; external modules below) ─
 
@@ -265,7 +265,7 @@ pub mod input {
     }
 }
 
-// ── edit: editor <-> document-model, editor <-> view-engine ─────────
+// ── edit: editor <-> document, editor <-> presenter ─────────────────
 
 pub mod edit {
     pub const MSG_WRITE_INSERT: u32 = 30;
@@ -394,11 +394,11 @@ pub mod metal;
 /// Content Region shared memory layout (font data, decoded images).
 pub mod content;
 
-/// Document service protocol (A ↔ document service, legacy filesystem).
-pub mod document;
+/// Store service protocol (document ↔ store service, legacy filesystem).
+pub mod store;
 
 /// Decode protocol for content decoder services (PNG, JPEG, etc.).
 pub mod decode;
 
-/// Layout engine (B) protocol — shared memory format and IPC signals.
+/// Layout protocol — shared memory format and IPC signals.
 pub mod layout;

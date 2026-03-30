@@ -1,39 +1,38 @@
 # document
 
-Document service: metadata-aware document store over virtio-blk. Replaces the filesystem service. Owns the block device directly (MMIO mapping, DMA I/O) and layers the COW filesystem (`fs` library) and document store (`store` library) on top. This service is a thin IPC translator -- all document/metadata logic lives in the `store` library.
+The document process owns the document buffer. It is the sole writer to
+the buffer and applies all edits received from editors via IPC. Pure data
+service -- no knowledge of layout, display, input, or animation.
+
+## Responsibilities
+
+- Owns document buffer (sole writer). Editors and other processes read via RO shared memory.
+- Applies edits (insert, delete, style) from editors via IPC.
+- Manages undo ring: COW snapshots via store service at operation boundaries.
+- Communicates with store service (persistence, queries, snapshots).
+- Communicates with decoder services (decode requests/responses).
+- Notifies presenter on document changes and image decode completion.
 
 ## Key Files
 
-- `main.rs` — Entry point, VirtioBlockDevice (BlockDevice trait impl), boot-query phase, main IPC loop
+- `main.rs` -- entry point, IPC loop, edit application, undo/redo, decoder communication
 
 ## IPC Protocol
 
-**Receives (from core, handle 1):**
+### Receives
 
-- `MSG_DOC_COMMIT` — Read doc buffer from shared memory, write to file, commit
-- `MSG_DOC_QUERY` — Run store query (media type, type, attribute), return matching FileIds
-- `MSG_DOC_READ` — Read file content into shared memory (doc buffer or Content Region)
-- `MSG_DOC_SNAPSHOT` — Create COW snapshot of specified files
-- `MSG_DOC_RESTORE` — Restore a previous snapshot
-- `MSG_DOC_CREATE` — Create a new document with a media type
-- `MSG_DOC_DELETE_SNAPSHOT` — Fire-and-forget snapshot cleanup
+- `MSG_DOC_CONFIG` -- Init config (doc buffer VA, Content Region, handles)
+- `MSG_WRITE_INSERT`, `MSG_WRITE_DELETE`, `MSG_WRITE_DELETE_RANGE` -- Edits from editor
+- `MSG_STYLE_APPLY`, `MSG_STYLE_SET_CURRENT` -- Style changes from editor
+- `MSG_UNDO_REQUEST`, `MSG_REDO_REQUEST` -- Undo/redo from presenter
 
-**Receives (from init, handle 0, boot phase only):**
+### Sends
 
-- `MSG_DOC_CONFIG` — MMIO address, IRQ, doc buffer VA, Content Region VA
-- `MSG_DOC_QUERY` / `MSG_DOC_READ` — Font loading queries during boot
-- `MSG_DOC_BOOT_DONE` — End of boot-query phase
-
-**Sends:**
-
-- `MSG_DOC_READY` — Ready signal to init
-- `MSG_DOC_QUERY_RESULT`, `MSG_DOC_READ_DONE`, `MSG_DOC_SNAPSHOT_RESULT`, `MSG_DOC_RESTORE_RESULT`, `MSG_DOC_CREATE_RESULT` — Replies to core
+- `MSG_DOC_LOADED` -- Initial document loaded (to presenter)
+- `MSG_DOC_CHANGED` -- Buffer changed after edit or undo/redo (to presenter)
+- `MSG_IMAGE_DECODED` -- Image decoded and registered in Content Region (to presenter)
+- `MSG_STORE_COMMIT`, `MSG_STORE_SNAPSHOT`, `MSG_STORE_RESTORE` -- Store service ops
 
 ## Dependencies
 
-- `sys` — Syscalls, DMA allocation, counter/timer
-- `ipc` — Channel communication
-- `protocol` — Document wire format (`protocol/document.rs`)
-- `virtio` — Virtio device/virtqueue management
-- `fs` — COW filesystem (BlockDevice trait, Filesystem, Files)
-- `store` — Document store metadata layer (catalog, queries)
+Libraries: sys, ipc, protocol, piecetable, content (allocator)

@@ -4,9 +4,9 @@
 
 extern crate alloc;
 
-#[path = "../../services/view-engine/fallback.rs"]
+#[path = "../../services/presenter/fallback.rs"]
 mod fallback;
-#[path = "../../services/view-engine/typography.rs"]
+#[path = "../../services/presenter/typography.rs"]
 mod typography;
 
 use fallback::ContentType;

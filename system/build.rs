@@ -42,14 +42,14 @@ struct CargoLibOutput {
 
 /// ELFs that init embeds (must be a subset of PROGRAMS names).
 const INIT_EMBEDDED: &[(&str, &str)] = &[
+    ("store", "STORE_ELF"),
     ("document", "DOCUMENT_ELF"),
-    ("document-model", "DOCUMENT_MODEL_ELF"),
-    ("layout-engine", "LAYOUT_ENGINE_ELF"),
+    ("layout", "LAYOUT_ELF"),
     ("virtio-blk", "VIRTIO_BLK_ELF"),
     ("virtio-console", "VIRTIO_CONSOLE_ELF"),
     ("virtio-input", "VIRTIO_INPUT_ELF"),
     ("virtio-9p", "VIRTIO_9P_ELF"),
-    ("view-engine", "VIEW_ENGINE_ELF"),
+    ("presenter", "PRESENTER_ELF"),
     ("cpu-render", "CPU_RENDER_ELF"),
     ("virgil-render", "VIRGIL_RENDER_ELF"),
     ("metal-render", "METAL_RENDER_ELF"),
@@ -64,7 +64,7 @@ const INIT_EMBEDDED: &[(&str, &str)] = &[
 /// ORDER MATTERS: fuzz-helper must be before fuzz (fuzz embeds it).
 const PROGRAMS: &[(&str, &str, bool, bool)] = &[
     ("echo", "user/echo", false, false),
-    ("document", "services/document", true, false),
+    ("store", "services/store", true, false),
     ("virtio-blk", "services/drivers/virtio-blk", true, false),
     (
         "virtio-console",
@@ -74,19 +74,9 @@ const PROGRAMS: &[(&str, &str, bool, bool)] = &[
     ),
     ("virtio-input", "services/drivers/virtio-input", true, false),
     ("virtio-9p", "services/drivers/virtio-9p", true, false),
-    (
-        "document-model",
-        "services/document-model",
-        false,
-        false,
-    ),
-    (
-        "layout-engine",
-        "services/layout-engine",
-        false,
-        false,
-    ),
-    ("view-engine", "services/view-engine", false, true),
+    ("document", "services/document", false, false),
+    ("layout", "services/layout", false, false),
+    ("presenter", "services/presenter", false, true),
     ("cpu-render", "services/drivers/cpu-render", true, true),
     (
         "virgil-render",
@@ -165,13 +155,7 @@ fn main() {
     let piecetable_src = manifest_dir.join("libraries/piecetable/lib.rs");
     let piecetable_rlib = out_dir.join("libpiecetable.rlib");
 
-    rustc_rlib(
-        &rustc,
-        &piecetable_src,
-        &piecetable_rlib,
-        "piecetable",
-        &[],
-    );
+    rustc_rlib(&rustc, &piecetable_src, &piecetable_rlib, "piecetable", &[]);
 
     let virtio_src = manifest_dir.join("libraries/virtio/lib.rs");
     let virtio_rlib = out_dir.join("libvirtio.rlib");
@@ -193,10 +177,7 @@ fn main() {
     let icons_svg_dir = manifest_dir.join("resources/icons");
     let icons_data_rs = manifest_dir.join("libraries/icons/data.rs");
     build_icons::generate_icon_data(&icons_svg_dir, &icons_data_rs);
-    println!(
-        "cargo:rerun-if-changed={}",
-        icons_svg_dir.display()
-    );
+    println!("cargo:rerun-if-changed={}", icons_svg_dir.display());
 
     let icons_src = manifest_dir.join("libraries/icons/lib.rs");
     let icons_rlib = out_dir.join("libicons.rlib");
@@ -281,26 +262,26 @@ fn main() {
         if name == "cpu-render"
             || name == "virgil-render"
             || name == "metal-render"
-            || name == "view-engine"
+            || name == "presenter"
         {
             externs.push(("render", render_rlib.clone()));
         }
-        if name == "view-engine" {
+        if name == "presenter" {
             externs.push(("animation", animation_rlib.clone()));
             externs.push(("layout", layout_rlib.clone()));
             externs.push(("piecetable", piecetable_rlib.clone()));
             externs.push(("icons", icons_rlib.clone()));
         }
-        if name == "layout-engine" {
+        if name == "layout" {
             externs.push(("layout", layout_rlib.clone()));
             externs.push(("piecetable", piecetable_rlib.clone()));
             externs.push(("fonts", fonts_output.rlib.clone()));
             externs.push(("scene", scene_rlib.clone()));
         }
-        if name == "rich-editor" || name == "document-model" {
+        if name == "rich-editor" || name == "document" {
             externs.push(("piecetable", piecetable_rlib.clone()));
         }
-        if name == "document" {
+        if name == "store" {
             externs.push(("fs", fs_rlib.clone()));
             externs.push(("store", store_rlib.clone()));
         }
@@ -325,7 +306,7 @@ fn main() {
         }
 
         // Add fonts library search paths for programs that need drawing or fonts.
-        let search_paths: Vec<&Path> = if needs_drawing || name == "layout-engine" {
+        let search_paths: Vec<&Path> = if needs_drawing || name == "layout" {
             vec![&fonts_output.deps_dir, &fonts_host_deps]
         } else {
             vec![]

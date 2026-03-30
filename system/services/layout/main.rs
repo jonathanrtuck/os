@@ -1,4 +1,4 @@
-//! Layout Engine (B) — computes text layout from document content.
+//! Layout service — computes text layout from document content.
 //!
 //! Pure layout function: reads the document buffer (RO shared memory),
 //! reads font data from the Content Region (RO), receives viewport
@@ -10,7 +10,7 @@
 //!
 //! # IPC channels (handle indices)
 //!
-//! Handle 1: B ↔ C (receives MSG_LAYOUT_RECOMPUTE, sends MSG_LAYOUT_READY)
+//! Handle 1: layout ↔ presenter (receives MSG_LAYOUT_RECOMPUTE, sends MSG_LAYOUT_READY)
 
 #![no_std]
 #![no_main]
@@ -1148,7 +1148,7 @@ fn write_layout_results(
     let total_needed = style_off + style_registry.len();
 
     if total_needed > capacity {
-        sys::print(b"layout-engine: results exceed capacity\n");
+        sys::print(b"layout: results exceed capacity\n");
         return;
     }
 
@@ -1296,7 +1296,7 @@ fn write_rich_layout_results(
     let total_needed = style_off + style_registry.len();
 
     if total_needed > capacity {
-        sys::print(b"layout-engine: rich results exceed capacity\n");
+        sys::print(b"layout: rich results exceed capacity\n");
         return;
     }
 
@@ -1523,14 +1523,14 @@ fn discover_fonts(content_va: usize, content_size: u32) {
         s.fonts.serif_italic_caret_skew = fonts::rasterize::caret_skew(data);
     }
 
-    sys::print(b"  layout-engine: fonts discovered\n");
+    sys::print(b"  layout: fonts discovered\n");
 }
 
 // ── Entry point ─────────────────────────────────────────────────────
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    sys::print(b"  \xF0\x9F\x93\x90 layout-engine - starting\n");
+    sys::print(b"  \xF0\x9F\x93\x90 layout - starting\n");
 
     // Read config from init channel.
     let init_ch =
@@ -1539,14 +1539,14 @@ pub extern "C" fn _start() -> ! {
     let mut msg = ipc::Message::new(0);
 
     if !init_ch.try_recv(&mut msg) || msg.msg_type != MSG_LAYOUT_ENGINE_CONFIG {
-        sys::print(b"layout-engine: no config message\n");
+        sys::print(b"layout: no config message\n");
         sys::exit();
     }
 
     let Some(layout::Message::LayoutEngineConfig(config)) =
         layout::decode(msg.msg_type, &msg.payload)
     else {
-        sys::print(b"layout-engine: bad config payload\n");
+        sys::print(b"layout: bad config payload\n");
         sys::exit();
     };
 
@@ -1563,7 +1563,7 @@ pub extern "C" fn _start() -> ! {
     // Discover fonts from Content Region.
     discover_fonts(config.content_va as usize, config.content_size);
 
-    sys::print(b"  layout-engine: ready, waiting for recompute signals\n");
+    sys::print(b"  layout: ready, waiting for recompute signals\n");
 
     // Main loop: wait for MSG_LAYOUT_RECOMPUTE, compute layout, signal back.
     let core_handle = state().core_handle;

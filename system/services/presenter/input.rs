@@ -22,7 +22,7 @@ pub(crate) struct KeyAction {
     pub(crate) selection_changed: bool,
     pub(crate) context_switched: bool,
     pub(crate) consumed: bool,
-    /// Pending delete range to forward to document-model (A).
+    /// Pending delete range to forward to document service.
     /// Set when a selection-delete or word-delete needs A to apply.
     pub(crate) pending_delete: Option<(u32, u32)>,
 }

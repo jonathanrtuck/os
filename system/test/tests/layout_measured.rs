@@ -210,7 +210,7 @@ fn multiple_spaces_between_words() {
     assert_eq!((lines[1].byte_start, lines[1].byte_end), (5, 7));
 }
 
-// ── Regression: per-line height (layout-engine bug) ────────────────────
+// ── Regression: per-line height (layout bug) ────────────────────
 //
 // Bug: The layout engine stored a uniform `line_height_pt` (the default
 // monospace line height, 25pt) in every `LineInfo`, instead of the actual
@@ -223,7 +223,7 @@ fn multiple_spaces_between_words() {
 // function, which depends on font metrics from the Content Region.
 //
 // Direct unit testing is not feasible because:
-// - `compute_rich_line_height` is private to the layout-engine service
+// - `compute_rich_line_height` is private to the layout service
 //   (a #![no_std] aarch64 binary, not a host-testable library)
 // - It requires `FontState` with real font metric data from the Content
 //   Region
@@ -237,7 +237,7 @@ fn multiple_spaces_between_words() {
 //    font sizes (e.g., body 14pt + heading 24pt) and asserts that lines
 //    have different heights in the layout results shared memory.
 //
-// The fix is in services/layout-engine/main.rs: `height: max_line_h as u32`
+// The fix is in services/layout/main.rs: `height: max_line_h as u32`
 // on the LayoutRun for the rich text path (was previously `height: line_height`
 // which used the uniform default).
 

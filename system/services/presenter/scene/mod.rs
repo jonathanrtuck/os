@@ -1,7 +1,7 @@
 //! Scene graph building and view-state utilities.
 //!
 //! Provides the scene graph construction functions that assemble the text
-//! editor UI. Layout computation is handled by the layout engine (B) —
+//! editor UI. Layout computation is handled by the layout service —
 //! this module reads B's pre-computed layout results from shared memory.
 //! All scene mutation flows through free functions that accept a
 //! `SceneWriter` — `SceneState` delegates here.
@@ -743,7 +743,7 @@ pub(crate) fn allocate_line_nodes(
     prev_line_node
 }
 
-/// Read pre-shaped glyph data from layout engine (B) results and push
+/// Read pre-shaped glyph data from layout service results and push
 /// to the scene writer. Returns glyph refs for line-node construction.
 pub(crate) fn push_layout_results_to_scene(
     w: &mut scene::SceneWriter<'_>,

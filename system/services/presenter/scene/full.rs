@@ -3,7 +3,7 @@
 //! Contains `build_full_scene` (initial scene from scratch) and
 //! `build_document_content` (compaction rebuild of document content
 //! within an existing scene). Layout computation is handled by the
-//! layout engine (B) — this module reads pre-computed results.
+//! layout service — this module reads pre-computed results.
 
 /// Font metrics for a run: ascender and descender in points at the run's font size,
 /// plus cursor-relevant style properties from the style registry.
@@ -125,7 +125,7 @@ pub fn build_full_scene(
     let clock_glyphs = shape_chrome_text(cfg, clock_text);
     let clock_glyph_ref = w.push_shaped_glyphs(&clock_glyphs);
 
-    // Document text glyphs — read pre-shaped from layout engine (B).
+    // Document text glyphs — read pre-shaped from layout service.
     let line_glyph_refs = if let Some(header) = crate::read_layout_header() {
         super::push_layout_results_to_scene(w, &header)
     } else {
@@ -574,7 +574,7 @@ pub fn build_document_content(
     let clock_glyphs = shape_chrome_text(cfg, clock_text);
     let clock_glyph_ref = w.push_shaped_glyphs(&clock_glyphs);
 
-    // Document text glyphs — read pre-shaped from layout engine (B).
+    // Document text glyphs — read pre-shaped from layout service.
     let line_glyph_refs = if let Some(header) = crate::read_layout_header() {
         super::push_layout_results_to_scene(w, &header)
     } else {

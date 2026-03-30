@@ -189,7 +189,7 @@ Notification for both: `channel_signal` syscall wakes the consumer from `sys::wa
 
 **What's foundational:**
 
-- **One module per protocol boundary (10 modules).** `init` (init→any service config), `device` (init→drivers), `input` (input→C), `edit` (editor↔A, editor↔C), `layout` (C↔B), `view` (C→compositor, A↔C notifications), `document` (A↔document service), `decode` (A↔decoders), `content` (shared memory layout), `metal` (compositor→hypervisor, includes legacy virgl submodule). The module structure mirrors the IPC topology.
+- **One module per protocol boundary (10 modules).** `init` (init→any service config), `device` (init→drivers), `input` (input→presenter), `edit` (editor↔document, editor↔presenter), `layout` (presenter↔layout), `view` (presenter→compositor, document↔presenter notifications), `store` (document↔store service), `decode` (document↔decoders), `content` (shared memory layout), `metal` (compositor→hypervisor, includes legacy virgl submodule). The module structure mirrors the IPC topology.
 - **All payload structs are `#[repr(C)]`** and fit within the 60-byte IPC message payload. Size guards via `const _: ()` assertions where payloads approach the limit.
 - **`CHANNEL_SHM_BASE` and `channel_shm_va()`** defined once. Every userspace component imports these instead of defining local copies.
 - **Zero dependencies.** Pure `no_std` library, fully testable on the host.
@@ -404,7 +404,7 @@ Notification for both: `channel_signal` syscall wakes the consumer from `sys::wa
 
 ---
 
-### 2.2 View Engine (`services/view-engine/`) 🟡
+### 2.2 Presenter (`services/presenter/`) 🟡
 
 **Goal:** The OS service: sole writer to document state, scene graph builder, input router.
 
@@ -420,7 +420,7 @@ Notification for both: `channel_signal` syscall wakes the consumer from `sys::wa
 
 **Event-driven boot sequence:**
 
-Core's boot phase is fully event-driven: it publishes a loading scene (Tabler loader-2 spinner, CPU-rasterized as `Content::InlineImage`) to shared memory immediately, giving the user a visible frame within milliseconds. It then enters a multiplexed wait loop: animation timer ticks rotate the spinner while async init replies (font metrics from 9p, document queries/reads from the document service, PNG decode from the decoder service, undo snapshot) arrive as IPC messages. Each reply advances a state machine (`BootState` with `DecodePhase` and `DocPhase` sub-states). The loop exits when all init completes (`all_ready()`) or a 5-second timeout fires. Core then builds the full document scene, replacing the loading scene in the triple buffer.
+Core's boot phase is fully event-driven: it publishes a loading scene (Tabler loader-2 spinner, CPU-rasterized as `Content::InlineImage`) to shared memory immediately, giving the user a visible frame within milliseconds. It then enters a multiplexed wait loop: animation timer ticks rotate the spinner while async init replies (font metrics from 9p, document queries/reads from the store service, PNG decode from the decoder service, undo snapshot) arrive as IPC messages. Each reply advances a state machine (`BootState` with `DecodePhase` and `DocPhase` sub-states). The loop exits when all init completes (`all_ready()`) or a 5-second timeout fires. Core then builds the full document scene, replacing the loading scene in the triple buffer.
 
 This pattern — show UI immediately, init async, transition on completion — avoids blocking the display pipeline during boot. The spinner uses `Content::InlineImage` (CPU-rasterized each frame) rather than `Content::Path` because it rotates each frame and path re-rasterization would be wasteful. Title bar icons use `Content::Path` with fill+stroke support (separate fill color and stroke color per path node).
 

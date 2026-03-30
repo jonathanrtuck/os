@@ -1,7 +1,7 @@
 //! Document buffer read-only access and header sync.
 //!
-//! The view engine (C) reads the document buffer for scene building and
-//! navigation. All content mutations go through the document-model (A)
+//! The presenter reads the document buffer for scene building and
+//! navigation. All content mutations go through the document service
 //! via IPC. C writes only the header (cursor position sync).
 
 use super::DOC_HEADER_SIZE;
@@ -11,7 +11,7 @@ pub(crate) fn doc_content() -> &'static [u8] {
     let s = super::state();
     // SAFETY: doc_buf points to doc_capacity bytes of shared memory.
     // doc_len is always <= doc_capacity - DOC_HEADER_SIZE (maintained by
-    // the document-model service). doc_buf is set once during init and
+    // the document service). doc_buf is set once during init and
     // never null after that point.
     unsafe {
         debug_assert!(!s.doc_buf.is_null());
