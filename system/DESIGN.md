@@ -25,29 +25,28 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 ```text
 ┌───────────────────────────────────────────────────────────┐
-│  User Programs     (text-editor, echo)                    │  🟡/🔴
+│  User Programs  (text-editor, rich-editor, echo)          │  🟡/🔴
 ├───────────────────────────────────────────────────────────┤
 │  Platform Services                                        │
-│  ┌────────┐ ┌─────────┐ ┌──────────────────────────────┐  │
-│  │  Init  │ │  Core   │ │      Render Services         │  │  🟡/🟢
-│  │ (root  │ │ (OS svc)│ │ ┌─────────────┐ ┌──────────┐ │  │
-│  │  task) │ │         │ │ ┌─────────────┐              │  │
-│  │        │ │   sole  │ │ │metal-render │              │  │
-│  │        │ │  writer │ │ │  (Metal GPU)│              │  │
-│  └────────┘ └───┬─────┘ │ └─────────────┘              │  │
-│      input→core │       │                              │  │
-│   editor↔core   │       │                              │  │
-│                 │       │                              │  │
-│          core→render    └──────────────────────────────┘  │
-│          (scene graph,                                    │
-│           shared mem)          ┌──────────────────┐       │
-│                                │  Drivers +       │       │
-│                                │  Services        │       │
-│                                │ (virtio-blk/     │       │
-│                                │  input/9p/       │       │
-│                                │  console/        │       │
-│                                │  filesystem)     │       │
-│                                └──────────────────┘       │
+│  ┌────────┐ ┌─────────────────────────────────────────┐   │
+│  │  Init  │ │  Document Pipeline                      │   │  🟡/🟢
+│  │ (root  │ │  ┌─────────────┐  ┌──────────────────┐  │   │
+│  │  task) │ │  │ document    │  │ presenter        │  │   │
+│  │        │ │  │ (sole writer│  │ (scene graph,    │  │   │
+│  │        │ │  │  piece table│  │  input routing,  │  │   │
+│  │        │ │  │  or flat)   │  │  style shortcuts)│  │   │
+│  │        │ │  └─────────────┘  └──────────────────┘  │   │
+│  └────────┘ │  ┌─────────────┐                        │   │
+│             │  │ layout      │  editor↔document       │   │
+│             │  │ (styled runs│  input→presenter       │   │
+│             │  │  word break)│  presenter→render      │   │
+│             │  └─────────────┘   (scene graph, shm)   │   │
+│             └─────────────────────────────────────────┘   │
+│  ┌──────────────┐  ┌──────────────────────────────────┐   │
+│  │ metal-render │  │  Drivers + Services              │   │
+│  │ (Metal GPU)  │  │ (document, virtio-blk/input/9p/  │   │
+│  │              │  │  console, decoders/png)          │   │
+│  └──────────────┘  └──────────────────────────────────┘   │
 ├───────────────────────────────────────────────────────────┤
 │  Libraries                                                │
 │  ┌─────┐ ┌────────┐ ┌─────────┐ ┌───────┐ ┌───────┐       │  🟢 foundational
@@ -56,9 +55,9 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 │  ┌─────┐ ┌──────────┐ ┌────────┐ ┌───────────┐ ┌────────┐ │
 │  │ ipc │ │ protocol │ │ render │ │ animation │ │ layout │ │
 │  └─────┘ └──────────┘ └────────┘ └───────────┘ └────────┘ │
-│  ┌────┐                                                   │
-│  │ fs │                                                   │
-│  └────┘                                                   │
+│  ┌────┐ ┌───────┐ ┌────────────┐ ┌───────┐                │
+│  │ fs │ │ store │ │ piecetable │ │ icons │                │
+│  └────┘ └───────┘ └────────────┘ └───────┘                │
 ├───────────────────────────────────────────────────────────┤
 │  Kernel (28 syscalls, see kernel/DESIGN.md)               │  🟢 production
 └───────────────────────────────────────────────────────────┘
@@ -372,6 +371,25 @@ Notification for both: `channel_signal` syscall wakes the consumer from `sys::wa
 - **COW-entire-file** for extent-based writes. O(file_size) per write. Acceptable for document workloads. Per-block COW is a future optimization.
 
 **No restrictions imposed.** `no_std` library with `alloc` dependency. No syscalls, no I/O — callers provide a `BlockDevice` implementation.
+
+---
+
+### 1.10 Piece Table Library (`libraries/piecetable/`) 🟢
+
+**Goal:** Fixed-size, arena-allocated piece table for `text/rich` documents. The buffer IS the piece table — `validate()` is a bounds check, enabling zero-copy access via shared memory. Both the in-memory and on-disk format.
+
+**Status:** ~1,295 lines. Full piece table with style palette, operation coalescing, and styled run iteration. 47 tests pass.
+
+**What's foundational:**
+
+- **Arena layout.** Header (64 bytes) + styles (32 × 12 bytes) + pieces (512 × 16 bytes) + original buffer + add buffer. Fixed-size, no heap allocation. `MAX_PIECES` (512), `MAX_STYLES` (32), `MAX_ADD_BUFFER` (32K).
+- **Style palette.** 32 entries, each with font family, weight, size, color, flags (italic, underline, strikethrough), and semantic a11y role (body, strong, emphasis, heading, code). Pieces carry a `style_id` index into the palette.
+- **Operation coalescing.** Sequential same-style inserts at adjacent positions merge into a single piece. Reduces piece count for typical editing patterns.
+- **Styled run iterator.** `styled_run()` / `styled_run_count()` coalesce adjacent same-style pieces. `copy_run_text()` extracts text for a run. This is the interface the layout engine reads.
+- **Default style builders.** `default_body_style()`, `bold_style()`, `italic_style()`, `heading1_style()`, `code_style()` for common styles.
+- **Zero-copy shared memory.** All operations work on `&[u8]` / `&mut [u8]` slices. No `alloc` dependency. Layout engine and presenter read the piece table directly from the document buffer.
+
+**No restrictions imposed.** Pure `no_std` library with no allocations. Callers provide the buffer.
 
 ---
 

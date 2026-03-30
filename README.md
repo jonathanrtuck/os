@@ -18,7 +18,7 @@ This project explores inverting that: **OS → Document → Tool.** Documents ha
 
 ## status
 
-The project has a working interactive demo running on a bare-metal aarch64 microkernel. The display pipeline renders text with macOS-grade anti-aliasing (analytic coverage, outline dilation, subpixel glyph positioning), composites z-ordered surfaces with rounded corners, analytical Gaussian shadows, backdrop blur, and layer opacity over a radial gradient background, decodes PNG images, renders cubic bezier paths and Tabler vector icons, and supports a text editor with selection, smooth scrolling, and mouse click-to-position plus an image viewer — switchable at runtime with context-aware glyph icons via a spring-animated document strip (Ctrl+Tab). A hardware RTC clock ticks in the title bar. Rendering uses native Metal GPU passthrough (`metal-render`) via the [hypervisor](https://github.com/jonathanrtuck/hypervisor). The rendering pipeline uses a display-refresh-rate frame scheduler (120 Hz on ProMotion, 60 Hz default) with event coalescing and idle optimization, triple-buffered incremental scene graph updates with change-list-driven damage tracking, millipoint coordinates (1/1024 pt), 2D affine transforms, fractional DPI scaling, and bilinear image resampling — only dirty screen regions are re-rendered and transferred to the GPU.
+The project has a working interactive demo running on a bare-metal aarch64 microkernel. The display pipeline renders rich text with multi-style runs (per-span font, weight, size, color, underline, strikethrough), macOS-grade anti-aliasing (analytic coverage, outline dilation, subpixel glyph positioning), composites z-ordered surfaces with rounded corners, analytical Gaussian shadows, backdrop blur, and layer opacity, decodes PNG images, renders cubic bezier paths and Tabler vector icons, and supports both a plain text editor and a rich text editor with styled text, selection (click, double-click word select, triple-click line select, click-and-drag), smooth scrolling, and mouse click-to-position, plus an image viewer — switchable at runtime with context-aware glyph icons via a spring-animated document strip (Ctrl+Tab). Documents persist to a COW filesystem with undo/redo (Cmd+Z / Cmd+Shift+Z). A hardware RTC clock ticks in the title bar. Rendering uses native Metal GPU passthrough (`metal-render`) via the [hypervisor](https://github.com/jonathanrtuck/hypervisor). The rendering pipeline uses a display-refresh-rate frame scheduler (120 Hz on ProMotion, 60 Hz default) with event coalescing and idle optimization, triple-buffered incremental scene graph updates with change-list-driven damage tracking, millipoint coordinates (1/1024 pt), 2D affine transforms, fractional DPI scaling, and bilinear image resampling — only dirty screen regions are re-rendered and transferred to the GPU.
 
 For the full design landscape, see the [decision register](design/decisions.md) and the [exploration journal](design/journal.md).
 
@@ -28,11 +28,11 @@ For the full design landscape, see the [decision register](design/decisions.md) 
 
 **Display pipeline** — Presenter builds a scene graph in shared memory; metal-render reads it, submits Metal GPU commands, and presents to the display via the [hypervisor](https://github.com/jonathanrtuck/hypervisor). Triple-buffered scene graph with mailbox semantics (writer never blocks, reader always gets latest frame). Configurable-cadence frame scheduler (60/30/120fps) with event coalescing, frame budgeting, and idle optimization. Incremental scene graph updates — clock ticks and cursor moves are zero-allocation mutations; only changed nodes are recorded in a change list. Change-list-driven damage tracking with subtree clip skipping. Dirty-rectangle GPU transfers (only changed regions sent to the host).
 
-**Core (OS service)** — Sole writer to document state. Builds a scene graph describing the visual structure of the document. Routes input to the active editor. Editors are read-only consumers that send write requests via IPC.
+**Document pipeline** — Three cooperating processes: `document` (sole writer to document state — applies edits, manages piece table or flat buffer), `layout` (text layout with styled runs, word/character breaking, font metrics), and `presenter` (scene graph builder, input router, style shortcuts). Content-type dispatch throughout: text/rich documents use the piece table; text/plain uses a flat UTF-8 buffer. Editors are read-only consumers that send write requests via IPC.
 
 **Render service (metal-render)** — Native Metal GPU rendering via serialized Metal commands over a custom virtio device — used with the [hypervisor](https://github.com/jonathanrtuck/hypervisor) for zero-translation-layer GPU passthrough with 4x MSAA. Single-process thick driver: tree walk, GPU command submission, compositing, and present. Capabilities: Z-ordered surface compositing with translucent chrome, Gaussian-blurred box shadows (configurable blur radius, offset, spread), per-subtree layer opacity via offscreen compositing, rounded corners with SDF-based anti-aliased fill and corner-radius-aware child clipping, 2D affine transforms (3x3 matrix per node, composition through tree, transform-aware clipping), fractional DPI scaling (f32 scale factors) with pixel-snapped borders and fractional font sizing, bilinear image resampling, radial gradient background with noise texture, title bar with glyph icons and hardware RTC wall-clock (PL031, UTC), pure monochrome palette, procedural arrow cursor, damage tracking for incremental re-rendering.
 
-**Render library** — Shared rendering infrastructure: frame scheduler (used by metal-render), path rasterizer (used by presenter for loading screen), coordinate scaling helpers, scene graph tree walk and compositing (legacy CpuBackend, tested but no runtime consumers).
+**Render library** — Shared rendering infrastructure: frame scheduler (used by metal-render), path rasterizer (used by presenter for loading screen), coordinate scaling helpers, scene graph tree walk and compositing.
 
 **Drawing library** — Surfaces, colors, Porter-Duff compositing, gamma-correct sRGB blending. NEON SIMD acceleration for fill, blend, rounded-corner, and blur operations. Anti-aliased lines (Wu’s algorithm). Path rendering (MoveTo/LineTo/CurveTo/Close, fill and stroke, cubic beziers). Separable Gaussian blur (two-pass horizontal/vertical, configurable radius/sigma). PNG decoder (DEFLATE, all filter types). Bilinear image resampling. Monochrome palette system.
 
@@ -40,19 +40,29 @@ For the full design landscape, see the [decision register](design/decisions.md) 
 
 **Layout library** — Unified text layout engine. Single `layout_paragraph()` function for both monospace and proportional text, parameterized by a `FontMetrics` trait. `CharBreaker` for character-level wrapping (monospace), `WordBreaker` for word-boundary wrapping (proportional). Alignment (left, center, right). Standalone `byte_to_line_col()` for cursor positioning.
 
+**Piece table library** — Fixed-size, arena-allocated rich text data structure. 512 pieces, 32-entry style palette (font family, weight, size, color, flags, semantic a11y role), append-only add buffer. Sequential same-style inserts coalesce into a single piece. Zero-copy shared memory access — the buffer IS the piece table (pointer cast with validation). Used for text/rich documents.
+
+**Filesystem and store libraries** — COW filesystem (`fs`): block device trait, superblock ring, free-extent allocator, inodes, two-flush commit, per-file snapshots. Document store (`store`): metadata catalog (media types, queryable attributes), wraps `Box<dyn Files>`.
+
+**Icon library** — Named vector icons: `get(name, mimetype)` lookup, pre-compiled Tabler SVGs (MIT), layer annotations for fill+stroke. Build-time SVG→path converter with stroke expansion and arc-to-cubic conversion.
+
 **Animation library** — Easing functions (standard CSS curves), spring physics (semi-implicit Euler with 4ms fixed substeps), and timeline sequencing. Used for smooth scroll, cursor blink, and document slide transitions (Ctrl+Tab).
 
 **Scene graph library** — Typed visual node tree in shared memory. Triple-buffered with mailbox semantics for lock-free producer/consumer across processes. Four geometric content types: `None` (containers/solid fills), `Image` (pixel buffers), `Path` (cubic bezier contours), `Glyphs` (shaped glyph runs). Change list for incremental damage tracking. Copy-forward with selective mutation for zero-allocation updates. Per-node 2D affine transforms, corner radius, layer opacity, box shadows.
 
-**Text editor** — Cursor movement, text selection (shift+arrow), scrolling, mouse click-to-position, insert and delete. Communicates with core via IPC write requests.
+**Text editor** — Editor for text/plain documents. Cursor movement, text selection (shift+arrow, click-and-drag, double-click word, triple-click line), scrolling, mouse click-to-position, insert and delete. Communicates with document via IPC write requests.
+
+**Rich text editor** — Editor for text/rich documents backed by the piece table library. Same editing operations as text editor, with content-type detection at startup. Style shortcuts (Cmd+B bold, Cmd+I italic, Cmd+1/2 headings) handled by the presenter.
+
+**Document service** — Persistent document storage over COW filesystem on virtio-blk. Undo/redo via COW snapshots (Cmd+Z / Cmd+Shift+Z, 64-entry ring, character-level granularity). Receives commit messages from document, reads document buffer from shared memory, writes to disk with two-flush crash consistency.
 
 **Image viewer** — Decodes and displays a PNG image. Toggle between editor and viewer with Ctrl+Tab (title bar icon updates to reflect current mode).
 
 **Mouse support** — virtio-tablet driver (absolute pointer events) with procedural arrow cursor. Left-click positions the text cursor in the editor content area.
 
-**Assets via 9P** — Fonts, images, and icons loaded at boot from the host filesystem via virtio-9p passthrough.
+**Assets** — Fonts loaded at boot from the native COW filesystem (disk.img). Images and icons loaded via virtio-9p host filesystem passthrough.
 
-**Tests** — ~2,153 host-side tests.
+**Tests** — ~2,313 host-side unit tests, 15 visual regression tests (verify.py assertions + hypervisor capture).
 
 ## running the demo
 
@@ -81,10 +91,14 @@ This builds the kernel and launches it in the [native hypervisor](https://github
 ### Interaction
 
 - **Type** to insert text in the editor
-- **Arrow keys** to move the cursor
+- **Arrow keys** to move the cursor (Cmd+Left/Right for line start/end, Cmd+Up/Down for document start/end)
 - **Shift+arrow** to select text
-- **Backspace** to delete
-- **Left-click** to position the text cursor
+- **Click** to position cursor, **double-click** to select word, **triple-click** to select line
+- **Click-and-drag** to select a range
+- **Backspace/Delete** to delete
+- **Cmd+Z** to undo, **Cmd+Shift+Z** to redo
+- **Cmd+B** to toggle bold, **Cmd+I** to toggle italic (rich text documents)
+- **Cmd+1/2** to toggle heading styles (rich text documents)
 - **Ctrl+Tab** to toggle between text editor and image viewer
 
 ## project structure
@@ -96,18 +110,19 @@ os/
 │   ├── foundations.md               # The core idea, glossary, guiding beliefs, content model
 │   ├── decisions.md                 # 17 tiered design decisions with tradeoffs
 │   ├── architecture.md              # Architectural narrative and decision checklist
+│   ├── roadmap.md                   # Milestone plan (v0.5–v1.0), sequencing rationale
 │   ├── journal.md                   # Open threads, insights, research spikes
 │   ├── research/                    # COW filesystems, OS landscape, font rendering
-│   ├── architecture.mermaid         # System architecture diagram
-│   ├── decision-map.mermaid         # Visual dependency graph
-│   ├── dependency-graph.mermaid     # Component dependency graph
-│   ├── rendering-pipeline.mermaid   # Rendering pipeline diagram
-│   └── userspace-graph.mermaid      # Userspace component relationships
+│   └── *.mermaid                    # Architecture, dependency, pipeline diagrams
 ├── system/                          # OS implementation (Rust, no_std)
 │   ├── kernel/                      # Microkernel (28 syscalls, EEVDF, GICv3, SMP)
 │   ├── services/
 │   │   ├── init/                    # Root task — spawns everything, wires IPC
-│   │   ├── core/                    # OS service — sole writer, scene graph builder, input router
+│   │   ├── presenter/               # View engine (C) — scene graph builder, input router
+│   │   ├── layout/                  # Layout engine (B) — text layout with styled runs
+│   │   ├── document/                # Document service — COW persistence, undo/redo
+│   │   ├── store/                   # Store service — metadata catalog
+│   │   ├── decoders/png/            # Sandboxed PNG decoder
 │   │   └── drivers/
 │   │       ├── metal-render/        # Metal render service (sole backend, via hypervisor)
 │   │       ├── virtio-input/        # Keyboard + tablet input (evdev translation)
@@ -117,23 +132,27 @@ os/
 │   ├── libraries/
 │   │   ├── sys/                     # Syscall wrappers + userspace allocator
 │   │   ├── virtio/                  # MMIO transport + split virtqueue
-│   │   ├── drawing/                 # Surfaces, colors, PNG, compositing, palette
+│   │   ├── drawing/                 # Surfaces, colors, compositing, palette
 │   │   ├── fonts/                   # TrueType rasterizer, stem darkening, glyph cache
+│   │   ├── piecetable/              # Piece table for text/rich documents
 │   │   ├── animation/               # Easing functions, spring physics, timelines
 │   │   ├── layout/                  # Unified text layout engine (mono + proportional)
-│   │   ├── render/                  # Render backend (CpuBackend, damage, incremental, frame scheduler)
+│   │   ├── render/                  # Frame scheduler, path rasterizer, coordinate helpers
 │   │   ├── scene/                   # Scene graph nodes, triple-buffered shared memory
+│   │   ├── icons/                   # Named vector icons (Tabler SVGs, mimetype lookup)
 │   │   ├── ipc/                     # Lock-free SPSC ring buffers
-│   │   ├── protocol/                # IPC message types + payload structs (all protocols)
-│   │   └── link.ld                  # Shared userspace linker script
+│   │   ├── protocol/                # IPC message types + payload structs (10 boundaries)
+│   │   ├── fs/                      # COW filesystem (block device, snapshots, inodes)
+│   │   └── store/                   # Document store metadata layer
 │   ├── user/
-│   │   ├── text-editor/             # Editor process (input → write requests)
+│   │   ├── text-editor/             # Editor for text/plain (input → write requests)
+│   │   ├── rich-editor/             # Editor for text/rich (piece table documents)
 │   │   ├── echo/                    # IPC test program
 │   │   ├── stress/                  # IPC stress test program
 │   │   ├── fuzz/                    # Fuzzing harness
 │   │   └── fuzz-helper/             # Fuzzing helper
-│   ├── test/                        # Host-side unit + integration tests (~2,153 tests)
-│   └── share/                       # Runtime assets (fonts, images, icons)
+│   ├── test/                        # Host-side unit + visual regression tests
+│   └── tools/mkdisk/               # Factory disk image builder
 ├── prototype/
 │   └── files/                       # Files interface prototype (macOS-backed)
 ├── CLAUDE.md                        # AI collaboration context

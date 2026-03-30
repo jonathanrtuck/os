@@ -10,12 +10,12 @@ Milestone plan for the document-centric OS. Foundation-up: generic infrastructur
 | v0.2    | Kernel audit, display pipeline, rendering architecture (3 backends, GICv3)    | 2026-03-19 |
 | v0.3    | Rendering + UI foundation (animation, composition, text, visual polish)       | 2026-03-25 |
 | v0.4    | Filesystem, Document Store (COW, snapshots, undo)                             | 2026-03-26 |
+| v0.5    | Rich text (piece table, multi-style runs, content-type dispatch, decorations) | 2026-03-30 |
 
 ## Planned
 
 | Version    | Theme                           | Character      | Key Deliverables                                                                                                                                                                                                          |
 | ---------- | ------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **v0.5**   | **Rich Text**                   | Foundation     | Multi-style text runs (font, size, weight, color per span). Operation coalescing for undo. Content-type-aware edit protocol (text/rich vs text/plain).                                                                    |
 | **v0.6**   | **Media**                       | Foundation     | JPEG decoder (mimetype routing exists). Audio subsystem. Video playback (frame ring in Content Region). Larger milestone. _(Swappable with v0.7.)_                                                                        |
 | **v0.7**   | **Design Decisions**            | Design sprint  | Settle #10 (view state), #15 (layout engine), #17 (interaction model) _as interfaces_. System clipboard. Prototyping to validate, not to ship.                                                                            |
 | **v0.8**   | **Compound Documents & Layout** | Foundation     | Layout engine (#15). Spatial composition. Manifest format. Translators. Generic -- not encoding a specific UX.                                                                                                            |

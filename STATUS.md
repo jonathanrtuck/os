@@ -1,26 +1,26 @@
 # Project Status
 
-**Last updated:** 2026-03-29
+**Last updated:** 2026-03-30
 
 ## Current State
 
 **v0.4 Document Store: COMPLETE** (all phases A-G, 2026-03-25-26). Every document has identity (FileId), media type, queryable metadata, and version history (COW snapshots). Document service replaces filesystem service. Undo/redo (Cmd+Z / Cmd+Shift+Z) wired to COW snapshots — 64-entry undo ring, character-level granularity. 2,257 tests pass.
 
-**v0.5 Rich Text: DESIGN SETTLED** (2026-03-27). Piece table, library-based, single-file, style palette, a11y roles. Ready for implementation.
+**v0.5 Rich Text: COMPLETE** (2026-03-30). Piece table library (512 pieces, 32 styles, operation coalescing). Style palette with semantic a11y roles. Rich-editor process for text/rich documents. Content-type-aware edit protocol — document, layout engine, and presenter all dispatch on text/rich vs text/plain. Style shortcuts (Cmd+B/I, Cmd+1/2). Underline and strikethrough decorations. 2,313 tests pass, 15 visual tests pass.
 
 ## Architecture (Decomposed 2026-03-29)
 
 ```text
-Input Driver → C (View Engine) → Scene Graph → Render Service → Display
+Input Driver → Presenter → Scene Graph → Render Service → Display
                   ↕         ↕
-               Editor    B (Layout Engine)
+               Editor    Layout Engine
                   ↕         ↕
-           A (Document Model)
+             Document Model
                   ↕
            Document Service → Disk
 ```
 
-The monolithic `core` has been decomposed into three processes: A (document-model), B (layout-engine), C (view-engine). Protocol library consolidated to 10 modules (init, device, input, edit, layout, view, document, decode, content, metal). 2,375 tests pass.
+The monolithic `core` has been decomposed into three processes: document, layout engine, and presenter (view engine). Protocol library consolidated to 10 modules (init, device, input, edit, layout, view, document, decode, content, metal). 2,313 tests pass.
 
 Content types: `None`, `InlineImage` (per-frame scene data), `Image` (Content Region via content_id), `Path`, `Glyphs`. Sole render backend: `metal-render` (native Metal GPU via hypervisor). cpu-render and virgil-render removed (2026-03-30).
 
@@ -50,7 +50,7 @@ Seven-layer fs stack: `BlockDevice` trait → superblock ring → free-extent al
 
 ### System Code
 
-`system/kernel/` (33 .rs + 2 .S), `system/services/{init,document-model,layout-engine,view-engine,document,filesystem,drivers/{metal-render,virtio-blk,virtio-console,virtio-input,virtio-9p},decoders/{png}}/`, `system/libraries/{sys,virtio,drawing,fonts,animation,layout,scene,ipc,protocol,render,fs,store}/`, `system/user/{echo,text-editor,rich-editor,stress,fuzz,fuzz-helper}/`, `system/test/`, `tools/mkdisk/`. 28 syscalls. 4 SMP cores, EEVDF scheduler.
+`system/kernel/` (33 .rs + 2 .S), `system/services/{init,document,layout,presenter,store,filesystem,drivers/{metal-render,virtio-blk,virtio-console,virtio-input,virtio-9p},decoders/{png}}/`, `system/libraries/{sys,virtio,drawing,fonts,animation,layout,scene,ipc,protocol,render,piecetable,icons,fs,store}/`, `system/user/{echo,text-editor,rich-editor,stress,fuzz,fuzz-helper}/`, `system/test/`, `tools/mkdisk/`. 28 syscalls. 4 SMP cores, EEVDF scheduler.
 
 ## Milestone Roadmap
 

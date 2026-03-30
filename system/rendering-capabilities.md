@@ -1,6 +1,6 @@
 # Rendering Pipeline — Capabilities and Limitations
 
-An honest audit of what this OS's rendering pipeline can and cannot do, compared against real systems. Updated 2026-03-24.
+An honest audit of what this OS's rendering pipeline can and cannot do, compared against real systems. Updated 2026-03-30.
 
 ---
 
@@ -38,13 +38,14 @@ Comparable to macOS Core Text for Latin text at common sizes. The result of a de
 
 ### Text layout
 
-Unified layout engine in `libraries/layout/`:
+Unified layout engine in `libraries/layout/` and `services/layout/`:
 
 - **Single `layout_paragraph()` function** for both monospace and proportional text, parameterized by a `FontMetrics` trait
 - **`CharBreaker`** for character-level wrapping (monospace)
 - **`WordBreaker`** for word-boundary wrapping (proportional)
 - **Alignment** (left, center, right)
 - **Standalone `byte_to_line_col()`** for cursor positioning
+- **Styled run iteration** — layout engine reads piece table styled runs, maps each to a style registry entry (font content_id, weight, axes, metrics), produces per-segment visible runs for scene building
 
 ### Compositing
 
@@ -121,17 +122,15 @@ No 3D scene graph, no depth buffer, no projection matrix, no GPU compute. The GP
 
 **Implication:** 3D games, CAD, WebGL-style content not possible. Consistent with the document-centric focus — documents are 2D.
 
-### No rich inline text
+### Rich inline text (implemented, with gaps)
 
-One font/style per Glyphs node. No inline style switching within a text run. Additionally:
+Multi-style text runs within a paragraph: per-span font family, weight, size, color, and flags (italic, underline, strikethrough). Piece table library provides styled runs; layout engine maps them to per-segment Glyphs nodes with style registry entries; presenter renders decorations (underline, strikethrough) as separate scene nodes. Style shortcuts (Cmd+B/I, Cmd+1/2) toggle bold, italic, heading styles on selections.
+
+**Remaining gaps:**
 
 - No bidirectional text (RTL, Arabic, Hebrew)
 - No complex script shaping beyond what HarfRust provides (no full Unicode text stack)
-- No text decoration (underline, strikethrough) as a text primitive
-
-**What it would take:** Run-level font/style switching with shaping across run boundaries, the Unicode BiDi algorithm (UAX #9), text decoration geometry.
-
-**Implication:** Document rendering handles single-style text (monospace code, proportional prose) but not rich text within a paragraph. Non-Latin scripts untested.
+- Non-Latin scripts untested
 
 ### No video or animated media
 
@@ -153,7 +152,6 @@ Clip masks handle rectangular and rounded-rect regions. No clip-to-arbitrary-bez
 
 - No rotated text rendering (text is always axis-aligned)
 - No Lanczos or bicubic image filtering (bilinear only)
-- No italic rendering (deferred — see journal)
 
 ---
 
