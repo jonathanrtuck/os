@@ -158,14 +158,14 @@ Clip masks handle rectangular and rounded-rect regions. No clip-to-arbitrary-bez
 
 ## Performance envelope
 
-| Metric                 | Current state                                              | Bottleneck                                                        | Practical ceiling                                                                          |
-| ---------------------- | ---------------------------------------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| Resolution             | Native display (e.g., 4112×2658 on Retina, configurable)   | GPU command throughput                                            | Retina resolutions at 120fps via Metal GPU                                                 |
-| Compositing throughput | GPU compositing via Metal                                   | GPU shader throughput                                             | Full GPU compositing — no CPU pixel work                                                   |
-| Text rendering         | Cache hit = memcpy. Miss = outline + scanline + coverage   | Cache misses are expensive. LRU eviction under font-size variety  | Adequate for document editing. Would struggle with many font sizes or rapid font switching |
-| Scene graph            | 512 nodes max, 64 KB data buffer, triple-buffered          | Fixed. Selection rects and glyph runs consume capacity            | Sufficient for single-document editing. Complex compound documents would hit limits        |
-| Frame cadence          | Actual display refresh (120/60 Hz) with event coalescing   | Frame budget enforcement. Heavy layout can miss deadline          | 8.3ms budget at 120Hz. Event coalescing prevents redundant frames. Idle optimization       |
-| Damage tracking        | 512-bit dirty bitmap + dirty rects                         | Full repaint on data buffer exhaustion                            | Effective for all editor interactions. Bitmap covers all 512 node slots without overflow   |
+| Metric                 | Current state                                            | Bottleneck                                                       | Practical ceiling                                                                          |
+| ---------------------- | -------------------------------------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| Resolution             | Native display (e.g., 4112×2658 on Retina, configurable) | GPU command throughput                                           | Retina resolutions at 120fps via Metal GPU                                                 |
+| Compositing throughput | GPU compositing via Metal                                | GPU shader throughput                                            | Full GPU compositing — no CPU pixel work                                                   |
+| Text rendering         | Cache hit = memcpy. Miss = outline + scanline + coverage | Cache misses are expensive. LRU eviction under font-size variety | Adequate for document editing. Would struggle with many font sizes or rapid font switching |
+| Scene graph            | 512 nodes max, 64 KB data buffer, triple-buffered        | Fixed. Selection rects and glyph runs consume capacity           | Sufficient for single-document editing. Complex compound documents would hit limits        |
+| Frame cadence          | Actual display refresh (120/60 Hz) with event coalescing | Frame budget enforcement. Heavy layout can miss deadline         | 8.3ms budget at 120Hz. Event coalescing prevents redundant frames. Idle optimization       |
+| Damage tracking        | 512-bit dirty bitmap + dirty rects                       | Full repaint on data buffer exhaustion                           | Effective for all editor interactions. Bitmap covers all 512 node slots without overflow   |
 
 ---
 
