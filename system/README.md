@@ -101,9 +101,7 @@ system/
     init/main.rs             — root task (embeds ELFs, spawns drivers, wires IPC)
     core/                    — OS service (sole writer, scene graph builder, input router)
     drivers/
-      metal-render/          — Metal render service (native Metal via hypervisor)
-      cpu-render/            — CPU render service (CpuBackend + virtio-gpu 2D)
-      virgil-render/         — GPU render service (Virgil3D/Gallium3D via QEMU)
+      metal-render/          — Metal render service (sole backend, via hypervisor)
       virtio-input/main.rs   — keyboard + tablet input (evdev translation, IPC forwarding)
       virtio-9p/main.rs      — host filesystem passthrough (9P2000.L protocol)
       virtio-blk/main.rs     — block device driver (reads sectors)
@@ -116,7 +114,7 @@ system/
     fonts/                   — TrueType rasterizer, stem darkening, glyph cache
     animation/               — easing functions, spring physics, timeline sequencing
     layout/                  — unified text layout engine (mono + proportional)
-    render/                  — render backend (CpuBackend, scene walk, damage, frame scheduler)
+    render/                  — shared rendering infra (frame scheduler, path rasterizer, coord helpers)
     scene/                   — scene graph nodes, triple-buffered shared memory layout
     ipc/                     — lock-free SPSC ring buffers on shared memory
     protocol/                — IPC message types + payload structs (all protocol boundaries)

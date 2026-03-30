@@ -12,13 +12,9 @@ Event-driven 2D document rendering with pluggable render services:
 Core (layout + scene build) → Scene Graph (shared memory) → Render Service → Display
 ```
 
-The scene graph is the interface. Render services are thick drivers that read the scene graph, perform the full tree walk, and produce pixels. Three render services:
+The scene graph is the interface. The render service is a thick driver that reads the scene graph, performs the full tree walk, and produces pixels.
 
-- **`metal-render`** (default): Native Metal GPU rendering via serialized Metal commands over a custom virtio device. Used with the [hypervisor](https://github.com/jonathanrtuck/hypervisor) on Apple Silicon. 4x MSAA, sRGB render targets, analytical Gaussian shadows, on-demand glyph atlas, hardware cursor plane. Auto-detects native display resolution (e.g., 4112×2658@120Hz on ProMotion).
-- **`virgil-render`** _(deprecated)_: GPU-accelerated rendering via Gallium3D command streams (virtio-gpu 3D / Virgl). v0.3 research spike; no longer maintained. Will be removed in a future milestone.
-- **`cpu-render`**: Software rasterization via `CpuBackend` + virtio-gpu 2D presentation. Used for QEMU integration testing. Not actively developed; will be retired once test infrastructure migrates to hypervisor.
-
-All three live as sibling directories under `services/drivers/`. Init probes GPU capabilities at boot and selects the appropriate render service.
+- **`metal-render`**: Native Metal GPU rendering via serialized Metal commands over a custom virtio device. Used with the [hypervisor](https://github.com/jonathanrtuck/hypervisor) on Apple Silicon. 4x MSAA, sRGB render targets, analytical Gaussian shadows, on-demand glyph atlas, hardware cursor plane. Auto-detects native display resolution (e.g., 4112×2658@120Hz on ProMotion).
 
 The pipeline uses a **configurable-cadence frame scheduler** with actual display refresh rate (120 Hz on ProMotion, 60 Hz on QEMU), event coalescing, frame budgeting, and idle optimization. Updates are driven by state changes (keystroke, clock tick, pointer move), coalesced within frame boundaries.
 
@@ -104,7 +100,7 @@ Hardware cursor decoupled from the content rendering pipeline:
 - **Path rasterization**: cubic bezier flattening (De Casteljau), scanline fill, non-zero winding, antialiased
 - **Anti-aliased lines** (Wu's algorithm), filled/outlined rectangles, horizontal/vertical lines
 - **Rounded corners**: SDF-based fill with anti-aliased edges, NEON SIMD, corner-radius-aware child clipping
-- **Box shadows**: analytical Gaussian in metal-render (exact erf integral per-pixel, no offscreen textures); separable blur in cpu-render/virgil-render. Configurable radius, offset, spread. Declarative on Node, damage-tracking-aware
+- **Box shadows**: analytical Gaussian (exact erf integral per-pixel, no offscreen textures). Configurable radius, offset, spread. Declarative on Node, damage-tracking-aware
 - **Layer opacity**: per-subtree opacity via offscreen compositing (group opacity), pool-based buffer management
 - **Clip masks**: per-subtree clip regions for non-rectangular clipping
 - **2D affine transforms**: 3×3 matrix per node, transform composition through tree, transform-aware clipping
@@ -164,8 +160,8 @@ Clip masks handle rectangular and rounded-rect regions. No clip-to-arbitrary-bez
 
 | Metric                 | Current state                                              | Bottleneck                                                        | Practical ceiling                                                                          |
 | ---------------------- | ---------------------------------------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| Resolution             | Native display (e.g., 4112×2658 on Retina, configurable)   | GPU command throughput (metal-render); CPU bandwidth (cpu-render) | Retina resolutions at 120fps via metal-render. cpu-render limited to ~1080p at 60fps       |
-| Compositing throughput | NEON SIMD per-pixel blend (cpu-render); GPU (metal/virgil) | Full-screen recomposite at high res is CPU-bound in cpu-render    | metal-render bypasses this entirely via GPU compositing                                    |
+| Resolution             | Native display (e.g., 4112×2658 on Retina, configurable)   | GPU command throughput                                            | Retina resolutions at 120fps via Metal GPU                                                 |
+| Compositing throughput | GPU compositing via Metal                                   | GPU shader throughput                                             | Full GPU compositing — no CPU pixel work                                                   |
 | Text rendering         | Cache hit = memcpy. Miss = outline + scanline + coverage   | Cache misses are expensive. LRU eviction under font-size variety  | Adequate for document editing. Would struggle with many font sizes or rapid font switching |
 | Scene graph            | 512 nodes max, 64 KB data buffer, triple-buffered          | Fixed. Selection rects and glyph runs consume capacity            | Sufficient for single-document editing. Complex compound documents would hit limits        |
 | Frame cadence          | Actual display refresh (120/60 Hz) with event coalescing   | Frame budget enforcement. Heavy layout can miss deadline          | 8.3ms budget at 120Hz. Event coalescing prevents redundant frames. Idle optimization       |
