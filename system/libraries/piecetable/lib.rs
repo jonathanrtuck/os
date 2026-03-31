@@ -20,7 +20,7 @@
 //!
 //! - Pure data structure: no_std, no alloc, no OS dependencies.
 //! - All operations work on `&[u8]` / `&mut [u8]` slices.
-//! - Fixed-size arenas: MAX_PIECES (512), MAX_STYLES (32), MAX_ADD_BUFFER (32K).
+//! - All limits derived from `buf.len()` — the buffer is the single source of truth.
 //! - Style palette with semantic roles for accessibility.
 //! - Sequential same-style inserts coalesce into a single piece.
 
@@ -35,9 +35,6 @@ use core::mem;
 pub const MAGIC: u32 = 0x4C42_5450; // "PTBL" in little-endian
 pub const VERSION: u16 = 1;
 pub const HEADER_SIZE: usize = 64;
-pub const MAX_PIECES: usize = 512;
-pub const MAX_STYLES: usize = 32;
-pub const MAX_ADD_BUFFER: usize = 32768;
 
 const PIECE_SIZE: usize = mem::size_of::<Piece>(); // 16
 const STYLE_SIZE: usize = mem::size_of::<Style>(); // 12
@@ -230,6 +227,37 @@ fn shift_pieces_right(buf: &mut [u8], style_count: u8, piece_count: u16, from: u
     }
 }
 
+/// Shift the data region (original + add buffers) when piece count changes.
+/// `old_pc` is the piece count before the change, `new_pc` after.
+fn relocate_data(buf: &mut [u8], sc: u8, old_pc: u16, new_pc: u16, ol: u32, al: u32) -> bool {
+    let old_data_off = original_offset(sc, old_pc);
+    let new_data_off = original_offset(sc, new_pc);
+    let data_len = ol as usize + al as usize;
+
+    if data_len == 0 || old_data_off == new_data_off {
+        return true;
+    }
+
+    if new_data_off + data_len > buf.len() {
+        return false;
+    }
+
+    if new_data_off > old_data_off {
+        // Shift right — copy backward.
+        let mut i = data_len;
+        while i > 0 {
+            i -= 1;
+            buf[new_data_off + i] = buf[old_data_off + i];
+        }
+    } else {
+        // Shift left — copy forward.
+        for i in 0..data_len {
+            buf[new_data_off + i] = buf[old_data_off + i];
+        }
+    }
+    true
+}
+
 // ---------------------------------------------------------------------------
 // Public API — Initialization
 // ---------------------------------------------------------------------------
@@ -329,12 +357,6 @@ pub fn validate(buf: &[u8]) -> bool {
     }
     let h = read_header(buf);
     if h.magic != MAGIC || h.version != VERSION {
-        return false;
-    }
-    if h.style_count as usize > MAX_STYLES {
-        return false;
-    }
-    if h.piece_count as usize > MAX_PIECES {
         return false;
     }
 
@@ -463,9 +485,6 @@ pub fn insert_bytes(buf: &mut [u8], pos: u32, bytes: &[u8]) -> bool {
             {
                 // Append to the add buffer and extend the piece.
                 let add_start = add_off + h.add_len as usize;
-                if h.add_len as usize + bytes.len() > MAX_ADD_BUFFER {
-                    return false;
-                }
                 if add_start + bytes.len() > buf.len() {
                     return false;
                 }
@@ -491,35 +510,25 @@ pub fn insert_bytes(buf: &mut [u8], pos: u32, bytes: &[u8]) -> bool {
     let pieces_to_add: u16 = if need_split { 2 } else { 1 };
     let final_piece_count = pc as usize + pieces_to_add as usize;
 
-    if final_piece_count > MAX_PIECES {
+    // Check piece count fits in u16.
+    if final_piece_count > u16::MAX as usize {
         return false;
     }
 
-    // We need to relocate the original and add buffers if piece count changes,
-    // because they come after the piece array. Instead of relocating, we design
-    // the layout so original buffer starts at a fixed position:
-    // Actually, the buffers are AFTER the piece array, so adding pieces shifts them.
-    // We need to handle this carefully.
-    //
-    // Strategy: the piece array, original buffer, and add buffer are sequential.
-    // When we add pieces, the original and add buffers must shift right.
-    // This is expensive but correct for a fixed-size arena.
-
     let pieces_added = final_piece_count as u16 - pc;
 
-    // Check buffer capacity for shifted data.
+    // Check buffer capacity for shifted data + new bytes.
     let h = read_header(buf);
-    let old_orig_off = original_offset(sc, pc);
-    let data_len = h.original_len as usize + h.add_len as usize;
-    let new_orig_off = original_offset(sc, pc + pieces_added);
-    let new_add_off = new_orig_off + h.original_len as usize;
+    let new_add_off = add_offset(sc, pc + pieces_added, h.original_len);
 
-    // Need room for new add data too.
+    // Need room for existing add data + new bytes.
     if new_add_off + h.add_len as usize + bytes.len() > buf.len() {
         return false;
     }
 
     // Shift original + add buffers right to make room for new pieces.
+    let old_orig_off = original_offset(sc, pc);
+    let data_len = h.original_len as usize + h.add_len as usize;
     if pieces_added > 0 && data_len > 0 {
         let shift = (pieces_added as usize) * PIECE_SIZE;
         // Copy backwards (memmove semantics for rightward shift).
@@ -539,11 +548,6 @@ pub fn insert_bytes(buf: &mut [u8], pos: u32, bytes: &[u8]) -> bool {
     // Append the new text to the add buffer (at its new position).
     let new_add_data_off =
         add_offset(sc, new_pc, read_header(buf).original_len) + read_header(buf).add_len as usize;
-    if read_header(buf).add_len as usize + bytes.len() > MAX_ADD_BUFFER {
-        // Rollback: shift buffers back and restore piece_count.
-        // For simplicity in this no_alloc context, we already checked above.
-        return false;
-    }
     buf[new_add_data_off..new_add_data_off + bytes.len()].copy_from_slice(bytes);
     let add_buf_offset = read_header(buf).add_len;
     read_header_mut(buf).add_len += bytes.len() as u32;
@@ -620,6 +624,9 @@ pub fn delete(buf: &mut [u8], pos: u32) -> bool {
 }
 
 /// Delete bytes in the range `[start, end)`.
+///
+/// Operates in-place on the piece array — no scratch buffer needed.
+/// Uses a two-cursor approach: reads from `ri`, writes to `wi`.
 pub fn delete_range(buf: &mut [u8], start: u32, end: u32) -> bool {
     if start >= end {
         return false;
@@ -635,115 +642,101 @@ pub fn delete_range(buf: &mut [u8], start: u32, end: u32) -> bool {
     let ol = h.original_len;
     let al = h.add_len;
 
-    // Collect pieces into a temporary array, apply the delete, then write back.
-    // We work with a stack-allocated piece buffer (MAX_PIECES is 512 × 16 = 8KB).
-    let mut pieces = [Piece {
-        source: 0,
-        _pad: 0,
-        style_id: 0,
-        _pad2: 0,
-        offset: 0,
-        length: 0,
-        operation_id: 0,
-    }; MAX_PIECES];
-    let mut count = 0usize;
+    // In-place delete with read/write cursors.
+    //
+    // A delete can split one piece into two (hole punch), which grows the
+    // piece count by 1. But in that case no pieces are fully removed.
+    //
+    // Detect if any single piece contains both `start` and `end` internally.
+    let might_split = {
+        let mut offset: u32 = 0;
+        let mut found = false;
+        for i in 0..pc {
+            let p = read_piece(buf, sc, i);
+            let p_start = offset;
+            let p_end = offset + p.length;
+            if start > p_start && end < p_end {
+                found = true;
+                break;
+            }
+            offset = p_end;
+        }
+        found
+    };
 
+    if might_split {
+        // Need to grow piece array by 1 — check buffer capacity.
+        let new_data_off = original_offset(sc, pc + 1);
+        if new_data_off + ol as usize + al as usize > buf.len() {
+            return false;
+        }
+        // Shift data right by one piece slot to make room.
+        relocate_data(buf, sc, pc, pc + 1, ol, al);
+        read_header_mut(buf).piece_count = pc + 1;
+    }
+
+    // Now do the in-place piece rewrite with read/write cursors.
+    // Iterate over the ORIGINAL piece count — the pre-expansion only added
+    // empty slots, not logical pieces.
+    let cur_pc = read_header(buf).piece_count; // may be pc+1 after expansion
+    let mut wi: u16 = 0; // write index
     let mut offset: u32 = 0;
-    for i in 0..pc {
-        let p = read_piece(buf, sc, i);
+
+    for ri in 0..pc {
+        let p = read_piece(buf, sc, ri);
         let p_start = offset;
         let p_end = offset + p.length;
+        offset = p_end;
 
         if p_end <= start || p_start >= end {
             // Entirely outside deletion range — keep as-is.
-            pieces[count] = p;
-            count += 1;
+            if wi != ri {
+                write_piece(buf, sc, wi, &p);
+            }
+            wi += 1;
         } else if p_start >= start && p_end <= end {
-            // Entirely within deletion range — remove.
+            // Entirely within deletion range — skip (remove).
         } else if start > p_start && end < p_end {
-            // Deletion splits this piece into two.
-            // Left part.
-            pieces[count] = Piece {
-                source: p.source,
-                _pad: 0,
-                style_id: p.style_id,
-                _pad2: 0,
-                offset: p.offset,
+            // Deletion punches a hole — split into two.
+            let left = Piece {
                 length: start - p_start,
-                operation_id: p.operation_id,
+                ..p
             };
-            count += 1;
-            // Right part.
-            pieces[count] = Piece {
-                source: p.source,
-                _pad: 0,
-                style_id: p.style_id,
-                _pad2: 0,
+            write_piece(buf, sc, wi, &left);
+            wi += 1;
+            let right = Piece {
                 offset: p.offset + (end - p_start),
                 length: p_end - end,
-                operation_id: p.operation_id,
+                ..p
             };
-            count += 1;
+            write_piece(buf, sc, wi, &right);
+            wi += 1;
         } else if start > p_start {
-            // Deletion cuts off the end of this piece.
-            pieces[count] = Piece {
-                source: p.source,
-                _pad: 0,
-                style_id: p.style_id,
-                _pad2: 0,
-                offset: p.offset,
+            // Deletion cuts off the end.
+            let trimmed = Piece {
                 length: start - p_start,
-                operation_id: p.operation_id,
+                ..p
             };
-            count += 1;
+            write_piece(buf, sc, wi, &trimmed);
+            wi += 1;
         } else {
-            // Deletion cuts off the beginning of this piece.
+            // Deletion cuts off the beginning.
             let trim = end - p_start;
-            pieces[count] = Piece {
-                source: p.source,
-                _pad: 0,
-                style_id: p.style_id,
-                _pad2: 0,
+            let trimmed = Piece {
                 offset: p.offset + trim,
                 length: p.length - trim,
-                operation_id: p.operation_id,
+                ..p
             };
-            count += 1;
+            write_piece(buf, sc, wi, &trimmed);
+            wi += 1;
         }
-
-        offset = p_end;
     }
 
-    // Calculate the new piece count.
-    let new_pc = count as u16;
-    let pieces_removed = pc as i32 - new_pc as i32;
+    let new_pc = wi;
 
-    if pieces_removed > 0 {
-        // Pieces shrunk — shift original+add buffers left.
-        let old_data_off = original_offset(sc, pc);
-        let new_data_off = original_offset(sc, new_pc);
-        let data_len = ol as usize + al as usize;
-        if data_len > 0 {
-            // Copy forward (leftward shift).
-            for i in 0..data_len {
-                buf[new_data_off + i] = buf[old_data_off + i];
-            }
-        }
-    } else if pieces_removed < 0 {
-        // Pieces grew (split added one) — shift original+add buffers right.
-        let old_data_off = original_offset(sc, pc);
-        let new_data_off = original_offset(sc, new_pc);
-        let data_len = ol as usize + al as usize;
-        if new_data_off + data_len > buf.len() {
-            return false;
-        }
-        if data_len > 0 {
-            let mut i = data_len;
-            while i > 0 {
-                i -= 1;
-                buf[new_data_off + i] = buf[old_data_off + i];
-            }
-        }
+    // Relocate data buffers to match new piece count.
+    if new_pc != cur_pc {
+        relocate_data(buf, sc, cur_pc, new_pc, ol, al);
     }
 
     // Update header.
@@ -751,15 +744,13 @@ pub fn delete_range(buf: &mut [u8], start: u32, end: u32) -> bool {
     h.piece_count = new_pc;
     h.text_len -= end - start;
 
-    // Write pieces.
-    for i in 0..count {
-        write_piece(buf, sc, i as u16, &pieces[i]);
-    }
-
     true
 }
 
 /// Apply a style to the byte range `[start, end)`.
+///
+/// Operates in-place on the piece array. Splits are handled by first
+/// expanding the piece array, then processing right-to-left.
 pub fn apply_style(buf: &mut [u8], start: u32, end: u32, style_id: u8) {
     if start >= end {
         return;
@@ -773,132 +764,152 @@ pub fn apply_style(buf: &mut [u8], start: u32, end: u32, style_id: u8) {
     let ol = h.original_len;
     let al = h.add_len;
 
-    // Read all pieces into a temporary buffer, apply style changes, write back.
-    let mut pieces = [Piece {
-        source: 0,
-        _pad: 0,
-        style_id: 0,
-        _pad2: 0,
-        offset: 0,
-        length: 0,
-        operation_id: 0,
-    }; MAX_PIECES];
-    let mut count = 0usize;
+    // Count how many extra piece slots we need.
+    let mut extra_pieces: u16 = 0;
+    {
+        let mut offset: u32 = 0;
+        for i in 0..pc {
+            let p = read_piece(buf, sc, i);
+            let p_start = offset;
+            let p_end = offset + p.length;
+            offset = p_end;
 
-    let mut offset: u32 = 0;
-    for i in 0..pc {
-        let p = read_piece(buf, sc, i);
-        let p_start = offset;
-        let p_end = offset + p.length;
-
-        if p_end <= start || p_start >= end {
-            // Outside style range — keep as-is.
-            pieces[count] = p;
-            count += 1;
-        } else if p_start >= start && p_end <= end {
-            // Entirely within style range — change style.
-            pieces[count] = Piece { style_id, ..p };
-            count += 1;
-        } else if start > p_start && end < p_end {
-            // Style range splits this piece into three.
-            if count + 3 > MAX_PIECES {
-                return; // Can't fit — abort.
+            if p_end <= start || p_start >= end {
+                // Outside — no split.
+            } else if p_start >= start && p_end <= end {
+                // Fully inside — no split, just restyle.
+            } else if start > p_start && end < p_end {
+                // Both boundaries inside this piece — 1→3 split.
+                extra_pieces += 2;
+            } else {
+                // One boundary inside — 1→2 split.
+                extra_pieces += 1;
             }
-            // Left (unchanged).
-            pieces[count] = Piece {
-                offset: p.offset,
-                length: start - p_start,
-                ..p
-            };
-            count += 1;
-            // Middle (styled).
-            pieces[count] = Piece {
-                offset: p.offset + (start - p_start),
-                length: end - start,
-                style_id,
-                ..p
-            };
-            count += 1;
-            // Right (unchanged).
-            pieces[count] = Piece {
-                offset: p.offset + (end - p_start),
-                length: p_end - end,
-                ..p
-            };
-            count += 1;
-        } else if start > p_start {
-            // Style cuts into the end of this piece — split into two.
-            if count + 2 > MAX_PIECES {
-                return;
-            }
-            pieces[count] = Piece {
-                offset: p.offset,
-                length: start - p_start,
-                ..p
-            };
-            count += 1;
-            pieces[count] = Piece {
-                offset: p.offset + (start - p_start),
-                length: p_end - start,
-                style_id,
-                ..p
-            };
-            count += 1;
-        } else {
-            // Style cuts into the beginning of this piece — split into two.
-            if count + 2 > MAX_PIECES {
-                return;
-            }
-            pieces[count] = Piece {
-                offset: p.offset,
-                length: end - p_start,
-                style_id,
-                ..p
-            };
-            count += 1;
-            pieces[count] = Piece {
-                offset: p.offset + (end - p_start),
-                length: p_end - end,
-                ..p
-            };
-            count += 1;
         }
-
-        offset = p_end;
     }
 
-    let new_pc = count as u16;
-
-    // Relocate data buffers if piece count changed.
-    if new_pc != pc {
-        let old_data_off = original_offset(sc, pc);
-        let new_data_off = original_offset(sc, new_pc);
-        let data_len = ol as usize + al as usize;
-
-        if new_data_off + data_len > buf.len() {
+    if extra_pieces > 0 {
+        // Check buffer capacity for expanded piece array.
+        let new_data_off = original_offset(sc, pc + extra_pieces);
+        if new_data_off + ol as usize + al as usize > buf.len() {
             return; // Buffer too small.
         }
+        // Shift data right to accommodate extra pieces.
+        relocate_data(buf, sc, pc, pc + extra_pieces, ol, al);
+    }
 
-        if new_data_off > old_data_off {
-            // Shift right.
-            let mut i = data_len;
-            while i > 0 {
-                i -= 1;
-                buf[new_data_off + i] = buf[old_data_off + i];
-            }
-        } else if new_data_off < old_data_off {
-            // Shift left.
-            for i in 0..data_len {
-                buf[new_data_off + i] = buf[old_data_off + i];
-            }
+    // Process pieces right-to-left so that rightward placement doesn't
+    // clobber unprocessed pieces.
+    let mut slots_remaining = extra_pieces;
+
+    let mut i = pc;
+    while i > 0 {
+        i -= 1;
+        let p = read_piece(buf, sc, i);
+
+        // Compute starting offset of piece i by summing pieces 0..i.
+        let mut p_start: u32 = 0;
+        for j in 0..i {
+            p_start += read_piece(buf, sc, j).length;
+        }
+        let p_end = p_start + p.length;
+
+        // Where this piece lands in the new array.
+        let dest = i + slots_remaining;
+
+        if p_end <= start || p_start >= end {
+            // Outside range — copy to destination.
+            write_piece(buf, sc, dest, &p);
+        } else if p_start >= start && p_end <= end {
+            // Fully inside — restyle in place.
+            write_piece(buf, sc, dest, &Piece { style_id, ..p });
+        } else if start > p_start && end < p_end {
+            // 1→3 split.
+            slots_remaining -= 2;
+            let base = i + slots_remaining;
+            write_piece(
+                buf,
+                sc,
+                base,
+                &Piece {
+                    length: start - p_start,
+                    ..p
+                },
+            );
+            write_piece(
+                buf,
+                sc,
+                base + 1,
+                &Piece {
+                    offset: p.offset + (start - p_start),
+                    length: end - start,
+                    style_id,
+                    ..p
+                },
+            );
+            write_piece(
+                buf,
+                sc,
+                base + 2,
+                &Piece {
+                    offset: p.offset + (end - p_start),
+                    length: p_end - end,
+                    ..p
+                },
+            );
+        } else if start > p_start {
+            // Style cuts into end — 1→2 split.
+            slots_remaining -= 1;
+            let base = i + slots_remaining;
+            write_piece(
+                buf,
+                sc,
+                base,
+                &Piece {
+                    length: start - p_start,
+                    ..p
+                },
+            );
+            write_piece(
+                buf,
+                sc,
+                base + 1,
+                &Piece {
+                    offset: p.offset + (start - p_start),
+                    length: p_end - start,
+                    style_id,
+                    ..p
+                },
+            );
+        } else {
+            // Style cuts into beginning — 1→2 split.
+            slots_remaining -= 1;
+            let base = i + slots_remaining;
+            write_piece(
+                buf,
+                sc,
+                base,
+                &Piece {
+                    length: end - p_start,
+                    style_id,
+                    ..p
+                },
+            );
+            write_piece(
+                buf,
+                sc,
+                base + 1,
+                &Piece {
+                    offset: p.offset + (end - p_start),
+                    length: p_end - end,
+                    ..p
+                },
+            );
         }
     }
 
-    // Update header and write pieces.
-    read_header_mut(buf).piece_count = new_pc;
-    for i in 0..count {
-        write_piece(buf, sc, i as u16, &pieces[i]);
-    }
+    // Update piece count.
+    read_header_mut(buf).piece_count = pc + extra_pieces;
 }
 
 /// Set the current insertion style.
@@ -938,6 +949,7 @@ pub fn next_operation(buf: &mut [u8]) -> u32 {
 /// Add a style to the palette. Returns the style index, or `None` if full.
 ///
 /// Adding a style shifts the piece array and data buffers right by STYLE_SIZE.
+/// The style_count field is u8, so the maximum is 255.
 pub fn add_style(buf: &mut [u8], style: &Style) -> Option<u8> {
     let h = read_header(buf);
     let sc = h.style_count;
@@ -945,7 +957,8 @@ pub fn add_style(buf: &mut [u8], style: &Style) -> Option<u8> {
     let ol = h.original_len;
     let al = h.add_len;
 
-    if sc as usize >= MAX_STYLES {
+    // u8 ceiling.
+    if sc == 255 {
         return None;
     }
 
@@ -1177,6 +1190,62 @@ pub fn styled_run(buf: &[u8], index: usize) -> Option<StyledRun> {
 /// Copy the text of a styled run into `out`. Returns the number of bytes copied.
 pub fn copy_run_text(buf: &[u8], run: &StyledRun, out: &mut [u8]) -> usize {
     text_slice(buf, run.byte_offset, run.byte_offset + run.byte_len, out)
+}
+
+// ---------------------------------------------------------------------------
+// Public API — Compaction
+// ---------------------------------------------------------------------------
+
+/// Compact the piece table by merging adjacent pieces that reference
+/// contiguous ranges in the same source buffer with the same style.
+///
+/// Returns the number of pieces removed. After compaction, the buffer
+/// has more free space for new inserts and splits.
+pub fn compact(buf: &mut [u8]) -> u16 {
+    let h = read_header(buf);
+    let sc = h.style_count;
+    let pc = h.piece_count;
+
+    if pc <= 1 {
+        return 0;
+    }
+
+    let ol = h.original_len;
+    let al = h.add_len;
+
+    // Forward scan with read/write cursors.
+    let mut wi: u16 = 0;
+    let mut current = read_piece(buf, sc, 0);
+
+    for ri in 1..pc {
+        let next = read_piece(buf, sc, ri);
+        if next.source == current.source
+            && next.style_id == current.style_id
+            && next.offset == current.offset + current.length
+        {
+            // Merge: extend current piece to cover next.
+            current.length += next.length;
+        } else {
+            // Flush current, advance.
+            write_piece(buf, sc, wi, &current);
+            wi += 1;
+            current = next;
+        }
+    }
+    // Flush last piece.
+    write_piece(buf, sc, wi, &current);
+    wi += 1;
+
+    let new_pc = wi;
+    let removed = pc - new_pc;
+
+    if removed > 0 {
+        // Shift data buffers left to reclaim space from removed pieces.
+        relocate_data(buf, sc, pc, new_pc, ol, al);
+        read_header_mut(buf).piece_count = new_pc;
+    }
+
+    removed
 }
 
 // ---------------------------------------------------------------------------

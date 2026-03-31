@@ -268,6 +268,16 @@ pub mod input {
 // ── edit: editor <-> document, editor <-> presenter ─────────────────
 
 pub mod edit {
+    /// Document content format. Used by document service and presenter to
+    /// dispatch on text/plain vs text/rich code paths.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum DocumentFormat {
+        /// text/plain — flat UTF-8 buffer.
+        Plain,
+        /// text/rich — piece table in shared memory.
+        Rich,
+    }
+
     pub const MSG_WRITE_INSERT: u32 = 30;
     pub const MSG_WRITE_DELETE: u32 = 31;
     pub const MSG_CURSOR_MOVE: u32 = 32;

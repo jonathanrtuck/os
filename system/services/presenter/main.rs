@@ -85,15 +85,7 @@ fn round_f32(x: f32) -> i32 {
     drawing::round_f32(x)
 }
 
-/// Document format discriminant — determines which code path core uses
-/// for document operations, layout, and scene building.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DocumentFormat {
-    /// text/plain — flat UTF-8 buffer (existing path, unchanged).
-    Plain,
-    /// text/rich — piece table in shared memory.
-    Rich,
-}
+pub(crate) use protocol::edit::DocumentFormat;
 
 /// Boot timeout: force-transition after 5 seconds regardless of pending replies.
 const BOOT_TIMEOUT_NS: u64 = 5_000_000_000;

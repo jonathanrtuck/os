@@ -45,12 +45,7 @@ const MAX_UNDO: usize = 64;
 /// Undo coalescing window: edits within this window are grouped into one undo step.
 const COALESCE_MS: u64 = 500;
 
-/// Document format discriminant.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum DocumentFormat {
-    Plain,
-    Rich,
-}
+use protocol::edit::DocumentFormat;
 
 /// Undo/redo state: fixed-size ring of COW snapshot IDs.
 struct UndoState {

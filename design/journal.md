@@ -4,6 +4,233 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Edit Architecture — OPEN (2026-03-31)
+
+**Context:** Emerged from architecture review item #2 (single-byte inserts over IPC). The original problem — paste of 1K text = 1000 IPC round-trips — led to three connected design insights about how editing works across all content types.
+
+### Insight 1: Editors write to decoded representations, not file bytes
+
+Tracing the edit path across content types revealed a pattern:
+
+| Content type | Stored form   | Decoded form  | Editor mutates |
+| ------------ | ------------- | ------------- | -------------- |
+| text/plain   | byte sequence | byte sequence | byte sequence  |
+| text/rich    | piece table   | piece table   | piece table    |
+| image/jpeg   | DCT blocks    | pixel grid    | pixel grid     |
+| audio/wav    | sample bytes  | sample buffer | sample buffer  |
+
+The OS decodes file bytes into a content-class-specific representation (pixel grid, sample buffer, piece table). Editors mutate the decoded representation. The OS encodes back to file bytes for persistence. This is the reading pipeline in reverse — the decode path already exists for viewing.
+
+**Structural primitives, not semantic operations.** The OS provides content-class-specific mutation primitives on decoded representations: insert/delete/replace for sequences (text, audio), write-region for grids (images). These are structural — the OS doesn't know whether an insert is a keystroke or AI output, whether a pixel write is a paint stroke or a sepia filter. Semantic understanding of edits belongs to the editor. Consistent with settled decision #9: "OS is semantically ignorant — tracks ordering and attribution only."
+
+**Selection is content-class-specific.** Text selection is a 1D byte range. Image selection is a 2D region (rectangle, mask). Audio selection is a time range. No universal selection type — but they share a shape: selection answers "what is the scope of the next operation?" and "nothing selected" = "entire document."
+
+### Insight 2: The trust boundary is persistence, not the buffer
+
+Original concern: giving the editor RW access to the decoded buffer means a buggy editor can corrupt the document.
+
+Resolution: **the encoder is the validation gate.** The editor can scribble all over the decoded buffer — worst case is a garbled frame on screen. But nothing corrupt reaches disk:
+
+1. The encoder validates the decoded representation before producing file bytes (encoding malformed pixel data fails)
+2. For text, `piecetable::validate()` gates persistence
+3. COW snapshots preserve the previous valid version — always recoverable
+
+The trust boundary isn't "who can write to the buffer" — it's **"what gets persisted."** The OS controls persistence. The editor controls the working copy.
+
+**This resolves architecture review item #2.** The editor writes directly to the decoded buffer in shared memory. IPC becomes pure coordination:
+
+- `begin_operation` / `end_operation` (undo boundaries)
+- `selection_changed` (scope updates)
+- Cursor position sync
+
+No `MSG_WRITE_INSERT`. No batch messages. No staging buffer. No 60-byte data limit. The 1-byte keystroke and the 40MB sepia filter use the same mechanism — direct shared memory writes, followed by coordination signals.
+
+### Insight 3: Copy is document creation
+
+The view/edit split (settled decision #6) creates tension around copy/paste:
+
+- **Selection** is a view operation (highlighting content)
+- **Paste** is an edit operation (inserting content)
+- **Copy** sits on the boundary — reads (view-side) but only useful for pasting (edit-side)
+
+Key observation: **copy without paste is valueless** — unless copy produces something independently meaningful.
+
+Resolution: **copy creates a document.** Cmd+C on a selection creates a new unnamed document containing the selected content, with the appropriate mimetype. This document is immediately a first-class citizen — viewable, shareable, searchable, nameable. Copy is now independently valuable: it's document creation, an OS operation.
+
+**Paste** is "insert the content of document X at the current scope." The editor reads from the source document's decoded representation and writes to the active document's decoded representation. Same structural primitives, same shared memory mechanism.
+
+**No clipboard, no staging area — just documents.** Unnamed documents created by copy accumulate naturally. The "clipboard" is a metadata query:
+
+- **Cmd+V** = insert most recent unnamed document of compatible type at cursor
+- **Paste list** (UI TBD) = query all unnamed documents of compatible type, sorted reverse-chronologically
+- **Retention** = keep last N unnamed documents per type (user-configurable), auto-cleanup
+
+Composes with settled decisions #5 (mimetype determines compatibility), #7 (rich queryable metadata — paste list is just a query), #6 (selection is view, document creation is OS, paste-insertion is editor).
+
+### Architecture summary
+
+```text
+File bytes (stored form)
+    ↕ decode/encode (OS — content-type-specific codecs)
+Decoded representation (shared memory — pixel grid / piece table / sample buffer)
+    ↕ structural mutations (editor writes directly, OS validates before persist)
+    ↕ read for rendering (OS — layout, scene graph, renderer)
+Display
+```
+
+- Editors have RW access to decoded representations
+- OS handles decode (for viewing) and encode (for persistence)
+- Structural primitives are per content class, not per content type
+- OS is semantically ignorant of edits — tracks boundaries and attribution only
+- Encoder validates before persistence — corruption stays in working copy
+- COW snapshots provide rollback from any state
+- IPC is coordination only — no data transfer for edits
+
+### Open questions
+
+- **Cross-type paste.** Copying rich text and pasting into plain text — who downcasts? Likely the editor: it inspects the source type and decides to strip styles / reject / prompt for type upgrade.
+- **Multi-selection copy.** Non-contiguous selection → one document or multiple? Probably one coherent excerpt.
+- **Copy from compound documents.** Region spanning text + image — compound excerpt, or one document per content type?
+- **Concurrent editor access.** Editor writing directly to decoded buffer while layout/presenter read — synchronization design. Piece table uses operation_id as generation counter; does this generalize to other content classes?
+- **Encode-on-persist cost.** Re-encoding a large image on every operation boundary could be expensive. Lazy encoding? But this OS has no "save" — edits write immediately. Interaction with lossy formats where re-encoding degrades quality needs design.
+- **Decoded buffer lifecycle.** When is it created — on document open (eager) or first edit (lazy)? A 100MP photo decoded to BGRA = 400MB. Memory pressure management needed.
+- **Retention UX.** How does the user discover and manage accumulated unnamed documents from copy?
+
+---
+
+## Architecture Review — RESOLVED (2026-03-30, resolved 2026-03-31)
+
+**Context:** Deep review of the post-v0.5 codebase. Nine findings, all addressed:
+
+| #   | Finding                      | Resolution                                                                                          |
+| --- | ---------------------------- | --------------------------------------------------------------------------------------------------- |
+| 1   | Piece table hard limits      | **Implemented.** Constants removed, limits derived from buf.len(). In-place ops, compact().         |
+| 2   | Single-byte inserts over IPC | **Superseded.** Edit Architecture — editors write directly to decoded buffers.                      |
+| 3   | Init knows too much          | **Accepted.** Service topology in flux; manifests when architecture stabilizes.                     |
+| 4   | Allocator is naive           | **Implemented.** Two-tier slab allocator, O(1) alloc/free.                                          |
+| 5   | No large message pattern     | **Accepted.** Reinforced by Edit Architecture — data via shared memory, IPC for coordination only.  |
+| 6   | No rendering backpressure    | **Already implemented.** Layout service drains and coalesces signals.                               |
+| 7   | DocumentFormat duplicated    | **Implemented.** Moved to protocol::edit.                                                           |
+| 8   | Scaffolding label overloaded | **Redesigned.** Two-axis model: interface change cost + implementation confidence.                  |
+| 9   | COW filesystem limits        | **Decided.** Overflow extent blocks before v0.6. Simpler than extent trees, sufficient for this OS. |
+
+### 1. Piece table hard limits will silently truncate (HIGH)
+
+`MAX_PIECES = 512`, `MAX_STYLES = 32`, `MAX_ADD_BUFFER = 32K`. When limits are hit, `insert_bytes` returns `false` — the document silently stops accepting edits. A document-centric OS that can't handle a long document is a contradiction.
+
+**Options:**
+
+- (a) **Compaction** — periodically rewrite the buffer: merge adjacent same-style pieces, fold add buffer into original. This is what VS Code's piece table does. Keeps the fixed-arena model, just reclaims fragmented space.
+- (b) **Growable backing** — allocate additional shared memory pages when limits are hit. More complex (shared memory renegotiation with document service), but removes the wall entirely.
+- (c) **Larger limits** — raise MAX_PIECES to 4096, MAX_ADD_BUFFER to 256K. Delays the problem, doesn't solve it. But combined with (a), may be sufficient for v0.6–v0.8.
+
+**Resolution (2026-03-31):** Constants removed, limits derived from `buf.len()`. In-place `delete_range` and `apply_style` (no scratch buffers). `compact()` added for defragmentation. 62 piecetable tests pass, 2,326 total.
+
+### 2. Single-byte inserts over IPC (HIGH) → SUPERSEDED
+
+The rich editor sends `MSG_WRITE_INSERT` one character at a time. Each keystroke → IPC message → kernel signal → context switch → piece table operation → layout signal. Normal typing is fine. Paste of 1K text = 1000 IPC round-trips.
+
+**Original fix:** Add `MSG_WRITE_INSERT_BATCH`. Straightforward but shallow.
+
+**Superseded by:** "Edit Architecture" thread (above). Editors write directly to decoded representations in shared memory. IPC becomes pure coordination (operation boundaries, cursor sync) — no data transfer. Eliminates `MSG_WRITE_INSERT` entirely. The 1-byte keystroke and the 40MB image filter use the same mechanism. See architecture summary and open questions above.
+
+### 3. Init knows too much (MEDIUM)
+
+`init/main.rs` is the largest file (~94K lines when fully loaded with font data). It hardcodes the handle layout of every service, the 10-phase boot sequence, and the entire shared memory allocation plan. Adding or changing a service requires editing init.
+
+**Options:**
+
+- (a) **Service manifests** — each service declares channels, shared memory, capabilities. Init reads manifests and wires things up. Fuchsia component_manager pattern.
+- (b) **Declarative boot graph** — init reads a boot configuration (data, not code) describing services and their connections.
+- (c) **Accept it for now** — init is scaffolding anyway. The service count is small (~14). Revisit when adding the 20th service.
+
+**Likely path:** (c) for now, (a) when the service count starts to hurt. The interfaces between services (protocol library) are the real contract — init is just the plumber.
+
+**Resolution (2026-03-31):** Accepted (c). Manifests are the right long-term answer, but the service topology is still in flux (Edit Architecture will restructure the document service, new content types will add services). Declaring manifests for services that are about to be restructured is premature. Protocol library is where interface stability lives. Revisit when the architecture stabilizes or service count reaches ~20.
+
+### 4. Allocator is naive (MEDIUM)
+
+`sys/heap.rs` is a linked-list first-fit allocator with coalescing, protected by a raw spinlock (CAS loop, no backoff). O(n) allocation on free block count. No size classes. Works for current workloads but will fragment and slow down under real use.
+
+**Options:**
+
+- (a) **Slab allocator for small sizes** (≤2048 bytes) — O(1) alloc/free for the common case. Keep linked-list for large allocations. This is what the CLAUDE.md documents as the intended three-tier design; it should be implemented.
+- (b) **Replace with dlmalloc-style** — proven, well-understood, handles fragmentation. More code but battle-tested.
+- (c) **Accept for now** — current processes are single-threaded, allocation patterns are modest. Revisit when profiling shows it matters.
+
+**Likely path:** (a) — the three-tier design is already specified, just not implemented. This is a good v0.7 or v0.8 task.
+
+**Resolution (2026-03-31):** Implemented. Two-tier slab allocator replaces the linked-list allocator. 8 size classes (16–2048, powers of two) with per-class free lists for O(1) alloc/free. Large allocations (>2048) go directly to kernel page allocation. Slab pages carved on demand. Spinlock retained with `spin_loop()` (YIELD hint) — correct for current single-threaded processes; upgrade to per-class locks if threads arrive. 2,326 tests pass.
+
+### 5. No standardized large message pattern (MEDIUM)
+
+Every IPC message is 60 bytes of payload. Boundaries that need more (file paths, style palettes, bulk data) each invent their own shared memory layout. The pattern works but isn't systematic.
+
+**Options:**
+
+- (a) **Protocol-level DataRef** — add a standard `LargePayload { shm_offset: u32, length: u32 }` to the protocol library. Channels that need it allocate a per-channel overflow page.
+- (b) **Accept it** — the current ad-hoc shared memory regions (document buffer, layout results, content region) are well-documented and stable. The "problem" is theoretical — no boundary is actually struggling.
+
+**Likely path:** (b) for now. Revisit if new protocol boundaries feel constrained. The 60-byte limit is a feature (forces clean design), not just a limitation.
+
+**Resolution (2026-03-31):** Accepted (b), reinforced by Edit Architecture discussion. The system's established pattern is shared memory for data, IPC for coordination. Every boundary already uses purpose-built shared memory layouts. A generic DataRef would standardize the pointer but not the data format — it adds indirection without value. The 60-byte message is right-sized for coordination metadata.
+
+### 6. No backpressure on the rendering pipeline (LOW)
+
+If document edits arrive faster than layout can process them, `MSG_LAYOUT_RECOMPUTE` signals queue up. If layout is slower than presenter's frame rate, the scene is built with stale data. The triple buffer silently drops frames (correct for display), but bursty workloads (large paste, rapid undo/redo) could cause visible lag.
+
+**Options:**
+
+- (a) **Coalesce layout signals** — layout service tracks a pending flag and ignores duplicate recompute requests. Only recomputes once per frame at most.
+- (b) **Generation-based staleness** — presenter checks layout generation vs document generation. If stale, skip scene build and wait for layout.
+- (c) **Accept it** — the triple buffer already handles the steady state. Bursts cause momentary staleness (old layout, new cursor position), which self-corrects within one frame. Unlikely to be user-visible.
+
+**Likely path:** (a) is trivial and correct. (c) is probably fine for now.
+
+**Resolution (2026-03-31):** Already implemented. Layout service (line 1583–1589) drains all queued `MSG_LAYOUT_RECOMPUTE` messages in a `while try_recv` loop and recomputes once per wake cycle. This is option (a). No change needed.
+
+### 7. DocumentFormat enum duplicated (LOW)
+
+`DocumentFormat { Plain, Rich }` is defined identically in `services/document/main.rs` and `services/presenter/main.rs`. Classic DRY violation that will eventually diverge when a third format is added.
+
+**Fix:** Move to `protocol` library. Both services already import from protocol. Trivial change, should just be done.
+
+**Resolution (2026-03-31):** Done. `DocumentFormat` moved to `protocol::edit`. Both services import from there. Local definitions removed.
+
+### 8. The "scaffolding" label is load-bearing (OBSERVATION)
+
+Every service is marked "scaffolding" in DESIGN.md. The libraries are "foundational." But the services _are_ the system — the libraries are inert without them. If the services are rewritten, the system is rewritten.
+
+**The real question:** Are the _interfaces_ between services stable enough to survive a rewrite? The protocol library is versioned and well-documented (good). The shared memory layouts have const assertions (good). But init's boot sequence is hardcoded (see item 3). The test for "scaffolding" should be: can this service be replaced without changing any other service's code? Currently, the answer is yes for most services (because protocol is the contract), but no for init.
+
+**No action needed** — just awareness. When promoting services from scaffolding to foundational, the test is interface stability, not implementation quality.
+
+**Resolution (2026-03-31):** Replaced scaffolding/foundational with a two-axis labeling model. See `system/DESIGN.md` for details.
+
+**Axis 1 — Interface change cost** (property of the interface, not the code):
+
+- **Deep**: cascades through most of the system (syscall ABI, page size, IPC format)
+- **Wide**: many components depend on it (protocol message types, Content Region layout)
+- **Narrow**: 2–3 components depend on it (document ↔ store protocol)
+- **Leaf**: nothing else depends on it (internal implementation details)
+
+**Axis 2 — Implementation confidence** (property of the code, not the interface):
+
+- **Hardened**: stress-tested, edge cases covered. If it breaks, that's a real bug.
+- **Placeholder**: works for the happy path. Known limitations, expect to revisit.
+
+The old "scaffolding" label conflated both axes. A service could have a stable wide interface with a placeholder implementation (init), or a narrow interface with a hardened implementation (piece table). Labeling them both "scaffolding" obscured the important distinction.
+
+### 9. COW filesystem limits (OBSERVATION)
+
+The fs library is real and well-engineered (superblock ring, extent-based inodes, CRC32 crash recovery). But: 16 KiB blocks, max 16 extents per inode, inline storage up to 16128 bytes. This is a filesystem for small documents. Large media files (images, video) would need extent trees or indirect blocks.
+
+**No action needed for v0.5–v0.8** — current content types are text and small images. This becomes relevant in v0.6 (Media) when JPEG/audio/video are on the roadmap. At that point, either extend the inode structure with indirect blocks, or implement a separate large-object store.
+
+**Resolution (2026-03-31):** Overflow extent blocks chosen over extent trees. Keep 16 inline extents in the inode (zero overhead for small files). When full, chain to overflow blocks (~2000 extents per 16 KiB block). One pointer chase for large files, zero for small. Trivially crash-safe (same COW pattern the fs already uses), no tree balancing or journaling needed. Extent trees solve a problem this OS won't have (huge fragmented files with random seeks on a multi-user server) at the cost of significant crash-consistency complexity. If fragmentation becomes an issue, a defragmentation pass (rewrite contiguously) is simpler than maintaining a B-tree. Implement before v0.6 media milestone.
+
+---
+
 ## Render Driver Consolidation — SETTLED (2026-03-30)
 
 **Decision:** Remove cpu-render and virgil-render. Metal-render is the sole render backend.
@@ -75,20 +302,20 @@ Cursor bugs exposed a broader question: two parallel scanline rasterizers exist 
 
 Move metric functions out of `fonts::rasterize` into `fonts::metrics` (or top-level re-exports):
 
-| Function | Current module | New module | Consumers |
-| --- | --- | --- | --- |
-| `font_metrics()`, `glyph_h_metrics()`, `caret_skew()`, etc. | `rasterize` | `metrics` | layout, presenter |
-| `AxisValue`, `axis_values_hash()` | `rasterize` | `metrics` (or top-level) | layout, presenter, metal-render |
-| `glyph_id_for_char()` | `rasterize` | `metrics` | layout, presenter |
-| `rasterize_with_axes()`, `RasterBuffer`, `RasterScratch` | `rasterize` | `rasterize` (stays) | metal-render only |
-| `scale_fu()`, `GlyphMetrics` | `rasterize` | `rasterize` (stays) | metal-render only |
-| `GlyphCache`, `LruGlyphCache` | `cache` | dead code | legacy CpuBackend only |
+| Function                                                    | Current module | New module               | Consumers                       |
+| ----------------------------------------------------------- | -------------- | ------------------------ | ------------------------------- |
+| `font_metrics()`, `glyph_h_metrics()`, `caret_skew()`, etc. | `rasterize`    | `metrics`                | layout, presenter               |
+| `AxisValue`, `axis_values_hash()`                           | `rasterize`    | `metrics` (or top-level) | layout, presenter, metal-render |
+| `glyph_id_for_char()`                                       | `rasterize`    | `metrics`                | layout, presenter               |
+| `rasterize_with_axes()`, `RasterBuffer`, `RasterScratch`    | `rasterize`    | `rasterize` (stays)      | metal-render only               |
+| `scale_fu()`, `GlyphMetrics`                                | `rasterize`    | `rasterize` (stays)      | metal-render only               |
+| `GlyphCache`, `LruGlyphCache`                               | `cache`        | dead code                | legacy CpuBackend only          |
 
 After this, layout and presenter import `fonts::metrics`, not `fonts::rasterize`. Pixel APIs become structurally unreachable from above the render boundary.
 
 ### Architecture
 
-```
+```text
 fonts/                          (font-specific)
   metrics (font units)
   outline extraction

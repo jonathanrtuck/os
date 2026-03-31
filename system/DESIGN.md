@@ -2,7 +2,7 @@
 
 Architectural record for everything above the kernel: shared libraries, platform services, drivers, and user programs. Companion to `kernel/DESIGN.md`, which covers kernel internals.
 
-Each section captures the goal, current approach, what's foundational (will survive into the real system), what's scaffolding (works for now, will be replaced), and what's missing. Honest about gaps.
+Each section captures the goal, current approach, interface change cost, implementation confidence, and gaps. Honest about what's solid and what isn't.
 
 ## Design Principle: Simplicity
 
@@ -15,7 +15,21 @@ The system should be simple to reason about from the top down. Simple doesn't me
 
 This is Decision #4 applied to implementation: simple connective tissue, complex leaf nodes, total complexity conserved but displaced to where it's contained.
 
-**Status key:** 🟢 Foundational — 🟡 Scaffolding — 🔴 Demo/throwaway — ⚫ Deprecated
+**Labeling model — two axes:**
+
+_Interface change cost_ (how painful to change the contract):
+
+- **Deep** — cascades through most of the system (syscall ABI, page size, IPC format)
+- **Wide** — many components depend on it (protocol message types, Content Region layout)
+- **Narrow** — 2–3 components depend on it (document ↔ store protocol)
+- **Leaf** — nothing else depends on it (internal implementation details)
+
+_Implementation confidence_ (how much to trust the code):
+
+- **Hardened** — stress-tested, edge cases covered. If it breaks, that's a real bug.
+- **Placeholder** — works for the happy path. Known limitations, expect to revisit.
+
+Components are always replaceable — that's what interfaces are for. The system IS the interfaces; implementations are black boxes behind them. These labels communicate cost of change (interface) and diagnostic trust (implementation), not permanence.
 
 ---
 
@@ -25,11 +39,11 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 ```text
 ┌───────────────────────────────────────────────────────────┐
-│  User Programs  (text-editor, rich-editor, echo)          │  🟡/🔴
+│  User Programs  (text-editor, rich-editor, echo)          │  placeholder
 ├───────────────────────────────────────────────────────────┤
 │  Platform Services                                        │
 │  ┌────────┐ ┌─────────────────────────────────────────┐   │
-│  │  Init  │ │  Document Pipeline                      │   │  🟡/🟢
+│  │  Init  │ │  Document Pipeline                      │   │  mixed
 │  │ (root  │ │  ┌─────────────┐  ┌──────────────────┐  │   │
 │  │  task) │ │  │ document    │  │ presenter        │  │   │
 │  │        │ │  │ (sole writer│  │ (scene graph,    │  │   │
@@ -49,7 +63,7 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 │  └──────────────┘  └──────────────────────────────────┘   │
 ├───────────────────────────────────────────────────────────┤
 │  Libraries                                                │
-│  ┌─────┐ ┌────────┐ ┌─────────┐ ┌───────┐ ┌───────┐       │  🟢 foundational
+│  ┌─────┐ ┌────────┐ ┌─────────┐ ┌───────┐ ┌───────┐       │  hardened
 │  │ sys │ │ virtio │ │ drawing │ │ fonts │ │ scene │       │
 │  └─────┘ └────────┘ └─────────┘ └───────┘ └───────┘       │
 │  ┌─────┐ ┌──────────┐ ┌────────┐ ┌───────────┐ ┌────────┐ │
@@ -59,11 +73,11 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 │  │ fs │ │ store │ │ piecetable │ │ icons │                │
 │  └────┘ └───────┘ └────────────┘ └───────┘                │
 ├───────────────────────────────────────────────────────────┤
-│  Kernel (28 syscalls, see kernel/DESIGN.md)               │  🟢 production
+│  Kernel (28 syscalls, see kernel/DESIGN.md)               │  hardened
 └───────────────────────────────────────────────────────────┘
 ```
 
-**Process model:** Kernel spawns only init. Init reads service ELFs from a memory-mapped service pack and spawns everything else. Microkernel pattern (Fuchsia component_manager, seL4 root task). This pattern is foundational; init's implementation is scaffolding.
+**Process model:** Kernel spawns only init. Init reads service ELFs from a memory-mapped service pack and spawns everything else. Microkernel pattern (Fuchsia component_manager, seL4 root task). This pattern is stable (deep interface); init's implementation is placeholder.
 
 **IPC:** Two mechanisms, matched to data semantics:
 
@@ -73,19 +87,19 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 Notification for both: `channel_signal` syscall wakes the consumer from `sys::wait()`. The signal means "something changed" — the consumer checks both event rings and state registers.
 
-**Memory model for userspace:** Stack (64 KiB) + static BSS + DMA buffers + shared memory from init + demand-paged heap via `memory_alloc`/`memory_free` syscalls. Heap region: 16–256 MiB VA, 32 MiB physical budget per process. Userspace `GlobalAlloc` in `sys` library (linked-list first-fit with coalescing, grows via `memory_alloc`). Programs opt in with `extern crate alloc;` to get `Vec`/`String`/`Box`.
+**Memory model for userspace:** Stack (64 KiB) + static BSS + DMA buffers + shared memory from init + demand-paged heap via `memory_alloc`/`memory_free` syscalls. Heap region: 16–256 MiB VA, 32 MiB physical budget per process. Userspace `GlobalAlloc` in `sys` library (two-tier slab allocator: 8 size classes 16–2048 for O(1) small allocs, direct page allocation for large; grows via `memory_alloc`). Programs opt in with `extern crate alloc;` to get `Vec`/`String`/`Box`.
 
 ---
 
 ## 1. Libraries
 
-### 1.1 Syscall Library (`libraries/sys/`) 🟢
+### 1.1 Syscall Library (`libraries/sys/`) — deep interface, hardened
 
 **Goal:** Safe Rust wrappers for all kernel syscalls.
 
 **Status:** ~710 lines, covers all 28 syscalls with typed errors + `GlobalAlloc` (linked-list first-fit with coalescing). Every userspace binary links against this. Programs opt in to heap allocation with `extern crate alloc;`.
 
-**What's foundational:**
+**Interface (stable):**
 
 - The syscall ABI (x0–x5 args, x8 number, `svc #0`). Standard, stable.
 - The function signatures mirror the kernel's syscall interface 1:1.
@@ -93,7 +107,7 @@ Notification for both: `channel_signal` syscall wakes the consumer from `sys::wa
 - `SyscallResult<T>` — typed returns on all fallible syscalls. Return types encode meaning: `process_create → SyscallResult<u8>` (handle), `channel_create → SyscallResult<(u8, u8)>` (pair of handles), `dma_alloc → SyscallResult<usize>` (VA).
 - `print()` — fire-and-forget console output (wraps `write`, discards Result). Mirrors Rust's `print!` vs `write!` pattern.
 - Panic handler that calls `exit()` — correct behavior for userspace panics.
-- `GlobalAlloc` — linked-list first-fit allocator with coalescing, grows on demand via `memory_alloc`. Spinlock-protected. Enables `Vec`, `String`, `Box` for all userspace programs. Zero cost if `alloc` crate is not imported.
+- `GlobalAlloc` — two-tier slab allocator. 8 power-of-two size classes (16–2048 bytes) with per-class free lists for O(1) alloc/free. Large allocations (>2048) go directly to kernel page allocation. Slab pages carved on demand. Spinlock-protected. Enables `Vec`, `String`, `Box` for all userspace programs. Zero cost if `alloc` crate is not imported.
 
 **What's missing:**
 
@@ -101,20 +115,20 @@ Notification for both: `channel_signal` syscall wakes the consumer from `sys::wa
 
 ---
 
-### 1.2 Virtio Library (`libraries/virtio/`) 🟢
+### 1.2 Virtio Library (`libraries/virtio/`) — narrow interface, hardened
 
 **Goal:** Reusable virtio MMIO transport and split virtqueue, shared across all virtio drivers.
 
 **Status:** 373 lines. Pure library — no syscalls, no allocations. Callers provide DMA buffers.
 
-**What's foundational:**
+**Interface (stable):**
 
 - MMIO register abstraction with volatile reads/writes.
 - Split virtqueue implementation (descriptor table, available ring, used ring).
 - Device negotiation flow (reset → acknowledge → driver → features → driver_ok).
 - Clean separation: library handles the protocol, caller handles memory and I/O.
 
-**What's temporary:**
+**Implementation (placeholder):**
 
 - QEMU-specific. Real hardware uses different transports (PCI, platform bus). But the split virtqueue protocol is the same — the transport layer would be swapped, not the queue logic.
 
@@ -122,13 +136,13 @@ Notification for both: `channel_signal` syscall wakes the consumer from `sys::wa
 
 ---
 
-### 1.3 Drawing Library (`libraries/drawing/`) 🟢
+### 1.3 Drawing Library (`libraries/drawing/`) — wide interface, hardened
 
 **Goal:** Pure drawing primitives for pixel buffers. No allocations, no syscalls, no hardware — fully testable on the host.
 
 **Status:** ~1100 lines (lib.rs + gamma_tables.rs + palette.rs). Surface abstraction, color with alpha, blending, blitting, gamma-correct sRGB blending, monochrome palette. PNG decoder moved to `services/decoders/png/` (sandboxed service).
 
-**What's foundational:**
+**Interface (stable):**
 
 - `Surface<'a>` borrows `&mut [u8]` — no allocation policy. Works with any memory source (DMA, BSS, stack, shared).
 - `Color` in canonical RGBA, encode/decode at the pixel boundary. Format-agnostic above the pixel level.
@@ -146,7 +160,7 @@ Notification for both: `channel_signal` syscall wakes the consumer from `sys::wa
 - **Unsafe inner loops:** `draw_coverage`, `blit_blend`, and `fill_rect_blend` use raw pointer access (`unsafe { *ptr }`) in hot inner loops after bounds are verified at the row level. Eliminates redundant bounds checks for ~2× throughput on large surfaces.
 - **NEON SIMD (aarch64):** `fill_rect` uses `vst1q_u32` to write 4 pixels per instruction for opaque fills. Alpha blending uses scalar sRGB gamma lookups combined with NEON vector operations for the linear-space blend math. Constant-color blends use a dedicated NEON path. All SIMD paths have scalar fallbacks and are tested against reference implementations.
 
-**What's scaffolding:**
+**Implementation (placeholder):**
 
 - `PixelFormat` enum has only `Bgra8888`. Trivial to extend (add variant + match arms), but currently untested with other formats.
 
@@ -154,20 +168,20 @@ Notification for both: `channel_signal` syscall wakes the consumer from `sys::wa
 
 ---
 
-### 1.3b Font Library (`libraries/fonts/`) 🟢
+### 1.3b Font Library (`libraries/fonts/`) — wide interface, hardened
 
 **Goal:** TrueType font parsing, rasterization, and caching. Separated from the drawing library for modularity — fonts depend on drawing (for coverage maps), but drawing doesn't depend on fonts.
 
 **Status:** ~3,500 lines across lib.rs, cache.rs, and rasterize/ (8 modules). read-fonts for outline extraction, HarfRust for OpenType shaping, analytic area coverage rasterizer, outline dilation (stem darkening), variable font support (gvar), glyph cache.
 
-**What's foundational:**
+**Interface (stable):**
 
 - read-fonts + HarfRust — OpenType shaping (ligatures, kerning, contextual alternates). Glyph outline extraction from TTF/OTF (simple + composite glyphs, variable fonts via gvar).
 - Analytic area coverage rasterizer — bezier flattening + exact signed-area trapezoid coverage per pixel. Grayscale anti-aliasing (1 byte/pixel). No LCD subpixel rendering (unnecessary at Retina density).
 - Outline dilation (stem darkening) — macOS Core Text formula with scale-factor-aware conversion. Symmetric miter-join modification applied to glyph outlines before rasterization.
 - Glyph cache — fixed ASCII cache (95 glyphs, O(1) lookup) + LRU cache for non-ASCII/ligature glyphs. Keyed by (glyph_id, font_size, axis_hash).
 
-**What's scaffolding:**
+**Implementation (placeholder):**
 
 - Runtime fonts (jetbrains-mono.ttf, inter.ttf, source-serif-4.ttf) are loaded from the host filesystem via the 9p driver. Tests embed these same fonts for parser and rasterizer validation.
 
@@ -180,13 +194,13 @@ Notification for both: `channel_signal` syscall wakes the consumer from `sys::wa
 
 ---
 
-### 1.4 Protocol Library (`libraries/protocol/`) 🟢
+### 1.4 Protocol Library (`libraries/protocol/`) — deep interface, hardened
 
 **Goal:** Single source of truth for all IPC message types and payload structs. Every component that sends or receives IPC messages imports from here.
 
 **Status:** 10 protocol modules across ~1000 lines (lib.rs + external files). Defines message type constants and all shared payload structs, plus shared memory layout types (`PointerState` for the input state register), `CHANNEL_SHM_BASE` and `channel_shm_va()`.
 
-**What's foundational:**
+**Interface (stable):**
 
 - **One module per protocol boundary (10 modules).** `init` (init→any service config), `device` (init→drivers), `input` (input→presenter), `edit` (editor↔document, editor↔presenter), `layout` (presenter↔layout), `view` (presenter→compositor, document↔presenter notifications), `store` (document↔store service), `decode` (document↔decoders), `content` (shared memory layout), `metal` (compositor→hypervisor, includes legacy virgl submodule). The module structure mirrors the IPC topology.
 - **All payload structs are `#[repr(C)]`** and fit within the 60-byte IPC message payload. Size guards via `const _: ()` assertions where payloads approach the limit.
@@ -197,17 +211,17 @@ Notification for both: `channel_signal` syscall wakes the consumer from `sys::wa
 
 ---
 
-### 1.5 Linker Script (`libraries/link.ld`) 🟢
+### 1.5 Linker Script (`libraries/link.ld`) — deep interface, hardened
 
 **Goal:** Shared ELF layout for all userspace binaries.
 
 **Status:** 16 lines. Base VA 0x400000, page-aligned sections.
 
-**Foundational.** Standard layout, matches kernel's ELF loader expectations. No changes needed unless the VA layout changes.
+**Deep interface, hardened.** Standard layout, matches kernel's ELF loader expectations. No changes needed unless the VA layout changes.
 
 ---
 
-### 1.5 IPC Library (`libraries/ipc/`) 🟢
+### 1.5 IPC Library (`libraries/ipc/`) — deep interface, hardened
 
 **Goal:** Lock-free SPSC ring buffer on shared memory pages. The structured message transport for all inter-process communication.
 
@@ -288,7 +302,7 @@ Notification for both: `channel_signal` syscall wakes the consumer from `sys::wa
 
 **No restrictions imposed.** Pure `no_std` library with no syscalls, no allocations. Callers provide the shared memory page address. Fully testable on the host.
 
-### 1.7 Scene Graph Library (`libraries/scene/`) 🟢
+### 1.7 Scene Graph Library (`libraries/scene/`) — narrow interface, hardened
 
 **Goal:** Define the scene graph data structures and shared memory layout that form the interface between the OS service (document semantics) and the compositor (pixels). The OS service builds a tree of typed visual nodes; the compositor reads the tree and renders it.
 
@@ -329,13 +343,13 @@ Notification for both: `channel_signal` syscall wakes the consumer from `sys::wa
 
 **No restrictions imposed.** Pure `no_std` library with no syscalls, no allocations. Callers provide the buffer. ~1584 lines, host-side tests in `system/test/`. The scene library is purely geometric — no content-aware code (no monospace assumptions, no line breaking, no character encoding knowledge). Content-aware layout helpers (`layout_mono_lines`, `byte_to_line_col`, `scroll_runs`) live in core where they belong.
 
-### 1.8 Render Library (`libraries/render/`) 🟢
+### 1.8 Render Library (`libraries/render/`) — narrow interface, hardened
 
 **Goal:** Render library that transforms a scene graph into pixels. Owns the tree walk, rasterization, compositing, damage tracking, glyph caching, and all pixel-level work. Callers compose the free functions (`render_scene`, `render_scene_full`, etc.) with explicit state (glyph caches, surface pool, LRU rasterizer).
 
 **Status:** ~2,194 lines across 6 files (lib.rs, scene_render.rs, compositing.rs, surface_pool.rs, damage.rs, cursor.rs). Extracted from the compositor in Phase 1 of the rendering architecture redesign (2026-03-16).
 
-**What's foundational:**
+**Interface (stable):**
 
 - **Free-function API.** `render_scene`, `render_scene_full`, `render_scene_clipped_full` — callers compose explicit state (RenderCtx, SurfacePool, LruRasterizer, NodeCache, ClipMaskCache). No trait-based polymorphism.
 - **Content-type rendering.** `FillRect` → solid/blended rectangle fill. `Glyphs` → glyph cache lookup + coverage drawing. `Image` → bilinear resampling blit. No content-type dispatch above this layer.
@@ -344,7 +358,7 @@ Notification for both: `channel_signal` syscall wakes the consumer from `sys::wa
 - **Procedural cursor.** Arrow cursor rendered at top z-order.
 - **Font handling boundary.** The render library owns glyph rasterization and caching (via LruRasterizer and GlyphCache). Core owns text shaping (harfrust) and metrics.
 
-**What's scaffolding:**
+**Implementation (placeholder):**
 
 - **Single-threaded tree walk.** Multi-core rasterization (horizontal strip parallelism) is an internal optimization — no interface changes needed.
 
@@ -352,20 +366,20 @@ Notification for both: `channel_signal` syscall wakes the consumer from `sys::wa
 
 ---
 
-### 1.9 Filesystem Library (`libraries/fs/`) 🟢
+### 1.9 Filesystem Library (`libraries/fs/`) — narrow interface, hardened
 
 **Goal:** COW filesystem implementation. `no_std` port of the host prototype (`prototype/files/`). Provides the full stack from raw blocks to the `Files` trait.
 
 **Status:** `BlockDevice` trait, superblock ring (16-slot with CRC32), sorted free-extent allocator with coalescing, inodes (16 KiB blocks, inline data, extent lists with birth_txg), COW write path with two-flush commit protocol, per-file and multi-file snapshots, `Files` trait with `FileId`/`SnapshotId` newtypes.
 
-**What's foundational:**
+**Interface (stable):**
 
 - **`BlockDevice` trait.** Abstract block I/O — implemented by `VirtioBlockDevice` (bare-metal) and `FileBlockDevice`/`MemoryBlockDevice` (host tests).
 - **Pure COW crash consistency.** Two-flush commit protocol: write all data blocks, flush, write superblock, flush. No journal needed.
 - **Flat namespace.** `FileId` → inode block. No directories.
 - **`Files` trait.** Object-safe (`dyn Files`) with explicit `commit()`. Full lifecycle: create, read, write, delete, snapshot, restore.
 
-**What's scaffolding:**
+**Implementation (placeholder):**
 
 - **`BTreeMap` for inode table and allocator.** `HashMap` from the host prototype replaced with `BTreeMap` for `no_std` compatibility.
 - **COW-entire-file** for extent-based writes. O(file_size) per write. Acceptable for document workloads. Per-block COW is a future optimization.
@@ -374,13 +388,13 @@ Notification for both: `channel_signal` syscall wakes the consumer from `sys::wa
 
 ---
 
-### 1.10 Piece Table Library (`libraries/piecetable/`) 🟢
+### 1.10 Piece Table Library (`libraries/piecetable/`) — narrow interface, hardened
 
 **Goal:** Fixed-size, arena-allocated piece table for `text/rich` documents. The buffer IS the piece table — `validate()` is a bounds check, enabling zero-copy access via shared memory. Both the in-memory and on-disk format.
 
 **Status:** ~1,295 lines. Full piece table with style palette, operation coalescing, and styled run iteration. 47 tests pass.
 
-**What's foundational:**
+**Interface (stable):**
 
 - **Arena layout.** Header (64 bytes) + styles (32 × 12 bytes) + pieces (512 × 16 bytes) + original buffer + add buffer. Fixed-size, no heap allocation. `MAX_PIECES` (512), `MAX_STYLES` (32), `MAX_ADD_BUFFER` (32K).
 - **Style palette.** 32 entries, each with font family, weight, size, color, flags (italic, underline, strikethrough), and semantic a11y role (body, strong, emphasis, heading, code). Pieces carry a `style_id` index into the palette.
@@ -395,19 +409,19 @@ Notification for both: `channel_signal` syscall wakes the consumer from `sys::wa
 
 ## 2. Platform Services
 
-### 2.1 Init / Proto-OS-Service (`services/init/`) 🟡
+### 2.1 Init / Proto-OS-Service (`services/init/`) — wide interface, placeholder
 
 **Goal:** Bootstrap userspace. The only process the kernel spawns directly.
 
 **Status:** ~1300 lines (build.rs is at the system/ level). Reads device manifest, spawns drivers, orchestrates display pipeline.
 
-**What's foundational (the pattern):**
+**Interface (stable):**
 
 - Kernel spawns only init → init spawns everything else. Microkernel root task.
 - Init reads a device manifest from the kernel channel to discover hardware.
 - Init sends handles (channels, shared memory) to child processes before starting them.
 
-**What's scaffolding (the implementation):**
+**Implementation (placeholder):**
 
 - **Service pack.** Service ELFs packed into a flat archive linked into the kernel as a `.services` section. Init reads from a memory-mapped region at `SERVICE_PACK_BASE`. Changing one service requires only repacking + relinking. Real OS loads from a filesystem.
 - **Hardcoded framebuffer dimensions** (1024×768). Should come from GPU driver, not init.
@@ -421,13 +435,13 @@ Notification for both: `channel_signal` syscall wakes the consumer from `sys::wa
 
 ---
 
-### 2.2 Presenter (`services/presenter/`) 🟡
+### 2.2 Presenter (`services/presenter/`) — wide interface, placeholder
 
 **Goal:** The OS service: sole writer to document state, scene graph builder, input router.
 
 **Status:** ~1750 lines across 4 files (main.rs, scene_state.rs, typography.rs, fallback.rs). Builds a scene graph describing the visual structure of the document, routes input to the active editor, applies editor write requests to document state.
 
-**What's foundational (the approach):**
+**Interface (stable):**
 
 - **Sole writer to document state.** Core owns the text buffer — the editor never touches it. Write requests (MSG_WRITE_INSERT, MSG_WRITE_DELETE) arrive via IPC and are applied sequentially. This is Decision #9: "editors are read-only consumers, OS service is sole writer."
 - **Scene graph output.** Core compiles document structure into a scene graph (typed visual node tree) and publishes it via double-buffered shared memory. The compositor reads the scene graph and renders it — separation of document semantics from pixels.
@@ -446,7 +460,7 @@ This pattern — show UI immediately, init async, transition on completion — a
 - **Targeted update dispatch.** The event loop classifies each event and dispatches to the narrowest possible update method: timer ticks → `update_clock` (clock text only), cursor blink → `update_cursor` (cursor node only), keypresses/edits → `update_document_content` (text runs + selection), selection changes → `update_selection`. Each method uses copy-forward (copy front buffer to back), mutates only affected nodes, marks them changed, and swaps.
 - **Zero-allocation clock and cursor updates.** `update_clock` and `update_cursor` modify existing nodes in-place without touching the data buffer or allocating. These fire at high frequency (250 Hz timer, cursor blink) and must be cheap.
 
-**What's scaffolding (the implementation):**
+**Implementation (placeholder):**
 
 - **Static text buffer in BSS.** Real OS service reads document content from a Files-backed memory mapping.
 - **No operation boundary detection.** Every write is applied immediately without snapshot/undo tracking.
@@ -460,13 +474,13 @@ cpu-render (software via virtio-gpu 2D) and virgil-render (Gallium3D via virglre
 
 ---
 
-### 2.4 Virtio Block Driver (`services/drivers/virtio-blk/`) 🟢
+### 2.4 Virtio Block Driver (`services/drivers/virtio-blk/`) — narrow interface, hardened
 
 **Goal:** Full block device I/O over virtio-blk transport.
 
 **Status:** `BlkDevice` struct with `read_block`, `write_block`, and `flush` methods. Negotiates `VIRTIO_BLK_F_FLUSH` feature for persistent writes. Self-test on init (write → read-back → verify cycle). Interrupt-driven.
 
-**What's foundational:**
+**Interface (stable):**
 
 - 3-descriptor chain pattern (header → data → status). Correct virtio-blk protocol.
 - Same interrupt-driven pattern as GPU driver (wait → ack).
@@ -478,19 +492,19 @@ cpu-render (software via virtio-gpu 2D) and virgil-render (Gallium3D via virglre
 
 ---
 
-### 2.4b Filesystem Service (`services/filesystem/`) 🟢
+### 2.4b Filesystem Service (`services/filesystem/`) — narrow interface, hardened
 
 **Goal:** COW filesystem over virtio-blk, persists document edits to disk.
 
 **Status:** Owns the virtio-blk device. Formats the disk on first boot, mounts the filesystem, and runs an IPC commit loop with core. Uses the `fs` library (`system/libraries/fs/`) — a `no_std` port of the host prototype.
 
-**What's foundational:**
+**Interface (stable):**
 
 - **`VirtioBlockDevice`** implements the `BlockDevice` trait over virtio transport. Uses `RefCell` for interior mutability (`read_block` takes `&self` but virtio I/O mutates internal queue state).
 - **IPC commit loop:** Receives `MSG_FS_COMMIT` from core, reads the doc buffer from shared memory (read-only mapping), writes content to the filesystem via the `Files` trait, and commits (two-flush protocol for crash consistency).
 - **Init orchestration (Phase 10):** Init creates the filesystem process, shares the doc buffer read-only via `memory_share` (requires unstarted process), creates a core↔filesystem channel, then starts it.
 
-**What's scaffolding:**
+**Implementation (placeholder):**
 
 - Single-document persistence. Only one FileId managed.
 - Formats on every boot (no mount-on-reboot yet).
@@ -503,20 +517,20 @@ cpu-render (software via virtio-gpu 2D) and virgil-render (Gallium3D via virglre
 
 ---
 
-### 2.5 Virtio Input Driver (`services/drivers/virtio-input/`) 🟢
+### 2.5 Virtio Input Driver (`services/drivers/virtio-input/`) — narrow interface, hardened
 
 **Goal:** Read keyboard events from the QEMU virtual keyboard and forward to the compositor.
 
 **Status:** ~190 lines. Interrupt-driven event loop. Translates Linux evdev keycodes to ASCII.
 
-**What's foundational:**
+**Interface (stable):**
 
 - Same interrupt-driven pattern as virtio-blk/gpu (register IRQ → wait → ack → loop).
 - Uses the standard virtio-input protocol: posts device-writable 8-byte event buffers on queue 0, device fills them with `{type, code, value}` evdev events.
 - Cross-process IPC: sends `MSG_KEY_EVENT` messages to the compositor via a direct channel (not routed through init).
 - Keycode-to-ASCII translation table (US layout, 58 keycodes including letters, digits, punctuation, space, enter, backspace).
 
-**What's scaffolding:**
+**Implementation (placeholder):**
 
 - **Single event buffer.** Posts one 8-byte buffer at a time. Sufficient for keyboard (human typing speed), but mouse/touch input at 100+ events/sec would need multiple pre-posted buffers.
 - **Lowercase only.** No shift/ctrl/alt modifier state tracking. The keymap returns lowercase letters only.
@@ -530,20 +544,20 @@ cpu-render (software via virtio-gpu 2D) and virgil-render (Gallium3D via virglre
 
 ---
 
-### 2.6 Virtio 9P Driver (`services/drivers/virtio-9p/`) 🟢
+### 2.6 Virtio 9P Driver (`services/drivers/virtio-9p/`) — narrow interface, placeholder
 
 **Goal:** Read files from the host macOS filesystem via QEMU's 9p passthrough. Validates the Files interface design through practical use before building the real COW filesystem.
 
 **Status:** ~450 lines. Implements 6 of ~30 9P2000.L operations (Tversion, Tattach, Twalk, Tlopen, Tread, Tclunk). Reads files from a shared host directory (`system/share/`) via virtio transport. Currently used to load three fonts (JetBrains Mono, Inter, Source Serif 4) and a PNG image at boot.
 
-**What's foundational:**
+**Interface (stable):**
 
 - **Host filesystem passthrough pattern.** The driver bridges the gap between the OS and the host, letting userspace load files without `include_bytes!`. This is the prototype-on-host strategy from Decision #16 in action — implement Files against the host filesystem first, build the real COW FS later.
 - **9P2000.L wire protocol.** Manual message encoding/decoding (MsgWriter/MsgReader) for the Plan 9 protocol. 2-descriptor virtio chain (T-message readable, R-message writable).
 - **IPC request/response pattern.** Init sends MSG_FS_READ_REQUEST with shared buffer VA + filename, driver fills buffer via 9P reads, sends MSG_FS_READ_RESPONSE with byte count. Shared-memory-reference pattern for large data (§5.5).
 - **Same interrupt-driven pattern** as other virtio drivers (register IRQ → wait → ack → loop).
 
-**What's scaffolding:**
+**Implementation (placeholder):**
 
 - **Single-directory flat namespace.** Only walks one path component from root. No subdirectories.
 - **Read-only.** No write, create, or delete operations (only 6 of ~30 9P ops implemented).
@@ -554,7 +568,7 @@ cpu-render (software via virtio-gpu 2D) and virgil-render (Gallium3D via virglre
 
 ---
 
-### 2.7 Virtio Console Driver (`services/drivers/virtio-console/`) 🟡
+### 2.7 Virtio Console Driver (`services/drivers/virtio-console/`) — leaf interface, placeholder
 
 **Status:** 112 lines. TX-only, writes one test string. Not exercised (no QEMU device configured).
 
@@ -562,19 +576,19 @@ Minimal and not yet useful. Would need RX queue, proper character device interfa
 
 ---
 
-### 2.8 Text Editor (`user/text-editor/`) 🟡
+### 2.8 Text Editor (`user/text-editor/`) — narrow interface, placeholder
 
 **Goal:** Content-type-specific input-to-write translator. Editors handle character insertion, deletion, and content-specific operations. Navigation and selection live in core (the OS service), which owns layout and provides content-type interaction primitives (cursor, selection, playhead). This is Decision #8 in action.
 
 **Status:** ~195 lines. Receives MSG_KEY_EVENT from core via IPC. Has read-only shared memory mapping of the document buffer. Handles: character insert, backspace, forward delete, Tab (4 spaces), Shift+Tab (dedent). Sends write requests (MSG_WRITE_INSERT, MSG_WRITE_DELETE) back to core. No navigation, no selection, no modifier tracking.
 
-**What's foundational (the pattern):**
+**Interface (stable):**
 
 - **Editor as read-only consumer.** The editor has a hardware-enforced read-only mapping of the document buffer. It reads content for context-aware editing. All writes go through IPC. This is Decision #9 in action.
 - **Thin editor, smart core.** Navigation (arrows, Cmd+Left/Right, word boundaries, Home/End, PgUp/PgDn), selection (Shift+navigation, Cmd+A), selection-aware deletion (Opt+Backspace/Delete), and mouse click handling (double-click word select, triple-click line select) all live in core. The editor only translates content-type-specific keypresses into write operations. This split means adding a new editor for a different content type only requires writing the content-specific translation logic — navigation and selection come for free from core.
 - **IPC write protocol.** MSG_WRITE_INSERT carries position + byte, MSG_WRITE_DELETE carries position, MSG_WRITE_DELETE_RANGE carries a byte range, MSG_CURSOR_MOVE carries cursor position, MSG_SELECTION_UPDATE carries selection state. All typed, all fit in 60-byte ring buffer payload.
 
-**What's scaffolding (the implementation):**
+**Implementation (placeholder):**
 
 - **Single-byte inserts only.** No Unicode, no multi-byte operations.
 - **ASCII-only.** No Unicode text handling.
@@ -586,7 +600,7 @@ Minimal and not yet useful. Would need RX queue, proper character device interfa
 
 ---
 
-### 2.8 Echo (`user/echo/`) 🔴
+### 2.8 Echo (`user/echo/`) — leaf interface, placeholder
 
 **Status:** 34 lines. IPC ping-pong demo. Not integrated into current boot sequence.
 
@@ -764,6 +778,8 @@ virtio-gpu copies the framebuffer from guest to host memory on every present —
 Ring buffer messages are fixed at 64 bytes (4-byte type + 60-byte payload). All current control message types fit comfortably (edit protocol, input events, device configuration — all <40 bytes). But some future messages may not: metadata query results with variable-length strings, error diagnostics, path references.
 
 **Design rule (not an escape hatch):** Large data never flows through the ring buffer. It goes in shared memory; the ring carries a reference (VA + length). Documents are already memory-mapped this way. If a message type regularly needs >60 bytes, that's a signal it should use the shared-memory-reference pattern — not a signal to make messages bigger.
+
+**Note:** The Edit Architecture (Decision #9, edit protocol) resolves the remaining pressure here. Edit operations use the shared-memory document buffer; the ring carries only small typed commands (insert position + byte, delete range). No edit message approaches the 60-byte limit.
 
 ---
 

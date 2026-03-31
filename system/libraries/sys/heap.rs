@@ -1,4 +1,12 @@
-//! Userspace heap allocator — linked-list first-fit with coalescing.
+//! Userspace slab allocator — O(1) alloc/free for common sizes.
+//!
+//! Two-tier design:
+//! - **Small** (≤ 2048 bytes): slab with 8 power-of-two size classes.
+//!   Free lists carved from dedicated 16 KiB slab pages. O(1) alloc/free.
+//! - **Large** (> 2048 bytes): direct page allocation from kernel.
+//!   One syscall per alloc/free.
+//!
+//! Size classes: 16, 32, 64, 128, 256, 512, 1024, 2048 bytes.
 
 use core::{
     alloc::{GlobalAlloc, Layout},
@@ -6,19 +14,47 @@ use core::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-use crate::{asm::align_up, syscalls::memory_alloc, types::HeapStats, PAGE_SIZE};
+use crate::{syscalls::memory_alloc, types::HeapStats, PAGE_SIZE};
 
-pub(crate) struct FreeBlock {
-    size: usize,
-    next: *mut FreeBlock,
+// ---------------------------------------------------------------------------
+// Size classes
+// ---------------------------------------------------------------------------
+
+const NUM_CLASSES: usize = 8;
+const CLASS_SIZES: [usize; NUM_CLASSES] = [16, 32, 64, 128, 256, 512, 1024, 2048];
+
+/// Find the size class index for a given effective size.
+/// Returns `None` if the size exceeds all classes (large allocation).
+#[inline]
+fn class_index(size: usize) -> Option<usize> {
+    // Binary search on powers of two. The classes are 16..=2048 = 2^4..=2^11.
+    if size <= 16 {
+        Some(0)
+    } else if size <= 2048 {
+        // next_power_of_two then log2 to find the class.
+        // size=17 → npt=32 → trailing_zeros=5 → index=5-4=1 → CLASS_SIZES[1]=32 ✓
+        let npt = size.next_power_of_two();
+        Some(npt.trailing_zeros() as usize - 4)
+    } else {
+        None
+    }
 }
 
-const MIN_BLOCK: usize = core::mem::size_of::<FreeBlock>();
+// ---------------------------------------------------------------------------
+// Free slot header — embedded in each free slot
+// ---------------------------------------------------------------------------
+
+struct FreeSlot {
+    next: *mut FreeSlot,
+}
+
+// ---------------------------------------------------------------------------
+// Slab allocator
+// ---------------------------------------------------------------------------
 
 pub struct UserHeap {
-    head: UnsafeCell<*mut FreeBlock>,
+    classes: [UnsafeCell<*mut FreeSlot>; NUM_CLASSES],
     lock: AtomicBool,
-    // Instrumentation counters (protected by the same spinlock as head).
     total_allocated: UnsafeCell<usize>,
     total_freed: UnsafeCell<usize>,
     pages_requested: UnsafeCell<usize>,
@@ -26,8 +62,9 @@ pub struct UserHeap {
 
 impl UserHeap {
     pub const fn new() -> Self {
+        const NULL: UnsafeCell<*mut FreeSlot> = UnsafeCell::new(core::ptr::null_mut());
         Self {
-            head: UnsafeCell::new(core::ptr::null_mut()),
+            classes: [NULL; NUM_CLASSES],
             lock: AtomicBool::new(false),
             total_allocated: UnsafeCell::new(0),
             total_freed: UnsafeCell::new(0),
@@ -45,217 +82,116 @@ impl UserHeap {
         }
     }
 
-    /// Request pages from the kernel and add them to the free list.
-    ///
-    /// Allocates enough pages to satisfy `min_size` bytes. Returns true
-    /// on success, false if the kernel refuses (out of memory / budget).
-    unsafe fn grow(&self, min_size: usize) -> bool {
-        let pages = (min_size + PAGE_SIZE - 1) / PAGE_SIZE;
-        let va = match memory_alloc(pages as u64) {
-            Ok(va) => va,
-            Err(_) => return false,
-        };
-        let block = va as *mut FreeBlock;
-        let head = &mut *self.head.get();
-
-        (*block).size = pages * PAGE_SIZE;
-        (*block).next = *head;
-        *head = block;
-        *self.pages_requested.get() += pages;
-
-        true
-    }
-
     pub(crate) fn release(&self) {
         self.lock.store(false, Ordering::Release);
     }
-}
 
-// ---------------------------------------------------------------------------
-// Heap allocator — linked-list first-fit with coalescing.
-//
-// Grows on demand by calling `memory_alloc`. Programs use this by adding
-// `extern crate alloc;` to get Vec, String, Box, etc. Programs that never
-// import `alloc` pay no cost.
-// ---------------------------------------------------------------------------
-unsafe impl GlobalAlloc for UserHeap {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        self.acquire();
+    /// Carve a freshly allocated slab page into free slots for `class_size`.
+    ///
+    /// # Safety
+    ///
+    /// `page_va` must point to a valid, zeroed, `PAGE_SIZE`-byte region.
+    /// Caller must hold the lock.
+    unsafe fn carve_slab_page(&self, page_va: usize, ci: usize) {
+        let class_size = CLASS_SIZES[ci];
+        let slots = PAGE_SIZE / class_size;
+        let head = &mut *self.classes[ci].get();
 
-        let size = align_up(layout.size().max(MIN_BLOCK), MIN_BLOCK);
-        let align = layout.align().max(MIN_BLOCK);
-        let head = &mut *self.head.get();
-        let mut prev = head as *mut *mut FreeBlock;
-
-        // First-fit search with alignment handling.
-        loop {
-            let current = *prev;
-
-            if current.is_null() {
-                break;
-            }
-
-            let block_addr = current as usize;
-            let block_size = (*current).size;
-            let alloc_start = align_up(block_addr, align);
-            let front_pad = alloc_start - block_addr;
-
-            // Front padding must fit a free block header, or be zero.
-            if front_pad > 0 && front_pad < MIN_BLOCK {
-                prev = &mut (*current).next;
-                continue;
-            }
-            if front_pad + size > block_size {
-                prev = &mut (*current).next;
-                continue;
-            }
-
-            let back_left = block_size - front_pad - size;
-
-            // Unlink this block.
-            *prev = (*current).next;
-
-            // Return front padding as a smaller free block.
-            if front_pad >= MIN_BLOCK {
-                let front = block_addr as *mut FreeBlock;
-
-                (*front).size = front_pad;
-                (*front).next = *prev;
-                *prev = front;
-                prev = &mut (*front).next;
-            }
-            // Return back leftover as a free block.
-            if back_left >= MIN_BLOCK {
-                let back = (alloc_start + size) as *mut FreeBlock;
-
-                (*back).size = back_left;
-                (*back).next = *prev;
-                *prev = back;
-            }
-
-            *self.total_allocated.get() += size;
-            self.release();
-
-            return alloc_start as *mut u8;
+        // Build the free list from the end so that the first slot is at the head.
+        // This gives ascending-address allocation order.
+        for i in (0..slots).rev() {
+            let slot = (page_va + i * class_size) as *mut FreeSlot;
+            (*slot).next = *head;
+            *head = slot;
         }
-
-        // Free list exhausted — grow and retry once.
-        if self.grow(size) {
-            // Retry from the head (new block was prepended).
-            prev = &mut *self.head.get() as *mut *mut FreeBlock;
-
-            loop {
-                let current = *prev;
-
-                if current.is_null() {
-                    break;
-                }
-
-                let block_addr = current as usize;
-                let block_size = (*current).size;
-                let alloc_start = align_up(block_addr, align);
-                let front_pad = alloc_start - block_addr;
-
-                if front_pad > 0 && front_pad < MIN_BLOCK {
-                    prev = &mut (*current).next;
-                    continue;
-                }
-                if front_pad + size > block_size {
-                    prev = &mut (*current).next;
-                    continue;
-                }
-
-                let back_left = block_size - front_pad - size;
-
-                *prev = (*current).next;
-
-                if front_pad >= MIN_BLOCK {
-                    let front = block_addr as *mut FreeBlock;
-
-                    (*front).size = front_pad;
-                    (*front).next = *prev;
-                    *prev = front;
-                    prev = &mut (*front).next;
-                }
-                if back_left >= MIN_BLOCK {
-                    let back = (alloc_start + size) as *mut FreeBlock;
-
-                    (*back).size = back_left;
-                    (*back).next = *prev;
-                    *prev = back;
-                }
-
-                *self.total_allocated.get() += size;
-                self.release();
-
-                return alloc_start as *mut u8;
-            }
-        }
-
-        self.release();
-
-        core::ptr::null_mut()
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        self.acquire();
-
-        let size = align_up(layout.size().max(MIN_BLOCK), MIN_BLOCK);
-        *self.total_freed.get() += size;
-        let addr = ptr as usize;
-        let head = &mut *self.head.get();
-
-        // Walk to the sorted insertion point.
-        let mut prev_block: *mut FreeBlock = core::ptr::null_mut();
-        let mut current = *head;
-
-        while !current.is_null() && (current as usize) < addr {
-            prev_block = current;
-            current = (*current).next;
-        }
-
-        // Insert freed region.
-        let block = addr as *mut FreeBlock;
-
-        (*block).size = size;
-        (*block).next = current;
-
-        if prev_block.is_null() {
-            *head = block;
-        } else {
-            (*prev_block).next = block;
-        }
-
-        // Coalesce with next neighbor.
-        if !current.is_null() && addr + size == current as usize {
-            (*block).size += (*current).size;
-            (*block).next = (*current).next;
-        }
-
-        // Coalesce with previous neighbor.
-        if !prev_block.is_null() {
-            let prev_end = prev_block as usize + (*prev_block).size;
-
-            if prev_end == addr {
-                (*prev_block).size += (*block).size;
-                (*prev_block).next = (*block).next;
-            }
-        }
-
-        self.release();
     }
 }
 
 // SAFETY: All free list access is protected by a spinlock (AtomicBool CAS).
 unsafe impl Sync for UserHeap {}
 
+unsafe impl GlobalAlloc for UserHeap {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // Effective size accounts for alignment: a 16-byte alloc with 64-byte
+        // alignment needs a 64-byte slot (every 64-byte slot in a slab page
+        // is naturally 64-byte aligned because pages are page-aligned and
+        // slots are power-of-two sized).
+        let effective = layout.size().max(layout.align());
+
+        match class_index(effective) {
+            Some(ci) => {
+                // Small allocation — slab path.
+                self.acquire();
+                let head = &mut *self.classes[ci].get();
+
+                if (*head).is_null() {
+                    // Free list empty — allocate a new slab page.
+                    let va = match memory_alloc(1) {
+                        Ok(va) => va,
+                        Err(_) => {
+                            self.release();
+                            return core::ptr::null_mut();
+                        }
+                    };
+                    *self.pages_requested.get() += 1;
+                    self.carve_slab_page(va, ci);
+                }
+
+                // Pop from free list.
+                let slot = *head;
+                *head = (*slot).next;
+                *self.total_allocated.get() += CLASS_SIZES[ci];
+                self.release();
+                slot as *mut u8
+            }
+            None => {
+                // Large allocation — direct page allocation.
+                let pages = (layout.size() + PAGE_SIZE - 1) / PAGE_SIZE;
+                let va = match memory_alloc(pages as u64) {
+                    Ok(va) => va,
+                    Err(_) => return core::ptr::null_mut(),
+                };
+                self.acquire();
+                *self.total_allocated.get() += pages * PAGE_SIZE;
+                *self.pages_requested.get() += pages;
+                self.release();
+                va as *mut u8
+            }
+        }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        let effective = layout.size().max(layout.align());
+
+        match class_index(effective) {
+            Some(ci) => {
+                // Small deallocation — push to free list.
+                self.acquire();
+                let head = &mut *self.classes[ci].get();
+                let slot = ptr as *mut FreeSlot;
+                (*slot).next = *head;
+                *head = slot;
+                *self.total_freed.get() += CLASS_SIZES[ci];
+                self.release();
+            }
+            None => {
+                // Large deallocation — return pages to kernel.
+                let pages = (layout.size() + PAGE_SIZE - 1) / PAGE_SIZE;
+                let _ = crate::syscalls::memory_free(ptr as usize, pages as u64);
+                self.acquire();
+                *self.total_freed.get() += pages * PAGE_SIZE;
+                self.release();
+            }
+        }
+    }
+}
+
 /// Return heap usage statistics.
 ///
-/// Acquires the heap spinlock to read consistent counters. Safe to call
-/// from any thread, but not from within an allocator callback.
+/// Acquires the heap spinlock to read consistent counters.
 pub fn heap_stats() -> HeapStats {
     crate::HEAP.acquire();
-    // SAFETY: Counters are protected by the same spinlock as the free list.
+    // SAFETY: Counters are protected by the same spinlock as the free lists.
     let stats = unsafe {
         HeapStats {
             total_allocated: *crate::HEAP.total_allocated.get(),

@@ -305,30 +305,51 @@ fn invalid_magic_rejected() {
     assert!(!validate(&buf));
 }
 
-// ── Capacity limits ─────────────────────────────────────────────────────
+// ── Capacity limits (buffer-derived) ────────────────────────────────────
 
 #[test]
-fn capacity_limits_add_buffer() {
-    let mut buf = make_empty(HEADER_SIZE + MAX_ADD_BUFFER + MAX_PIECES * 16 + 1024);
-    // Fill the add buffer.
-    let big = vec![b'x'; MAX_ADD_BUFFER];
+fn capacity_add_buffer_fills_to_buf_len() {
+    // With a 4096-byte buffer, after header (64) + 1 piece (16), the rest
+    // is available for add buffer data. Fill it until the buffer is full.
+    let buf_size = 4096;
+    let mut buf = make_empty(buf_size);
+    // Available = buf_size - HEADER_SIZE - piece overhead per insert.
+    // First insert creates 1 piece (16 bytes), so available for text is
+    // buf_size - 64 - 16 = 4016.
+    let available = buf_size - HEADER_SIZE - 16; // 1 piece slot
+    let big = vec![b'x'; available];
     assert!(insert_bytes(&mut buf, 0, &big));
-    // One more byte should fail.
+    assert_eq!(text_len(&buf), available as u32);
+    // One more byte should fail — buffer is full.
     assert!(!insert(&mut buf, 0, b'y'));
 }
 
 #[test]
-fn capacity_limits_pieces() {
-    // Create a buffer big enough for many pieces but insert in the middle
-    // repeatedly to force splits until we hit MAX_PIECES.
+fn capacity_bigger_buffer_allows_more_data() {
+    // A 1024-byte buffer holds less text than a 4096-byte buffer.
+    let small = 1024;
+    let large = 4096;
+    let mut buf_small = make_empty(small);
+    let mut buf_large = make_empty(large);
+
+    let text = vec![b'a'; small - HEADER_SIZE - 16];
+    assert!(insert_bytes(&mut buf_small, 0, &text));
+    assert!(insert_bytes(&mut buf_large, 0, &text));
+
+    // Small buffer is now full — can't insert more.
+    assert!(!insert(&mut buf_small, 0, b'z'));
+    // Large buffer has room.
+    assert!(insert(&mut buf_large, 0, b'z'));
+}
+
+#[test]
+fn capacity_pieces_limited_by_buffer_size() {
+    // Insert in the middle repeatedly to force splits until the buffer
+    // can't fit any more pieces. The limit is buffer-derived, not a constant.
     let mut buf = make_with_text(b"ab", 1024 * 1024);
 
-    // Each insert in the middle of a piece creates 2 new pieces (split + insert),
-    // net +2. We start with 1 piece. After N middle inserts: 1 + 2*N pieces.
-    // MAX_PIECES = 512, so we need (512-1)/2 = 255 middle inserts to reach 511,
-    // then one more should fail or reach exactly 512.
     let mut success_count = 0;
-    for _ in 0..300 {
+    for _ in 0..50000 {
         let tl = text_len(&buf);
         if tl < 2 {
             break;
@@ -340,7 +361,11 @@ fn capacity_limits_pieces() {
         }
     }
     assert!(success_count > 0);
-    assert!(header(&buf).piece_count as usize <= MAX_PIECES);
+    // With a 1 MiB buffer, we should be able to fit far more than 512 pieces.
+    // Each mid-piece insert adds 2 pieces (net), so success_count > 255.
+    assert!(success_count > 255, "got {} inserts, expected > 255", success_count);
+    // Piece count fits in u16.
+    assert!(header(&buf).piece_count <= u16::MAX);
 }
 
 // ── Style palette ───────────────────────────────────────────────────────
@@ -373,13 +398,39 @@ fn style_palette() {
 }
 
 #[test]
-fn style_palette_full() {
+fn style_palette_limited_by_buffer_size() {
+    // Style count is u8 (max 255), but the buffer may fill before that.
+    // In a 4096-byte buffer, each style is 12 bytes. With header (64),
+    // we can fit (4096 - 64) / 12 = 336 styles — but u8 caps at 255.
     let mut buf = make_empty(4096);
-    for _ in 0..MAX_STYLES {
-        assert!(add_style(&mut buf, &default_body_style()).is_some());
+    let mut count = 0u16;
+    for _ in 0..256 {
+        if add_style(&mut buf, &default_body_style()).is_some() {
+            count += 1;
+        } else {
+            break;
+        }
     }
-    // 33rd should fail.
+    // With 4096 bytes and no pieces/data, should hit u8 ceiling (255).
+    assert_eq!(count, 255);
+    // 256th must fail.
     assert!(add_style(&mut buf, &default_body_style()).is_none());
+}
+
+#[test]
+fn style_palette_limited_by_small_buffer() {
+    // In a tiny buffer, the buffer fills before the u8 ceiling.
+    // header (64) + styles must fit. 128 bytes → room for (128-64)/12 = 5 styles.
+    let mut buf = make_empty(128);
+    let mut count = 0u16;
+    for _ in 0..256 {
+        if add_style(&mut buf, &default_body_style()).is_some() {
+            count += 1;
+        } else {
+            break;
+        }
+    }
+    assert_eq!(count, 5);
 }
 
 // ── Current style ───────────────────────────────────────────────────────
@@ -648,4 +699,243 @@ fn find_style_by_role_finds_all_defaults() {
     assert!(find_style_by_role(&buf, ROLE_HEADING2).is_some());
     assert!(find_style_by_role(&buf, ROLE_STRONG).is_some());
     assert!(find_style_by_role(&buf, ROLE_EMPHASIS).is_some());
+}
+
+// ── Compaction ──────────────────────────────────────────────────────────
+
+#[test]
+fn compact_merges_adjacent_same_style_pieces() {
+    // Insert text with alternating styles to create multiple pieces,
+    // then restyle everything to the same style. Pieces become mergeable.
+    let mut buf = make_empty(4096);
+    add_style(&mut buf, &default_body_style()).unwrap();
+    let bold_id = add_style(&mut buf, &bold_style()).unwrap();
+
+    // Insert "hello" as body, " " as bold, "world" as body.
+    assert!(insert_bytes(&mut buf, 0, b"hello"));
+    set_current_style(&mut buf, bold_id);
+    assert!(insert_bytes(&mut buf, 5, b" "));
+    set_current_style(&mut buf, 0);
+    assert!(insert_bytes(&mut buf, 6, b"world"));
+
+    // 3 pieces (at minimum — possibly more from coalescing behavior).
+    let pc_before = header(&buf).piece_count;
+    assert!(pc_before >= 3);
+
+    // Restyle everything to body.
+    apply_style(&mut buf, 0, 11, 0);
+
+    // All pieces now have the same style and are in the add buffer sequentially.
+    // Compact should merge them.
+    let removed = compact(&mut buf);
+    assert!(removed > 0, "compact should merge pieces");
+    assert_eq!(header(&buf).piece_count, 1, "all pieces merged into one");
+    assert_eq!(read_text(&buf), b"hello world");
+    assert!(validate(&buf));
+}
+
+#[test]
+fn compact_preserves_different_styles() {
+    let mut buf = make_with_text(b"hello world", 4096);
+    let bold_id = add_style(&mut buf, &bold_style()).unwrap();
+    apply_style(&mut buf, 0, 5, bold_id);
+
+    let pc_before = header(&buf).piece_count;
+    let removed = compact(&mut buf);
+    // Different styles can't merge — piece count should not decrease
+    // (unless adjacent same-style pieces existed from the split).
+    assert_eq!(removed, 0, "no mergeable pieces");
+    assert_eq!(header(&buf).piece_count, pc_before);
+    assert_eq!(read_text(&buf), b"hello world");
+    assert!(validate(&buf));
+}
+
+#[test]
+fn compact_no_op_on_single_piece() {
+    let buf = make_with_text(b"hello", 4096);
+    let mut buf = buf;
+    let removed = compact(&mut buf);
+    assert_eq!(removed, 0);
+    assert_eq!(header(&buf).piece_count, 1);
+}
+
+#[test]
+fn compact_reclaims_space_for_more_inserts() {
+    // Create a document, apply styles to fragment it, then restyle back.
+    // Compact should merge the pieces, freeing slots for more operations.
+    let buf_size = 2048;
+    let mut buf = make_empty(buf_size);
+    add_style(&mut buf, &default_body_style()).unwrap();
+    let bold_id = add_style(&mut buf, &bold_style()).unwrap();
+
+    // Insert a block of text (coalesces into 1 piece).
+    let text = b"abcdefghijklmnopqrstuvwxyz";
+    assert!(insert_bytes(&mut buf, 0, text));
+    assert_eq!(header(&buf).piece_count, 1);
+
+    // Apply bold to every other character — creates many pieces.
+    for i in (0..26).step_by(2) {
+        apply_style(&mut buf, i, i + 1, bold_id);
+    }
+    let pc_before = header(&buf).piece_count;
+    assert!(pc_before > 10, "should have many pieces after styling");
+
+    // Restyle everything back to body.
+    apply_style(&mut buf, 0, 26, 0);
+
+    // Now all pieces have the same style. Adjacent same-source pieces
+    // with contiguous offsets will merge.
+    let text_before = read_text(&buf);
+    let removed = compact(&mut buf);
+    assert!(removed > 0, "should have merged pieces");
+    assert!(header(&buf).piece_count < pc_before);
+
+    // Text is preserved.
+    assert_eq!(read_text(&buf), text_before);
+    assert!(validate(&buf));
+}
+
+// ── In-place delete: correctness across piece boundaries ────────────────
+
+#[test]
+fn delete_spanning_multiple_pieces() {
+    // Create text with 3 different styles → 3+ pieces.
+    let mut buf = make_empty(4096);
+    add_style(&mut buf, &default_body_style()).unwrap();
+    let bold_id = add_style(&mut buf, &bold_style()).unwrap();
+    let ital_id = add_style(&mut buf, &italic_style()).unwrap();
+
+    assert!(insert_bytes(&mut buf, 0, b"AAABBBCCC"));
+    apply_style(&mut buf, 3, 6, bold_id);
+    apply_style(&mut buf, 6, 9, ital_id);
+
+    // Delete "BBBC" (positions 3..7) — spans bold and italic pieces.
+    assert!(delete_range(&mut buf, 3, 7));
+    assert_eq!(read_text(&buf), b"AAACC");
+    assert_eq!(style_at(&buf, 0), Some(0)); // A = body
+    assert_eq!(style_at(&buf, 3), Some(ital_id)); // C = italic
+    assert!(validate(&buf));
+}
+
+#[test]
+fn delete_entire_middle_piece() {
+    let mut buf = make_with_text(b"hello beautiful world", 4096);
+    let bold_id = add_style(&mut buf, &bold_style()).unwrap();
+    apply_style(&mut buf, 6, 15, bold_id); // "beautiful" bold
+
+    // Delete " beautiful" (5..15).
+    assert!(delete_range(&mut buf, 5, 15));
+    assert_eq!(read_text(&buf), b"hello world");
+    assert!(validate(&buf));
+}
+
+#[test]
+fn delete_punches_hole_in_single_piece() {
+    // Single piece: delete a range in the middle, splitting it.
+    let mut buf = make_with_text(b"abcdefgh", 4096);
+    assert!(delete_range(&mut buf, 3, 5)); // Remove "de"
+    assert_eq!(read_text(&buf), b"abcfgh");
+    assert!(validate(&buf));
+}
+
+// ── In-place apply_style: correctness ───────────────────────────────────
+
+#[test]
+fn apply_style_1_to_3_split() {
+    // Single piece, style applied to the middle → 3 pieces.
+    let mut buf = make_with_text(b"abcdefgh", 4096);
+    let bold_id = add_style(&mut buf, &bold_style()).unwrap();
+    apply_style(&mut buf, 2, 6, bold_id);
+
+    assert_eq!(style_at(&buf, 0), Some(0));       // 'a' body
+    assert_eq!(style_at(&buf, 1), Some(0));       // 'b' body
+    assert_eq!(style_at(&buf, 2), Some(bold_id)); // 'c' bold
+    assert_eq!(style_at(&buf, 5), Some(bold_id)); // 'f' bold
+    assert_eq!(style_at(&buf, 6), Some(0));       // 'g' body
+    assert_eq!(style_at(&buf, 7), Some(0));       // 'h' body
+    assert_eq!(read_text(&buf), b"abcdefgh");
+    assert!(validate(&buf));
+}
+
+#[test]
+fn apply_style_multiple_splits() {
+    // Three pieces with different styles, apply a fourth style across all.
+    let mut buf = make_empty(4096);
+    add_style(&mut buf, &default_body_style()).unwrap();
+    let bold_id = add_style(&mut buf, &bold_style()).unwrap();
+    let ital_id = add_style(&mut buf, &italic_style()).unwrap();
+    let code_id = add_style(&mut buf, &code_style()).unwrap();
+
+    assert!(insert_bytes(&mut buf, 0, b"AAABBBCCC"));
+    apply_style(&mut buf, 0, 3, 0);      // body
+    apply_style(&mut buf, 3, 6, bold_id); // bold
+    apply_style(&mut buf, 6, 9, ital_id); // italic
+
+    // Apply code style to "ABBBCC" (1..8) — crosses all three pieces.
+    apply_style(&mut buf, 1, 8, code_id);
+
+    assert_eq!(style_at(&buf, 0), Some(0));        // 'A' still body
+    assert_eq!(style_at(&buf, 1), Some(code_id));  // 'A' code
+    assert_eq!(style_at(&buf, 4), Some(code_id));  // 'B' code
+    assert_eq!(style_at(&buf, 7), Some(code_id));  // 'C' code
+    assert_eq!(style_at(&buf, 8), Some(ital_id));  // 'C' still italic
+    assert_eq!(read_text(&buf), b"AAABBBCCC");
+    assert!(validate(&buf));
+}
+
+#[test]
+fn apply_style_then_delete_then_compact() {
+    // Exercise the full pipeline: style, delete, compact.
+    let mut buf = make_with_text(b"the quick brown fox", 4096);
+    let bold_id = add_style(&mut buf, &bold_style()).unwrap();
+
+    // Bold "quick" (4..9).
+    apply_style(&mut buf, 4, 9, bold_id);
+    assert_eq!(read_text(&buf), b"the quick brown fox");
+
+    // Delete "brown " (10..16).
+    assert!(delete_range(&mut buf, 10, 16));
+    assert_eq!(read_text(&buf), b"the quick fox");
+
+    // Compact.
+    compact(&mut buf);
+    assert_eq!(read_text(&buf), b"the quick fox");
+    assert!(validate(&buf));
+
+    // Style check survives.
+    assert_eq!(style_at(&buf, 4), Some(bold_id));
+    assert_eq!(style_at(&buf, 10), Some(0)); // "fox" = body
+}
+
+// ── Large piece count (beyond old MAX_PIECES=512) ───────────────────────
+
+#[test]
+fn large_piece_count_beyond_old_limit() {
+    // With a large buffer, we should be able to hold >512 pieces.
+    // Use a 256 KiB buffer. Insert at alternating positions to force splits
+    // (not boundary inserts, which only add 1 piece).
+    let buf_size = 256 * 1024;
+    let mut buf = make_with_text(b"ab", buf_size);
+
+    // First insert at position 1 splits the single piece: net +2 → 3 pieces.
+    // Subsequent inserts at position 1 land at a piece boundary: net +1 each.
+    // To force splits, insert at varying mid-piece positions.
+    let mut success = 0;
+    for i in 0..600 {
+        // Insert at position 1 — always inside or at the boundary of the
+        // first piece, depending on coalescing.
+        let tl = text_len(&buf);
+        // Alternate insert positions to prevent coalescing: 1, then tl/2.
+        let pos = if i % 2 == 0 { 1 } else { tl / 2 };
+        if insert(&mut buf, pos, b'x') {
+            success += 1;
+        } else {
+            break;
+        }
+    }
+    assert!(success == 600, "all 600 inserts should succeed with 256K buffer, got {}", success);
+    // With alternating positions and splits, piece count grows well past 512.
+    let pc = header(&buf).piece_count;
+    assert!(pc > 512, "piece count {} should exceed old MAX_PIECES=512", pc);
+    assert!(validate(&buf));
 }
