@@ -67,7 +67,15 @@ pub(crate) struct RenderContext<'a> {
     pub(crate) vw: f32,
     pub(crate) vh: f32,
     pub(crate) scale: f32,
+    /// Nodes visited this frame. Capped at NODE_VISIT_BUDGET to prevent
+    /// unbounded command buffer growth from cycles or pathological scenes.
+    pub(crate) nodes_visited: u32,
 }
+
+/// Maximum node visits per frame. 2× MAX_NODES is generous for any
+/// realistic scene. A sibling cycle would hit this in <1ms and produce
+/// a partial frame instead of OOM.
+const NODE_VISIT_BUDGET: u32 = 1024;
 
 // ── Scene walk ──────────────────────────────────────────────────────────
 
@@ -82,6 +90,13 @@ pub(crate) fn walk_scene(
     ctx: &mut RenderContext,
 ) {
     if node_id == NULL || node_id as usize >= nodes.len() {
+        return;
+    }
+
+    // Budget guard: prevent unbounded command buffer growth from sibling
+    // cycles or pathologically large scenes. Partial frame > OOM crash.
+    ctx.nodes_visited += 1;
+    if ctx.nodes_visited > NODE_VISIT_BUDGET {
         return;
     }
 

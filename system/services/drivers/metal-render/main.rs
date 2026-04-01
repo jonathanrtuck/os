@@ -883,6 +883,7 @@ pub extern "C" fn _start() -> ! {
                 vw,
                 vh,
                 scale,
+                nodes_visited: 0,
             };
             scene_walk::walk_scene(
                 nodes,
