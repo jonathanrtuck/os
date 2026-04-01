@@ -136,6 +136,67 @@ impl Allocator {
         Some(start)
     }
 
+    /// Allocate `count` blocks, potentially across multiple non-contiguous
+    /// extents. Tries contiguous first (fast path). Falls back to greedy
+    /// multi-extent allocation from available free space.
+    ///
+    /// `max_extents` caps the number of extents returned (e.g., how many
+    /// the inode can hold). Each individual extent count is capped at
+    /// `u16::MAX` to fit the `InodeExtent` on-disk format.
+    ///
+    /// Returns `None` if total free blocks < `count` or if the allocation
+    /// would require more extents than `max_extents`.
+    ///
+    /// On failure, no blocks are consumed (all-or-nothing).
+    pub fn alloc_multi(&mut self, count: u32, max_extents: usize) -> Option<Vec<(u32, u32)>> {
+        if count == 0 || max_extents == 0 {
+            return None;
+        }
+        if self.free_blocks < count {
+            return None;
+        }
+
+        // Fast path: single contiguous allocation.
+        if let Some(start) = self.alloc(count) {
+            return Some(vec![(start, count)]);
+        }
+
+        // Greedy: take from free extents front-to-back until we have enough.
+        let mut plan: Vec<(u32, u32)> = Vec::new();
+        let mut remaining = count;
+
+        for ext in &self.free {
+            if remaining == 0 {
+                break;
+            }
+            // Take as much as we can from this extent.
+            let take = remaining.min(ext.count).min(u16::MAX as u32);
+            plan.push((ext.start, take));
+            remaining -= take;
+
+            if plan.len() > max_extents {
+                return None; // Would exceed extent limit.
+            }
+        }
+
+        if remaining > 0 || plan.len() > max_extents {
+            return None; // Not enough space or too many extents.
+        }
+
+        // Execute the plan — allocate each chunk.
+        // We must be careful: each `alloc` modifies the free list, which
+        // invalidates our plan indices. But since we planned from front to
+        // back and each chunk starts at a free extent's start, the first-fit
+        // `alloc` will find each one at the expected position.
+        let result: Vec<(u32, u32)> = plan.clone();
+        for &(_, chunk_count) in &result {
+            let _start = self.alloc(chunk_count)
+                .expect("alloc_multi: planned block should be available");
+        }
+
+        Some(result)
+    }
+
     /// Free `count` blocks starting at `start`. Coalesces with neighbors.
     pub fn free(&mut self, start: u32, count: u32) {
         debug_assert!(count > 0, "freeing zero blocks");

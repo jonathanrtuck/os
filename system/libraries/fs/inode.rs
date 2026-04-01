@@ -33,6 +33,14 @@ const INLINE_OFFSET: usize = HEADER_SIZE + EXTENT_REGION; // 256
 /// Maximum bytes storable inline in the inode block.
 pub const INLINE_CAPACITY: usize = BLOCK_SIZE as usize - INLINE_OFFSET; // 16128
 
+/// Overflow block layout: [count: u32] [reserved: u32] [extents...]
+const OVERFLOW_HEADER: usize = 8;
+/// Maximum extents in the overflow block.
+const MAX_OVERFLOW_EXTENTS: usize = (BLOCK_SIZE as usize - OVERFLOW_HEADER) / EXTENT_SIZE; // 1364
+
+/// Total maximum extents per file (inline + overflow).
+pub const MAX_TOTAL_EXTENTS: usize = MAX_EXTENTS + MAX_OVERFLOW_EXTENTS; // 1380
+
 const FLAG_INLINE: u32 = 1;
 
 // Header field offsets
@@ -44,8 +52,7 @@ const H_FLAGS: usize = 32; //        u32
 const H_EXTENT_CT: usize = 36; //    u16
 #[allow(dead_code)] // reserved for A6
 const H_SNAP_CT: usize = 38;
-#[allow(dead_code)]
-const H_INDIRECT: usize = 40;
+const H_INDIRECT: usize = 40; //     u32 (overflow extent block, 0 = none)
 #[allow(dead_code)] // reserved for A6
 const H_SNAP_BLK: usize = 44;
 // 48..64: reserved (zeros)
@@ -80,7 +87,12 @@ pub struct Inode {
     /// Last modification time (nanos since UNIX epoch).
     pub modified: u64,
     flags: u32,
+    /// Extents stored directly in the inode (up to MAX_EXTENTS = 16).
     extents: Vec<InodeExtent>,
+    /// Overflow extents stored in a separate block (up to MAX_OVERFLOW_EXTENTS).
+    overflow_extents: Vec<InodeExtent>,
+    /// Block number of the overflow extent block (0 = none).
+    indirect_block: u32,
     block: u32,
     inline_data: Vec<u8>,
 }
@@ -101,6 +113,8 @@ impl Inode {
             modified: now,
             flags: FLAG_INLINE,
             extents: Vec::new(),
+            overflow_extents: Vec::new(),
+            indirect_block: 0,
             block,
             inline_data: Vec::new(),
         };
@@ -117,10 +131,11 @@ impl Inode {
         let size = get_u64(&buf, H_SIZE);
         let flags = get_u32(&buf, H_FLAGS);
         let extent_count = get_u16(&buf, H_EXTENT_CT) as usize;
+        let indirect_block = get_u32(&buf, H_INDIRECT);
 
         if extent_count > MAX_EXTENTS {
             return Err(FsError::Corrupt(format!(
-                "inode {file_id}: {extent_count} extents, max {MAX_EXTENTS}"
+                "inode {file_id}: {extent_count} inline extents, max {MAX_EXTENTS}"
             )));
         }
 
@@ -141,6 +156,13 @@ impl Inode {
             });
         }
 
+        // Load overflow extents from indirect block, if present.
+        let overflow_extents = if indirect_block != 0 {
+            load_overflow_extents(device, file_id, indirect_block)?
+        } else {
+            Vec::new()
+        };
+
         let inline_data = if is_inline && size > 0 {
             buf[INLINE_OFFSET..INLINE_OFFSET + size as usize].to_vec()
         } else {
@@ -154,13 +176,20 @@ impl Inode {
             modified: get_u64(&buf, H_MODIFIED),
             flags,
             extents,
+            overflow_extents,
+            indirect_block,
             block,
             inline_data,
         })
     }
 
-    /// Write the inode back to its block.
+    /// Write the inode back to its block (and overflow block if present).
     pub fn save(&self, device: &mut impl BlockDevice) -> Result<(), FsError> {
+        // Write overflow extents to indirect block first.
+        if self.indirect_block != 0 && !self.overflow_extents.is_empty() {
+            save_overflow_extents(device, self.indirect_block, &self.overflow_extents)?;
+        }
+
         let mut buf = vec![0u8; BLOCK_SIZE as usize];
 
         put_u64(&mut buf, H_FILE_ID, self.file_id);
@@ -169,7 +198,8 @@ impl Inode {
         put_u64(&mut buf, H_MODIFIED, self.modified);
         put_u32(&mut buf, H_FLAGS, self.flags);
         put_u16(&mut buf, H_EXTENT_CT, self.extents.len() as u16);
-        // H_SNAP_CT, H_INDIRECT, H_SNAP_BLK: remain 0 (reserved for A6)
+        put_u32(&mut buf, H_INDIRECT, self.indirect_block);
+        // H_SNAP_CT, H_SNAP_BLK: remain 0 (reserved for A6)
 
         for (i, ext) in self.extents.iter().enumerate() {
             let off = HEADER_SIZE + i * EXTENT_SIZE;
@@ -261,23 +291,51 @@ impl Inode {
         self.block
     }
 
-    /// The file's extent list (empty for inline files).
-    pub fn extents(&self) -> &[InodeExtent] {
+    /// All extents for this file (inline + overflow, in order).
+    /// Empty for inline files.
+    pub fn extents(&self) -> Vec<InodeExtent> {
+        if self.overflow_extents.is_empty() {
+            self.extents.clone()
+        } else {
+            let mut all = self.extents.clone();
+            all.extend_from_slice(&self.overflow_extents);
+            all
+        }
+    }
+
+    /// Number of extents (inline + overflow).
+    pub fn extent_count(&self) -> usize {
+        self.extents.len() + self.overflow_extents.len()
+    }
+
+    /// The inline extents only (for snapshot serialization).
+    pub fn inline_extents(&self) -> &[InodeExtent] {
         &self.extents
     }
 
-    /// Add an extent. Used by A5 when writing extent-based data.
+    /// The overflow extents only (for snapshot serialization).
+    pub fn overflow_extents_ref(&self) -> &[InodeExtent] {
+        &self.overflow_extents
+    }
+
+    /// Add an extent. Fills the inline list first (up to MAX_EXTENTS),
+    /// then spills to the overflow list (up to MAX_OVERFLOW_EXTENTS).
     pub fn add_extent(&mut self, ext: InodeExtent) -> Result<(), FsError> {
-        if self.extents.len() >= MAX_EXTENTS {
+        if self.extents.len() < MAX_EXTENTS {
+            self.extents.push(ext);
+        } else if self.overflow_extents.len() < MAX_OVERFLOW_EXTENTS {
+            self.overflow_extents.push(ext);
+        } else {
             return Err(FsError::NoSpace);
         }
-        self.extents.push(ext);
         Ok(())
     }
 
-    /// Clear all extents. Used by A5/A6 during restore or rewrite.
+    /// Clear all extents (inline + overflow). Resets indirect_block to 0.
     pub fn clear_extents(&mut self) {
         self.extents.clear();
+        self.overflow_extents.clear();
+        self.indirect_block = 0;
     }
 
     /// Transition from inline to extent-based storage.
@@ -288,18 +346,52 @@ impl Inode {
         core::mem::take(&mut self.inline_data)
     }
 
+    /// The overflow block number (0 = none). Exposed for snapshot
+    /// serialization and COW lifecycle management.
+    pub fn indirect_block(&self) -> u32 {
+        self.indirect_block
+    }
+
+    /// Allocate an overflow block if needed (extents exceed inline capacity).
+    /// Called before save/save_cow when overflow extents exist but no
+    /// indirect block has been allocated yet.
+    pub fn ensure_overflow_block(
+        &mut self,
+        allocator: &mut Allocator,
+    ) -> Result<(), FsError> {
+        if !self.overflow_extents.is_empty() && self.indirect_block == 0 {
+            self.indirect_block = allocator.alloc(1).ok_or(FsError::NoSpace)?;
+        }
+        Ok(())
+    }
+
     /// Write the inode to a newly allocated block (COW). Returns the old
-    /// block number for deferred freeing.
+    /// inode block number and the old overflow block number (0 if none)
+    /// for deferred freeing.
     pub fn save_cow(
         &mut self,
         device: &mut impl BlockDevice,
         allocator: &mut Allocator,
-    ) -> Result<u32, FsError> {
-        let new_block = allocator.alloc(1).ok_or(FsError::NoSpace)?;
+    ) -> Result<OldBlocks, FsError> {
         let old_block = self.block;
+        let old_indirect = self.indirect_block;
+
+        // Allocate new inode block.
+        let new_block = allocator.alloc(1).ok_or(FsError::NoSpace)?;
         self.block = new_block;
+
+        // Allocate new overflow block if needed.
+        if !self.overflow_extents.is_empty() {
+            self.indirect_block = allocator.alloc(1).ok_or(FsError::NoSpace)?;
+        } else {
+            self.indirect_block = 0;
+        }
+
         self.save(device)?;
-        Ok(old_block)
+        Ok(OldBlocks {
+            inode: old_block,
+            indirect: old_indirect,
+        })
     }
 
     /// Transition back to inline (empty). Used when truncating to zero.
@@ -307,17 +399,90 @@ impl Inode {
         self.flags |= FLAG_INLINE;
         self.inline_data.clear();
         self.extents.clear();
+        self.overflow_extents.clear();
+        self.indirect_block = 0;
         self.size = 0;
     }
 
-    /// Delete this inode, freeing its block and all data extent blocks.
-    /// Consumes the inode — it cannot be used after deletion.
+    /// Delete this inode, freeing its block, all data extent blocks,
+    /// and the overflow block (if any). Consumes the inode.
     pub fn delete(self, allocator: &mut Allocator) {
         for ext in &self.extents {
             allocator.free(ext.start_block, ext.count as u32);
         }
+        for ext in &self.overflow_extents {
+            allocator.free(ext.start_block, ext.count as u32);
+        }
+        if self.indirect_block != 0 {
+            allocator.free(self.indirect_block, 1);
+        }
         allocator.free(self.block, 1);
     }
+}
+
+/// Block numbers returned by `save_cow` for deferred freeing.
+pub struct OldBlocks {
+    /// The old inode block.
+    pub inode: u32,
+    /// The old overflow extent block (0 = none).
+    pub indirect: u32,
+}
+
+// ── Overflow extent I/O ───────────────────────────────────────────
+
+/// Load overflow extents from an indirect block.
+fn load_overflow_extents(
+    device: &impl BlockDevice,
+    file_id: u64,
+    block: u32,
+) -> Result<Vec<InodeExtent>, FsError> {
+    let mut buf = vec![0u8; BLOCK_SIZE as usize];
+    device.read_block(block, &mut buf)?;
+
+    let count = get_u32(&buf, 0) as usize;
+    if count > MAX_OVERFLOW_EXTENTS {
+        return Err(FsError::Corrupt(format!(
+            "inode {file_id}: overflow block has {count} extents, max {MAX_OVERFLOW_EXTENTS}"
+        )));
+    }
+
+    let mut extents = Vec::with_capacity(count);
+    for i in 0..count {
+        let off = OVERFLOW_HEADER + i * EXTENT_SIZE;
+        extents.push(InodeExtent {
+            start_block: get_u32(&buf, off),
+            count: get_u16(&buf, off + 4),
+            birth_txg: get_u48(&buf, off + 6),
+        });
+    }
+
+    Ok(extents)
+}
+
+/// Save overflow extents to an indirect block.
+fn save_overflow_extents(
+    device: &mut impl BlockDevice,
+    block: u32,
+    extents: &[InodeExtent],
+) -> Result<(), FsError> {
+    debug_assert!(
+        extents.len() <= MAX_OVERFLOW_EXTENTS,
+        "overflow extents exceed capacity: {} > {MAX_OVERFLOW_EXTENTS}",
+        extents.len()
+    );
+
+    let mut buf = vec![0u8; BLOCK_SIZE as usize];
+    put_u32(&mut buf, 0, extents.len() as u32);
+    // bytes 4..8: reserved (zero)
+
+    for (i, ext) in extents.iter().enumerate() {
+        let off = OVERFLOW_HEADER + i * EXTENT_SIZE;
+        put_u32(&mut buf, off, ext.start_block);
+        put_u16(&mut buf, off + 4, ext.count);
+        put_u48(&mut buf, off + 6, ext.birth_txg);
+    }
+
+    device.write_block(block, &buf)
 }
 
 // ── Encoding helpers ───────────────────────────────────────────────

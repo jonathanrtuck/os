@@ -112,7 +112,7 @@ Display
 | 6   | No rendering backpressure    | **Already implemented.** Layout service drains and coalesces signals.                               |
 | 7   | DocumentFormat duplicated    | **Implemented.** Moved to protocol::edit.                                                           |
 | 8   | Scaffolding label overloaded | **Redesigned.** Two-axis model: interface change cost + implementation confidence.                  |
-| 9   | COW filesystem limits        | **Decided.** Overflow extent blocks before v0.6. Simpler than extent trees, sufficient for this OS. |
+| 9   | COW filesystem limits        | **Implemented.** Overflow extent blocks (16 inline + 1364 overflow = 1380 extents/file). |
 
 ### 1. Piece table hard limits will silently truncate (HIGH)
 
@@ -225,9 +225,11 @@ The old "scaffolding" label conflated both axes. A service could have a stable w
 
 The fs library is real and well-engineered (superblock ring, extent-based inodes, CRC32 crash recovery). But: 16 KiB blocks, max 16 extents per inode, inline storage up to 16128 bytes. This is a filesystem for small documents. Large media files (images, video) would need extent trees or indirect blocks.
 
-**No action needed for v0.5–v0.8** — current content types are text and small images. This becomes relevant in v0.6 (Media) when JPEG/audio/video are on the roadmap. At that point, either extend the inode structure with indirect blocks, or implement a separate large-object store.
+**Resolution (2026-03-31):** Overflow extent blocks chosen over extent trees and implemented. The inode stores up to 16 extents inline (zero overhead for small files). When full, additional extents spill to an overflow block referenced by `indirect_block` (inode header offset 40). One 16 KiB overflow block holds up to 1364 extents (8-byte header + 12 bytes/extent), for a total of 1380 extents per file. One pointer chase for large files, zero for small.
 
-**Resolution (2026-03-31):** Overflow extent blocks chosen over extent trees. Keep 16 inline extents in the inode (zero overhead for small files). When full, chain to overflow blocks (~2000 extents per 16 KiB block). One pointer chase for large files, zero for small. Trivially crash-safe (same COW pattern the fs already uses), no tree balancing or journaling needed. Extent trees solve a problem this OS won't have (huge fragmented files with random seeks on a multi-user server) at the cost of significant crash-consistency complexity. If fragmentation becomes an issue, a defragmentation pass (rewrite contiguously) is simpler than maintaining a B-tree. Implement before v0.6 media milestone.
+Crash-safe by construction: overflow blocks follow the same COW pattern as the rest of the filesystem — `save_cow` allocates new inode + overflow blocks, old ones are deferred-freed. No tree balancing or journaling needed. Extent trees solve a problem this OS won't have (huge fragmented files with random seeks on a multi-user server) at the cost of significant crash-consistency complexity. If fragmentation becomes an issue, a defragmentation pass (rewrite contiguously) is simpler than maintaining a B-tree.
+
+7 new tests in `test/tests/fs_overflow.rs`. 2,333 tests pass (0 regressions).
 
 ---
 

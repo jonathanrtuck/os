@@ -21,7 +21,7 @@ use alloc::{
 use crate::{
     alloc_mod::Allocator,
     block::BlockDevice,
-    inode::{Inode, InodeExtent, INLINE_CAPACITY},
+    inode::{Inode, InodeExtent, INLINE_CAPACITY, MAX_TOTAL_EXTENTS},
     snapshot::{self, FileSnapshot, Snapshot},
     superblock::Superblock,
     FsError, BLOCK_SIZE,
@@ -141,10 +141,17 @@ impl<D: BlockDevice> Filesystem<D> {
             .remove(&file_id)
             .ok_or(FsError::NotFound(file_id))?;
         let next_txg = self.superblock.txg + 1;
-        for ext in inode.extents() {
+        for ext in &inode.extents() {
             self.deferred.push(DeferredFree {
                 start: ext.start_block,
                 count: ext.count as u32,
+                txg: next_txg,
+            });
+        }
+        if inode.indirect_block() != 0 {
+            self.deferred.push(DeferredFree {
+                start: inode.indirect_block(),
+                count: 1,
                 txg: next_txg,
             });
         }
@@ -201,18 +208,21 @@ impl<D: BlockDevice> Filesystem<D> {
         // Apply the write.
         content[offset as usize..end as usize].copy_from_slice(data);
 
-        // Allocate new blocks and write content.
+        // Allocate new blocks — may span multiple extents on a fragmented disk.
         let block_count = blocks_for(content.len());
-        if block_count > u16::MAX as u32 {
-            return Err(FsError::NoSpace); // Extent count is u16; file too large.
-        }
-        let start = self.allocator.alloc(block_count).ok_or(FsError::NoSpace)?;
-        write_content(&mut self.device, start, &content)?;
+        let chunks = self
+            .allocator
+            .alloc_multi(block_count, MAX_TOTAL_EXTENTS)
+            .ok_or(FsError::NoSpace)?;
 
-        // Defer-free old extent blocks.
+        // Write content across the allocated extents.
+        write_content_multi(&mut self.device, &chunks, &content)?;
+
+        // Defer-free old extent blocks (and old overflow block if any).
         let next_txg = self.superblock.txg + 1;
         let inode = self.get(file_id)?;
-        let old_extents: Vec<InodeExtent> = inode.extents().to_vec();
+        let old_extents = inode.extents();
+        let old_indirect = inode.indirect_block();
         for ext in &old_extents {
             self.deferred.push(DeferredFree {
                 start: ext.start_block,
@@ -220,21 +230,37 @@ impl<D: BlockDevice> Filesystem<D> {
                 txg: next_txg,
             });
         }
-
-        // Update inode.
-        let now = (self.time_fn)();
-        let inode = self.get_mut(file_id)?;
-        if inode.is_inline() {
-            inode.transition_to_extents();
+        if old_indirect != 0 {
+            self.deferred.push(DeferredFree {
+                start: old_indirect,
+                count: 1,
+                txg: next_txg,
+            });
         }
-        inode.clear_extents();
-        inode.add_extent(InodeExtent {
-            start_block: start,
-            count: block_count as u16,
-            birth_txg: next_txg,
-        })?;
-        inode.size = content.len() as u64;
-        inode.modified = now;
+
+        // Update inode with new extents.
+        let now = (self.time_fn)();
+        {
+            let inode = self
+                .inodes
+                .get_mut(&file_id)
+                .ok_or(FsError::NotFound(file_id))?;
+            if inode.is_inline() {
+                inode.transition_to_extents();
+            }
+            inode.clear_extents();
+            for &(start, count) in &chunks {
+                inode.add_extent(InodeExtent {
+                    start_block: start,
+                    count: count as u16,
+                    birth_txg: next_txg,
+                })?;
+            }
+            // Allocate overflow block if we spilled past 16 extents.
+            inode.ensure_overflow_block(&mut self.allocator)?;
+            inode.size = content.len() as u64;
+            inode.modified = now;
+        }
         self.dirty.insert(file_id);
         Ok(())
     }
@@ -255,12 +281,20 @@ impl<D: BlockDevice> Filesystem<D> {
         // Extent-based truncate to zero: free extents, go back to inline.
         if new_size == 0 {
             let inode = self.get(file_id)?;
-            let old_extents: Vec<InodeExtent> = inode.extents().to_vec();
+            let old_extents = inode.extents();
+            let old_indirect = inode.indirect_block();
             let next_txg = self.superblock.txg + 1;
             for ext in &old_extents {
                 self.deferred.push(DeferredFree {
                     start: ext.start_block,
                     count: ext.count as u32,
+                    txg: next_txg,
+                });
+            }
+            if old_indirect != 0 {
+                self.deferred.push(DeferredFree {
+                    start: old_indirect,
+                    count: 1,
                     txg: next_txg,
                 });
             }
@@ -313,16 +347,23 @@ impl<D: BlockDevice> Filesystem<D> {
             self.allocator.free(start, count);
         }
 
-        // 2. COW-save dirty inodes.
+        // 2. COW-save dirty inodes (including overflow blocks).
         let next_txg = self.superblock.txg + 1;
         for file_id in self.dirty.iter().copied().collect::<Vec<_>>() {
             if let Some(inode) = self.inodes.get_mut(&file_id) {
-                let old_block = inode.save_cow(&mut self.device, &mut self.allocator)?;
+                let old = inode.save_cow(&mut self.device, &mut self.allocator)?;
                 self.deferred.push(DeferredFree {
-                    start: old_block,
+                    start: old.inode,
                     count: 1,
                     txg: next_txg,
                 });
+                if old.indirect != 0 {
+                    self.deferred.push(DeferredFree {
+                        start: old.indirect,
+                        count: 1,
+                        txg: next_txg,
+                    });
+                }
             }
         }
         self.dirty.clear();
@@ -417,7 +458,7 @@ impl<D: BlockDevice> Filesystem<D> {
                 FileSnapshot {
                     was_inline: false,
                     inline_data: Vec::new(),
-                    extents: inode.extents().to_vec(),
+                    extents: inode.extents(),
                     size: inode.size,
                 }
             };
@@ -450,7 +491,8 @@ impl<D: BlockDevice> Filesystem<D> {
             let inode = self.get(file_id)?;
 
             // Defer-free current extents NOT referenced by any snapshot.
-            let current_extents: Vec<InodeExtent> = inode.extents().to_vec();
+            let current_extents = inode.extents();
+            let current_indirect = inode.indirect_block();
             for ext in &current_extents {
                 if !self.extent_in_any_snapshot(file_id, ext.start_block) {
                     self.deferred.push(DeferredFree {
@@ -459,6 +501,13 @@ impl<D: BlockDevice> Filesystem<D> {
                         txg: next_txg,
                     });
                 }
+            }
+            if current_indirect != 0 {
+                self.deferred.push(DeferredFree {
+                    start: current_indirect,
+                    count: 1,
+                    txg: next_txg,
+                });
             }
 
             // Restore the file's state.
@@ -504,7 +553,7 @@ impl<D: BlockDevice> Filesystem<D> {
             let current_extents: Vec<InodeExtent> = self
                 .inodes
                 .get(&file_id)
-                .map(|i| i.extents().to_vec())
+                .map(|i| i.extents())
                 .unwrap_or_default();
 
             for ext in &file_snap.extents {
@@ -675,7 +724,7 @@ fn read_extents<D: BlockDevice>(
     let mut file_pos = 0u64;
     let mut block_buf = vec![0u8; BLOCK_SIZE as usize];
 
-    for ext in inode.extents() {
+    for ext in &inode.extents() {
         for i in 0..ext.count as u32 {
             let block_start = file_pos;
             let block_end = block_start + BLOCK_SIZE as u64;
@@ -702,7 +751,7 @@ fn read_extents<D: BlockDevice>(
     Ok(buf_pos)
 }
 
-/// Write content to consecutive blocks.
+/// Write content to consecutive blocks (single extent).
 fn write_content<D: BlockDevice>(
     device: &mut D,
     start: u32,
@@ -717,6 +766,29 @@ fn write_content<D: BlockDevice>(
         let end = (off + BLOCK_SIZE as usize).min(content.len());
         buf[..end - off].copy_from_slice(&content[off..end]);
         device.write_block(start + i, &buf)?;
+    }
+    Ok(())
+}
+
+/// Write content across multiple extents.
+fn write_content_multi<D: BlockDevice>(
+    device: &mut D,
+    chunks: &[(u32, u32)],
+    content: &[u8],
+) -> Result<(), FsError> {
+    let mut buf = vec![0u8; BLOCK_SIZE as usize];
+    let mut content_off = 0usize;
+
+    for &(start, count) in chunks {
+        for i in 0..count {
+            buf.fill(0);
+            let end = (content_off + BLOCK_SIZE as usize).min(content.len());
+            if content_off < content.len() {
+                buf[..end - content_off].copy_from_slice(&content[content_off..end]);
+            }
+            device.write_block(start + i, &buf)?;
+            content_off += BLOCK_SIZE as usize;
+        }
     }
     Ok(())
 }

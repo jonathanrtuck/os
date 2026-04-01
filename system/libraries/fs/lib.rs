@@ -29,7 +29,7 @@ mod superblock;
 pub use alloc_mod::Allocator;
 pub use block::BlockDevice;
 pub use filesystem::Filesystem;
-pub use inode::{Inode, InodeExtent, INLINE_CAPACITY};
+pub use inode::{Inode, InodeExtent, OldBlocks, INLINE_CAPACITY, MAX_TOTAL_EXTENTS};
 pub use superblock::{Superblock, DATA_START, RING_SIZE};
 
 /// Block size in bytes. Matches the kernel's 16 KiB page size and the

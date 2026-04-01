@@ -9,7 +9,7 @@ COW filesystem library. Implements a copy-on-write filesystem with the `BlockDev
 - `block.rs` -- `BlockDevice` trait (read_block, write_block, block_count)
 - `superblock.rs` -- Superblock ring (8-entry circular buffer with CRC32 validation, two-flush commit)
 - `alloc_mod.rs` -- Free-extent allocator for block allocation
-- `inode.rs` -- Inode table with linked-block storage, inline capacity for small files
+- `inode.rs` -- Inode with inline data (small files), extent lists (16 inline + 1364 overflow via indirect block)
 - `snapshot.rs` -- COW snapshot creation and restore (atomic multi-file snapshots)
 - `crc32.rs` -- CRC32 checksums for on-disk integrity
 

@@ -370,7 +370,7 @@ Notification for both: `channel_signal` syscall wakes the consumer from `sys::wa
 
 **Goal:** COW filesystem implementation. `no_std` port of the host prototype (`prototype/files/`). Provides the full stack from raw blocks to the `Files` trait.
 
-**Status:** `BlockDevice` trait, superblock ring (16-slot with CRC32), sorted free-extent allocator with coalescing, inodes (16 KiB blocks, inline data, extent lists with birth_txg), COW write path with two-flush commit protocol, per-file and multi-file snapshots, `Files` trait with `FileId`/`SnapshotId` newtypes.
+**Status:** `BlockDevice` trait, superblock ring (16-slot with CRC32), sorted free-extent allocator with coalescing, inodes (16 KiB blocks, inline data, extent lists with birth_txg, overflow extent blocks for >16 extents), COW write path with two-flush commit protocol, per-file and multi-file snapshots, `Files` trait with `FileId`/`SnapshotId` newtypes.
 
 **Interface (stable):**
 
