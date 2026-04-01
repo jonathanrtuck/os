@@ -148,6 +148,7 @@ pub struct HandleCategories {
     pub timers: Vec<super::timer::TimerId>,
     pub thread_handles: Vec<ThreadId>,
     pub process_handles: Vec<ProcessId>,
+    pub vmos: Vec<super::vmo::VmoId>,
 }
 
 /// Information collected under the scheduler lock for thread exit.
@@ -214,6 +215,7 @@ fn categorize_handles(objects: Vec<HandleObject>, s: &mut State) -> HandleCatego
         timers: Vec::new(),
         thread_handles: Vec::new(),
         process_handles: Vec::new(),
+        vmos: Vec::new(),
     };
 
     for obj in objects {
@@ -224,6 +226,7 @@ fn categorize_handles(objects: Vec<HandleObject>, s: &mut State) -> HandleCatego
             HandleObject::SchedulingContext(id) => release_context_inner(s, id),
             HandleObject::Thread(id) => categories.thread_handles.push(id),
             HandleObject::Timer(id) => categories.timers.push(id),
+            HandleObject::Vmo(id) => categories.vmos.push(id),
         }
     }
 
@@ -919,6 +922,13 @@ pub fn close_handle_categories(h: HandleCategories) {
     }
     for id in h.process_handles {
         super::process_exit::destroy(id);
+    }
+    for id in h.vmos {
+        let freed_pages = super::vmo::destroy(id);
+
+        for pa in freed_pages {
+            super::page_allocator::free_frame(pa);
+        }
     }
 }
 /// Create a new process with the given address space. Returns the ProcessId.

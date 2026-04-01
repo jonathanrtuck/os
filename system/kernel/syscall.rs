@@ -92,7 +92,7 @@ use super::{
     thread::{ThreadId, WaitEntry},
     thread_exit, timer,
     timer::TimerId,
-    Context,
+    vmo, Context,
 };
 
 pub mod nr {
@@ -126,6 +126,12 @@ pub mod nr {
     pub const PROCESS_SET_SYSCALL_FILTER: u64 = 27;
     pub const HANDLE_SET_BADGE: u64 = 28;
     pub const HANDLE_GET_BADGE: u64 = 29;
+    pub const VMO_CREATE: u64 = 30;
+    pub const VMO_MAP: u64 = 31;
+    pub const VMO_UNMAP: u64 = 32;
+    pub const VMO_READ: u64 = 33;
+    pub const VMO_WRITE: u64 = 34;
+    pub const VMO_GET_INFO: u64 = 35;
 }
 
 /// Maximum DMA allocation order — matches page_allocator::MAX_ORDER.
@@ -166,9 +172,22 @@ pub enum Error {
     SyscallBlocked = -15,
 }
 
+const VMO_MAP_READ: u64 = 1 << 0;
+const VMO_MAP_WRITE: u64 = 1 << 1;
+
 impl From<HandleError> for u64 {
     fn from(e: HandleError) -> u64 {
         (e as i64) as u64
+    }
+}
+impl From<HandleError> for Error {
+    fn from(e: HandleError) -> Error {
+        match e {
+            HandleError::InvalidHandle => Error::InvalidArgument,
+            HandleError::InsufficientRights => Error::InvalidArgument,
+            HandleError::TableFull => Error::OutOfMemory,
+            HandleError::SlotOccupied => Error::InvalidArgument,
+        }
     }
 }
 
@@ -190,7 +209,6 @@ fn dispatch_ok(ctx: *mut Context, val: u64) -> *const Context {
 
     ctx as *const Context
 }
-
 /// Check if a user virtual address is readable by EL0 using the hardware
 /// address translation instruction. Returns false if the page is unmapped
 /// or inaccessible.
@@ -217,6 +235,27 @@ fn is_user_range_readable(start: u64, len: u64) -> bool {
 
     while page <= last_page {
         if !is_user_page_readable(page) {
+            return false;
+        }
+
+        page += paging::PAGE_SIZE;
+    }
+
+    true
+}
+/// Verify that all pages in `[start, start+len)` are writable by EL0.
+fn is_user_range_writable(start: u64, len: u64) -> bool {
+    if len == 0 {
+        return true;
+    }
+
+    let page_mask = !(paging::PAGE_SIZE - 1);
+    let first_page = start & page_mask;
+    let last_page = start.saturating_add(len).saturating_sub(1) & page_mask;
+    let mut page = first_page;
+
+    while page <= last_page {
+        if !is_user_page_writable(page) {
             return false;
         }
 
@@ -510,6 +549,13 @@ fn sys_handle_close(handle_nr: u64) -> Result<u64, HandleError> {
         HandleObject::SchedulingContext(id) => scheduler::release_scheduling_context(id),
         HandleObject::Thread(id) => thread_exit::destroy(id),
         HandleObject::Timer(id) => timer::destroy(id),
+        HandleObject::Vmo(id) => {
+            let freed_pages = vmo::destroy(id);
+
+            for pa in freed_pages {
+                page_allocator::free_frame(pa);
+            }
+        }
     }
 
     Ok(0)
@@ -1038,6 +1084,245 @@ fn sys_timer_create(timeout_ns: u64) -> Result<u64, HandleError> {
         }
     }
 }
+fn sys_vmo_create(size_pages: u64, flags: u64, type_tag: u64) -> Result<u64, Error> {
+    if size_pages == 0 {
+        return Err(Error::InvalidArgument);
+    }
+
+    let vmo_flags = vmo::VmoFlags::from_bits(flags as u32);
+
+    // For contiguous VMOs, allocate all pages eagerly via the buddy allocator.
+    if vmo_flags.contains(vmo::VmoFlags::CONTIGUOUS) {
+        // Find the smallest power-of-two order that covers size_pages.
+        let order = (64 - (size_pages - 1).leading_zeros()) as usize;
+        let contig_pa = page_allocator::alloc_frames(order).ok_or(Error::OutOfMemory)?;
+        let vmo_id = match vmo::create(size_pages, vmo_flags, type_tag) {
+            Some(id) => id,
+            None => {
+                page_allocator::free_frames(contig_pa, order);
+                return Err(Error::OutOfMemory);
+            }
+        };
+
+        // Pre-commit all pages in the VMO.
+        {
+            let mut state = vmo::STATE.lock();
+
+            if let Some(v) = state.get_mut(vmo_id) {
+                for i in 0..size_pages {
+                    let pa = memory::Pa(contig_pa.0 + (i as usize) * paging::PAGE_SIZE as usize);
+
+                    v.commit_page(i, pa);
+                }
+            }
+        }
+
+        // Insert handle into caller's table.
+        return scheduler::current_process_do(|process| {
+            match process
+                .handles
+                .insert(HandleObject::Vmo(vmo_id), Rights::ALL)
+            {
+                Ok(handle) => Ok(handle.0 as u64),
+                Err(e) => {
+                    // Rollback: destroy VMO (which returns pages to free).
+                    let freed = vmo::destroy(vmo_id);
+
+                    for pa in freed {
+                        page_allocator::free_frame(pa);
+                    }
+
+                    Err(Error::from(e))
+                }
+            }
+        });
+    }
+
+    // Normal (lazy) VMO — no pages allocated yet.
+    let vmo_id = vmo::create(size_pages, vmo_flags, type_tag).ok_or(Error::OutOfMemory)?;
+
+    scheduler::current_process_do(|process| {
+        match process
+            .handles
+            .insert(HandleObject::Vmo(vmo_id), Rights::ALL)
+        {
+            Ok(handle) => Ok(handle.0 as u64),
+            Err(e) => {
+                vmo::destroy(vmo_id);
+                Err(Error::from(e))
+            }
+        }
+    })
+}
+fn sys_vmo_get_info(handle_nr: u64, info_va: u64) -> Result<u64, Error> {
+    if handle_nr > u16::MAX as u64 {
+        return Err(Error::InvalidArgument);
+    }
+
+    // Validate output buffer (must fit VmoInfo).
+    let info_size = core::mem::size_of::<vmo::VmoInfo>() as u64;
+    let end = info_va.checked_add(info_size).ok_or(Error::BadAddress)?;
+
+    if end > USER_VA_END {
+        return Err(Error::BadAddress);
+    }
+    if !is_user_range_writable(info_va, info_size) {
+        return Err(Error::BadAddress);
+    }
+
+    // Any valid handle can query info (no specific rights required).
+    let vmo_id = scheduler::current_process_do(|process| {
+        let obj = process
+            .handles
+            .get(Handle(handle_nr as u16), Rights::NONE)?;
+
+        match obj {
+            HandleObject::Vmo(id) => Ok(id),
+            _ => Err(HandleError::InvalidHandle),
+        }
+    })?;
+
+    let info = vmo::get_info(vmo_id).ok_or(Error::InvalidArgument)?;
+
+    // SAFETY: info_va was validated as writable user memory. VmoInfo is repr(C).
+    unsafe {
+        core::ptr::write(info_va as *mut vmo::VmoInfo, info);
+    }
+
+    Ok(0)
+}
+fn sys_vmo_map(handle_nr: u64, map_flags: u64) -> Result<u64, Error> {
+    if handle_nr > u16::MAX as u64 {
+        return Err(Error::InvalidArgument);
+    }
+
+    let readable = map_flags & VMO_MAP_READ != 0;
+    let writable = map_flags & VMO_MAP_WRITE != 0;
+
+    if !readable && !writable {
+        return Err(Error::InvalidArgument);
+    }
+
+    // Determine required rights.
+    let mut required = Rights::MAP;
+
+    if readable {
+        required = required.union(Rights::READ);
+    }
+    if writable {
+        required = required.union(Rights::WRITE);
+    }
+
+    // Look up the VMO handle and get its ID + size.
+    let (vmo_id, size_pages) = scheduler::current_process_do(|process| {
+        let obj = process.handles.get(Handle(handle_nr as u16), required)?;
+
+        match obj {
+            HandleObject::Vmo(id) => {
+                let size = vmo::size_pages(id).ok_or(HandleError::InvalidHandle)?;
+
+                Ok((id, size))
+            }
+            _ => Err(HandleError::InvalidHandle),
+        }
+    })?;
+
+    // Map into the caller's address space.
+    scheduler::current_process_do(|process| {
+        process
+            .address_space
+            .map_vmo(vmo_id, size_pages, writable)
+            .ok_or(Error::OutOfMemory)
+    })
+}
+fn sys_vmo_read(handle_nr: u64, offset: u64, buf_va: u64, len: u64) -> Result<u64, Error> {
+    if handle_nr > u16::MAX as u64 || len == 0 {
+        return Err(Error::InvalidArgument);
+    }
+
+    // Validate user buffer.
+    let end = buf_va.checked_add(len).ok_or(Error::BadAddress)?;
+
+    if end > USER_VA_END {
+        return Err(Error::BadAddress);
+    }
+    if !is_user_range_writable(buf_va, len) {
+        return Err(Error::BadAddress);
+    }
+
+    // Check handle rights.
+    let vmo_id = scheduler::current_process_do(|process| {
+        let obj = process
+            .handles
+            .get(Handle(handle_nr as u16), Rights::READ)?;
+
+        match obj {
+            HandleObject::Vmo(id) => Ok(id),
+            _ => Err(HandleError::InvalidHandle),
+        }
+    })?;
+
+    // Read from VMO into user buffer.
+    // SAFETY: buf_va was validated as a writable user buffer above.
+    // The TTBR0 page tables are still loaded (we're in the caller's context).
+    let user_buf = unsafe { core::slice::from_raw_parts_mut(buf_va as *mut u8, len as usize) };
+
+    vmo::read(vmo_id, offset, user_buf).ok_or(Error::InvalidArgument)
+}
+fn sys_vmo_unmap(va: u64, size_pages: u64) -> Result<u64, Error> {
+    if size_pages == 0 || va >= USER_VA_END {
+        return Err(Error::InvalidArgument);
+    }
+
+    let ok =
+        scheduler::current_process_do(|process| process.address_space.unmap_vmo(va, size_pages));
+
+    if ok {
+        Ok(0)
+    } else {
+        Err(Error::InvalidArgument)
+    }
+}
+fn sys_vmo_write(handle_nr: u64, offset: u64, buf_va: u64, len: u64) -> Result<u64, Error> {
+    if handle_nr > u16::MAX as u64 || len == 0 {
+        return Err(Error::InvalidArgument);
+    }
+
+    // Validate user buffer (source — must be readable).
+    let end = buf_va.checked_add(len).ok_or(Error::BadAddress)?;
+
+    if end > USER_VA_END {
+        return Err(Error::BadAddress);
+    }
+    if !is_user_range_readable(buf_va, len) {
+        return Err(Error::BadAddress);
+    }
+
+    // Check handle rights: WRITE or APPEND.
+    let (vmo_id, append_only) = scheduler::current_process_do(|process| {
+        let (obj, rights) = process
+            .handles
+            .get_entry(Handle(handle_nr as u16), Rights::NONE)?;
+        // Must have either WRITE or APPEND.
+        let has_write = rights.contains(Rights::WRITE);
+        let has_append = rights.contains(Rights::APPEND);
+
+        if !has_write && !has_append {
+            return Err(HandleError::InsufficientRights);
+        }
+
+        match obj {
+            HandleObject::Vmo(id) => Ok((id, has_append && !has_write)),
+            _ => Err(HandleError::InvalidHandle),
+        }
+    })?;
+
+    // Read user data and write to VMO.
+    // SAFETY: buf_va was validated as a readable user buffer above.
+    let user_buf = unsafe { core::slice::from_raw_parts(buf_va as *const u8, len as usize) };
+
+    vmo::write(vmo_id, offset, user_buf, append_only).ok_or(Error::InvalidArgument)
+}
 #[inline(never)]
 fn sys_wait(ctx: *mut Context) -> *const Context {
     use super::thread::TIMEOUT_SENTINEL;
@@ -1072,7 +1357,7 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
             HandleObject::Interrupt(id) => interrupt::unregister_waiter(id),
             HandleObject::Thread(id) => thread_exit::unregister_waiter(id),
             HandleObject::Process(id) => process_exit::unregister_waiter(id),
-            HandleObject::SchedulingContext(_) => {}
+            HandleObject::SchedulingContext(_) | HandleObject::Vmo(_) => {}
         }
     }
 
@@ -1196,7 +1481,7 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
             }
             HandleObject::Thread(id) => thread_ids[idx.min(thread_ids.len() - 1)] = Some(id),
             HandleObject::Process(id) => process_ids[idx.min(process_ids.len() - 1)] = Some(id),
-            HandleObject::SchedulingContext(_) => {}
+            HandleObject::SchedulingContext(_) | HandleObject::Vmo(_) => {}
         }
     }
 
@@ -1486,6 +1771,26 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
         }
         nr::HANDLE_SET_BADGE => dispatch_ok(ctx, result_to_u64!(sys_handle_set_badge(x0, x1))),
         nr::HANDLE_GET_BADGE => dispatch_ok(ctx, result_to_u64!(sys_handle_get_badge(x0))),
+        nr::VMO_CREATE => {
+            let xbase = unsafe { core::ptr::addr_of!((*ctx).x) as *const u64 };
+            let x2 = unsafe { xbase.add(2).read() };
+            dispatch_ok(ctx, result_to_u64!(sys_vmo_create(x0, x1, x2)))
+        }
+        nr::VMO_MAP => dispatch_ok(ctx, result_to_u64!(sys_vmo_map(x0, x1))),
+        nr::VMO_UNMAP => dispatch_ok(ctx, result_to_u64!(sys_vmo_unmap(x0, x1))),
+        nr::VMO_READ => {
+            let xbase = unsafe { core::ptr::addr_of!((*ctx).x) as *const u64 };
+            let x2 = unsafe { xbase.add(2).read() };
+            let x3 = unsafe { xbase.add(3).read() };
+            dispatch_ok(ctx, result_to_u64!(sys_vmo_read(x0, x1, x2, x3)))
+        }
+        nr::VMO_WRITE => {
+            let xbase = unsafe { core::ptr::addr_of!((*ctx).x) as *const u64 };
+            let x2 = unsafe { xbase.add(2).read() };
+            let x3 = unsafe { xbase.add(3).read() };
+            dispatch_ok(ctx, result_to_u64!(sys_vmo_write(x0, x1, x2, x3)))
+        }
+        nr::VMO_GET_INFO => dispatch_ok(ctx, result_to_u64!(sys_vmo_get_info(x0, x1))),
 
         _ => dispatch_ok(
             ctx,

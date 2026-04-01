@@ -109,6 +109,7 @@ mod syscall;
 mod thread;
 mod thread_exit;
 mod timer;
+mod vmo;
 mod waitable;
 
 /// Pseudo device ID for the PL031 RTC in the device manifest.
@@ -127,7 +128,11 @@ const VIRTIO_IRQ_BASE: u32 = 48; // SPI 16 = GIC IRQ 48
 /// Init ELF — the only process the kernel spawns directly.
 /// Init is the proto-OS-service that spawns all other processes.
 static INIT_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/init.elf"));
-
+/// Atomic gate for panic output serialization. The first core to CAS this
+/// from 0 to its core_id+1 "wins" and prints diagnostics. Other cores spin
+/// until the winner finishes, then print their own. Without this, concurrent
+/// panics produce unreadable interleaved UART output.
+static PANIC_GATE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 // Service pack: build.rs packs all service ELFs into services.pack, converts
 // it to services.o via llvm-objcopy with a .services section, and tells cargo
 // to link it. The linker script defines _services_start/_services_end.
@@ -567,12 +572,6 @@ pub extern "C" fn irq_handler(ctx: *mut Context) -> *const Context {
 
     next
 }
-/// Atomic gate for panic output serialization. The first core to CAS this
-/// from 0 to its core_id+1 "wins" and prints diagnostics. Other cores spin
-/// until the winner finishes, then print their own. Without this, concurrent
-/// panics produce unreadable interleaved UART output.
-static PANIC_GATE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-
 /// Handle fatal exceptions from EL1 (kernel faults).
 ///
 /// Called from exception.S on a per-core emergency stack (the original SP

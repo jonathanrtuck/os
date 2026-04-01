@@ -217,14 +217,320 @@ The extraction is mostly mechanical — moving existing code behind the interfac
 
 Each of these is a design discussion before implementation. They're ordered by how many things they unlock.
 
-**3a. Virtual Memory Objects (VMOs):**
+**3a. Virtual Memory Objects (VMOs) — SETTLED (2026-04-01):**
 
 The foundational shared-memory abstraction. A VMO is a handle to a range of physical pages. Any process holding a VMO handle can map it into its address space. Channels carry messages; VMOs carry data.
 
-- Current model: init allocates shared memory, maps it into processes before start. No runtime sharing.
-- VMO model: any process can create a VMO, map/unmap it, send the handle via IPC. Dynamic, flexible, composable.
-- Unlocks: zero-copy IPC for large data, shared libraries, memory-mapped files, framebuffer sharing without init knowing about it.
-- Reference: Zircon `zx_vmo_create`, `zx_vmar_map`.
+Design discussion held 2026-04-01. Cross-OS comparison (Zircon, seL4, Mach/XNU, QNX, L4 family, Linux, Redox) plus research survey (Theseus, Twizzler, RedLeaf, TreeSLS, Asterinas). Six design questions settled. Four novel features adopted from research. Full design below.
+
+#### Design Principles
+
+1. **VMO is THE memory object.** One abstraction for all shared memory. Subsumes `memory_share` (syscall #24). Subsumes `dma_alloc`/`dma_free` (syscalls #17/#18) via `VMO_CONTIGUOUS` flag. No parallel memory abstractions — when you build a new way, kill the old way.
+
+2. **Capability-native.** VMO handles participate fully in the capability system: rights attenuation (READ, WRITE, MAP, APPEND, SEAL), transfer via `handle_send`, badges. Same model as channels, timers, interrupts.
+
+3. **Ownership-typed (Theseus-inspired).** The kernel-internal `Vmo` type uses Rust ownership to prevent use-after-free and double-unmap at compile time. `Drop` unmaps all mappings and frees all pages. No manual `freed` flag. No other microkernel can do this — it's a Rust-specific advantage.
+
+4. **Designed for the general case.** This is not "what our OS needs" — it's "what any consumer of this microkernel needs." Decisions evaluated against the full landscape of microkernel use cases.
+
+#### Settled Decisions
+
+**1. Size: Fixed at creation.**
+
+Resize is architecturally wrong in a capability system. Zircon added `ZX_VMO_RESIZABLE` and immediately needed `ZX_VM_ALLOW_FAULTS` and `ZX_VM_REQUIRE_NON_RESIZABLE` — defensive flags that exist solely because resize creates a class of bugs where one process shrinks a VMO mapped in another, causing unexpected faults. seL4, NOVA, L4Re — the kernels optimizing for correctness — all chose fixed. The formally verified microkernel (seL4) chose fixed.
+
+**2. Backing: Lazy by default (demand-paged, zero-fill on fault).**
+
+Pages allocated on first touch, not at creation. Matches Zircon, Mach, L4 family, Linux. Existing demand-paging infrastructure (heap, ELF segments) reused. A database allocating 1 GiB shouldn't pay for pages it hasn't touched. A compositor allocating render targets for undrawn windows shouldn't commit memory upfront. seL4's eager model is a formal-verification constraint, not a design preference.
+
+Explicit commit available via `vmo_op_range(COMMIT, offset, len)` for processes that need deterministic allocation (no faults on hot path).
+
+**3. Contiguity: Non-contiguous by default. `VMO_CONTIGUOUS` flag for DMA.**
+
+VMO is the single memory object type. Contiguous VMOs use the buddy allocator for 2^n contiguous frames (eager allocation — contiguity requires all pages allocated together). Every OS special-cases contiguous allocation (Zircon `zx_vmo_create_contiguous`, Linux CMA, QNX `MAP_PHYS`). Having two parallel abstractions (VMO + DMA buffer) means every consumer learns two APIs and the capability model has a gap.
+
+Contiguous VMO restrictions: cannot snapshot (COW copy wouldn't be contiguous), always eager (all pages allocated at creation), always pinned (cannot decommit).
+
+**4. VA placement: Kernel-picks (Tier 2), VMAR extension point documented.**
+
+`vmo_map` maps into the process's shared memory region. Kernel picks the next available VA using the existing `VmaList` (sorted list, gap search). Optional `VMO_MAP_FIXED` for specific-VA mapping (fails on overlap, never silently replaces). This is where Mach, QNX, and Linux sit — adequate for all foreseeable use cases.
+
+VMARs (Tier 3) are a documented future extension — see "VMAR Extension Point" below.
+
+**5. Channels remain separate.**
+
+Channels and VMOs are distinct IPC primitives: channels are message pipes (ordered, small), VMOs are shared memory (unordered, large). Every microkernel keeps them separate (Zircon channels + VMOs, seL4 endpoints + frames, L4 IPC + dataspaces). Future: channels carry VMO handles in messages.
+
+#### Novel Features (Beyond Existing Microkernels)
+
+**N1. Built-in generation numbers (versioned memory).**
+
+Every VMO has a generation counter (u64). `vmo_snapshot()` increments the generation and COW-forks the page list. `vmo_restore(generation)` reverts to a previous snapshot. Bounded snapshot ring (configurable depth, default 64).
+
+No other production microkernel offers versioned memory objects. COW is typically a filesystem concern (ZFS, Btrfs) or process-fork mechanism. Making COW a VMO primitive means any consumer gets point-in-time snapshots, undo, and concurrent-read-while-write for free.
+
+Implementation: per-page reference counting (refcount stored alongside Pa in the page list). Write to a page with refcount > 1 triggers COW (allocate new page, copy, update current generation's page list, decrement old page's refcount). When a snapshot is dropped (ring wraps), walk its page list and decrement refcounts, freeing pages that hit zero.
+
+Interaction with other features:
+
+- Sealed VMOs reject `snapshot` and `restore` (content frozen). Existing snapshots remain readable.
+- Contiguous VMOs cannot snapshot (COW would break contiguity).
+- Append-only VMOs snapshot normally (captures the append frontier).
+
+**N2. Append-only permission.**
+
+New right: APPEND. A handle with APPEND (but not WRITE) can write at `offset >= committed_size` but cannot overwrite existing data. Enforced in `vmo_write` syscall.
+
+Use cases: log-structured stores, audit trails, append-only document history. The document service can hand an APPEND-only VMO to an editor — the editor can add content but never modify or delete previous entries.
+
+**N3. Seal (immutable freeze).**
+
+`vmo_seal()` permanently freezes the VMO's content, permissions, and metadata. Irreversible. All subsequent mutating operations (write, snapshot, restore, seal) return `PermissionDenied`. Existing snapshots survive. Mappings remain valid (read-only).
+
+Use cases: init creates a VMO with font data, seals it, sends READ+MAP handles to services. Services know by construction that the content will never change — no TOCTOU, no races, tamper-proof. Linux has `memfd_create(MFD_ALLOW_SEALING)` + `fcntl(F_ADD_SEALS)` for the same reason (Android uses it to replace ashmem).
+
+Seal requires the SEAL right on the handle. Once sealed, the SEAL right is consumed (seal is monotonic — can't unseal, can't re-seal).
+
+**N4. Content-type tag.**
+
+Each VMO carries an optional `type_tag: u64` set at creation. The kernel doesn't interpret it — it's opaque metadata. Distinct from badges (which identify the sender). Type tags identify what's in the VMO.
+
+Use cases: when VMO handles travel via IPC, the receiver checks `vmo_get_info().type_tag` to verify the content type matches expectations. Catches version mismatches, corrupted handles, and protocol errors without a side-channel. Inspired by RedLeaf's `RRef<T>` (OSDI '20), reduced to minimum viable form.
+
+Type tag is immutable after creation (set in `vmo_create` flags). If content type changes, create a new VMO.
+
+#### Page Commitment Tracking
+
+Per-VMO page list using `BTreeMap<u64, (Pa, u32)>` where the key is the page offset, Pa is the physical address, and u32 is the reference count (for COW snapshot sharing).
+
+- **Uncommitted page:** absent from the BTreeMap. Zero-fill on fault (or return zeros for `vmo_read` without allocating).
+- **Committed page, refcount=1:** exclusively owned by the current generation. Writes go directly to the page.
+- **Committed page, refcount>1:** shared between the current generation and N snapshots. Write triggers COW: allocate new page, copy content, insert new page at refcount=1, decrement old page's refcount.
+- **Contiguous VMO:** BTreeMap pre-populated at creation with all pages at refcount=1. No faulting.
+
+Why BTreeMap (not global hash table, not PTE-is-truth): VMO must be self-contained because it can be mapped into multiple processes. Its page state can't live in any one process's page tables. BTreeMap gives O(log n) lookup, sparse storage (uncommitted ranges cost nothing), and iteration for COW snapshots. Matches Zircon's `VmPageList` architecture. Mach's global hash table creates lock contention under SMP.
+
+#### VMO-Backed VMAs
+
+The fault handler currently handles `Backing::Anonymous` (heap) and `Backing::Code` (ELF). Add `Backing::Vmo`:
+
+```rust
+pub enum Backing {
+    Anonymous,
+    Code,
+    Vmo { vmo_id: VmoId, offset: u64, writable: bool },
+}
+```
+
+Fault path for VMO-backed VMA:
+
+1. Find VMA via `VmaList` (existing binary search)
+2. Compute VMO page offset: `(fault_va - vma.base) / PAGE_SIZE + vma.offset`
+3. Look up page in VMO's BTreeMap
+4. If committed with refcount=1: install PTE (read or read/write per VMA permissions)
+5. If committed with refcount>1 and write fault: COW — allocate new page, copy, insert, install writable PTE
+6. If uncommitted: allocate frame, zero-fill, insert into BTreeMap at refcount=1, install PTE
+7. If uncommitted and `vmo_read` (not a mapped fault): return zeros without allocating
+
+#### Syscall Surface (10 new → 40 total)
+
+| Nr  | Syscall        | Args                                            | Returns    | Rights required       |
+| --- | -------------- | ----------------------------------------------- | ---------- | --------------------- |
+| 30  | `vmo_create`   | x0=size_pages, x1=flags, x2=type_tag            | handle     | — (creator gets ALL)  |
+| 31  | `vmo_map`      | x0=handle, x1=map_flags, x2=fixed_va (if FIXED) | va         | MAP + (READ or WRITE) |
+| 32  | `vmo_unmap`    | x0=va, x1=size_pages                            | 0          | — (caller unmaps own) |
+| 33  | `vmo_read`     | x0=handle, x1=offset, x2=buf, x3=len            | bytes_read | READ                  |
+| 34  | `vmo_write`    | x0=handle, x1=offset, x2=buf, x3=len            | written    | WRITE (or APPEND)     |
+| 35  | `vmo_get_info` | x0=handle, x1=info_buf                          | 0          | — (any valid handle)  |
+| 36  | `vmo_snapshot` | x0=handle                                       | generation | WRITE                 |
+| 37  | `vmo_restore`  | x0=handle, x1=generation                        | 0          | WRITE                 |
+| 38  | `vmo_seal`     | x0=handle                                       | 0          | SEAL                  |
+| 39  | `vmo_op_range` | x0=handle, x1=op, x2=offset, x3=len             | 0          | varies by op          |
+
+**Create flags (x1 of `vmo_create`):**
+
+- `0` — normal VMO (lazy, non-contiguous)
+- `VMO_CONTIGUOUS` (bit 0) — physically contiguous, eager allocation via buddy allocator
+
+**Map flags (x1 of `vmo_map`):**
+
+- `VMO_MAP_READ` (bit 0) — map readable
+- `VMO_MAP_WRITE` (bit 1) — map writable (requires WRITE right)
+- `VMO_MAP_FIXED` (bit 2) — map at VA in x2 (fails on overlap, never replaces silently)
+
+**Op codes for `vmo_op_range`:**
+
+- `VMO_OP_COMMIT` (0) — eagerly allocate pages in range (requires WRITE)
+- `VMO_OP_DECOMMIT` (1) — free pages in range, revert to zero-fill (requires WRITE)
+
+**`vmo_get_info` returns (written to user buffer):**
+
+```rust
+#[repr(C)]
+struct VmoInfo {
+    size_pages: u64,
+    flags: u64,          // VMO_CONTIGUOUS, sealed status
+    type_tag: u64,
+    generation: u64,     // current generation number
+    committed_pages: u64, // pages with physical backing
+}
+```
+
+#### Rights Integration
+
+| Right    | Bit | Gates                                                                                      |
+| -------- | --- | ------------------------------------------------------------------------------------------ |
+| READ     | 0   | `vmo_read`, `vmo_map` with `VMO_MAP_READ`                                                  |
+| WRITE    | 1   | `vmo_write`, `vmo_map` with `VMO_MAP_WRITE`, `vmo_snapshot`, `vmo_restore`, `vmo_op_range` |
+| MAP      | 4   | `vmo_map` (required for any mapping)                                                       |
+| TRANSFER | 5   | `handle_send` (existing, applies to VMO handles)                                           |
+| APPEND   | 8   | `vmo_write` at offset >= committed_size only (no overwrite)                                |
+| SEAL     | 9   | `vmo_seal` (consumed on use — one-way, permanent)                                          |
+
+APPEND and SEAL are new rights (bits 8 and 9). Existing rights mask (bits 0-7) unchanged. `Rights::ALL` widened to include bits 8-9. `Rights::from_raw()` mask widened accordingly.
+
+A handle with READ+MAP but not WRITE → read-only mapping, read-only `vmo_read`. Cannot write, cannot map writable. Cannot snapshot or restore. Rights attenuation works as always: `original & mask`, monotonically decreasing.
+
+A handle with APPEND+MAP → can map writable (for append), can `vmo_write` only past committed_size. Cannot overwrite.
+
+#### HandleObject Extension
+
+```rust
+pub enum HandleObject {
+    Channel(ChannelId),
+    Interrupt(InterruptId),
+    Process(ProcessId),
+    SchedulingContext(SchedulingContextId),
+    Thread(ThreadId),
+    Timer(TimerId),
+    Vmo(VmoId),           // NEW
+}
+```
+
+#### Kernel-Internal Type
+
+```rust
+struct Vmo {
+    /// Per-page tracking: offset → (physical address, refcount).
+    /// Absent = uncommitted (zero-fill on fault or zero-return for vmo_read).
+    /// Refcount > 1 = shared with snapshots (COW on write).
+    pages: BTreeMap<u64, (Pa, u32)>,
+
+    /// Fixed at creation, in pages.
+    size_pages: u64,
+
+    /// Creation flags (CONTIGUOUS, etc.).
+    flags: VmoFlags,
+
+    /// Opaque content-type tag. Set at creation, immutable.
+    type_tag: u64,
+
+    /// Current generation number. Incremented by vmo_snapshot().
+    generation: u64,
+
+    /// COW snapshot ring. Each snapshot is a clone of `pages` at the
+    /// time of the snapshot (with shared refcounts). Bounded depth.
+    snapshots: VecDeque<VmoSnapshot>,
+
+    /// Maximum snapshot depth. Oldest snapshot dropped when exceeded.
+    max_snapshots: usize,
+
+    /// True after vmo_seal(). All mutating operations rejected.
+    sealed: bool,
+
+    /// Active mappings (process, VA range) for cleanup on Drop.
+    mappings: Vec<VmoMapping>,
+}
+
+struct VmoSnapshot {
+    generation: u64,
+    pages: BTreeMap<u64, (Pa, u32)>,
+}
+
+struct VmoMapping {
+    process_id: ProcessId,
+    va_base: u64,
+    page_count: u64,
+}
+```
+
+`impl Drop for Vmo`: unmap all active mappings (walk `mappings`, unmap from each process's address space, invalidate TLB), then walk `pages` and all snapshot page lists decrementing refcounts and freeing frames that hit zero. Compiler guarantees no dangling references to the Vmo exist when Drop runs.
+
+#### Deprecated Syscalls
+
+VMOs subsume two existing syscalls:
+
+| Nr  | Syscall        | Replacement                                     |
+| --- | -------------- | ----------------------------------------------- |
+| 17  | `dma_alloc`    | `vmo_create(pages, VMO_CONTIGUOUS)` + `vmo_map` |
+| 18  | `dma_free`     | `handle_close` (Drop unmaps + frees)            |
+| 24  | `memory_share` | `vmo_create` + `vmo_map` + `handle_send`        |
+
+These syscalls remain functional for backward compatibility during the transition. Document them as deprecated in the syscall table. Remove in Phase 6 (packaging) after userspace is migrated.
+
+#### VMAR Extension Point (Future — Not Phase 3a)
+
+**What's missing:** `vmo_map` maps into a single flat shared region per process. Any process that can call `vmo_map` can map anywhere in that region. There's no way to confine a component to a sub-region of the VA space.
+
+**What VMARs would add:**
+
+- `Vmar` kernel object type (handle-based, capability-controlled)
+- Every process gets a root VMAR at creation (replaces the flat region)
+- `vmar_allocate(parent, size, flags) → (child_handle, base_va)` — carve a sub-region
+- `vmar_map(vmar, vmo, offset, len, flags) → va` — map VMO into a specific VMAR
+- `vmar_unmap(vmar, va, len)` — unmap within a VMAR
+- `vmar_destroy(vmar)` — tear down sub-region and all contained mappings
+
+**Where they'd live in code:**
+
+- New file: `kernel/vmar.rs` — VMAR tree, sub-allocation, overlap checking
+- `address_space.rs` — root VMAR replaces bump allocators; `VmaList` becomes per-VMAR
+- `syscall.rs` — 4 new syscalls (allocate, map, unmap, destroy)
+- `handle.rs` — new `HandleObject::Vmar` variant
+
+**Compatibility:** `vmo_map(handle, flags)` continues to work — it maps into the root VMAR. When VMARs arrive, `vmo_map` becomes sugar for `vmar_map(root_vmar, ...)`. No API break.
+
+**What VMARs enable:** Composable sandboxing — hand a library or plugin a sub-VMAR, and it can only map VMOs within its designated region. The VA-space equivalent of capability confinement. Zircon uses this for component framework isolation.
+
+**Why deferred:** Pure additive change. The VMO API works without VMARs. Implementation cost ~400-600 lines for a feature no consumer needs until they're doing in-process sandboxing.
+
+#### Implementation Plan (8 steps, testable at each)
+
+Each step keeps the kernel compiling and all existing tests passing. New tests added at each step.
+
+**Step 1: Vmo type + VmoId + storage.**
+New file `kernel/vmo.rs`. The `Vmo` struct, `VmoId`, `VmoFlags`, `VmoSnapshot`, `VmoMapping`. Global VMO table (similar to channel/timer tables). `Drop` impl with full cleanup. `HandleObject::Vmo(VmoId)` variant. No syscalls yet.
+
+**Step 2: `vmo_create` + `vmo_get_info` (syscalls 30, 35).**
+Creation: allocate VmoId, insert into table, insert handle with ALL rights. Contiguous flag: buddy-allocate all pages eagerly. Normal: empty BTreeMap (lazy). Type tag stored. Tests: create normal VMO, create contiguous VMO, query info (size, flags, tag, generation=0, committed=0 for normal, committed=N for contiguous), close handle (Drop frees).
+
+**Step 3: `vmo_map` + `vmo_unmap` + fault handler (syscalls 31, 32).**
+Map: rights check (MAP + READ/WRITE), find free VA in shared region, create VMA with `Backing::Vmo`, record mapping in `Vmo.mappings`. Unmap: remove VMA, unmap pages, TLB invalidate, remove from `Vmo.mappings`. Fault handler: extend `handle_fault` for `Backing::Vmo` — look up page in VMO's BTreeMap, allocate+zero-fill if absent, install PTE. Tests: create VMO, map, touch (triggers fault → page committed), verify via `vmo_get_info` (committed_pages=1), unmap, remap elsewhere.
+
+**Step 4: `vmo_read` + `vmo_write` (syscalls 33, 34).**
+Read: rights check (READ), for each page in range — if committed, copy to user buf; if uncommitted, write zeros to user buf (no allocation). Write: rights check (WRITE or APPEND), for each page — if uncommitted, allocate+insert; copy from user buf to page. APPEND check: reject writes at offset < committed_size. Tests: write data, read back (match), read uncommitted (zeros), append-only semantics.
+
+**Step 5: `vmo_snapshot` + `vmo_restore` (syscalls 36, 37).**
+Snapshot: clone `pages` BTreeMap, increment all refcounts, push to snapshot ring (drop oldest if full, decrementing refcounts). Bump generation. Restore: find snapshot by generation, swap page lists (adjusting refcounts), update PTEs for all active mappings (remap to restored pages). COW fault path: on write fault to page with refcount > 1, allocate new page, copy content, insert at refcount=1, decrement old. Tests: write data, snapshot, write new data, verify old snapshot preserved via `vmo_read`, restore, verify content reverted. Stress: rapid snapshot/write/restore cycles.
+
+**Step 6: `vmo_seal` (syscall 38).**
+Set `sealed = true`. All mutating operations (`vmo_write`, `vmo_snapshot`, `vmo_restore`, `vmo_op_range(COMMIT/DECOMMIT)`) return `PermissionDenied`. Existing mappings become effectively read-only (remap writable PTEs as read-only on seal). Tests: seal, verify all mutations fail, verify reads still work, verify existing mappings work (read-only).
+
+**Step 7: `vmo_op_range` (syscall 39).**
+COMMIT: for each page in range, if uncommitted allocate+zero-fill+insert. DECOMMIT: for each page in range, if committed and refcount=1, free frame+remove from BTreeMap; if refcount>1 just decrement (page shared with snapshot). Tests: commit range, verify no fault on access; decommit, verify re-faults to zeros; decommit shared page (verify snapshot retains it).
+
+**Step 8: Deprecation wiring.**
+Add `vmo_create` + `vmo_map` path as alternative to `dma_alloc` and `memory_share`. Mark old syscalls deprecated in DESIGN.md syscall table. Do NOT remove them — userspace migration happens separately.
+
+#### Research References
+
+Design informed by cross-OS comparison and research survey:
+
+**Production systems:** Zircon VMOs (zx_vmo_create, zx_vmar_map), seL4 Untyped/frames, Mach/XNU vm_object, QNX shm_ctl, L4Re dataspaces, Linux mmap/memfd, Redox schemes.
+
+**Research systems:** Theseus OS (ownership-typed MappedPages — OSDI '20), Twizzler (object-relative pointers — USENIX ATC '20), RedLeaf (RRef<T> typed cross-domain memory — OSDI '20), TreeSLS (capability tree checkpointing — SOSP '23), Asterinas (framework/service safety split — USENIX ATC '25).
+
+**Key insight:** No existing microkernel combines all four novel features (ownership-typed, versioned, permission-rich, content-tagged). Each exists in isolation in research systems. This kernel composes them into a single coherent abstraction.
 
 **3b. Pager interface / exception forwarding:**
 
@@ -358,9 +664,10 @@ Expose a proper monotonic clock to userspace. Currently `sys::counter()` returns
 Phase 1 (Arch Abstraction) ───────────────────────────────────────┐
     │                                                             │
     ├──→ Phase 2 (Capabilities) ──→ Phase 3a (VMOs)               │
+    │         │                      (versioned, sealed, typed)   │
     │         │                        │                          │
     │         │                   Phase 3b (Pager) ──→ Phase 4d   │
-    │         │                        │               (COW)      │
+    │         │                        │               (COW→user) │
     │         └──→ Phase 3c (Signals)  │                          │
     │              Phase 3d (Thread inspect)                      │
     │              Phase 3e (Clock)                               │
@@ -373,6 +680,8 @@ Phase 1 (Arch Abstraction) ─────────────────�
 ```
 
 Phase 1 is the prerequisite for everything. Phase 5 (SMP) is best done immediately after Phase 1 while scheduler internals are fresh from the arch extraction. Phase 2 should come early (capabilities inform how VMOs and signals work). Phases 3a-3e are mostly independent of each other. Phase 4 is independent of Phases 3 and 5. Phase 6 is last.
+
+Note: Phase 3a now includes kernel-level COW (generation snapshots). Phase 3b (pager) extends this to userspace-controlled paging, which subsumes §9.9 (COW kernel mechanics) — the pager becomes the policy layer. Phase 4d is eliminated if 3b ships.
 
 ---
 
@@ -387,11 +696,12 @@ Phase 1 is the prerequisite for everything. Phase 5 (SMP) is best done immediate
 
 **Target (the kernel is standalone):**
 
-- All of minimum + VMOs + signals + pager interface
+- All of minimum + VMOs (versioned, sealed, typed, lazy+COW) + signals + pager interface
 - Per-core ready queues + IPI wake
 - User ASLR
 - Standalone build with README and examples
 - Someone unfamiliar with the project can boot it on QEMU in 5 minutes
+- VMOs subsume `dma_alloc`/`dma_free`/`memory_share` — one memory abstraction
 
 **Stretch (the kernel is "the one"):**
 
@@ -404,16 +714,17 @@ Phase 1 is the prerequisite for everything. Phase 5 (SMP) is best done immediate
 
 ## Estimated Scale
 
-| Phase                 | New/changed lines (est.)    | Design discussions needed         |
-| --------------------- | --------------------------- | --------------------------------- |
-| 1. Arch abstraction   | ~1,500 (refactor, net ~0)   | 1 (the interface)                 |
-| 2. Capabilities       | ~300–500                    | 1 (rights model)                  |
-| 3. Core primitives    | ~800–1,200                  | 4–5 (one per primitive)           |
-| 4. Security hardening | ~200–400                    | 0 (designs exist in research doc) |
-| 5. SMP scalability    | ~600–900 (scheduler rework) | 1 (per-core queue design)         |
-| 6. Packaging          | ~500 (docs, examples)       | 0                                 |
+| Phase                 | New/changed lines (est.)    | Design discussions needed                     |
+| --------------------- | --------------------------- | --------------------------------------------- |
+| 1. Arch abstraction   | ~1,500 (refactor, net ~0)   | 1 (the interface) — DONE                      |
+| 2. Capabilities       | ~300–500                    | 1 (rights model) — DONE                       |
+| 3a. VMOs              | ~500–700                    | 1 — DONE (versioned, sealed, typed, lazy+COW) |
+| 3b–e. Other prims     | ~400–600                    | 3–4 (pager, signals, clock, inspect)          |
+| 4. Security hardening | ~200–400                    | 0 (designs exist in research doc)             |
+| 5. SMP scalability    | ~600–900 (scheduler rework) | 1 (per-core queue design)                     |
+| 6. Packaging          | ~500 (docs, examples)       | 0                                             |
 
-Total: ~3,900–4,500 lines of new/refactored code, 7–8 design discussions. The kernel grows from ~11K to ~15-16K lines while gaining significantly more capability.
+Total: ~4,000–4,600 lines of new/refactored code, 6–7 design discussions. The kernel grows from ~11K to ~15-16K lines while gaining significantly more capability.
 
 ---
 

@@ -38,6 +38,10 @@ mod timer {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct TimerId(pub u8);
 }
+mod vmo {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct VmoId(pub u32);
+}
 #[path = "../../kernel/handle.rs"]
 mod handle;
 #[path = "../../kernel/scheduling_context.rs"]

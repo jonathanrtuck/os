@@ -27,7 +27,7 @@ use alloc::{boxed::Box, vec::Vec};
 
 use super::{
     interrupt::InterruptId, process::ProcessId, scheduling_context::SchedulingContextId,
-    thread::ThreadId, timer::TimerId,
+    thread::ThreadId, timer::TimerId, vmo::VmoId,
 };
 
 const BASE_SIZE: usize = 256;
@@ -54,6 +54,7 @@ pub enum HandleObject {
     SchedulingContext(SchedulingContextId),
     Thread(ThreadId),
     Timer(TimerId),
+    Vmo(VmoId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,22 +69,13 @@ impl Rights {
     pub const TRANSFER: Self = Self(1 << 5);
     pub const CREATE: Self = Self(1 << 6);
     pub const KILL: Self = Self(1 << 7);
-
-    /// All defined rights. Bits 8-31 are reserved.
-    pub const ALL: Self = Self(0xFF);
+    pub const APPEND: Self = Self(1 << 8);
+    pub const SEAL: Self = Self(1 << 9);
+    /// All defined rights. Bits 10-31 are reserved.
+    pub const ALL: Self = Self(0x3FF);
     pub const NONE: Self = Self(0);
-
     /// Backward-compat alias: READ | WRITE.
     pub const READ_WRITE: Self = Self((1 << 0) | (1 << 1));
-
-    pub const fn contains(self, required: Self) -> bool {
-        self.0 & required.0 == required.0
-    }
-
-    /// Combine two rights sets (bitwise OR).
-    pub const fn union(self, other: Self) -> Self {
-        Self(self.0 | other.0)
-    }
 
     /// Reduce rights: result has only the bits present in both self and mask.
     /// This is the core capability attenuation operation — rights can only be
@@ -91,11 +83,17 @@ impl Rights {
     pub const fn attenuate(self, mask: Self) -> Self {
         Self(self.0 & mask.0)
     }
-
+    pub const fn contains(self, required: Self) -> bool {
+        self.0 & required.0 == required.0
+    }
     /// Construct from a raw u32 (e.g., from a syscall argument). Masks to
     /// defined bits only — undefined bits are silently dropped.
     pub const fn from_raw(raw: u32) -> Self {
-        Self(raw & 0xFF)
+        Self(raw & 0x3FF)
+    }
+    /// Combine two rights sets (bitwise OR).
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
     }
 }
 
@@ -140,7 +138,6 @@ impl HandleTable {
     fn capacity(&self) -> usize {
         BASE_SIZE + self.overflow.len() * PAGE_SIZE
     }
-
     /// Get a reference to the slot at `index`, or None if beyond allocated range.
     fn slot(&self, index: usize) -> Option<&Option<HandleEntry>> {
         if index < BASE_SIZE {
@@ -153,7 +150,6 @@ impl HandleTable {
             self.overflow.get(page).map(|p| &p[offset])
         }
     }
-
     /// Get a mutable reference to the slot at `index`, or None if beyond allocated range.
     fn slot_mut(&mut self, index: usize) -> Option<&mut Option<HandleEntry>> {
         if index < BASE_SIZE {
@@ -167,6 +163,66 @@ impl HandleTable {
         }
     }
 
+    /// Close a handle (clear the slot). Returns the object, rights, and badge.
+    pub fn close(&mut self, handle: Handle) -> Result<(HandleObject, Rights, u64), HandleError> {
+        let slot = self
+            .slot_mut(handle.0 as usize)
+            .ok_or(HandleError::InvalidHandle)?;
+        let entry = slot.ok_or(HandleError::InvalidHandle)?;
+        let result = (entry.object, entry.rights, entry.badge);
+
+        *slot = None;
+
+        Ok(result)
+    }
+    /// Iterate over all occupied handles (for cleanup on process exit).
+    pub fn drain(&mut self) -> DrainHandles<'_> {
+        DrainHandles {
+            table: self,
+            index: 0,
+        }
+    }
+
+    /// Look up a handle and verify it has the required rights.
+    pub fn get(&self, handle: Handle, required: Rights) -> Result<HandleObject, HandleError> {
+        let entry = self
+            .slot(handle.0 as usize)
+            .and_then(|s| s.as_ref())
+            .ok_or(HandleError::InvalidHandle)?;
+
+        if !entry.rights.contains(required) {
+            return Err(HandleError::InsufficientRights);
+        }
+
+        Ok(entry.object)
+    }
+    /// Read the badge on a handle.
+    pub fn get_badge(&self, handle: Handle) -> Result<u64, HandleError> {
+        let entry = self
+            .slot(handle.0 as usize)
+            .and_then(|s| s.as_ref())
+            .ok_or(HandleError::InvalidHandle)?;
+
+        Ok(entry.badge)
+    }
+    /// Look up a handle, verify rights, and return both the object and its rights.
+    #[allow(dead_code)] // used by test crate and handle_send
+    pub fn get_entry(
+        &self,
+        handle: Handle,
+        required: Rights,
+    ) -> Result<(HandleObject, Rights), HandleError> {
+        let entry = self
+            .slot(handle.0 as usize)
+            .and_then(|s| s.as_ref())
+            .ok_or(HandleError::InvalidHandle)?;
+
+        if !entry.rights.contains(required) {
+            return Err(HandleError::InsufficientRights);
+        }
+
+        Ok((entry.object, entry.rights))
+    }
     /// Insert a new handle. Returns the handle index, or TableFull.
     pub fn insert(&mut self, object: HandleObject, rights: Rights) -> Result<Handle, HandleError> {
         // Scan base for free slot.
@@ -220,7 +276,6 @@ impl HandleTable {
 
         Ok(Handle(index as u16))
     }
-
     /// Insert at a specific slot. The slot must be empty. Used for rollback
     /// when a handle move fails and the handle must be restored to its
     /// original position.
@@ -260,40 +315,6 @@ impl HandleTable {
 
         Ok(())
     }
-
-    /// Look up a handle and verify it has the required rights.
-    pub fn get(&self, handle: Handle, required: Rights) -> Result<HandleObject, HandleError> {
-        let entry = self
-            .slot(handle.0 as usize)
-            .and_then(|s| s.as_ref())
-            .ok_or(HandleError::InvalidHandle)?;
-
-        if !entry.rights.contains(required) {
-            return Err(HandleError::InsufficientRights);
-        }
-
-        Ok(entry.object)
-    }
-
-    /// Look up a handle, verify rights, and return both the object and its rights.
-    #[allow(dead_code)] // used by test crate and handle_send
-    pub fn get_entry(
-        &self,
-        handle: Handle,
-        required: Rights,
-    ) -> Result<(HandleObject, Rights), HandleError> {
-        let entry = self
-            .slot(handle.0 as usize)
-            .and_then(|s| s.as_ref())
-            .ok_or(HandleError::InvalidHandle)?;
-
-        if !entry.rights.contains(required) {
-            return Err(HandleError::InsufficientRights);
-        }
-
-        Ok((entry.object, entry.rights))
-    }
-
     /// Insert with an explicit badge (used when transferring a badged handle).
     pub fn insert_with_badge(
         &mut self,
@@ -312,20 +333,6 @@ impl HandleTable {
 
         Ok(handle)
     }
-
-    /// Close a handle (clear the slot). Returns the object, rights, and badge.
-    pub fn close(&mut self, handle: Handle) -> Result<(HandleObject, Rights, u64), HandleError> {
-        let slot = self
-            .slot_mut(handle.0 as usize)
-            .ok_or(HandleError::InvalidHandle)?;
-        let entry = slot.ok_or(HandleError::InvalidHandle)?;
-        let result = (entry.object, entry.rights, entry.badge);
-
-        *slot = None;
-
-        Ok(result)
-    }
-
     /// Set the badge on a handle.
     pub fn set_badge(&mut self, handle: Handle, badge: u64) -> Result<(), HandleError> {
         let slot = self
@@ -336,24 +343,6 @@ impl HandleTable {
         entry.badge = badge;
 
         Ok(())
-    }
-
-    /// Read the badge on a handle.
-    pub fn get_badge(&self, handle: Handle) -> Result<u64, HandleError> {
-        let entry = self
-            .slot(handle.0 as usize)
-            .and_then(|s| s.as_ref())
-            .ok_or(HandleError::InvalidHandle)?;
-
-        Ok(entry.badge)
-    }
-
-    /// Iterate over all occupied handles (for cleanup on process exit).
-    pub fn drain(&mut self) -> DrainHandles<'_> {
-        DrainHandles {
-            table: self,
-            index: 0,
-        }
     }
 }
 

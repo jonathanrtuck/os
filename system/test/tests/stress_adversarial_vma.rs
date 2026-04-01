@@ -8,6 +8,11 @@
 
 extern crate alloc;
 
+mod vmo {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct VmoId(pub u32);
+}
+
 #[path = "../../kernel/memory_region.rs"]
 mod memory_region;
 

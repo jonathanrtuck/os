@@ -23,6 +23,14 @@ use alloc::vec::Vec;
 pub enum Backing {
     /// Anonymous zero-filled pages (stack, BSS).
     Anonymous,
+    /// VMO-backed region. Pages are demand-paged from the VMO's page list.
+    /// On fault: look up page in VMO's BTreeMap, allocate+zero-fill if absent.
+    Vmo {
+        vmo_id: super::vmo::VmoId,
+        /// Page offset within the VMO where this mapping starts.
+        offset: u64,
+        writable: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -62,7 +70,6 @@ impl VmaList {
 
         self.vmas.insert(pos, vma);
     }
-
     /// Look up the VMA containing `va`. Returns None if `va` is in a gap
     /// (e.g., guard page).
     pub fn lookup(&self, va: u64) -> Option<&Vma> {
@@ -90,7 +97,6 @@ impl VmaList {
 
         Some(&self.vmas[idx])
     }
-
     /// Remove the VMA whose start address matches `start`.
     ///
     /// Returns the removed VMA, or None if no VMA starts at that address.
