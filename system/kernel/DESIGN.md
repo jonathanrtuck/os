@@ -570,12 +570,12 @@ Creates a new thread in the calling process. Shares address space and handle tab
 
 **Syscalls:**
 
-| Nr  | Syscall        | Args                                                     | Returns                     |
-| --- | -------------- | -------------------------------------------------------- | --------------------------- |
-| 5   | channel_create | —                                                        | handle_a \| (handle_b << 8) |
-| 22  | handle_send    | x0=target_proc_handle, x1=handle_to_send, x2=rights_mask | 0             |
-| 28  | handle_set_badge | x0=handle, x1=badge                                    | 0             |
-| 29  | handle_get_badge | x0=handle                                              | badge         |
+| Nr  | Syscall          | Args                                                     | Returns                     |
+| --- | ---------------- | -------------------------------------------------------- | --------------------------- |
+| 5   | channel_create   | —                                                        | handle_a \| (handle_b << 8) |
+| 22  | handle_send      | x0=target_proc_handle, x1=handle_to_send, x2=rights_mask | 0                           |
+| 28  | handle_set_badge | x0=handle, x1=badge                                      | 0                           |
+| 29  | handle_get_badge | x0=handle                                                | badge                       |
 
 `handle_send` moves a handle from the caller's table into the target process's table with optional rights attenuation. The target handle receives `source_rights & rights_mask` (rights can only be removed, never added). `rights_mask=0` means preserve all rights from the source. The handle's badge is preserved through the transfer. Only works on suspended processes (Process.started == false). For Channel handles, also maps the shared page into the target's address space.
 

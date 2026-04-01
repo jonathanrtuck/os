@@ -172,7 +172,11 @@ impl HandleTable {
         // Scan base for free slot.
         for (i, slot) in self.base.iter_mut().enumerate() {
             if slot.is_none() {
-                *slot = Some(HandleEntry { object, rights, badge: 0 });
+                *slot = Some(HandleEntry {
+                    object,
+                    rights,
+                    badge: 0,
+                });
 
                 return Ok(Handle(i as u16));
             }
@@ -182,7 +186,11 @@ impl HandleTable {
         for (page_idx, page) in self.overflow.iter_mut().enumerate() {
             for (offset, slot) in page.iter_mut().enumerate() {
                 if slot.is_none() {
-                    *slot = Some(HandleEntry { object, rights, badge: 0 });
+                    *slot = Some(HandleEntry {
+                        object,
+                        rights,
+                        badge: 0,
+                    });
 
                     let index = BASE_SIZE + page_idx * PAGE_SIZE + offset;
 
@@ -200,7 +208,11 @@ impl HandleTable {
 
         let mut page = Box::new([None; PAGE_SIZE]);
 
-        page[0] = Some(HandleEntry { object, rights, badge: 0 });
+        page[0] = Some(HandleEntry {
+            object,
+            rights,
+            badge: 0,
+        });
 
         let index = BASE_SIZE + self.overflow.len() * PAGE_SIZE;
 
@@ -240,7 +252,11 @@ impl HandleTable {
             return Err(HandleError::SlotOccupied);
         }
 
-        *slot = Some(HandleEntry { object, rights, badge });
+        *slot = Some(HandleEntry {
+            object,
+            rights,
+            badge,
+        });
 
         Ok(())
     }
@@ -286,6 +302,7 @@ impl HandleTable {
         badge: u64,
     ) -> Result<Handle, HandleError> {
         let handle = self.insert(object, rights)?;
+
         // Overwrite the badge (insert sets it to 0).
         if let Some(slot) = self.slot_mut(handle.0 as usize) {
             if let Some(entry) = slot.as_mut() {

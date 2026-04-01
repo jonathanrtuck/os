@@ -514,27 +514,12 @@ fn sys_handle_close(handle_nr: u64) -> Result<u64, HandleError> {
 
     Ok(0)
 }
-fn sys_handle_set_badge(handle_nr: u64, badge: u64) -> Result<u64, HandleError> {
-    if handle_nr > u16::MAX as u64 {
-        return Err(HandleError::InvalidHandle);
-    }
-
-    scheduler::current_process_do(|process| {
-        process
-            .handles
-            .set_badge(Handle(handle_nr as u16), badge)
-    })?;
-
-    Ok(0)
-}
 fn sys_handle_get_badge(handle_nr: u64) -> Result<u64, HandleError> {
     if handle_nr > u16::MAX as u64 {
         return Err(HandleError::InvalidHandle);
     }
 
-    scheduler::current_process_do(|process| {
-        process.handles.get_badge(Handle(handle_nr as u16))
-    })
+    scheduler::current_process_do(|process| process.handles.get_badge(Handle(handle_nr as u16)))
 }
 fn sys_handle_send(
     target_handle_nr: u64,
@@ -557,27 +542,27 @@ fn sys_handle_send(
     // endpoints, which would corrupt channel closed_count.
     let (target_pid, source_obj, source_rights, source_badge) =
         scheduler::current_process_do(|process| {
-        let target_pid = match process
-            .handles
-            .get(Handle(target_handle_nr as u16), Rights::WRITE)
-        {
-            Ok(HandleObject::Process(id)) => id,
-            Ok(_) => return Err(Error::InvalidArgument),
-            Err(_) => return Err(Error::InvalidArgument),
-        };
-        // Verify the source handle has TRANSFER right before moving it.
-        // Without this check, any handle could be delegated to another process.
-        process
-            .handles
-            .get_entry(source_handle, Rights::TRANSFER)
-            .map_err(|_| Error::InvalidArgument)?;
-        // Now close (move out). Can't fail — we just verified it exists.
-        // close returns (object, rights, badge).
-        let (source_obj, source_rights, source_badge) =
-            process.handles.close(source_handle).unwrap();
+            let target_pid = match process
+                .handles
+                .get(Handle(target_handle_nr as u16), Rights::WRITE)
+            {
+                Ok(HandleObject::Process(id)) => id,
+                Ok(_) => return Err(Error::InvalidArgument),
+                Err(_) => return Err(Error::InvalidArgument),
+            };
+            // Verify the source handle has TRANSFER right before moving it.
+            // Without this check, any handle could be delegated to another process.
+            process
+                .handles
+                .get_entry(source_handle, Rights::TRANSFER)
+                .map_err(|_| Error::InvalidArgument)?;
+            // Now close (move out). Can't fail — we just verified it exists.
+            // close returns (object, rights, badge).
+            let (source_obj, source_rights, source_badge) =
+                process.handles.close(source_handle).unwrap();
 
-        Ok((target_pid, source_obj, source_rights, source_badge))
-    })?;
+            Ok((target_pid, source_obj, source_rights, source_badge))
+        })?;
     // Attenuate: target handle gets only the rights present in BOTH the
     // source handle and the mask. Rights can only be removed, never added.
     let source_rights = source_rights.attenuate(mask);
@@ -635,13 +620,25 @@ fn sys_handle_send(
     // Rollback: if Phase 2 failed, restore handle to source process.
     if let Err(e) = result {
         scheduler::current_process_do(|process| {
-            let _ = process
-                .handles
-                .insert_at(source_handle, source_obj, source_rights, source_badge);
+            let _ =
+                process
+                    .handles
+                    .insert_at(source_handle, source_obj, source_rights, source_badge);
         });
 
         return Err(e);
     }
+
+    Ok(0)
+}
+fn sys_handle_set_badge(handle_nr: u64, badge: u64) -> Result<u64, HandleError> {
+    if handle_nr > u16::MAX as u64 {
+        return Err(HandleError::InvalidHandle);
+    }
+
+    scheduler::current_process_do(|process| {
+        process.handles.set_badge(Handle(handle_nr as u16), badge)
+    })?;
 
     Ok(0)
 }
@@ -1487,12 +1484,8 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
         nr::PROCESS_SET_SYSCALL_FILTER => {
             dispatch_ok(ctx, result_to_u64!(sys_process_set_syscall_filter(x0, x1)))
         }
-        nr::HANDLE_SET_BADGE => {
-            dispatch_ok(ctx, result_to_u64!(sys_handle_set_badge(x0, x1)))
-        }
-        nr::HANDLE_GET_BADGE => {
-            dispatch_ok(ctx, result_to_u64!(sys_handle_get_badge(x0)))
-        }
+        nr::HANDLE_SET_BADGE => dispatch_ok(ctx, result_to_u64!(sys_handle_set_badge(x0, x1))),
+        nr::HANDLE_GET_BADGE => dispatch_ok(ctx, result_to_u64!(sys_handle_get_badge(x0))),
 
         _ => dispatch_ok(
             ctx,
