@@ -638,12 +638,12 @@ pub extern "C" fn _start() -> ! {
         let mut cursor_opacity_changed = false;
         if cursor_state_va != 0 {
             // SAFETY: cursor_state_va is a shared page mapped by init (read-only).
-            let gen = unsafe {
+            let generation = unsafe {
                 let atom = &*((cursor_state_va) as *const core::sync::atomic::AtomicU32);
                 atom.load(core::sync::atomic::Ordering::Acquire)
             };
-            if gen != cursor_shape_gen {
-                cursor_shape_gen = gen;
+            if generation != cursor_shape_gen {
+                cursor_shape_gen = generation;
                 cursor_shape_changed = true;
             }
             let opa = unsafe {
