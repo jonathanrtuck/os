@@ -145,6 +145,9 @@ struct DocModelState {
     doc_file_id: u64,
     doc_format: DocumentFormat,
     cursor_pos: usize,
+    /// Generation counter for the doc buffer header (offset 16).
+    /// Incremented on every header write with Release ordering.
+    doc_generation: u32,
     content_va: usize,
     content_size: usize,
     content_alloc: protocol::content::ContentAllocator,
@@ -166,6 +169,7 @@ static mut STATE: DocModelState = DocModelState {
     doc_file_id: 0,
     doc_format: DocumentFormat::Plain,
     cursor_pos: 0,
+    doc_generation: 0,
     content_va: 0,
     content_size: 0,
     content_alloc: protocol::content::ContentAllocator::empty(),
@@ -248,6 +252,17 @@ fn doc_write_header() {
         core::ptr::write_volatile(s.doc_buf as *mut u64, s.doc_len as u64);
         core::ptr::write_volatile(s.doc_buf.add(8) as *mut u64, s.cursor_pos as u64);
     }
+    // Increment generation with Release ordering. Readers that Acquire-load
+    // this field will see all prior writes (doc_len, cursor_pos, content).
+    // This makes the buffer self-synchronizing — safe to read without IPC.
+    s.doc_generation = s.doc_generation.wrapping_add(1);
+    // SAFETY: doc_buf is valid shared memory (≥64 bytes). Offset 16 is within
+    // the 64-byte header, 4-byte aligned. AtomicU32 is the correct model for
+    // cross-process shared memory.
+    unsafe {
+        let gen_ptr = s.doc_buf.add(16) as *const core::sync::atomic::AtomicU32;
+        (*gen_ptr).store(s.doc_generation, core::sync::atomic::Ordering::Release);
+    }
 }
 
 // ── Rich text operations ────────────────────────────────────────────
@@ -280,11 +295,8 @@ fn rich_sync_header() {
     let s = state();
     let total = rich_total_size();
     s.doc_len = total;
-    // SAFETY: doc_buf valid.
-    unsafe {
-        core::ptr::write_volatile(s.doc_buf as *mut u64, total as u64);
-        core::ptr::write_volatile(s.doc_buf.add(8) as *mut u64, s.cursor_pos as u64);
-    }
+    // Delegate to doc_write_header — single path for header + generation.
+    doc_write_header();
 }
 
 fn rich_insert(pos: usize, byte: u8) -> bool {

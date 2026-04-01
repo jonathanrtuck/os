@@ -228,6 +228,8 @@ pub(crate) struct ViewState {
     pub(crate) counter_freq: u64,
     pub(crate) doc_buf: *mut u8,
     pub(crate) doc_capacity: usize,
+    /// Generation counter for the doc buffer header (offset 16).
+    pub(crate) doc_generation: u32,
     /// FileId of the active text document in the store.
     pub(crate) doc_file_id: u64,
     /// Document format (Plain for text/plain, Rich for text/rich).
@@ -377,6 +379,7 @@ impl ViewState {
             counter_freq: 0,
             doc_buf: core::ptr::null_mut(),
             doc_capacity: 0,
+            doc_generation: 0,
             doc_file_id: 0,
             doc_format: DocumentFormat::Plain,
             doc_len: 0,
@@ -807,11 +810,11 @@ fn read_layout_header() -> Option<LayoutResultsHeader> {
     }
     let ptr = s.layout_results_va as *const LayoutResultsHeader;
     // Load-acquire on generation to ensure we see all data written by B.
-    let gen = unsafe {
+    let generation = unsafe {
         let gen_ptr = s.layout_results_va as *const core::sync::atomic::AtomicU32;
         (*gen_ptr).load(core::sync::atomic::Ordering::Acquire)
     };
-    if gen == 0 {
+    if generation == 0 {
         return None;
     }
     // SAFETY: layout_results_va points to mapped shared memory with valid header.

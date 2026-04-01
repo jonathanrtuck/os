@@ -9,6 +9,20 @@ use super::DOC_HEADER_SIZE;
 /// Access the document content as a byte slice (after the header).
 pub(crate) fn doc_content() -> &'static [u8] {
     let s = super::state();
+    // Acquire-load the generation counter at offset 16. Pairs with the
+    // document service's Release-store in doc_write_header(), ensuring
+    // all content writes are visible before we read. This makes the
+    // buffer self-synchronizing — safe even without a preceding IPC recv.
+    if !s.doc_buf.is_null() {
+        // SAFETY: doc_buf is valid shared memory (≥64 bytes). Offset 16 is
+        // within the 64-byte header, 4-byte aligned. The Acquire load pairs
+        // with the document service's Release store, ensuring content writes
+        // are visible.
+        unsafe {
+            let gen_ptr = s.doc_buf.add(16) as *const core::sync::atomic::AtomicU32;
+            let _ = (*gen_ptr).load(core::sync::atomic::Ordering::Acquire);
+        }
+    }
     // SAFETY: doc_buf points to doc_capacity bytes of shared memory.
     // doc_len is always <= doc_capacity - DOC_HEADER_SIZE (maintained by
     // the document service). doc_buf is set once during init and
@@ -26,6 +40,16 @@ pub(crate) fn doc_write_header() {
     unsafe {
         core::ptr::write_volatile(s.doc_buf as *mut u64, s.doc_len as u64);
         core::ptr::write_volatile(s.doc_buf.add(8) as *mut u64, s.cursor.pos as u64);
+    }
+    // Increment generation with Release ordering. Readers that Acquire-load
+    // this field will see all prior writes (doc_len, cursor_pos, content).
+    s.doc_generation = s.doc_generation.wrapping_add(1);
+    // SAFETY: doc_buf is valid shared memory (≥64 bytes). Offset 16 is within
+    // the 64-byte header, 4-byte aligned. AtomicU32 is the correct model for
+    // cross-process shared memory.
+    unsafe {
+        let gen_ptr = s.doc_buf.add(16) as *const core::sync::atomic::AtomicU32;
+        (*gen_ptr).store(s.doc_generation, core::sync::atomic::Ordering::Release);
     }
 }
 
