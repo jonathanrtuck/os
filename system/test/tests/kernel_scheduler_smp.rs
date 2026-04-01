@@ -117,6 +117,12 @@ struct State {
     blocked: Vec<Thread>,
     /// Per-core deferred drops — matches the fixed kernel.
     deferred_drops: Vec<Vec<Thread>>,
+    /// Per-core deferred ready — threads parked as ready are deferred to this
+    /// core's slot instead of immediately entering the global ready queue.
+    /// Drained at the start of THIS core's next schedule_inner. Prevents the
+    /// stack reuse race: another core picking up a thread while the originating
+    /// core is still on its kernel stack (between lock drop and SP switch).
+    deferred_ready: Vec<Vec<Thread>>,
     num_cores: usize,
 }
 
@@ -135,6 +141,7 @@ impl State {
             ready: Vec::new(),
             blocked: Vec::new(),
             deferred_drops: (0..num_cores).map(|_| Vec::new()).collect(),
+            deferred_ready: (0..num_cores).map(|_| Vec::new()).collect(),
             num_cores,
         }
     }
@@ -145,7 +152,10 @@ fn park_old(s: &mut State, old_thread: Thread, core: usize) {
         if old_thread.is_idle() {
             s.cores[core].idle = Some(old_thread);
         } else {
-            s.ready.push(old_thread);
+            // Defer ready queue insertion — we're still on this thread's kernel
+            // stack until restore_context_and_eret switches SP. Another core
+            // picking this thread up immediately would use the same stack.
+            s.deferred_ready[core].push(old_thread);
         }
     } else if old_thread.is_exited() {
         s.deferred_drops[core].push(old_thread);
@@ -171,6 +181,13 @@ fn schedule_on_core(s: &mut State, core: usize) -> u64 {
     // Drain THIS core's deferred drops only.
     s.deferred_drops[core].clear();
 
+    // Drain THIS core's deferred ready threads into the global ready queue.
+    // Safe now: we're on a different thread's stack (the one selected last time).
+    let deferred = core::mem::take(&mut s.deferred_ready[core]);
+    for t in deferred {
+        s.ready.push(t);
+    }
+
     let mut old_thread = s.cores[core].current.take().expect("no current thread");
     old_thread.deschedule();
 
@@ -191,10 +208,7 @@ fn schedule_on_core(s: &mut State, core: usize) -> u64 {
         old_id
     } else {
         // Fallback to idle.
-        let mut idle = s.cores[core]
-            .idle
-            .take()
-            .expect("no idle thread on core");
+        let mut idle = s.cores[core].idle.take().expect("no idle thread on core");
         idle.activate();
         let idle_id = idle.id;
         park_old(s, old_thread, core);
@@ -296,23 +310,48 @@ fn assert_no_duplicates(s: &State) {
 
     for (i, core) in s.cores.iter().enumerate() {
         if let Some(t) = &core.current {
-            assert!(seen.insert(t.id), "thread {} duplicated (current on core {i})", t.id);
+            assert!(
+                seen.insert(t.id),
+                "thread {} duplicated (current on core {i})",
+                t.id
+            );
         }
         if let Some(t) = &core.idle {
-            assert!(seen.insert(t.id), "thread {} duplicated (idle on core {i})", t.id);
+            assert!(
+                seen.insert(t.id),
+                "thread {} duplicated (idle on core {i})",
+                t.id
+            );
         }
     }
     for t in &s.ready {
-        assert!(seen.insert(t.id), "thread {} duplicated (ready queue)", t.id);
+        assert!(
+            seen.insert(t.id),
+            "thread {} duplicated (ready queue)",
+            t.id
+        );
     }
     for t in &s.blocked {
-        assert!(seen.insert(t.id), "thread {} duplicated (blocked list)", t.id);
+        assert!(
+            seen.insert(t.id),
+            "thread {} duplicated (blocked list)",
+            t.id
+        );
     }
     for (core_idx, drops) in s.deferred_drops.iter().enumerate() {
         for t in drops {
             assert!(
                 seen.insert(t.id),
                 "thread {} duplicated (deferred_drops[{core_idx}])",
+                t.id
+            );
+        }
+    }
+    for (core_idx, deferred) in s.deferred_ready.iter().enumerate() {
+        for t in deferred {
+            assert!(
+                seen.insert(t.id),
+                "thread {} duplicated (deferred_ready[{core_idx}])",
                 t.id
             );
         }
@@ -334,6 +373,9 @@ fn total_threads(s: &State) -> usize {
     count += s.blocked.len();
     for drops in &s.deferred_drops {
         count += drops.len();
+    }
+    for deferred in &s.deferred_ready {
+        count += deferred.len();
     }
     count
 }
@@ -362,8 +404,15 @@ fn two_core_deferred_drops_isolation() {
     schedule_on_core(&mut s, 0);
 
     // Thread 10 is now in deferred_drops[0].
-    assert_eq!(s.deferred_drops[0].len(), 1, "exited thread must be in core 0's deferred_drops");
-    assert!(s.deferred_drops[1].is_empty(), "core 1's deferred_drops must be empty");
+    assert_eq!(
+        s.deferred_drops[0].len(),
+        1,
+        "exited thread must be in core 0's deferred_drops"
+    );
+    assert!(
+        s.deferred_drops[1].is_empty(),
+        "core 1's deferred_drops must be empty"
+    );
 
     // Core 1 schedules — must NOT drain core 0's deferred drops.
     schedule_on_core(&mut s, 1);
@@ -397,7 +446,11 @@ fn buggy_global_deferred_drops_allows_cross_core_free() {
     s.cores[0].current.as_mut().unwrap().mark_exited();
     buggy_schedule_on_core(&mut s, 0);
 
-    assert_eq!(s.deferred_drops.len(), 1, "exited thread in global deferred_drops");
+    assert_eq!(
+        s.deferred_drops.len(),
+        1,
+        "exited thread in global deferred_drops"
+    );
 
     // Core 1 schedules — in the buggy version, it drains ALL deferred_drops,
     // including thread 10 which core 0 might still be using.
@@ -758,7 +811,10 @@ fn seeded_smp_stress() {
     struct Lcg(u64);
     impl Lcg {
         fn next(&mut self) -> u64 {
-            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             self.0
         }
     }
@@ -925,5 +981,385 @@ fn exit_under_full_smp_load() {
         );
 
         assert_no_duplicates(&s);
+    }
+}
+
+// ============================================================
+// Buggy immediate-ready model (the OLD vulnerable behavior)
+// ============================================================
+
+/// Model of the pre-fix behavior where park_old immediately pushes ready
+/// threads into the global ready queue, allowing another core to pick the
+/// thread while the originating core is still on its kernel stack.
+struct BuggyReadyState {
+    cores: Vec<PerCoreState>,
+    ready: Vec<Thread>,
+    blocked: Vec<Thread>,
+    deferred_drops: Vec<Vec<Thread>>,
+    // NO deferred_ready — this is the bug
+    num_cores: usize,
+}
+
+impl BuggyReadyState {
+    fn new(num_cores: usize) -> Self {
+        let cores = (0..num_cores)
+            .map(|i| PerCoreState {
+                current: Some(Thread::new_boot_idle(i as u64)),
+                idle: None,
+                is_idle: true,
+            })
+            .collect();
+
+        Self {
+            cores,
+            ready: Vec::new(),
+            blocked: Vec::new(),
+            deferred_drops: (0..num_cores).map(|_| Vec::new()).collect(),
+            num_cores,
+        }
+    }
+}
+
+fn buggy_ready_park_old(s: &mut BuggyReadyState, old_thread: Thread, core: usize) {
+    if old_thread.is_ready() {
+        if old_thread.is_idle() {
+            s.cores[core].idle = Some(old_thread);
+        } else {
+            // BUG: immediate enqueue — another core can pick this thread while
+            // the originating core is still on its kernel stack.
+            s.ready.push(old_thread);
+        }
+    } else if old_thread.is_exited() {
+        s.deferred_drops[core].push(old_thread);
+    } else {
+        s.blocked.push(old_thread);
+    }
+}
+
+/// Buggy schedule_on_core: pushes ready threads directly into the ready queue.
+/// Returns (new_thread_id, ready_thread_ids_visible_to_other_cores).
+fn buggy_ready_schedule_on_core(s: &mut BuggyReadyState, core: usize) -> (u64, Vec<u64>) {
+    s.deferred_drops[core].clear();
+
+    let mut old_thread = s.cores[core].current.take().expect("no current");
+    old_thread.deschedule();
+
+    if let Some(idx) = s.ready.iter().position(|t| !t.is_exited()) {
+        let mut new_thread = s.ready.swap_remove(idx);
+        new_thread.activate();
+        let new_id = new_thread.id;
+        buggy_ready_park_old(s, old_thread, core);
+        // After park_old, the old thread is in the global ready queue.
+        // Snapshot what's visible to other cores RIGHT NOW (between park_old
+        // and restore_context_and_eret — the vulnerable window).
+        let visible: Vec<u64> = s.ready.iter().map(|t| t.id).collect();
+        s.cores[core].current = Some(new_thread);
+        s.cores[core].is_idle = false;
+        (new_id, visible)
+    } else if old_thread.is_ready() {
+        old_thread.activate();
+        let old_id = old_thread.id;
+        s.cores[core].current = Some(old_thread);
+        (old_id, Vec::new())
+    } else {
+        let mut idle = s.cores[core].idle.take().expect("no idle");
+        idle.activate();
+        let idle_id = idle.id;
+        buggy_ready_park_old(s, old_thread, core);
+        let visible: Vec<u64> = s.ready.iter().map(|t| t.id).collect();
+        s.cores[core].current = Some(idle);
+        s.cores[core].is_idle = true;
+        (idle_id, visible)
+    }
+}
+
+// ============================================================
+// Tests: Per-core deferred_ready (fixed behavior)
+// ============================================================
+
+/// Core test: when a thread is preempted, it goes to deferred_ready (not the
+/// global ready queue). Another core scheduling immediately does NOT see it.
+#[test]
+fn two_core_deferred_ready_isolation() {
+    let mut s = State::new(2);
+
+    // Three threads: one for each core + one extra to force preemption.
+    s.ready.push(Thread::new(10));
+    s.ready.push(Thread::new(11));
+    s.ready.push(Thread::new(12));
+
+    // Each core picks a thread.
+    schedule_on_core(&mut s, 0);
+    schedule_on_core(&mut s, 1);
+
+    let core0_tid = s.cores[0].current.as_ref().unwrap().id;
+    let core1_tid = s.cores[1].current.as_ref().unwrap().id;
+
+    // One thread remains in the ready queue.
+    assert_eq!(s.ready.len(), 1);
+    let remaining_tid = s.ready[0].id;
+
+    // Core 0 reschedules (timer preemption) — picks the remaining thread.
+    // The old thread should go to deferred_ready[0], NOT the global ready queue.
+    schedule_on_core(&mut s, 0);
+
+    assert_eq!(s.cores[0].current.as_ref().unwrap().id, remaining_tid);
+    assert_eq!(
+        s.deferred_ready[0].len(),
+        1,
+        "preempted thread must be in core 0's deferred_ready"
+    );
+    assert_eq!(s.deferred_ready[0][0].id, core0_tid);
+    assert!(
+        s.ready.is_empty(),
+        "global ready queue must be empty — preempted thread is deferred"
+    );
+
+    // Core 1 schedules — must NOT see the deferred thread.
+    schedule_on_core(&mut s, 1);
+
+    // Core 1 has no other runnable thread, so it continues with its current.
+    assert_eq!(s.cores[1].current.as_ref().unwrap().id, core1_tid);
+    assert_eq!(
+        s.deferred_ready[0].len(),
+        1,
+        "core 1's schedule must not drain core 0's deferred_ready"
+    );
+
+    // Core 0 schedules AGAIN — the deferred thread is drained and becomes
+    // eligible. It either gets picked as new (and the current goes deferred)
+    // or core 0 continues. Either way, the OLD deferred content was drained.
+    let old_deferred_tid = s.deferred_ready[0][0].id;
+    schedule_on_core(&mut s, 0);
+    // The old deferred thread must no longer be in deferred_ready (it was drained).
+    assert!(
+        !s.deferred_ready[0].iter().any(|t| t.id == old_deferred_tid),
+        "previously deferred thread must have been drained by core 0's next schedule"
+    );
+
+    assert_no_duplicates(&s);
+}
+
+/// Verify the BUG scenario: immediate ready queue insertion allows cross-core
+/// stack reuse. This test MUST detect the race.
+#[test]
+fn buggy_immediate_ready_allows_cross_core_stack_reuse() {
+    let mut s = BuggyReadyState::new(2);
+
+    s.ready.push(Thread::new(10));
+    s.ready.push(Thread::new(11));
+    s.ready.push(Thread::new(12));
+
+    buggy_ready_schedule_on_core(&mut s, 0); // core 0 picks a thread
+    buggy_ready_schedule_on_core(&mut s, 1); // core 1 picks a thread
+
+    let core0_tid = s.cores[0].current.as_ref().unwrap().id;
+
+    // Core 0 reschedules — core0_tid gets preempted.
+    // In the buggy model, core0_tid goes DIRECTLY into the ready queue.
+    let (_new_id, visible_to_others) = buggy_ready_schedule_on_core(&mut s, 0);
+
+    // BUG CONFIRMED: the preempted thread is immediately visible in the ready
+    // queue. Core 1 could pick it up while core 0 is still on its stack.
+    assert!(
+        visible_to_others.contains(&core0_tid),
+        "BUG CONFIRMED: preempted thread {core0_tid} immediately visible in ready queue \
+         (core 1 could restore it while core 0 is still on its stack)"
+    );
+}
+
+/// Deferred ready across all core counts: thread is invisible to other cores
+/// for exactly one scheduling round on the originating core.
+#[test]
+fn deferred_ready_isolation_across_core_counts() {
+    for num_cores in [1, 2, 3, 4, 8] {
+        let mut s = State::new(num_cores);
+
+        // Enough threads to cause preemption.
+        for i in 0..num_cores * 2 {
+            s.ready.push(Thread::new(100 + i as u64));
+        }
+
+        // Each core picks a thread.
+        for core in 0..num_cores {
+            schedule_on_core(&mut s, core);
+        }
+
+        // Each core reschedules (preemption). Old threads go to deferred_ready.
+        for core in 0..num_cores {
+            schedule_on_core(&mut s, core);
+
+            // No thread should be in two cores' deferred_ready simultaneously.
+            for c in 0..num_cores {
+                for other in (c + 1)..num_cores {
+                    assert!(
+                        s.deferred_ready[c]
+                            .iter()
+                            .all(|t| !s.deferred_ready[other].iter().any(|o| o.id == t.id)),
+                        "thread found in both core {c} and core {other} deferred_ready \
+                         (num_cores={num_cores})"
+                    );
+                }
+            }
+        }
+
+        assert_no_duplicates(&s);
+    }
+}
+
+/// Deferred ready threads become available after the originating core's next
+/// schedule_inner — verifying the drain path.
+#[test]
+fn deferred_ready_drained_on_next_schedule() {
+    let mut s = State::new(2);
+
+    s.ready.push(Thread::new(10));
+    s.ready.push(Thread::new(11));
+
+    // Core 0 picks a thread.
+    schedule_on_core(&mut s, 0);
+    let first_tid = s.cores[0].current.as_ref().unwrap().id;
+
+    // Core 0 reschedules — picks the other thread, defers the first.
+    schedule_on_core(&mut s, 0);
+    let second_tid = s.cores[0].current.as_ref().unwrap().id;
+    assert_ne!(first_tid, second_tid);
+    assert_eq!(s.deferred_ready[0].len(), 1);
+    assert_eq!(s.deferred_ready[0][0].id, first_tid);
+    assert!(s.ready.is_empty(), "ready queue must be empty — only thread is deferred");
+
+    // Core 0 reschedules AGAIN — drains deferred_ready (first_tid enters
+    // the ready queue, gets picked). second_tid is now deferred.
+    schedule_on_core(&mut s, 0);
+    // The previously deferred thread (first_tid) was drained and is now current.
+    assert_eq!(s.cores[0].current.as_ref().unwrap().id, first_tid);
+    // second_tid is now in deferred_ready (the ping-pong). The key invariant:
+    // first_tid is NO LONGER in deferred_ready — it was properly drained.
+    assert!(
+        !s.deferred_ready[0].iter().any(|t| t.id == first_tid),
+        "previously deferred thread must have been drained"
+    );
+
+    assert_no_duplicates(&s);
+}
+
+/// Stress test: rapid preemption cycles across cores with deferred_ready.
+#[test]
+fn rapid_preemption_churn_deferred_ready() {
+    for num_cores in [2, 3, 4, 8] {
+        let mut s = State::new(num_cores);
+        let mut next_id = 100u64;
+
+        // Plenty of threads to cause constant preemption.
+        for _ in 0..num_cores * 4 {
+            s.ready.push(Thread::new(next_id));
+            next_id += 1;
+        }
+
+        for round in 0..2000 {
+            let core = round % num_cores;
+            schedule_on_core(&mut s, core);
+
+            // Verify per-core isolation every 10 rounds.
+            if round % 10 == 0 {
+                for c in 0..num_cores {
+                    for other in 0..num_cores {
+                        if other != c {
+                            assert!(
+                                s.deferred_ready[c]
+                                    .iter()
+                                    .all(|t| !s.deferred_ready[other].iter().any(|o| o.id == t.id)),
+                                "thread found in both core {c} and core {other} deferred_ready \
+                                 (round={round}, num_cores={num_cores})"
+                            );
+                        }
+                    }
+                }
+                assert_no_duplicates(&s);
+            }
+        }
+    }
+}
+
+/// Seeded stress with deferred_ready: block/wake/exit/preempt across cores.
+#[test]
+fn seeded_smp_stress_with_deferred_ready() {
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.0
+        }
+    }
+
+    for num_cores in [2, 3, 4, 8] {
+        for seed in [77u64, 2048, 0xCAFEBABE, 314159, 2026_03_31] {
+            let mut rng = Lcg(seed);
+            let mut s = State::new(num_cores);
+            let mut next_id = 100u64;
+            let mut preemptions = 0u64;
+
+            for _ in 0..num_cores * 3 {
+                s.ready.push(Thread::new(next_id));
+                next_id += 1;
+            }
+
+            for _ in 0..5000 {
+                let core = (rng.next() % num_cores as u64) as usize;
+                schedule_on_core(&mut s, core);
+
+                // Count preemptions (thread went to deferred_ready).
+                if !s.deferred_ready[core].is_empty() {
+                    preemptions += 1;
+                }
+
+                match rng.next() % 10 {
+                    0..=2 => {
+                        if let Some(t) = s.cores[core].current.as_mut() {
+                            if !t.is_idle() && t.state == ThreadState::Running {
+                                t.block();
+                                schedule_on_core(&mut s, core);
+                            }
+                        }
+                    }
+                    3..=4 => {
+                        if let Some(t) = s.cores[core].current.as_mut() {
+                            if !t.is_idle() && t.state == ThreadState::Running {
+                                t.mark_exited();
+                                s.ready.push(Thread::new(next_id));
+                                next_id += 1;
+                                schedule_on_core(&mut s, core);
+                            }
+                        }
+                    }
+                    5..=6 => {
+                        if !s.blocked.is_empty() {
+                            let idx = (rng.next() % s.blocked.len() as u64) as usize;
+                            let id = s.blocked[idx].id;
+                            try_wake(&mut s, id);
+                        }
+                    }
+                    _ => {}
+                }
+
+                assert_no_duplicates(&s);
+            }
+
+            // Verify preemptions actually happened (otherwise test is vacuous).
+            assert!(
+                preemptions > 0,
+                "no preemptions occurred (seed={seed}, num_cores={num_cores})"
+            );
+
+            // Clean up and verify.
+            for core in 0..num_cores {
+                s.deferred_drops[core].clear();
+                s.deferred_ready[core].clear();
+            }
+            assert_no_duplicates(&s);
+        }
     }
 }

@@ -1,6 +1,6 @@
 # Kernel Design Notes
 
-Architectural decision record for every kernel subsystem. Captures the "why" behind each choice: the goal, the approach taken, alternatives considered and rejected, and the rationale. Sections 0.x cover the foundational architecture (greenfield decisions). Sections 1.x–5.x cover improvements made during the roadmap phase.
+Architectural decision record for every kernel subsystem. Captures the "why" behind each choice: the goal, the approach taken, alternatives considered and rejected, and the rationale. Sections 0.x cover the foundational architecture. Sections 6.x+ cover scheduler evolution, hardening, and code quality.
 
 The finished code's module-level docs are the authoritative reference for _what_ the code does; these notes capture _why_ it does it that way.
 
@@ -10,11 +10,13 @@ The finished code's module-level docs are the authoritative reference for _what_
 
 **Goal:** Cold boot on QEMU `virt`, transition from EL2 (hypervisor) to EL1 (kernel), enable MMU, enter Rust.
 
-**Approach:** `boot.S` assembly trampoline. Core 0 only (parks others via MPIDR check). Creates coarse 2 MiB block mappings for both identity (TTBR0, needed until MMU is live) and kernel upper VA (TTBR1). Enables MMU, drops to EL1h via `ERET`, jumps to `kernel_main` at upper VA.
+**Approach:** `boot.S` assembly trampoline. Core 0 boots first (parks others via MPIDR check). Creates coarse 2 MiB block mappings for both identity (TTBR0, needed until MMU is live) and kernel upper VA (TTBR1). Enables MMU, drops to EL1h via `ERET`, jumps to `kernel_main` at upper VA. Secondary cores (1–3) are brought online via PSCI `CPU_ON` from `kernel_main` after core 0 finishes initialization (see §0.10).
 
 **Why EL1 (not EL2):** Hypervisor mode provides no benefit for a single-OS kernel. EL2 adds complexity (stage-2 translation, HCR_EL2 configuration) with no upside. Decision #16 explicitly rejected hypervisor design.
 
 **Why coarse then refine:** `boot.S` must be minimal — just enough to enable the MMU and reach Rust. Fine-grained W^X refinement happens in Rust (`memory::init()`) once the kernel is running at upper VA with a heap available.
+
+**Identity map reclamation:** After all cores have booted and transitioned to upper VA, `reclaim_boot_ttbr0()` frees the boot identity map tables (known symbols from `boot.S`) back into the frame allocator. Must wait until secondary cores complete their trampolines.
 
 ---
 
@@ -95,6 +97,8 @@ The finished code's module-level docs are the authoritative reference for _what_
 
 **Service loading:** The kernel embeds only init via `include_bytes!`. All other service ELFs are in a flat archive (service pack) linked as a `.services` section. The kernel maps this region read-only into init's address space at `SERVICE_PACK_BASE`. Init looks up ELFs by role ID and passes them to `process_create`.
 
+**ASID allocation:** 8-bit ASIDs (1–255) with generation-based recycling. Each `AddressSpace` stores an ASID + generation number. On context switch, if the thread's generation doesn't match the global generation, the ASID is lazily revalidated. When all 255 ASIDs are exhausted: flush TLB (`tlbi vmalle1is`), increment generation counter, restart allocation from ASID 1. No hard limit — the system never panics on ASID exhaustion. Standard approach (cf. Linux `arch/arm64/mm/context.c`).
+
 **Cleanup:** On process exit, the kernel drains all handles (closing channel endpoints), invalidates TLB entries for the ASID, frees all owned page frames + page table frames, and releases the ASID. Full resource reclamation — no leaks.
 
 ---
@@ -147,180 +151,39 @@ The finished code's module-level docs are the authoritative reference for _what_
 
 ---
 
-## 1.1 Sync Primitives
+## 0.10 Synchronization Primitives
 
-**Current:** `IrqMutex` masks IRQs to prevent reentry on a single core. No actual locking — works only because there's one core. `heap.rs` also masks IRQs directly rather than using `IrqMutex`.
+**Goal:** Mutual exclusion for kernel data structures on SMP.
 
-**Target:** Ticket spinlock + IRQ masking. FIFO-fair, no starvation, standard for short kernel critical sections.
-
-**Approach:**
-
-- Replace `IrqMutex` internals: mask IRQs (save DAIF), acquire ticket lock (atomic fetch-add on `next_ticket`, spin on `now_serving`), release = increment `now_serving` + restore DAIF.
-- Use `ldaxr`/`stlxr` (LL/SC) for ticket operations. More portable across aarch64 implementations than LSE atomics (`ldadd`). Start with LL/SC.
-- Migrate `heap.rs` to use `IrqMutex` instead of raw DAIF manipulation.
-- External API (`IrqMutex::lock()` -> `IrqGuard`) unchanged — callers don't need to change.
+**Approach:** `IrqMutex<T>` — ticket spinlock + IRQ masking. Mask IRQs (save DAIF), acquire ticket (`atomic fetch-add` on `next_ticket`, spin on `now_serving`), release = increment `now_serving` + restore DAIF. `IrqMutex::lock()` returns `IrqGuard` — drop restores DAIF and releases the ticket. Uses `ldaxr`/`stlxr` (LL/SC) for ticket operations. External API unchanged from the original single-core version.
 
 **Why ticket locks:**
 
 - **Test-and-set:** cache-line bouncing (every core writes the same line).
 - **Ticket:** separates "take a number" (write) from "check counter" (read), reducing contention. FIFO ordering prevents starvation.
-- **MCS:** better under very high contention but adds per-lock queue nodes. Unjustified complexity for <= 8 cores.
+- **MCS:** better under very high contention but adds per-lock queue nodes. Unjustified complexity for ≤8 cores. Revisit if scaling beyond that.
 
-**Depends on:** Nothing. Foundation for all SMP work.
+Lock ordering is documented in `LOCK-ORDERING.md`. Cross-cutting safety invariants (TPIDR chain, handle lifecycle, ASID lifecycle) in `SAFETY-MAP.md`.
 
 ---
 
-## 1.2 Multi-Core Boot
+## 0.11 Multi-Core Boot (SMP)
 
-**Current:** `boot.S` parks all cores except core 0 (`mpidr_el1` check). Only core 0 runs `kernel_main`.
+**Goal:** All cores boot, initialize own state, enter the scheduler.
 
-**Target:** All cores boot, initialize own state, enter scheduler. Per-core kernel stack, exception vectors, timer, GIC CPU interface.
+**Approach:** PSCI (Power State Coordination Interface) via `hvc` to bring up secondary cores. Core 0 calls `CPU_ON` for each secondary with a boot address and context ID. Secondary core trampoline: enable MMU (shared TTBR1, empty TTBR0), set own kernel stack, configure `TPIDR_EL1`, init GIC CPU interface + timer, enter scheduler idle loop.
 
-**Approach:**
+**Per-core data:** `[PerCpu; MAX_CORES]` array (`MAX_CORES` = 8, QEMU `virt` max). Holds current thread pointer, core ID. Indexed by MPIDR affinity. `core_id()` reads MPIDR directly — single source of truth.
 
-- PSCI (Power State Coordination Interface) via `hvc` to bring up secondary cores. QEMU `virt` supports PSCI. Core 0 calls `CPU_ON` for each secondary with a boot address and context ID.
-- Secondary core trampoline: enable MMU (shared TTBR1, empty TTBR0), set own kernel stack, configure `TPIDR_EL1`, init GIC CPU interface + timer, enter scheduler idle loop.
-- Per-CPU data: `[PerCpu; MAX_CORES]` array (`MAX_CORES` = 8, QEMU `virt` max). Holds current thread pointer, core ID, idle thread, local scheduling state. Indexed by MPIDR affinity.
-- `TPIDR_EL1` per-core points to that core's current thread context. **Critical invariant (Fix 17):** `TPIDR_EL1` must be updated inside `schedule_inner` (under the scheduler lock, IRQs masked) when switching threads — not deferred to exception.S after the Rust handler returns.
+**Boot/idle thread:** Each core has a single boot/idle thread (`new_boot_idle(core_id)`) that serves dual purpose: represents the initial execution context (kernel_main on core 0, secondary_main on cores 1+), and acts as the idle fallback when no user threads are runnable. Marked with `IDLE_THREAD_ID_MARKER` so the scheduler returns it to the per-core idle slot, never the global ready queue. This prevents cross-core migration — each boot thread stays on its originating core's boot stack.
 
 **Why PSCI over spin-table:** PSCI is the ARM-standard firmware interface. Works on QEMU, real hardware with UEFI/ATF, and most hypervisors. Spin-table is QEMU-specific.
-
-**Depends on:** 1.1 (sync primitives must handle multi-core before secondary cores enter the scheduler).
-
----
-
-## 1.3 SMP-Aware Scheduler
-
-**Superseded by section 6.1 (EEVDF + scheduling contexts).** The original priority-based FIFO scheduler (three levels: Idle/Normal/High, round-robin within each) has been replaced. The global queue + per-core current-thread structure (stage A) was retained; per-core queues with work stealing (stage B) remain a future option if the global lock bottlenecks.
-
-**Depends on:** 1.1, 1.2.
-
----
-
-## 2.1 Slab Allocator
-
-**Current:** One linked-list allocator for all kernel heap allocations. First-fit walk for every `Box<Thread>`, `Vec`, page table metadata alloc.
-
-**Target:** Slab caches for fixed-size kernel objects. Linked-list allocator handles variable/rare allocations. Hot path through slabs.
-
-**Approach:**
-
-- Slab cache = pool of pre-allocated objects of one size. Alloc = pop free list O(1). Free = push free list O(1). No fragmentation within a cache.
-- Each cache owns one or more 16 KiB pages ("slabs"), divided into N objects of the cache's size with embedded free list.
-- Caches for: `Thread` (~700 bytes), `HandleTable` entries, channel structs.
-- `GlobalAlloc` routes by size to slab cache, falls back to general allocator.
-
-**Why slab:** Kernel allocates few object types very frequently. Slab exploits this — zero fragmentation, O(1), cache-friendly. Proven in Linux (SLUB), FreeBSD (UMA).
-
-**Depends on:** None (benefits from 1.1 for SMP safety).
-
----
-
-## 2.2 Buddy Allocator
-
-**Current:** Free-list page frame allocator. One 16 KiB frame at a time. No contiguous multi-page allocation.
-
-**Target:** Buddy system for contiguous 2^n page allocation. Single-page alloc stays O(1). Automatic coalescing.
-
-**Approach:**
-
-- Free lists per order: 0 = 16 KiB, 1 = 32 KiB, ..., MAX_ORDER = ilog2(RAM_PAGES).
-- Alloc order-n: pop from order-n list, or split order-(n+1) block.
-- Free order-n: check buddy (`buddy_pa = block_pa XOR (PAGE_SIZE << order)`). If buddy free, merge and recurse upward. Otherwise add to order-n list.
-- Replace `page_allocator.rs`. New API: `alloc_frames(order) -> Option<usize>`, `free_frames(pa, order)`. Single page = `alloc_frames(0)`.
-
-**Why buddy:** O(log n) contiguous allocation with automatic coalescing. Best tradeoff for single pages (address spaces) + multi-page (DMA, large maps). Bitmap allocators coalesce in O(n). XOR trick makes buddy ID trivial.
-
-**Depends on:** None.
-
----
-
-## 2.3 ASID Generation Recycling
-
-**Current:** 8-bit ASIDs (1-255) with free stack for recycling. Panics if all 255 concurrent ASIDs in use. Functional but not robust.
-
-**Target:** Generation-based. Exhaustion triggers: increment generation, flush TLB, start over. Lazy ASID re-acquire on context switch. No hard limit.
-
-**Approach:**
-
-- Global generation counter (`u64`).
-- Each `AddressSpace` stores ASID + generation.
-- Context switch: if thread's generation != global, allocate new ASID (may trigger rollover).
-- Rollover: mark all ASIDs free, `tlbi vmalle1is`, increment generation.
-- Standard approach — see Linux `arch/arm64/mm/context.c`.
-
-**Depends on:** 1.1 (SMP synchronization for generation rollover).
-
----
-
-## 3.1 Timer Resolution
-
-**Current:** 10 Hz (100 ms tick).
-
-**Target:** 250 Hz (4 ms tick).
-
-**Approach:** Change timer reload in `timer.rs` from `freq / 10` to `freq / 250`.
-
-**Depends on:** None.
-
----
-
-## 3.2 Boot Identity Map Cleanup
-
-**Current:** `boot.S` TTBR0 identity map tables linger after kernel transitions to upper VA. Wasted memory.
-
-**Target:** Reclaim those pages into the frame allocator after `page_alloc::init()`.
-
-**Approach:** Boot tables are at known symbols from `boot.S`. Free those frames after all cores have booted (secondary cores need the identity map during their trampoline).
-
-**Depends on:** 1.2 (must wait for all secondary cores to finish using the identity map).
-
----
-
-## 4.1 Demand Paging
-
-**Current:** All pages eagerly allocated/mapped at process creation. Stacks fully allocated (4 pages = 64 KiB). ELF segments copied before process runs.
-
-**Target:** Lazy allocation (map on fault). Foundation for memory-mapped I/O.
-
-**Approach:**
-
-- Extend `user_fault_handler`: distinguish invalid access (kill) from valid-but-unmapped (allocate + resume).
-- Per-process VMA list: describes intended memory layout (code, data, stack, channels). Replaces pre-mapping.
-- Data abort from EL0: read `FAR_EL1`, look up VMA, alloc frame, zero/copy, map into address space, return to user.
-- Stack VMA extends downward from `USER_STACK_TOP`. Guard page = gap in VMA list (no VMA covers it -> kill).
-
-**Why:** Foundation for memory efficiency, memory-mapped files, shared memory. Makes process creation faster even without a filesystem.
-
-**Depends on:** Benefits from 2.2 (buddy) but not required.
-
----
-
-## 5.1 Virtio Framework
-
-**Current:** Hardcoded GIC + PL011 UART. No device discovery, no DMA.
-
-**Target:** Minimal virtio-mmio driver framework. virtio-console + virtio-blk.
-
-**Approach:**
-
-- **Discovery:** QEMU `virt` places virtio-mmio at `0x0a000000 + 0x200 * n` (n = 0..31). Probe magic number register. (A more general kernel would use a device tree.)
-- **Transport:** virtio-mmio (spec section 4.2). Virtqueue setup (descriptor table, available ring, used ring), feature negotiation, interrupt handling. One module reused by all device drivers.
-- **virtio-console:** replaces raw PL011, bidirectional, interrupt-driven RX.
-- **virtio-blk:** read/write sectors. Foundation for future filesystem.
-- **DMA:** physically contiguous buffers (buddy allocator), pass PAs to device.
-
-**Why virtio:** Standard paravirtualized device interface. QEMU, KVM, Firecracker. Public spec. Same drivers work under real hypervisors.
-
-**Depends on:** 2.2 (buddy allocator for contiguous DMA buffers).
 
 ---
 
 ## 6.1 Scheduling Algorithm: EEVDF + Scheduling Contexts
 
-**Current:** Priority-based FIFO with three levels (High, Normal, Idle). Global run queue behind a single lock. No fairness guarantees — High threads starve Normal indefinitely. Functional for two demo processes but not for a real OS.
-
-**Target:** Two-layer scheduling. Scheduling contexts provide per-workload temporal isolation and server billing. EEVDF provides proportional-fair selection with latency differentiation among eligible threads.
+**Goal:** Two-layer scheduling. Scheduling contexts provide per-workload temporal isolation and server billing. EEVDF provides proportional-fair selection with latency differentiation among eligible threads.
 
 **Layer 1 — Scheduling Contexts (budget management):**
 
@@ -380,7 +243,7 @@ The OS service adjusts contexts dynamically as document state changes. The kerne
 
 **Prior art:** Linux EEVDF (kernel 6.6+, Stoica & Abdel-Wahab 1995 paper), seL4 MCS scheduling contexts (Lyons et al.), QNX adaptive partitioning (partition inheritance = context donation), Apple Clutch (thread groups = content-type grouping).
 
-**Depends on:** 1.1 (sync primitives), 1.3 (SMP scheduler infrastructure), 0.8 (handle table for scheduling context handles).
+**Depends on:** 0.10 (sync primitives), 0.11 (SMP boot), 0.8 (handle table for scheduling context handles).
 
 ### Accepted limitation: `reprogram_next_deadline` inside scheduler lock
 
@@ -392,6 +255,10 @@ The OS service adjusts contexts dynamically as document state changes. The kerne
 
 **When to revisit:** If this kernel ever targets server-class hardware (64+ cores) or NUMA topologies where cache-line bouncing on the scheduler lock adds microseconds per access. Not applicable for the personal workstation target.
 
+### Known issue: ready queue reuse race
+
+`schedule_inner` moves the old thread to the global ready queue while the originating core is still on its kernel stack (between lock drop and `restore_context_and_eret`). Another core can pick up the thread and restore it, causing two cores to execute on the same stack. See §12.1 for full analysis and fix plan (per-core deferred ready list).
+
 ---
 
 ## 6.2 GICv3 Migration, Tickless Idle & IPI Wakeup
@@ -400,7 +267,7 @@ The OS service adjusts contexts dynamically as document state changes. The kerne
 
 ### GICv3 migration
 
-**Previous:** GICv2 with MMIO CPU interface (GICC). **Current:** GICv3 with system register CPU interface (ICC\_\*\_EL1) and MMIO distributor (GICD) + redistributor (GICR).
+**Approach:** GICv3 with system register CPU interface (ICC\_\*\_EL1) and MMIO distributor (GICD) + redistributor (GICR). (Replaced GICv2 which used MMIO for the CPU interface.)
 
 **Why GICv3:** GICv2's SGI mechanism writes to GICD_SGIR (a distributor MMIO register), which is shared and requires synchronization. GICv3 uses ICC_SGI1R_EL1 — a per-core system register write, no lock, no MMIO. This is essential for sending IPIs from inside the scheduler lock without adding a lock dependency.
 
@@ -414,13 +281,9 @@ The OS service adjusts contexts dynamically as document state changes. The kerne
 
 ### Tickless idle
 
-**Previous:** Fixed 250 Hz timer tick (`TICKS_PER_SEC`). Every core interrupted 250 times/sec regardless of work. Idle cores burned power servicing empty timer interrupts.
-
-**Current:** `reprogram_next_deadline()` computes the earliest deadline from three sources — timer objects (AtomicU64 cache for lock-free reads), current thread's scheduling context budget expiry, and scheduling context replenishment times — then programs CNTV_TVAL_EL0 for exactly that deadline. If no deadlines exist, programs u32::MAX ticks (~68 seconds at 62.5 MHz).
+**Approach:** `reprogram_next_deadline()` computes the earliest deadline from three sources — timer objects (AtomicU64 cache for lock-free reads), current thread's scheduling context budget expiry, and scheduling context replenishment times — then programs CNTV_TVAL_EL0 for exactly that deadline. If no deadlines exist, programs u32::MAX ticks (~68 seconds at 62.5 MHz). No fixed tick rate — the hardware timer fires only when something needs attention. (Replaced the original 250 Hz fixed tick.)
 
 **Deadline cache:** `EARLIEST_DEADLINE` is an `AtomicU64` updated on timer create/destroy/expire. `earliest_timer_deadline()` reads it with `Acquire` ordering — no lock needed on the hot path. The timer lock is only held when mutating the timer table.
-
-**`TICKS_PER_SEC` removed.** No fixed tick rate. The hardware timer fires only when something needs attention.
 
 ### IPI wakeup
 
@@ -432,7 +295,7 @@ The OS service adjusts contexts dynamically as document state changes. The kerne
 
 **WFI not WFE:** IPIs (SGI 0 via ICC_SGI1R_EL1) wake WFI but not WFE. WFE requires an explicit SEV event, which GICv3 IPIs do not generate.
 
-**Depends on:** 6.1 (scheduling contexts for budget deadline computation), 1.1 (IrqMutex for scheduler lock), 1.2 (SMP infrastructure, per-core state).
+**Depends on:** 6.1 (scheduling contexts for budget deadline computation), 0.10 (IrqMutex for scheduler lock), 0.11 (SMP boot, per-core state).
 
 ---
 
@@ -590,15 +453,7 @@ The OS service adjusts contexts dynamically as document state changes. The kerne
 
 **L3 mapping fix:** `memory::init()` replaces the kernel's 2MB block with L3 4KB pages. Originally, pre-kernel pages (0x40000000-0x40080000) had empty L3 entries. Fixed to map the entire 2MB block — pre-kernel pages are RW NX (data), kernel sections get W^X refinement.
 
-**Currently hardcoded (DTB not yet wired to device init):**
-
-| Device | Address      | Source    |
-| ------ | ------------ | --------- |
-| GIC    | 0x0800_0000  | QEMU virt |
-| UART   | 0x0900_0000  | QEMU virt |
-| virtio | 0x0A00_0000+ | QEMU virt |
-
-**Update (2026-03-09):** DTB now wired into device init. GIC bases from `"arm,cortex-a15-gic"`, virtio-mmio from `"virtio,mmio"` entries. Falls back to hardcoded QEMU `virt` defaults if no DTB.
+**Device init:** DTB wired into device initialization. GIC bases from `"arm,cortex-a15-gic"`, virtio-mmio from `"virtio,mmio"` entries. Falls back to hardcoded QEMU `virt` defaults (GIC 0x0800_0000, UART 0x0900_0000, virtio 0x0A00_0000+) if no DTB.
 
 ---
 
@@ -651,9 +506,7 @@ Phase 8 (COW mechanics) ← blocked on filesystem design
 
 **Goal:** Introduce a `Process` kernel object that owns the address space and handle table. Foundation for multi-threaded processes, process creation from userspace, and process handles.
 
-**Current state:** `Thread` owns `Option<Box<AddressSpace>>` and `HandleTable` directly. Single-threaded processes only. Process identity is implicit (a thread IS a process).
-
-**Target:** `Process { id, address_space, handles, threads }`. Threads hold `process_id: Option<ProcessId>`. Syscall handlers resolve process via thread's `process_id`. Global process table (fixed-size array under `IrqMutex`, same pattern as interrupt/timer tables).
+**Approach:** `Process { id, address_space, handles, threads }`. Threads hold `process_id: Option<ProcessId>`. Syscall handlers resolve process via thread's `process_id`. Global process table (fixed-size array under `IrqMutex`, same pattern as interrupt/timer tables).
 
 **Key design choices:**
 
@@ -1517,3 +1370,29 @@ if i + 1 < bufs.len() {
 **Problem:** Appears in both `link.ld` (`0xFFFF000000000000`) and `memory.rs` (`0xFFFF_0000_0000_0000`). A mismatch produces a non-booting kernel with no diagnostic. No cross-reference comment.
 
 **Fix:** Add `/* must match memory::KERNEL_VA_OFFSET */` in `link.ld` and vice versa.
+
+---
+
+## 12.0 Known Issues
+
+### 12.1 Ready Queue Reuse Race (SMP)
+
+**Status: FIXED (2026-04-01).** Root cause identified 2026-03-31. Fix: per-core `deferred_ready` list, same pattern as `deferred_drops`.
+
+**Bug:** When `schedule_inner` moves the old thread to the ready queue (via `park_old`), another core can immediately pick it up and restore it — while the originating core is still executing on the old thread's kernel stack. The originating core hasn't yet reached `restore_context_and_eret` (which switches SP to the new thread's stack). If the other core restores the thread and user code does an SVC, `svc_handler` runs on the same kernel stack as the originating core's `irq_handler` — stack corruption.
+
+**Evidence:** Stack canary `0xCAFEBABE12400001` (irq_handler) overwritten with `0xCAFEBABE5BC00002` (svc_handler). Two exception handlers on the same stack simultaneously. Crash logs in `system/test/crashes/`.
+
+**This is the same fundamental issue as the deferred_drops cross-core free (fixed in d00d92b), but applied to thread READY transitions instead of thread EXIT transitions.** Both stem from the window between scheduler lock drop and SP switch in `restore_context_and_eret`.
+
+**Fix:** Per-core `deferred_ready[MAX_CORES]` list in `State`. `park_old` pushes preempted (Ready, non-idle) threads to `deferred_ready[core]` instead of the global ready queue. At the start of the NEXT `schedule_inner` on the same core, `deferred_ready[core]` is drained into the global ready queue — by which time the core has switched to a different stack via `restore_context_and_eret`. Only `park_old` needs deferral; `try_wake_impl`, `spawn_user`, and `start_suspended_threads` add threads that are not the caller's current stack. Trade-off: a preempted thread is invisible to other cores for one scheduling tick (sub-millisecond delay).
+
+**Defense-in-depth mitigations (retained):**
+
+- Stack canaries in `irq_handler` and `svc_handler` (detect corruption, produce diagnosable crash instead of mysterious instruction abort)
+- `PANIC_GATE` atomic CAS for serialized multi-core panic output
+- Context SP validation before `restore_context_and_eret` (catch zeroed/user-range SP)
+- DSB SY before GICD ISENABLER (handler table globally visible before IRQ enabled)
+- Per-core `deferred_drops` (prevents the EXIT variant of this race)
+- 20 property-based SMP scheduler model tests (6 new for `deferred_ready`)
+- Thread churn stress workers (50k create/exit cycles under SMP load)

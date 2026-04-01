@@ -48,6 +48,10 @@ static STATE: IrqMutex<State> = IrqMutex::new(State {
         const EMPTY: Vec<Box<Thread>> = Vec::new();
         [EMPTY; per_core::MAX_CORES]
     },
+    deferred_ready: {
+        const EMPTY: Vec<Box<Thread>> = Vec::new();
+        [EMPTY; per_core::MAX_CORES]
+    },
     cores: {
         const INIT: PerCoreState = PerCoreState {
             current: None,
@@ -99,6 +103,16 @@ struct State {
     /// core B's deferred drops while core B is still on the exited thread's stack
     /// (use-after-free race between lock release and restore_context_and_eret).
     deferred_drops: [Vec<Box<Thread>>; per_core::MAX_CORES],
+    /// Per-core deferred ready queue. When a thread is preempted (still Ready),
+    /// it can't go directly into the global ready queue because another core
+    /// could immediately pick it up and restore it — while the originating core
+    /// is still on the old thread's kernel stack (between lock drop and
+    /// restore_context_and_eret SP switch). Two exception handlers would run on
+    /// the same stack → stack corruption.
+    ///
+    /// Same pattern as deferred_drops: push to this core's slot, drain into the
+    /// global ready queue at the start of THIS core's NEXT schedule_inner.
+    deferred_ready: [Vec<Box<Thread>>; per_core::MAX_CORES],
     cores: [PerCoreState; per_core::MAX_CORES],
     next_id: u64,
     /// All processes. Index = ProcessId.0.
@@ -400,6 +414,14 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
     // restore_context_and_eret SP switch.
     s.deferred_drops[core].clear();
 
+    // Drain THIS CORE's deferred ready threads into the global ready queue.
+    // These were parked by the previous schedule_inner on this core but couldn't
+    // enter the ready queue immediately (the core was still on their kernel
+    // stack). Safe now: we're on the current thread's stack.
+    for thread in s.deferred_ready[core].drain(..) {
+        s.queue.ready.push(thread);
+    }
+
     reap_exited(&mut s.queue, &mut s.blocked);
 
     let now = now_ns();
@@ -429,7 +451,13 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
                 // Idle threads are never enqueued — restore to this core's idle slot.
                 s.cores[core].idle = Some(old_thread);
             } else {
-                s.queue.ready.push(old_thread);
+                // Defer ready queue insertion — we're still on this thread's
+                // kernel stack until restore_context_and_eret switches SP.
+                // Immediate insertion would let another core pick this thread
+                // and restore it, running two exception handlers on the same
+                // stack (the 2026-03-31 stack reuse race). Drained at the
+                // start of THIS core's next schedule_inner.
+                s.deferred_ready[core].push(old_thread);
             }
         } else if old_thread.is_exited() {
             // Defer drop — we're still running on this thread's kernel stack.

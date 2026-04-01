@@ -101,6 +101,12 @@ struct State {
     /// that stack. Deferred drops are drained at the start of the NEXT
     /// schedule_inner, when we're on a different thread's stack.
     deferred_drops: Vec<Thread>,
+    /// Ready threads deferred from the ready queue. When a thread is preempted
+    /// (still Ready), it can't go directly into the global ready queue because
+    /// another core could restore it while the originating core is still on
+    /// its kernel stack. Drained into the ready queue at the start of the NEXT
+    /// schedule_inner on the same core.
+    deferred_ready: Vec<Thread>,
 }
 
 impl State {
@@ -118,6 +124,7 @@ impl State {
             ready: Vec::new(),
             blocked: Vec::new(),
             deferred_drops: Vec::new(),
+            deferred_ready: Vec::new(),
         }
     }
 }
@@ -129,7 +136,10 @@ fn park_old(s: &mut State, old_thread: Thread, core: usize) {
             // Idle threads are never enqueued — restore to this core's idle slot.
             s.cores[core].idle = Some(old_thread);
         } else {
-            s.ready.push(old_thread);
+            // Defer ready queue insertion — in the real kernel, we're still on
+            // this thread's kernel stack. Another core could pick it up and
+            // restore it, running two exception handlers on the same stack.
+            s.deferred_ready.push(old_thread);
         }
     } else if old_thread.is_exited() {
         // Deferred drop — in the real kernel, we're still running on this
@@ -285,7 +295,7 @@ fn idle_take_then_real_thread_replaces_then_idle_again() {
 // ============================================================
 
 #[test]
-fn ready_thread_parked_to_ready_queue() {
+fn ready_thread_parked_to_deferred_ready() {
     let mut s = State::new(1);
     let mut t = Thread::new(1);
 
@@ -293,9 +303,12 @@ fn ready_thread_parked_to_ready_queue() {
     t.deschedule(); // Running → Ready
     park_old(&mut s, t, 0);
 
-    assert_eq!(s.ready.len(), 1);
-    assert_eq!(s.ready[0].id, 1);
-    assert!(s.ready[0].is_ready());
+    // Thread goes to deferred_ready (not directly to ready queue).
+    // It will enter the ready queue when this core's next schedule_inner drains it.
+    assert!(s.ready.is_empty(), "thread must NOT be in ready queue immediately");
+    assert_eq!(s.deferred_ready.len(), 1);
+    assert_eq!(s.deferred_ready[0].id, 1);
+    assert!(s.deferred_ready[0].is_ready());
 }
 
 #[test]
@@ -526,6 +539,9 @@ fn check_invariants(s: &State, label: &str) {
     for t in &s.deferred_drops {
         all_ids.push(t.id);
     }
+    for t in &s.deferred_ready {
+        all_ids.push(t.id);
+    }
     for core in &s.cores {
         if let Some(t) = &core.current {
             if !t.is_idle() {
@@ -572,7 +588,19 @@ fn check_invariants(s: &State, label: &str) {
         );
     }
 
-    // 6. is_idle must be consistent with the current thread.
+    // 6. Deferred ready contains only Ready threads (no idle, no exited).
+    for t in &s.deferred_ready {
+        assert!(
+            t.is_ready(),
+            "{label}: non-ready thread in deferred_ready"
+        );
+        assert!(
+            !t.is_idle(),
+            "{label}: idle thread in deferred_ready"
+        );
+    }
+
+    // 7. is_idle must be consistent with the current thread.
     for (i, core) in s.cores.iter().enumerate() {
         if let Some(t) = &core.current {
             if t.is_idle() {
@@ -698,8 +726,12 @@ fn randomized_scheduler_state_machine() {
                         }
                         park_old(&mut s, old, core);
                     }
-                    // Drain deferred drops (start of schedule_inner).
+                    // Drain deferred drops and deferred ready (start of schedule_inner).
                     s.deferred_drops.clear();
+                    let deferred: Vec<Thread> = s.deferred_ready.drain(..).collect();
+                    for t in deferred {
+                        s.ready.push(t);
+                    }
 
                     // Pick a new thread or fall back to idle.
                     if !s.ready.is_empty() {
@@ -719,6 +751,10 @@ fn randomized_scheduler_state_machine() {
                 }
                 Action::DrainDeferred => {
                     s.deferred_drops.clear();
+                    let deferred: Vec<Thread> = s.deferred_ready.drain(..).collect();
+                    for t in deferred {
+                        s.ready.push(t);
+                    }
                 }
             }
 
@@ -772,8 +808,12 @@ fn rapid_block_wake_never_duplicates() {
             }
         }
 
-        // Drain deferred and pick a new thread.
+        // Drain deferred drops and deferred ready, then pick a new thread.
         s.deferred_drops.clear();
+        let deferred: Vec<Thread> = s.deferred_ready.drain(..).collect();
+        for t in deferred {
+            s.ready.push(t);
+        }
 
         if !s.ready.is_empty() {
             let mut t = s.ready.remove(0);
@@ -803,6 +843,7 @@ fn all_threads_eventually_reaped() {
     // Run each thread briefly, then exit it.
     let mut exited = 0;
     while !s.ready.is_empty()
+        || !s.deferred_ready.is_empty()
         || s.cores
             .iter()
             .any(|c| c.current.as_ref().map_or(false, |t| !t.is_idle()))
@@ -814,6 +855,10 @@ fn all_threads_eventually_reaped() {
                 park_old(&mut s, old, core);
             }
             s.deferred_drops.clear();
+            let deferred: Vec<Thread> = s.deferred_ready.drain(..).collect();
+            for t in deferred {
+                s.ready.push(t);
+            }
 
             if !s.ready.is_empty() {
                 let mut t = s.ready.remove(0);
@@ -840,11 +885,13 @@ fn all_threads_eventually_reaped() {
 
     // Final drain.
     s.deferred_drops.clear();
+    s.deferred_ready.clear();
 
     assert_eq!(exited, 20, "all 20 threads must have been exited");
     assert!(s.ready.is_empty(), "ready queue must be empty");
     assert!(s.blocked.is_empty(), "blocked list must be empty");
     assert!(s.deferred_drops.is_empty(), "deferred drops must be empty");
+    assert!(s.deferred_ready.is_empty(), "deferred ready must be empty");
 }
 
 // ============================================================
@@ -1259,6 +1306,10 @@ fn is_idle_consistent_under_randomized_schedule() {
             park_old(&mut s, old, core);
         }
         s.deferred_drops.clear();
+        let deferred: Vec<Thread> = s.deferred_ready.drain(..).collect();
+        for t in deferred {
+            s.ready.push(t);
+        }
 
         if !s.ready.is_empty() {
             let mut t = s.ready.remove(0);
