@@ -571,16 +571,12 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
     // (SPSR=EL1h, ELR=kernel addr, SP=wrong stack), causing an EC=0x21
     // instruction abort when the old thread is later restored.
     //
+    // Set TPIDR_EL1 (or equivalent) to the new thread's Context. Must happen
+    // before lock release (which re-enables IRQs — exception.S reads TPIDR).
     // SAFETY: `result` is a valid Context pointer from context_ptr() (stable
-    // heap address). TPIDR_EL1 is always valid to write at EL1. `nostack`
-    // is correct. No `nomem` — the compiler must not reorder this past the
-    // lock release (which restores DAIF and re-enables IRQs).
+    // heap address).
     unsafe {
-        core::arch::asm!(
-            "msr tpidr_el1, {ctx}",
-            ctx = in(reg) result,
-            options(nostack),
-        );
+        super::arch::scheduler::set_current_thread(result as usize);
     }
 
     result
@@ -682,31 +678,11 @@ fn swap_ttbr0(old: &Thread, new: &Thread) {
         // Extract old ASID from TTBR0 bits [63:48].
         let old_asid = old_ttbr0 >> 48;
 
-        // SAFETY: Inline assembly for TLB invalidation and TTBR0 switch.
-        // This sequence is correct per the ARMv8 architecture:
-        //   1. DSB ISHST — ensures prior page table writes are visible
-        //   2. TLBI ASIDE1IS, <old_asid> — invalidates only the old ASID's
-        //      TLB entries (inner-shareable). The ASID is placed in bits
-        //      [63:48] of the Xt operand per ARMv8 TLBI encoding.
-        //   3. DSB ISH — ensures TLB invalidation completes before TTBR0 write
-        //   4. MSR TTBR0_EL1 — switches the user address space
-        //   5. ISB — ensures subsequent fetches use the new TTBR0
-        // `new_ttbr0` is a valid TTBR0 value from the thread's address space.
-        // `nostack` is correct — no stack operations in the asm block.
+        // SAFETY: old_asid and new_ttbr0 are valid values from thread
+        // address spaces. The arch implementation handles TLB invalidation
+        // and page table root switch.
         unsafe {
-            // ASIDE1IS Xt encoding: ASID in bits [63:48], other bits RES0.
-            let aside_arg = old_asid << 48;
-
-            core::arch::asm!(
-                "dsb ishst",
-                "tlbi aside1is, {asid}",
-                "dsb ish",
-                "msr ttbr0_el1, {new}",
-                "isb",
-                asid = in(reg) aside_arg,
-                new = in(reg) new_ttbr0,
-                options(nostack)
-            );
+            super::arch::scheduler::switch_address_space(old_asid, new_ttbr0);
         }
     }
 }
@@ -745,7 +721,7 @@ fn try_wake_impl(s: &mut State, id: ThreadId, reason: Option<&HandleObject>) -> 
             if let Some(obj) = reason {
                 let result = thread.complete_wait_for(obj);
 
-                thread.context.x[0] = result;
+                thread.context.set_arg(0, result);
             }
 
             thread.scheduling.eevdf = thread.scheduling.eevdf.mark_eligible();
@@ -1232,15 +1208,11 @@ pub fn init() {
 
     s.default_context_id = Some(SchedulingContextId(0));
 
+    // Set current-thread pointer so exception.S can locate the save area.
     // SAFETY: ctx_ptr points to the Context at offset 0 of the boot thread,
     // which lives in a Box (stable address) stored in the scheduler state.
-    // TPIDR_EL1 is read by exception.S to locate the save area.
     unsafe {
-        core::arch::asm!(
-            "msr tpidr_el1, {0}",
-            in(reg) ctx_ptr as usize,
-            options(nostack)
-        );
+        super::arch::scheduler::set_current_thread(ctx_ptr as usize);
     }
 }
 /// Initialize a secondary core's scheduler state with a boot/idle thread.
@@ -1259,11 +1231,7 @@ pub fn init_secondary(core_id: u32) {
 
     // SAFETY: boot_ctx_ptr points to a stable Context in a Box.
     unsafe {
-        core::arch::asm!(
-            "msr tpidr_el1, {0}",
-            in(reg) boot_ctx_ptr as usize,
-            options(nostack)
-        );
+        super::arch::scheduler::set_current_thread(boot_ctx_ptr as usize);
     }
 }
 /// Kill all threads of a process and collect resources for cleanup.

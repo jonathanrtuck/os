@@ -4,6 +4,26 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## v0.6 Phase 1: Arch Interface — SETTLED (2026-04-01)
+
+**Design session resolving the three open questions from `kernel-v0.6.md` Phase 1.**
+
+Decisions recorded in `kernel-v0.6.md`. Summary:
+
+1. **Device discovery: separate from arch.** DTB/ACPI is platform/userspace, not architecture. Informed by NT HAL analysis — the HAL abstracted board-level variation that firmware standardization (ACPI, UEFI) eventually absorbed. Our arch module abstracts ISA variation (which won't converge), not platform variation.
+
+2. **Page tables: VA/PA/permissions interface, arch owns the walk + allocation.** Every production kernel except seL4 does this. seL4 externalizes table provisioning to userspace to eliminate implicit allocation from the formal proof — a constraint we don't share. Walk logic is inseparable from descriptor format; splitting them leaks internal structure.
+
+3. **Context: fully arch-defined, generic accessor methods.** The register file IS the architecture. `pc()`, `set_sp()`, `arg(n)`, `set_user_mode()` are the generic interface.
+
+Two additional decisions: `IrqState` opaque newtype for saved interrupt state (Rust-idiomatic, matches `Pa` pattern). Serial console lives in arch for now; extract to `platform::` layer when a second board target arrives (v0.14).
+
+**Key reference:** Windows NT HAL was not abandoned — it was scope-reduced by hardware convergence. Our arch module avoids the HAL's mistakes: compile-time (not runtime DLL), ISA-level (not board-level), honestly co-built (not pretending to be independently replaceable).
+
+**Next:** Implementation — 4-step mechanical extraction. See plan in `kernel-v0.6.md`.
+
+---
+
 ## Sole-Writer Scaling Under Compound Documents — OPEN (2026-04-01)
 
 **Context:** Extracted from a deep research review (most findings were wrong, but this userspace concern is real). The kernel-level concerns from the same review (security model, EEVDF tuning) are in `system/kernel/DESIGN.md` §13.1–13.2.

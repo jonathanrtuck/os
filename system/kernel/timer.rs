@@ -117,22 +117,11 @@ fn earliest_timer_deadline() -> Option<u64> {
     }
 }
 
-/// Program CNTV_TVAL_EL0 with the given number of counter ticks.
+/// Program the hardware timer with the given number of counter ticks.
 ///
 /// Writing TVAL also clears the timer condition (de-asserts the interrupt).
 fn program_tval(tval: u64) {
-    // SAFETY: Writing CNTV_TVAL_EL0 reprograms the virtual timer countdown
-    // and de-asserts the interrupt line. ISB ensures the new countdown is
-    // committed before returning. `nomem` intentionally omitted (side effects).
-    // `nostack` correct.
-    unsafe {
-        core::arch::asm!(
-            "msr cntv_tval_el0, {tval}",
-            "isb",
-            tval = in(reg) tval,
-            options(nostack)
-        );
-    }
+    super::arch::timer::program_tval(tval);
 }
 
 /// Reprogram the hardware timer for the earliest deadline across all sources.
@@ -235,21 +224,9 @@ pub fn check_expired() {
 pub fn check_fired(id: TimerId) -> bool {
     TIMERS.lock().waiters.check_ready(id)
 }
-/// Read the hardware counter (CNTVCT_EL0). Monotonic, sub-tick precision.
-///
-/// Uses the virtual counter, which equals the physical counter when
-/// CNTVOFF_EL2 = 0 (set by boot.S and QEMU HVF).
+/// Read the hardware counter. Monotonic, sub-tick precision.
 pub fn counter() -> u64 {
-    let cnt: u64;
-
-    // SAFETY: Reading CNTVCT_EL0 (virtual counter). Monotonically
-    // increasing hardware state. `nomem` intentionally omitted so LLVM
-    // cannot CSE or hoist repeated reads. `nostack` correct.
-    unsafe {
-        core::arch::asm!("mrs {0}, cntvct_el0", out(reg) cnt, options(nostack));
-    }
-
-    cnt
+    super::arch::timer::counter()
 }
 /// Counter frequency in Hz (cached from CNTFRQ_EL0).
 pub fn counter_freq() -> u64 {
@@ -364,59 +341,18 @@ pub fn handle_irq() {
 pub fn init() {
     interrupt_controller::GIC.enable_irq(IRQ_ID);
 
-    // CNTFRQ_EL0: counter frequency in Hz, set by firmware (e.g. 62.5 MHz on QEMU)
-    let freq: u64;
-
-    // SAFETY: Reading CNTFRQ_EL0 — the counter frequency set by firmware
-    // at boot. Read-only, immutable after firmware init. `nomem` is correct
-    // here (unlike CNTPCT_EL0) because the value never changes — LLVM may
-    // freely CSE/hoist this read. `nostack` is correct — MRS does not touch
-    // the stack. Result written to `freq` via out(reg).
-    unsafe {
-        core::arch::asm!("mrs {0}, cntfrq_el0", out(reg) freq, options(nostack, nomem));
-    }
+    let freq = super::arch::timer::read_frequency();
 
     CNTFRQ.store(freq, Ordering::Relaxed);
 
-    // Allow EL0 (userspace) to read CNTVCT_EL0 (virtual counter).
-    // CNTKCTL_EL1 bit 1 (EL0VCTEN) = 1 enables virtual counter access.
-    // SAFETY: Writing CNTKCTL_EL1. The register controls EL0 access to
-    // timer/counter registers. Setting bit 1 is a hardware side-effect
-    // (enables userspace reads), so nomem is omitted.
-    unsafe {
-        core::arch::asm!(
-            "mrs x0, cntkctl_el1",
-            "orr x0, x0, #2",
-            "msr cntkctl_el1, x0",
-            out("x0") _,
-            options(nostack),
-        );
-    }
+    super::arch::timer::enable_el0_counter();
 
     // Tickless: program a long initial interval. No fixed 250 Hz tick.
     // The first schedule_inner call will reprogram with the actual deadline.
     program_tval(u32::MAX as u64);
 
-    // SAFETY: Writing CNTV_CTL_EL0 with ENABLE=1, IMASK=0 starts generating
-    // virtual timer IRQs. `nomem` intentionally omitted (side effects).
-    // `nostack` correct.
-    unsafe {
-        core::arch::asm!(
-            "mov x0, #1",
-            "msr cntv_ctl_el0, x0",       // ENABLE=1, IMASK=0
-            out("x0") _,
-            options(nostack)
-        );
-    }
-    // SAFETY: Writing DAIFCLR with bit 1 clears DAIF.I, unmasking IRQs at
-    // the CPU level. GIC routing is already configured; this is the final
-    // gate. `nostack` is correct — MSR DAIFCLR does not touch the stack.
-    // `nomem` is intentionally omitted: unmasking IRQs is a side effect
-    // that affects control flow (IRQs may fire immediately after this
-    // instruction).
-    unsafe {
-        core::arch::asm!("msr daifclr, #2", options(nostack));
-    }
+    super::arch::timer::enable_virtual_timer();
+    super::arch::timer::unmask_irqs();
 }
 /// Register a thread as the waiter for this timer.
 ///

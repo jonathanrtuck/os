@@ -1,3 +1,8 @@
+// AUDIT: 2026-04-01 — 3 unsafe sites verified (2 UnsafeCell derefs in
+// Deref/DerefMut, 1 unsafe impl Sync). Arch-specific DAIF masking moved to
+// arch::interrupts (IrqState). Ticket spinlock uses correct
+// Relaxed/Acquire/Release ordering. No bugs found.
+
 //! Ticket-spinlock mutex with IRQ masking.
 //!
 //! `IrqMutex` masks IRQs and acquires a ticket spinlock on lock. The guard
@@ -7,11 +12,8 @@
 //! Lock ordering invariant: channel → scheduler (never reversed). No lock
 //! may be re-acquired while held (ticket spinlock would deadlock on self).
 //!
-// AUDIT: 2026-03-11 — 5 unsafe sites verified (2 asm in lock/drop, 2
-// UnsafeCell derefs in Deref/DerefMut, 1 unsafe impl Sync). 6-category
-// checklist applied. Ticket spinlock uses correct Relaxed/Acquire/Release
-// ordering. DAIF asm correctly omits `nomem` (Fix 6 re-verified). No bugs
-// found.
+//! IRQ masking is delegated to `arch::interrupts` — this module contains
+//! no architecture-specific code.
 
 use core::{
     cell::UnsafeCell,
@@ -19,7 +21,7 @@ use core::{
     sync::atomic::{AtomicU32, Ordering},
 };
 
-use super::metrics;
+use super::{arch::interrupts, metrics};
 
 // ---------------------------------------------------------------------------
 // IrqMutex — the lock
@@ -41,24 +43,10 @@ impl<T> IrqMutex<T> {
     }
 
     pub fn lock(&self) -> IrqGuard<'_, T> {
-        let saved_daif: u64;
-
         // Save and mask IRQs before taking a ticket. Prevents timer
         // interrupts from re-entering the locked region on this core,
         // and avoids spinning with IRQs enabled (priority inversion).
-        // IMPORTANT: no `nomem` — LLVM must treat these as memory barriers.
-        // With `nomem`, LLVM can reorder memory operations past the DAIF
-        // masking, allowing lock-protected accesses to execute with interrupts
-        // enabled (race condition that manifests at opt-level 3).
-        //
-        // SAFETY: Reading and writing DAIF is valid at EL1. `nostack` is
-        // correct (no stack manipulation). No `nomem` — intentional, see above
-        // and Fix 6 analysis.
-        unsafe {
-            core::arch::asm!("mrs {}, daif", out(reg) saved_daif, options(nostack));
-            core::arch::asm!("msr daifset, #2", options(nostack));
-        }
-
+        let saved = interrupts::mask_all();
         let my_ticket = self.next_ticket.fetch_add(1, Ordering::Relaxed);
 
         while self.now_serving.load(Ordering::Acquire) != my_ticket {
@@ -66,10 +54,7 @@ impl<T> IrqMutex<T> {
             core::hint::spin_loop();
         }
 
-        IrqGuard {
-            lock: self,
-            saved_daif,
-        }
+        IrqGuard { lock: self, saved }
     }
 }
 
@@ -84,7 +69,7 @@ unsafe impl<T> Sync for IrqMutex<T> {}
 
 pub struct IrqGuard<'a, T> {
     lock: &'a IrqMutex<T>,
-    saved_daif: u64,
+    saved: interrupts::IrqState,
 }
 
 impl<T> Drop for IrqGuard<'_, T> {
@@ -92,13 +77,9 @@ impl<T> Drop for IrqGuard<'_, T> {
         // Release the spinlock, then restore IRQ state.
         self.lock.now_serving.fetch_add(1, Ordering::Release);
 
-        // SAFETY: Restoring DAIF to a value previously read from this register
-        // is always valid at EL1. `nostack` is correct (no stack manipulation).
-        // No `nomem` — the compiler must not reorder memory accesses past this
-        // IRQ state restoration (Fix 6).
-        unsafe {
-            core::arch::asm!("msr daif, {}", in(reg) self.saved_daif, options(nostack));
-        }
+        // Restore saved IRQ state. The arch implementation ensures the
+        // compiler cannot reorder memory accesses past this restoration.
+        interrupts::restore(self.saved);
     }
 }
 

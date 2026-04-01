@@ -197,30 +197,7 @@ fn is_user_page_readable(va: u64) -> bool {
 /// address translation instruction. Returns false if the page is unmapped,
 /// read-only, or inaccessible.
 fn is_user_page_writable(va: u64) -> bool {
-    let par: u64;
-
-    // SAFETY: AT S1E0W is a privileged instruction that performs address
-    // translation without memory access — it only writes to PAR_EL1. The
-    // ISB ensures PAR_EL1 is visible before the mrs reads it. Single asm
-    // block prevents LLVM reordering. No memory is accessed; nostack is
-    // correct since this uses only system registers.
-    unsafe {
-        // AT S1E0W translates va, writing the result to PAR_EL1. The mrs
-        // reads that result. These MUST be a single asm block — with separate
-        // blocks, LLVM could reorder the mrs (if marked nomem) before the at,
-        // reading a stale PAR_EL1 from a previous translation.
-        core::arch::asm!(
-            "at s1e0w, {va}",
-            "isb",
-            "mrs {par}, par_el1",
-            va = in(reg) va,
-            par = out(reg) par,
-            options(nostack)
-        );
-    }
-
-    // PAR_EL1 bit 0: 0 = translation succeeded, 1 = fault.
-    par & 1 == 0
+    super::arch::mmu::is_user_page_writable(va)
 }
 /// Verify that all pages in `[start, start+len)` are readable by EL0.
 fn is_user_range_readable(start: u64, len: u64) -> bool {
@@ -1347,26 +1324,7 @@ fn unregister_timers(ids: &[Option<TimerId>]) {
 ///
 /// Returns None if the page is unmapped or inaccessible from EL0.
 fn user_va_to_pa(va: u64) -> Option<u64> {
-    let par: u64;
-
-    // SAFETY: AT S1E0R is a privileged instruction that performs address
-    // translation without memory access — it only writes to PAR_EL1. The
-    // ISB ensures PAR_EL1 is visible before the mrs reads it. Single asm
-    // block prevents LLVM reordering. No memory is accessed; nostack is
-    // correct since this uses only system registers.
-    unsafe {
-        // AT S1E0R translates va, writing the result to PAR_EL1. The mrs
-        // reads that result. Single asm block prevents LLVM from reordering
-        // the read before the translation (see is_user_page_writable comment).
-        core::arch::asm!(
-            "at s1e0r, {va}",
-            "isb",
-            "mrs {par}, par_el1",
-            va = in(reg) va,
-            par = out(reg) par,
-            options(nostack)
-        );
-    }
+    let par = super::arch::mmu::translate_user_read(va);
 
     // PAR_EL1 bit 0: 0 = success, 1 = fault.
     if par & 1 != 0 {

@@ -228,10 +228,10 @@ impl Thread {
         let (kernel_stack_top, alloc_pa, alloc_order) = alloc_guarded_stack(KERNEL_STACK_SIZE)?;
         let mut thread = Self::base(ThreadId(id), ThreadState::Ready, TrustLevel::Untrusted);
 
-        thread.context.elr = entry_va;
-        thread.context.sp = kernel_stack_top;
-        thread.context.sp_el0 = user_stack_top;
-        thread.context.spsr = 0b0000; // EL0t, DAIF clear
+        thread.context.set_pc(entry_va);
+        thread.context.set_sp(kernel_stack_top);
+        thread.context.set_user_sp(user_stack_top);
+        thread.context.set_user_mode();
         thread.stack_alloc_pa = alloc_pa;
         thread.stack_alloc_order = alloc_order;
         thread.process_id = Some(process_id);

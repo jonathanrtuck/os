@@ -1,10 +1,10 @@
-// AUDIT: 2026-03-11 — 1 unsafe block verified, 6-category checklist applied.
+// AUDIT: 2026-03-11 — 0 unsafe blocks (arch-specific code moved to arch::per_core).
 // SMP isolation verified: PERCPU uses AtomicBool with Release/Acquire ordering.
-// core_id() reads MPIDR_EL1 (read-only CPU identification register, nomem correct).
 // No data races possible — all shared state is atomic. No bugs found.
 //! Per-CPU data structures.
 //!
-//! Each core has a `PerCpu` slot indexed by its MPIDR affinity (core ID).
+//! Each core has a `PerCpu` slot indexed by its hardware core ID.
+//! The core ID is read via `arch::per_core::core_id()` (MPIDR on aarch64).
 //! TPIDR_EL1 continues to point at the current Thread's Context — PerCpu is
 //! a side table accessed via `core_id()`, not through TPIDR_EL1.
 
@@ -25,20 +25,12 @@ pub struct PerCpu {
     pub online: AtomicBool,
 }
 
-/// Read the current core's MPIDR affinity (bits [7:0]).
+/// Read the current core's hardware ID.
+///
+/// Delegates to arch-specific register read (MPIDR_EL1 on aarch64).
 #[inline(always)]
 pub fn core_id() -> u32 {
-    let mpidr: u64;
-
-    // SAFETY: MPIDR_EL1 is a read-only CPU identification register.
-    // It does not access memory (nomem correct) and has no side effects.
-    // The register value is stable for the lifetime of the core.
-    // nostack is correct — no stack operations in the asm block.
-    unsafe {
-        core::arch::asm!("mrs {}, mpidr_el1", out(reg) mpidr, options(nostack, nomem));
-    }
-
-    (mpidr & 0xFF) as u32
+    super::arch::per_core::core_id()
 }
 /// Mark a core as online. Core identity comes from `core_id()` (MPIDR).
 pub fn init_core(id: u32) {

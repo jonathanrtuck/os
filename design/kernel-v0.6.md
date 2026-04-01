@@ -59,59 +59,123 @@
 - `sync.rs` (IrqMutex — needs arch for IRQ masking, but the lock logic is generic)
 - `metrics.rs`, `syscall.rs` (dispatch logic)
 
-**Interface sketch (needs design discussion):**
+**Settled interface (2026-04-01):**
+
+Three open questions resolved through design discussion:
+
+**Q1: Device discovery → SEPARATE.** DTB/ACPI is consumed by init (userspace) to find device addresses. On x86 it would be ACPI tables — completely different mechanism. Putting either inside the arch boundary would abstract _platform_, not _architecture_. `device_tree.rs` stays generic. Arch provides minimal boot info (RAM base/size, DTB pointer). Informed by the NT HAL lesson: the HAL's device-enumeration scope was eaten by firmware standardization (ACPI, UEFI). Abstract what genuinely varies between ISAs, nothing more.
+
+**Q2: Page tables → VA/PA/permissions interface.** Walk logic, descriptor format, TLB invalidation are all arch-internal. The generic kernel never constructs descriptors. Arch owns the walk and calls the page allocator directly for intermediate table pages — same pattern as Linux (`arch/arm64/mm/mmu.c` calls `alloc_pages()`), Zircon (`ArmArchVmAspace::MapPages()` calls `AllocPage()`), and Redox. seL4 is the only kernel that externalizes table provisioning to userspace, but that's driven by formal verification constraints (eliminating implicit allocation from the proof), not applicable here.
+
+**Q3: Context → fully arch-defined, generic accessors.** The register set IS the architecture. ARM64 Context has x[31], sp, elr, spsr, q[32]; x86_64 would have rax-r15, rip, rflags, xmm. Zero overlap. The abstraction is method-based: `pc()`, `set_sp()`, `arg(n)`, `set_user_mode()`. On aarch64, `pc()` returns `self.elr`; on x86_64 it would return `self.rip`.
+
+**Additional decision: IRQ saved state → opaque `IrqState` newtype.** Zero-cost `#[repr(transparent)]` wrapper, consistent with the project's existing `Pa` newtype pattern. No production C kernel does this (C lacks zero-cost newtypes), but Rust enables it. `interrupts::mask_all() -> IrqState`, `interrupts::restore(IrqState)`.
+
+**Additional decision: Serial console → arch for now, platform later.** PL011 is technically a device (board-specific), not architecture. Linux, Zircon, and seL4 all separate arch from platform. But a platform layer serves zero boards today. Serial (~60 lines) lives in arch with an explicit marker: "platform-specific, extract to `platform::` when a second board target arrives (v0.14)." Same applies to GIC base addresses and RAM geometry.
 
 ```rust
 /// Architecture-specific operations the kernel requires.
-/// Each architecture implements this as a module (not a trait object —
-/// monomorphized at compile time, zero overhead).
+/// Compile-time module selection via #[cfg(target_arch)], not trait objects.
+/// Zero-overhead: all calls monomorphized/inlined.
 mod arch {
-    fn init_boot_cpu() -> BootInfo;
+    // --- Boot ---
+    fn init_boot_cpu(dtb_ptr: *const u8) -> BootInfo;
     fn init_secondary_cpu(core_id: usize);
-    fn context_switch(old: *mut Context, new: *const Context);
-    fn set_current_thread(ctx: *mut Context);  // TPIDR or equivalent
-    fn current_core_id() -> usize;
 
-    mod mmu {
-        fn create_address_space() -> AddressSpace;
-        fn map_page(asid, va, pa, flags);
-        fn unmap_page(asid, va);
-        fn switch_address_space(asid);
-        fn invalidate_tlb(asid);
+    // --- Context (fully arch-defined, generic accessors) ---
+    struct Context { /* arch-specific fields */ }
+    impl Context {
+        fn new() -> Self;
+        fn pc(&self) -> u64;
+        fn set_pc(&mut self, pc: u64);
+        fn sp(&self) -> u64;
+        fn set_sp(&mut self, sp: u64);
+        fn arg(&self, n: usize) -> u64;
+        fn set_arg(&mut self, n: usize, val: u64);
+        fn set_user_mode(&mut self);
+        fn set_user_tls(&mut self, tls: u64);
+        fn user_tls(&self) -> u64;
     }
 
+    // --- Core identity ---
+    fn core_id() -> u32;
+    fn set_current_thread(ctx: *mut Context);
+
+    // --- MMU (arch owns walk + allocation) ---
+    mod mmu {
+        struct PageTableRoot { /* opaque */ }
+        enum PagePerm { UserRX, UserRW, UserRO, UserDeviceRW }
+
+        fn init_kernel_tables();
+        fn create() -> (PageTableRoot, Asid);
+        fn map(root: &PageTableRoot, va: u64, pa: Pa, perm: PagePerm)
+            -> Result<(), MapError>;
+        fn unmap(root: &PageTableRoot, va: u64) -> Option<Pa>;
+        fn switch(root: &PageTableRoot, asid: Asid);
+        fn invalidate(asid: Asid);
+        fn destroy(root: PageTableRoot, asid: Asid);
+        fn set_kernel_guard(va: u64) -> bool;
+        fn clear_kernel_guard(va: u64);
+        fn is_user_accessible(va: u64, write: bool) -> bool;
+    }
+
+    // --- Interrupts ---
     mod interrupts {
+        struct IrqState(/* opaque */);  // saved interrupt state
+
         fn init();
         fn enable_irq(irq: u32);
         fn disable_irq(irq: u32);
         fn acknowledge() -> u32;
-        fn end_of_interrupt(token: u32);
-        fn send_ipi(target_core: usize);
-        fn mask_all();
-        fn unmask_all();
+        fn end_of_interrupt(irq: u32);
+        fn send_ipi(target_core: u32);
+        fn mask_all() -> IrqState;
+        fn restore(saved: IrqState);
     }
 
+    // --- Timer ---
     mod timer {
         fn init();
-        fn set_deadline(ns: u64);
+        fn set_deadline_ns(ns: u64);
         fn now_ns() -> u64;
         fn frequency() -> u64;
     }
 
+    // --- Serial (platform-specific; extract to platform:: at v0.14) ---
     mod serial {
-        fn init();
+        fn init(base: usize);
         fn put_byte(b: u8);
+    }
+
+    // --- Power ---
+    mod power {
+        fn cpu_on(target: u64, entry: u64, ctx: u64) -> Result<(), i64>;
+        fn system_off() -> !;
     }
 }
 ```
 
 **Deliverable:** The aarch64 implementation of this interface, extracted from existing code. The kernel compiles and all 2,313+ tests pass. No new architecture yet — this phase is about the interface, not the second implementation.
 
-**Open questions:**
+**Implementation plan:**
 
-- Does the arch interface include device discovery (DTB/ACPI), or is that a separate concern? Leaning: separate, since it's consumed by userspace services, not the kernel's core loop.
-- How does the page table abstraction handle architectural differences in levels, granules, and descriptor formats without leaking? Leaning: the `mmu` interface works in terms of VA/PA/flags, not descriptors.
-- Does `Context` become arch-generic with arch-specific storage, or fully arch-defined? Leaning: fully arch-defined (register set IS the architecture), with generic field accessors (pc, sp, arg0-arg5).
+The extraction is mostly mechanical — moving existing code behind the interface. Ordered to keep the kernel compiling and tests passing at every step.
+
+**Step 1: Create module structure.** `kernel/arch/mod.rs` (interface), `kernel/arch/aarch64/mod.rs` + submodules. Wire into `main.rs` with `#[cfg(target_arch = "aarch64")]`. Everything still compiles (new modules, no moves yet).
+
+**Step 2: Move pure-arch files.** `context.rs` → `arch/aarch64/context.rs` (add accessor methods). `power.rs` → `arch/aarch64/power.rs`. `boot.S` → `arch/aarch64/boot.S`. `exception.S` → `arch/aarch64/exception.S`. `interrupt_controller.rs` → `arch/aarch64/interrupts.rs`. `paging.rs` descriptor constants → `arch/aarch64/` (VA layout constants stay as generic `layout.rs`). `memory.rs` → `arch/aarch64/mmu.rs` (kernel table refinement). Tests pass after each file move.
+
+**Step 3: Extract arch from mixed files.** One file at a time, tests after each:
+
+- `per_core.rs`: MPIDR read → `arch::core_id()`. Online tracking stays generic.
+- `sync.rs`: DAIF save/restore → `arch::interrupts::mask_all()`/`restore()` with `IrqState`. Ticket spinlock stays generic.
+- `timer.rs`: All 6 asm sites → `arch::timer::*`. Waiter tracking stays generic.
+- `serial.rs`: PL011 register access → `arch::serial::*`. Lock wrapper stays generic.
+- `scheduler.rs`: TPIDR_EL1 → `arch::set_current_thread()`. TTBR0 swap → `arch::mmu::switch()`. TLBI → `arch::mmu::invalidate()`.
+- `syscall.rs`: AT S1E0R/W → `arch::mmu::is_user_accessible()`.
+- `address_space.rs`: Page table walk + descriptor construction → `arch::mmu::map/unmap/create/destroy`. VMA management + budgets stay generic.
+
+**Step 4: Verify.** Full test suite (2,313+ tests). Clippy clean. No `asm!` outside `arch/aarch64/`. No ARM64 register names outside `arch/aarch64/`. Grep audit for leakage.
 
 ---
 

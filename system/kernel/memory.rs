@@ -127,17 +127,7 @@ pub fn empty_ttbr0() -> u64 {
 
 /// Broadcast TLB invalidation across all cores.
 fn tlb_invalidate_all() {
-    // SAFETY: TLB invalidation is a safe maintenance operation. The `is`
-    // suffix broadcasts to all cores in the inner-shareable domain.
-    unsafe {
-        core::arch::asm!(
-            "dsb ishst",
-            "tlbi vmalle1is",
-            "dsb ish",
-            "isb",
-            options(nostack)
-        );
-    }
+    super::arch::mmu::tlbi_all();
 }
 
 /// Refine TTBR1 with 16KB pages for the kernel's 32MB block.
@@ -197,20 +187,9 @@ pub fn init() {
             .write_volatile(l3_kern_pa | DESC_VALID | DESC_TABLE);
     }
 
-    // SAFETY: TLB invalidation after replacing the L2 block descriptor
-    // with an L3 table descriptor. Uses vmalle1 (not vmalle1is) because
-    // this runs during boot before secondary cores are started. DSB
-    // ensures the table write is visible before TLB invalidation; ISB
-    // ensures the pipeline sees the updated TLB state.
-    unsafe {
-        core::arch::asm!(
-            "dsb ishst",
-            "tlbi vmalle1",
-            "dsb ish",
-            "isb",
-            options(nostack)
-        );
-    }
+    // TLB invalidation after replacing the L2 block descriptor with an
+    // L3 table descriptor. Local-core only (secondary cores not started yet).
+    super::arch::mmu::tlbi_all_local();
 }
 
 // ---------------------------------------------------------------------------

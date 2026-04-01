@@ -74,11 +74,12 @@ use core::{
 
 use context::Context;
 
-core::arch::global_asm!(include_str!("boot.S"));
-core::arch::global_asm!(include_str!("exception.S"));
+core::arch::global_asm!(include_str!("arch/aarch64/boot.S"));
+core::arch::global_asm!(include_str!("arch/aarch64/exception.S"));
 
 mod address_space;
 mod address_space_id;
+mod arch;
 mod channel;
 mod context;
 mod device_tree;
@@ -171,14 +172,9 @@ fn boot_secondaries() {
 
     // Ensure page tables and stacks are visible to secondary cores before
     // they start executing.
-    // SAFETY: DSB ISH is a data synchronization barrier ensuring all prior
-    // stores (page tables, stacks) are visible to the inner-shareable domain
-    // before secondary cores begin executing. No stack usage; nomem omitted
-    // intentionally so the compiler cannot reorder memory accesses past
-    // this barrier (Fix 6/Fix 9 re-verified).
-    unsafe {
-        core::arch::asm!("dsb ish", options(nostack));
-    }
+    // Ensure all prior stores (page tables, stacks) are visible to the
+    // inner-shareable domain before secondary cores begin executing.
+    arch::cpu::dsb_ish();
 
     serial::puts("  🧵 smp - booting secondaries via psci\n");
 
@@ -381,16 +377,9 @@ fn reclaim_boot_ttbr0() {
 /// bare metal), the HVC returns and the caller should fall through to a
 /// spin loop.
 fn system_off() {
-    // SAFETY: HVC #0 with PSCI_SYSTEM_OFF (0x84000008) in x0. This is a
-    // hypervisor call — no memory access, but may have side effects (VM
-    // termination), so nomem is NOT used per project convention.
-    unsafe {
-        core::arch::asm!(
-            "hvc #0",
-            in("x0") 0x8400_0008u64,
-            options(nostack),
-        );
-    }
+    // Delegate to arch-specific PSCI SYSTEM_OFF.
+    // If handled, the VM terminates. If not, power::system_off() spins.
+    arch::power::system_off();
 }
 /// Try to parse a DTB at the given physical address. Returns None if the
 /// address is outside RAM or the blob is invalid.
@@ -560,13 +549,9 @@ pub extern "C" fn irq_handler(ctx: *mut Context) -> *const Context {
         serial::panic_puts("\n🛑 irq_handler: stack canary corrupt! got=0x");
         serial::panic_put_hex(check);
         serial::panic_puts(" expected=0xCAFEBABE12400001\n  SP=0x");
-        let sp_val: u64;
-        unsafe { core::arch::asm!("mov {}, sp", out(reg) sp_val, options(nostack, nomem)) };
-        serial::panic_put_hex(sp_val);
+        serial::panic_put_hex(arch::cpu::read_sp());
         serial::panic_puts(" TPIDR=0x");
-        let tpidr_val: u64;
-        unsafe { core::arch::asm!("mrs {}, tpidr_el1", out(reg) tpidr_val, options(nostack)) };
-        serial::panic_put_hex(tpidr_val);
+        serial::panic_put_hex(arch::cpu::read_tpidr());
         serial::panic_puts(" core=");
         serial::panic_put_u32(per_core::core_id());
         serial::panic_puts("\n");
@@ -913,7 +898,7 @@ pub extern "C" fn kernel_main(dtb_pa: u64) -> ! {
         // use the stack. nomem is correct. WFI is used instead of WFE
         // because IPIs (SGI 0 via ICC_SGI1R_EL1) wake WFI but not WFE
         // (WFE requires a SEV event which GICv3 IPIs do not generate).
-        unsafe { core::arch::asm!("wfi", options(nostack, nomem)) };
+        arch::cpu::wait_for_interrupt();
     }
 }
 /// Entry point for secondary cores (called from boot.S secondary_entry).
@@ -948,7 +933,7 @@ pub extern "C" fn secondary_main(core_id: u64) -> ! {
         // interrupt (timer, IPI, or device IRQ). No memory access, no stack
         // usage. nomem is correct. WFI is used instead of WFE because IPIs
         // (SGI 0) wake WFI but not WFE.
-        unsafe { core::arch::asm!("wfi", options(nostack, nomem)) };
+        arch::cpu::wait_for_interrupt();
     }
 }
 #[unsafe(no_mangle)]
@@ -1000,17 +985,9 @@ pub extern "C" fn user_fault_handler(ctx: *mut Context) -> *const Context {
         "user_fault_handler: ctx is null (TPIDR_EL1 was 0)"
     );
 
-    let esr: u64;
-    let far: u64;
-    let elr: u64;
-
-    // SAFETY: Reading system registers to diagnose the fault. These are
-    // read-only queries with no side effects.
-    unsafe {
-        core::arch::asm!("mrs {}, esr_el1", out(reg) esr, options(nostack, nomem));
-        core::arch::asm!("mrs {}, far_el1", out(reg) far, options(nostack, nomem));
-        core::arch::asm!("mrs {}, elr_el1", out(reg) elr, options(nostack, nomem));
-    }
+    let esr = arch::cpu::read_esr();
+    let far = arch::cpu::read_far();
+    let elr = arch::cpu::read_elr();
 
     let ec = (esr >> 26) & 0x3F;
     let fsc = esr & 0x3F; // DFSC (data abort) or IFSC (instruction abort)

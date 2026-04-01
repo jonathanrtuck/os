@@ -465,16 +465,7 @@ impl AddressSpace {
         // The ASID is valid (allocated by address_space_id::alloc). The
         // barrier sequence (DSB ISHST → TLBI → DSB ISH → ISB) ensures
         // completion across all cores before returning to user code.
-        unsafe {
-            core::arch::asm!(
-                "dsb ishst",
-                "tlbi vale1is, {va}",
-                "dsb ish",
-                "isb",
-                va = in(reg) (page_va >> 12) | ((self.asid.0 as u64) << 48),
-                options(nostack)
-            );
-        }
+        super::arch::mmu::tlbi_page(page_va, self.asid.0 as u64);
 
         true
     }
@@ -484,16 +475,7 @@ impl AddressSpace {
         // SAFETY: TLBI aside1is invalidates all TLB entries tagged with this
         // ASID. The ASID was allocated by the address_space_id module and is valid.
         // Barriers ensure the invalidation completes before we free pages.
-        unsafe {
-            core::arch::asm!(
-                "dsb ishst",
-                "tlbi aside1is, {v}",
-                "dsb ish",
-                "isb",
-                v = in(reg) (self.asid.0 as u64) << 48,
-                options(nostack)
-            );
-        }
+        super::arch::mmu::tlbi_asid(self.asid.0 as u64);
     }
 
     /// Free all resources: DMA buffers, owned user pages, page table frames, and the L2 root table.
@@ -575,13 +557,8 @@ impl AddressSpace {
                 // descriptor over an existing valid descriptor is
                 // CONSTRAINED UNPREDICTABLE. Must invalidate first.
                 core::ptr::write_volatile(entry, 0);
-                core::arch::asm!(
-                    "dsb ish",
-                    "tlbi vale1is, {va}",
-                    "dsb ish",
-                    va = in(reg) (va >> 12) | ((self.asid.0 as u64) << 48),
-                    options(nostack)
-                );
+
+                super::arch::mmu::tlbi_bbm(va, self.asid.0 as u64);
             }
 
             core::ptr::write_volatile(entry, (pa & PA_MASK) | DESC_PAGE | attrs.0);

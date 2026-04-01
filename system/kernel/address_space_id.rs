@@ -70,20 +70,13 @@ pub fn alloc() -> (Asid, u64) {
     // This is safe because all threads will re-acquire ASIDs on next
     // context switch (generation mismatch triggers lazy revalidation).
     #[cfg(target_os = "none")]
-    unsafe {
-        core::arch::asm!(
-            "dsb ishst",
-            "tlbi vmalle1is",
-            "dsb ish",
-            "isb",
-            options(nostack)
-        );
-    }
+    super::arch::mmu::tlbi_all();
 
     s.generation += 1;
     s.bitmap = [0; 4];
     s.bitmap[0] |= 1; // Re-reserve ASID 0.
-                      // Allocate ASID 1 for the caller.
+
+    // Allocate ASID 1 for the caller.
     s.bitmap[0] |= 1u64 << 1;
     s.next_hint = 2;
 
@@ -98,6 +91,7 @@ pub fn current_generation() -> u64 {
 #[allow(dead_code)]
 pub fn reset() {
     let mut s = STATE.lock();
+
     s.bitmap = [0; 4];
     s.generation = 0;
     s.next_hint = 1;
