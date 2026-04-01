@@ -4,6 +4,20 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Sole-Writer Scaling Under Compound Documents — OPEN (2026-04-01)
+
+**Context:** Extracted from a deep research review (most findings were wrong, but this userspace concern is real). The kernel-level concerns from the same review (security model, EEVDF tuning) are in `system/kernel/DESIGN.md` §13.1–13.2.
+
+The document service is the sole writer to document state — core design principle (Decision #8, #9). Today this is one document, one editor, no contention. But compound documents (v0.8) introduce multiple content parts edited simultaneously, and realtime/streaming (v0.9) adds multiple concurrent writers (local user + remote participants).
+
+**Question:** Can the document service parallelize internally — one writer per document, or one writer per content part within a compound document? Or does the sole-writer principle require a single serialization point?
+
+**Why it matters now:** The Edit Architecture thread (below) is redesigning how editors interact with decoded representations. If the answer is "one writer per content part," that shapes the shared memory layout and coordination protocol being designed now.
+
+**When to resolve:** Before v0.8 planning. The Edit Architecture thread's open question on "concurrent editor access" is related.
+
+---
+
 ## Edit Architecture — OPEN (2026-03-31)
 
 **Context:** Emerged from architecture review item #2 (single-byte inserts over IPC). The original problem — paste of 1K text = 1000 IPC round-trips — led to three connected design insights about how editing works across all content types.
@@ -102,17 +116,17 @@ Display
 
 **Context:** Deep review of the post-v0.5 codebase. Nine findings, all addressed:
 
-| #   | Finding                      | Resolution                                                                                          |
-| --- | ---------------------------- | --------------------------------------------------------------------------------------------------- |
-| 1   | Piece table hard limits      | **Implemented.** Constants removed, limits derived from buf.len(). In-place ops, compact().         |
-| 2   | Single-byte inserts over IPC | **Superseded.** Edit Architecture — editors write directly to decoded buffers.                      |
-| 3   | Init knows too much          | **Accepted.** Service topology in flux; manifests when architecture stabilizes.                     |
-| 4   | Allocator is naive           | **Implemented.** Two-tier slab allocator, O(1) alloc/free.                                          |
-| 5   | No large message pattern     | **Accepted.** Reinforced by Edit Architecture — data via shared memory, IPC for coordination only.  |
-| 6   | No rendering backpressure    | **Already implemented.** Layout service drains and coalesces signals.                               |
-| 7   | DocumentFormat duplicated    | **Implemented.** Moved to protocol::edit.                                                           |
-| 8   | Scaffolding label overloaded | **Redesigned.** Two-axis model: interface change cost + implementation confidence.                  |
-| 9   | COW filesystem limits        | **Implemented.** Overflow extent blocks (16 inline + 1364 overflow = 1380 extents/file). |
+| #   | Finding                      | Resolution                                                                                         |
+| --- | ---------------------------- | -------------------------------------------------------------------------------------------------- |
+| 1   | Piece table hard limits      | **Implemented.** Constants removed, limits derived from buf.len(). In-place ops, compact().        |
+| 2   | Single-byte inserts over IPC | **Superseded.** Edit Architecture — editors write directly to decoded buffers.                     |
+| 3   | Init knows too much          | **Accepted.** Service topology in flux; manifests when architecture stabilizes.                    |
+| 4   | Allocator is naive           | **Implemented.** Two-tier slab allocator, O(1) alloc/free.                                         |
+| 5   | No large message pattern     | **Accepted.** Reinforced by Edit Architecture — data via shared memory, IPC for coordination only. |
+| 6   | No rendering backpressure    | **Already implemented.** Layout service drains and coalesces signals.                              |
+| 7   | DocumentFormat duplicated    | **Implemented.** Moved to protocol::edit.                                                          |
+| 8   | Scaffolding label overloaded | **Redesigned.** Two-axis model: interface change cost + implementation confidence.                 |
+| 9   | COW filesystem limits        | **Implemented.** Overflow extent blocks (16 inline + 1364 overflow = 1380 extents/file).           |
 
 ### 1. Piece table hard limits will silently truncate (HIGH)
 

@@ -55,15 +55,16 @@ Seven-layer fs stack: `BlockDevice` trait → superblock ring → free-extent al
 ## Milestone Roadmap
 
 - **v0.5:** Rich text (multi-style runs, operation coalescing)
-- **v0.6:** Media (JPEG, audio, video) — swappable with v0.7
-- **v0.7:** Design decisions (settle #10, #15, #17 as interfaces, clipboard)
-- **v0.8:** Compound documents & layout engine
-- **v0.9:** Realtime & streaming (conversations/presence as document types)
-- **v0.10:** CLI / TUI (fundamental OS interface, not an app)
-- **v0.11:** Network (TCP/IP, DNS, TLS)
-- **v0.12:** Web (browser-as-translator)
-- **v0.13:** Real hardware (bare-metal target)
-- **v0.14+:** UX iteration (GUI + CLI, document browse/search, look & feel — multiple passes)
+- **v0.6:** Kernel (arch abstraction, capabilities, VMOs, pager, signals, SMP scalability, ASLR, standalone packaging)
+- **v0.7:** Media (JPEG, audio, video) — swappable with v0.8
+- **v0.8:** Design decisions (settle #10, #15, #17 as interfaces, clipboard)
+- **v0.9:** Compound documents & layout engine
+- **v0.10:** Realtime & streaming (conversations/presence as document types)
+- **v0.11:** CLI / TUI (fundamental OS interface, not an app)
+- **v0.12:** Network (TCP/IP, DNS, TLS)
+- **v0.13:** Web (browser-as-translator)
+- **v0.14:** Real hardware (bare-metal target)
+- **v0.15+:** UX iteration (GUI + CLI, document browse/search, look & feel — multiple passes)
 - **v1.0:** Ship
 
 See `design/roadmap.md` for full details and rationale.

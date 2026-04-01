@@ -1396,3 +1396,41 @@ if i + 1 < bufs.len() {
 - Per-core `deferred_drops` (prevents the EXIT variant of this race)
 - 20 property-based SMP scheduler model tests (6 new for `deferred_ready`)
 - Thread churn stress workers (50k create/exit cycles under SMP load)
+
+---
+
+## 13.0 Forward-Looking Concerns
+
+Architectural concerns that don't affect current milestones but will need kernel-level design decisions before the relevant milestone begins. Extracted from a 2026-04-01 deep research review — most of the review's findings were wrong (assumed monolithic kernel, graphics in kernel, flat address space), but these two survived as genuine future concerns.
+
+### 13.1 Security Model Before Network (v0.11)
+
+**Context:** All userspace processes are currently trusted equally. No capability enforcement, no per-channel access control beyond what init happens to wire up. Correct for a personal project running only its own code.
+
+**When it breaks:** v0.11 (network) and v0.12 (web browser as translator) introduce untrusted content. A compromised decoder or network service has the same kernel-level access as the document service.
+
+**Design space:**
+
+- **Capability-based** (seL4, Fuchsia): Processes hold unforgeable tokens granting access to specific resources. Handle-based access (§0.8) is already halfway there — handles are per-process, unforgeable, typed. The gap is that init creates all channels and hands out handles by convention, not by enforcement. A capability model would make handle grants explicit and auditable.
+- **Sandboxed by default:** All services start with zero capabilities; init grants exactly what's needed. The decoder sandbox pattern (PNG decoder: RO file store, RW content region, nothing else) already works this way _informally_. Formalizing it means the kernel rejects syscalls on handles a process doesn't hold.
+- **Per-document permissions:** Documents carry access metadata; the document service enforces read/write/execute. Orthogonal to process capabilities.
+
+**Kernel implications:** Handle creation, channel setup, and `memory_share` syscalls would need to carry and enforce capability metadata. This is a deep interface change — easier to design in before v0.11 than retrofit after.
+
+**When to resolve:** Before v0.11 planning. Candidate for design decision #18 during v0.7's design decisions milestone.
+
+### 13.2 EEVDF Tuning for Interactive + Media Workloads (v0.6–v0.9)
+
+**Context:** The EEVDF scheduler (§6.1) is correct — property-based tests, SMP stress testing, 2,313+ tests. But its tuning parameters (slice length, virtual time decay for sleeping tasks, lag bounds) have only been validated under current workloads: text editing, layout computation, rendering.
+
+**What changes:** v0.6 (media) adds audio/video decoding with real-time deadlines. v0.9 (realtime/streaming) adds latency-sensitive concurrent flows.
+
+**Specific questions:**
+
+1. Does a CPU-bound layout recompute starve an audio decoder's deadline? EEVDF is fair, not priority-aware — a thread that uses its full slice delays all others by one slice.
+2. Do sleeping tasks (idle editor) accumulate negative lag that causes latency spikes when they wake? Linux's EEVDF caps lag to prevent this, but the cap value matters.
+3. Is the current slice length appropriate for media-sensitive workloads, or should it be content-class-aware (shorter slices for audio decoders)?
+
+**Kernel implications:** If the answer to (1) or (3) is "no," the syscall interface may need priority hints or deadline annotations (e.g., `thread_set_deadline(period, runtime)` à la SCHED_DEADLINE). This is a syscall ABI addition — easier to add before services depend on default behavior.
+
+**When to resolve:** v0.6 should include scheduler stress tests with media-like workload patterns (periodic short bursts at fixed intervals). Priority/deadline syscall design before v0.9.
