@@ -7,8 +7,8 @@
 
 use crate::{
     node::{
-        Node, NodeId, SceneHeader, DATA_BUFFER_SIZE, DATA_OFFSET, DIRTY_BITMAP_WORDS, NODES_OFFSET,
-        SCENE_SIZE,
+        Node, NodeId, SceneHeader, DATA_BUFFER_SIZE, DATA_OFFSET, DIRTY_BITMAP_WORDS, MAX_NODES,
+        NODES_OFFSET, SCENE_SIZE,
     },
     primitives::{DataRef, ShapedGlyph},
     writer::SceneWriter,
@@ -279,7 +279,7 @@ impl<'a> TripleWriter<'a> {
         // SAFETY: `off` is a valid scene buffer offset. SceneHeader is repr(C)
         // at the buffer start.
         let hdr = unsafe { &*(self.buf.as_ptr().add(off) as *const SceneHeader) };
-        let count = hdr.node_count as usize;
+        let count = (hdr.node_count as usize).min(MAX_NODES);
         // SAFETY: NODES_OFFSET is within each SCENE_SIZE buffer. Node is repr(C).
         let ptr = unsafe { self.buf.as_ptr().add(off + NODES_OFFSET) as *const Node };
         // SAFETY: `ptr` points to `count` contiguous Node-sized entries.
@@ -311,7 +311,7 @@ impl<'a> TripleWriter<'a> {
         let hdr = unsafe { &*(self.buf.as_ptr().add(off) as *const SceneHeader) };
         let start = off + DATA_OFFSET + dref.offset as usize;
         let end = start + dref.length as usize;
-        if end <= self.buf.len() && dref.offset + dref.length <= hdr.data_used {
+        if end <= self.buf.len() && dref.offset.saturating_add(dref.length) <= hdr.data_used {
             &self.buf[start..end]
         } else {
             &[]
@@ -516,7 +516,7 @@ impl TripleReader {
         let hdr = self.header();
         let start = off + DATA_OFFSET + dref.offset as usize;
         let end = start + dref.length as usize;
-        if end <= self.len && dref.offset + dref.length <= hdr.data_used {
+        if end <= self.len && dref.offset.saturating_add(dref.length) <= hdr.data_used {
             // SAFETY: start..end is within the valid buffer region.
             unsafe { core::slice::from_raw_parts((self.buf as *const u8).add(start), end - start) }
         } else {
@@ -547,7 +547,7 @@ impl TripleReader {
     pub fn front_nodes(&self) -> &[Node] {
         let off = self.read_off;
         let hdr = self.header();
-        let count = hdr.node_count as usize;
+        let count = (hdr.node_count as usize).min(MAX_NODES);
         // SAFETY: NODES_OFFSET is within each SCENE_SIZE buffer. Node is repr(C).
         let ptr = unsafe { (self.buf as *const u8).add(off + NODES_OFFSET) as *const Node };
         // SAFETY: `ptr` points to `count` contiguous Node-sized entries.

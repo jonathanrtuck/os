@@ -37,7 +37,9 @@ impl<'a> SceneReader<'a> {
         let start = DATA_OFFSET + dref.offset as usize;
         let end = start + dref.length as usize;
 
-        if end <= self.buf.len() && dref.offset + dref.length <= self.header().data_used {
+        if end <= self.buf.len()
+            && dref.offset.saturating_add(dref.length) <= self.header().data_used
+        {
             &self.buf[start..end]
         } else {
             &[]
@@ -66,7 +68,7 @@ impl<'a> SceneReader<'a> {
     }
     /// Get all live nodes as a slice.
     pub fn nodes(&self) -> &[Node] {
-        let count = self.node_count() as usize;
+        let count = (self.node_count() as usize).min(MAX_NODES);
         // SAFETY: NODES_OFFSET is within the SCENE_SIZE buffer. Node is
         // repr(C) with size NODE_SIZE. `count` <= MAX_NODES.
         let ptr = unsafe { self.buf.as_ptr().add(NODES_OFFSET) as *const Node };
