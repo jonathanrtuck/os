@@ -130,11 +130,10 @@ pub mod device {
         pub mmio_pa: u64,
         pub irq: u32,
         /// Kernel channel handle for signaling init.
-        pub init_handle: u8,
+        pub init_handle: u16,
         /// Kernel channel handle for signaling the connected service (e.g. core).
-        /// 0xFF if this driver has no service channel.
-        pub service_handle: u8,
-        pub _pad: [u8; 2],
+        /// 0xFFFF if this driver has no service channel.
+        pub service_handle: u16,
     }
     const _: () = assert!(core::mem::size_of::<DeviceConfig>() <= 60);
 

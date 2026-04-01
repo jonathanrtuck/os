@@ -234,7 +234,7 @@ fn validate_futex(addr: u64) -> Result<(), Error> {
 
 /// sys_memory_share validation.
 fn validate_memory_share(target_handle_nr: u64, pa: u64, page_count: u64) -> Result<(), Error> {
-    if target_handle_nr > u8::MAX as u64 {
+    if target_handle_nr > u16::MAX as u64 {
         return Err(Error::InvalidArgument);
     }
     const MAX_SHARE_PAGES: u64 = RAM_SIZE_MAX / PAGE_SIZE / 2;
@@ -293,11 +293,11 @@ fn validate_interrupt_register(irq: u64) -> Result<(), Error> {
 }
 
 /// Handle number validation.
-fn validate_handle_nr(handle_nr: u64) -> Result<u8, Error> {
-    if handle_nr > u8::MAX as u64 {
+fn validate_handle_nr(handle_nr: u64) -> Result<u16, Error> {
+    if handle_nr > u16::MAX as u64 {
         return Err(Error::InvalidArgument);
     }
-    Ok(handle_nr as u8)
+    Ok(handle_nr as u16)
 }
 
 /// Simulate process state: tracks whether process has been started.
@@ -319,8 +319,8 @@ impl SimProcess {
 fn simulate_handle_send(
     caller: &mut HandleTable,
     target: &SimProcess,
-    target_handle_nr: u8,
-    source_handle_nr: u8,
+    target_handle_nr: u16,
+    source_handle_nr: u16,
 ) -> Result<(), &'static str> {
     // Check target is a Process handle
     match caller.get(Handle(target_handle_nr), Rights::WRITE) {
@@ -343,7 +343,7 @@ fn simulate_handle_send(
 /// Simulate process_start: target must be Process, returns false if already started.
 fn simulate_process_start(
     handles: &HandleTable,
-    handle_nr: u8,
+    handle_nr: u16,
     started: bool,
 ) -> Result<(), &'static str> {
     match handles.get(Handle(handle_nr), Rights::WRITE) {
@@ -360,7 +360,7 @@ fn simulate_process_start(
 /// Simulate process_kill: target must be Process.
 fn simulate_process_kill(
     handles: &HandleTable,
-    handle_nr: u8,
+    handle_nr: u16,
     target_alive: bool,
 ) -> Result<(), &'static str> {
     match handles.get(Handle(handle_nr), Rights::WRITE) {
@@ -656,14 +656,14 @@ fn boundary_handle_nr_u64_max() {
 }
 
 #[test]
-fn boundary_handle_nr_256() {
-    assert_eq!(validate_handle_nr(256), Err(Error::InvalidArgument));
+fn boundary_handle_nr_65536() {
+    assert_eq!(validate_handle_nr(65536), Err(Error::InvalidArgument));
 }
 
 #[test]
-fn boundary_handle_nr_255() {
-    // u8::MAX is valid.
-    assert!(validate_handle_nr(255).is_ok());
+fn boundary_handle_nr_65535() {
+    // u16::MAX is valid.
+    assert!(validate_handle_nr(65535).is_ok());
 }
 
 // ==========================================================================
@@ -1395,7 +1395,7 @@ fn handle_send_all_non_process_target_types() {
     caller.insert(ch(2), Rights::READ_WRITE).unwrap(); // 6: source handle
     let target = SimProcess::new();
 
-    for wrong_target in 0..5u8 {
+    for wrong_target in 0..5u16 {
         assert_eq!(
             simulate_handle_send(&mut caller, &target, wrong_target, 6),
             Err("wrong target type"),
@@ -1472,7 +1472,7 @@ fn state_triple_close() {
 // SECTION 10: State confusion — signal-after-close
 // ==========================================================================
 
-fn try_channel_signal(t: &HandleTable, handle_nr: u8) -> Result<(), &'static str> {
+fn try_channel_signal(t: &HandleTable, handle_nr: u16) -> Result<(), &'static str> {
     match t.get(Handle(handle_nr), Rights::WRITE) {
         Ok(HandleObject::Channel(_)) => Ok(()),
         Ok(_) => Err("wrong type"),
@@ -1506,7 +1506,7 @@ fn state_signal_after_close_reinsert() {
 // SECTION 11: State confusion — ack-without-register
 // ==========================================================================
 
-fn try_interrupt_ack(t: &HandleTable, handle_nr: u8) -> Result<(), &'static str> {
+fn try_interrupt_ack(t: &HandleTable, handle_nr: u16) -> Result<(), &'static str> {
     match t.get(Handle(handle_nr), Rights::WRITE) {
         Ok(HandleObject::Interrupt(_)) => Ok(()),
         Ok(_) => Err("wrong type"),
@@ -1603,14 +1603,14 @@ fn state_kill_wrong_type() {
 // SECTION 14: State confusion — scheduling_context operations after close
 // ==========================================================================
 
-fn try_sched_bind(t: &HandleTable, handle_nr: u8) -> Result<(), &'static str> {
+fn try_sched_bind(t: &HandleTable, handle_nr: u16) -> Result<(), &'static str> {
     match t.get(Handle(handle_nr), Rights::READ) {
         Ok(HandleObject::SchedulingContext(_)) => Ok(()),
         _ => Err("invalid or wrong type"),
     }
 }
 
-fn try_sched_borrow(t: &HandleTable, handle_nr: u8) -> Result<(), &'static str> {
+fn try_sched_borrow(t: &HandleTable, handle_nr: u16) -> Result<(), &'static str> {
     match t.get(Handle(handle_nr), Rights::READ) {
         Ok(HandleObject::SchedulingContext(_)) => Ok(()),
         _ => Err("invalid or wrong type"),
@@ -1816,8 +1816,8 @@ fn sched_ctx_runtime_max_valid_params() {
 #[test]
 fn handle_table_full_all_types() {
     let mut t = HandleTable::new();
-    // Fill all 256 slots with different types.
-    for i in 0..256u32 {
+    // Fill all slots with different types.
+    for i in 0..handle::MAX_HANDLES as u32 {
         let obj = match i % 6 {
             0 => ch(i),
             1 => tm(i as u8),
@@ -1828,7 +1828,7 @@ fn handle_table_full_all_types() {
         };
         t.insert(obj, Rights::READ_WRITE).unwrap();
     }
-    // 257th insertion fails.
+    // Next insertion fails.
     assert!(matches!(
         t.insert(ch(999), Rights::READ),
         Err(HandleError::TableFull)
@@ -1838,7 +1838,7 @@ fn handle_table_full_all_types() {
 #[test]
 fn handle_table_get_every_slot_empty() {
     let t = HandleTable::new();
-    for i in 0..=255u8 {
+    for i in 0..=255u16 {
         assert!(matches!(
             t.get(Handle(i), Rights::READ),
             Err(HandleError::InvalidHandle)

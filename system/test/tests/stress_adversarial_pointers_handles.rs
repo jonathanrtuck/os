@@ -2,7 +2,7 @@
 //!
 //! Exercises every pointer validation path with hostile inputs: null, kernel-range
 //! (>= 0xFFFF_0000_0000_0000), unaligned, and partially-mapped pointers. Exercises
-//! every handle validation path with: out-of-range (>255), wrong-type, and
+//! every handle validation path with: out-of-range (>65535), wrong-type, and
 //! already-closed handles.
 //!
 //! These tests duplicate the pure validation logic from syscall.rs. The kernel
@@ -183,10 +183,10 @@ fn validate_futex(addr: u64) -> Result<(), Error> {
     Ok(())
 }
 
-/// sys_memory_share validation: target_handle in u8 range, page_count in [1, 8192],
+/// sys_memory_share validation: target_handle in u16 range, page_count in [1, 8192],
 /// pa page-aligned and within RAM.
 fn validate_memory_share(target_handle_nr: u64, pa: u64, page_count: u64) -> Result<(), Error> {
-    if target_handle_nr > u8::MAX as u64 {
+    if target_handle_nr > u16::MAX as u64 {
         return Err(Error::InvalidArgument);
     }
     const MAX_SHARE_PAGES: u64 = RAM_SIZE_MAX / PAGE_SIZE / 2;
@@ -218,19 +218,19 @@ fn validate_thread_create(entry_va: u64, stack_top: u64) -> Result<(), Error> {
 }
 
 /// Handle number validation (common to all handle-accepting syscalls).
-fn validate_handle_nr(handle_nr: u64) -> Result<u8, Error> {
-    if handle_nr > u8::MAX as u64 {
+fn validate_handle_nr(handle_nr: u64) -> Result<u16, Error> {
+    if handle_nr > u16::MAX as u64 {
         return Err(Error::InvalidArgument);
     }
-    Ok(handle_nr as u8)
+    Ok(handle_nr as u16)
 }
 
 /// Handle number validation used by HandleError-returning syscalls.
-fn validate_handle_nr_he(handle_nr: u64) -> Result<u8, HandleError> {
-    if handle_nr > u8::MAX as u64 {
+fn validate_handle_nr_he(handle_nr: u64) -> Result<u16, HandleError> {
+    if handle_nr > u16::MAX as u64 {
         return Err(HandleError::InvalidHandle);
     }
-    Ok(handle_nr as u8)
+    Ok(handle_nr as u16)
 }
 
 // Helper constructors for HandleObject variants.
@@ -647,7 +647,7 @@ fn adversarial_memory_share_exceeds_ram_end() {
 #[test]
 fn adversarial_memory_share_handle_out_of_range() {
     assert_eq!(
-        validate_memory_share(256, RAM_START, 1),
+        validate_memory_share(65536, RAM_START, 1),
         Err(Error::InvalidArgument)
     );
     assert_eq!(
@@ -809,22 +809,22 @@ fn adversarial_pointer_sweep_no_panic() {
 }
 
 // ==========================================================================
-// SECTION 10: Adversarial handle tests — out-of-range (>255)
+// SECTION 10: Adversarial handle tests — out-of-range (>65535)
 // ==========================================================================
 
 #[test]
 fn adversarial_handle_out_of_range_error() {
-    // Error-returning syscalls: handle_nr > u8::MAX → InvalidArgument
-    assert_eq!(validate_handle_nr(256), Err(Error::InvalidArgument));
+    // Error-returning syscalls: handle_nr > u16::MAX → InvalidArgument
+    assert_eq!(validate_handle_nr(65536), Err(Error::InvalidArgument));
     assert_eq!(validate_handle_nr(u64::MAX), Err(Error::InvalidArgument));
-    assert_eq!(validate_handle_nr(1000), Err(Error::InvalidArgument));
+    assert_eq!(validate_handle_nr(100_000), Err(Error::InvalidArgument));
 }
 
 #[test]
 fn adversarial_handle_out_of_range_handle_error() {
-    // HandleError-returning syscalls: handle_nr > u8::MAX → InvalidHandle
+    // HandleError-returning syscalls: handle_nr > u16::MAX → InvalidHandle
     assert!(matches!(
-        validate_handle_nr_he(256),
+        validate_handle_nr_he(65536),
         Err(HandleError::InvalidHandle)
     ));
     assert!(matches!(
@@ -832,19 +832,19 @@ fn adversarial_handle_out_of_range_handle_error() {
         Err(HandleError::InvalidHandle)
     ));
     assert!(matches!(
-        validate_handle_nr_he(1000),
+        validate_handle_nr_he(100_000),
         Err(HandleError::InvalidHandle)
     ));
 }
 
 #[test]
 fn adversarial_handle_boundary_values() {
-    // 255 is valid (u8::MAX), 256 is out of range.
-    assert!(validate_handle_nr(255).is_ok());
-    assert_eq!(validate_handle_nr(256), Err(Error::InvalidArgument));
-    assert!(validate_handle_nr_he(255).is_ok());
+    // 65535 is valid (u16::MAX), 65536 is out of range.
+    assert!(validate_handle_nr(65535).is_ok());
+    assert_eq!(validate_handle_nr(65536), Err(Error::InvalidArgument));
+    assert!(validate_handle_nr_he(65535).is_ok());
     assert!(matches!(
-        validate_handle_nr_he(256),
+        validate_handle_nr_he(65536),
         Err(HandleError::InvalidHandle)
     ));
 }
@@ -852,7 +852,7 @@ fn adversarial_handle_boundary_values() {
 /// Sweep all handle-accepting syscalls with out-of-range handle values.
 #[test]
 fn adversarial_handle_out_of_range_sweep() {
-    let out_of_range: &[u64] = &[256, 257, 1000, u32::MAX as u64, u64::MAX, u64::MAX / 2];
+    let out_of_range: &[u64] = &[65536, 65537, 100_000, u32::MAX as u64, u64::MAX, u64::MAX / 2];
 
     for &h in out_of_range {
         // Error-returning syscalls
@@ -892,14 +892,14 @@ fn table_with_all_types() -> HandleTable {
 fn adversarial_handle_close_any_type() {
     let mut t = table_with_all_types();
     // handle_close works on any type.
-    for i in 0..6u8 {
+    for i in 0..6u16 {
         assert!(t.close(Handle(i)).is_ok());
     }
 }
 
 /// Simulate channel_signal with wrong-type handle.
 /// channel_signal checks for Channel type.
-fn simulate_channel_signal(t: &HandleTable, handle_nr: u8) -> Result<(), &'static str> {
+fn simulate_channel_signal(t: &HandleTable, handle_nr: u16) -> Result<(), &'static str> {
     match t.get(Handle(handle_nr), Rights::WRITE) {
         Ok(HandleObject::Channel(_)) => Ok(()),
         Ok(_) => Err("wrong type"),
@@ -921,7 +921,7 @@ fn adversarial_channel_signal_wrong_type() {
 }
 
 /// Simulate scheduling_context_bind with wrong-type handle.
-fn simulate_sched_bind(t: &HandleTable, handle_nr: u8) -> Result<(), &'static str> {
+fn simulate_sched_bind(t: &HandleTable, handle_nr: u16) -> Result<(), &'static str> {
     match t.get(Handle(handle_nr), Rights::READ) {
         Ok(HandleObject::SchedulingContext(_)) => Ok(()),
         _ => Err("wrong type or invalid"),
@@ -942,7 +942,7 @@ fn adversarial_sched_bind_wrong_type() {
 }
 
 /// Simulate scheduling_context_borrow with wrong-type handle.
-fn simulate_sched_borrow(t: &HandleTable, handle_nr: u8) -> Result<(), &'static str> {
+fn simulate_sched_borrow(t: &HandleTable, handle_nr: u16) -> Result<(), &'static str> {
     match t.get(Handle(handle_nr), Rights::READ) {
         Ok(HandleObject::SchedulingContext(_)) => Ok(()),
         _ => Err("wrong type or invalid"),
@@ -964,7 +964,7 @@ fn adversarial_sched_borrow_wrong_type() {
 /// we test the handle insertion side. Nothing type-related to check.
 
 /// Simulate interrupt_ack with wrong-type handle.
-fn simulate_interrupt_ack(t: &HandleTable, handle_nr: u8) -> Result<(), &'static str> {
+fn simulate_interrupt_ack(t: &HandleTable, handle_nr: u16) -> Result<(), &'static str> {
     match t.get(Handle(handle_nr), Rights::WRITE) {
         Ok(HandleObject::Interrupt(_)) => Ok(()),
         Ok(_) => Err("wrong type"),
@@ -986,7 +986,7 @@ fn adversarial_interrupt_ack_wrong_type() {
 }
 
 /// Simulate process_start with wrong-type handle.
-fn simulate_process_start(t: &HandleTable, handle_nr: u8) -> Result<(), &'static str> {
+fn simulate_process_start(t: &HandleTable, handle_nr: u16) -> Result<(), &'static str> {
     match t.get(Handle(handle_nr), Rights::WRITE) {
         Ok(HandleObject::Process(_)) => Ok(()),
         Ok(_) => Err("wrong type"),
@@ -1006,7 +1006,7 @@ fn adversarial_process_start_wrong_type() {
 }
 
 /// Simulate process_kill with wrong-type handle.
-fn simulate_process_kill(t: &HandleTable, handle_nr: u8) -> Result<(), &'static str> {
+fn simulate_process_kill(t: &HandleTable, handle_nr: u16) -> Result<(), &'static str> {
     match t.get(Handle(handle_nr), Rights::WRITE) {
         Ok(HandleObject::Process(_)) => Ok(()),
         Ok(_) => Err("wrong type"),
@@ -1029,8 +1029,8 @@ fn adversarial_process_kill_wrong_type() {
 /// handle_send requires target to be Process.
 fn simulate_handle_send(
     t: &HandleTable,
-    target_handle_nr: u8,
-    source_handle_nr: u8,
+    target_handle_nr: u16,
+    source_handle_nr: u16,
 ) -> Result<(), &'static str> {
     match t.get(Handle(target_handle_nr), Rights::WRITE) {
         Ok(HandleObject::Process(_)) => {}
@@ -1165,7 +1165,7 @@ fn adversarial_handle_send_both_closed() {
 #[test]
 fn adversarial_handle_get_empty_table() {
     let t = HandleTable::new();
-    for i in 0..=255u8 {
+    for i in 0..=255u16 {
         assert!(matches!(
             t.get(Handle(i), Rights::READ),
             Err(HandleError::InvalidHandle)
@@ -1176,7 +1176,7 @@ fn adversarial_handle_get_empty_table() {
 #[test]
 fn adversarial_handle_close_empty_table() {
     let mut t = HandleTable::new();
-    for i in 0..=255u8 {
+    for i in 0..=255u16 {
         assert!(matches!(
             t.close(Handle(i)),
             Err(HandleError::InvalidHandle)
@@ -1239,24 +1239,25 @@ fn adversarial_handle_close_reuse_cycle() {
 #[test]
 fn adversarial_handle_fill_close_all_refill() {
     let mut t = HandleTable::new();
+    let capacity = handle::MAX_HANDLES;
 
-    // Fill all 256 slots.
-    for i in 0..256u32 {
+    // Fill all slots.
+    for i in 0..capacity as u32 {
         t.insert(ch(i), Rights::READ_WRITE).unwrap();
     }
     // Table is full.
     assert!(matches!(
-        t.insert(ch(999), Rights::READ),
+        t.insert(ch(999_999), Rights::READ),
         Err(HandleError::TableFull)
     ));
 
     // Close all.
-    for i in 0..=255u8 {
+    for i in 0..capacity as u16 {
         t.close(Handle(i)).unwrap();
     }
 
-    // All slots now return InvalidHandle.
-    for i in 0..=255u8 {
+    // Spot-check first 256 slots are empty.
+    for i in 0..=255u16 {
         assert!(matches!(
             t.get(Handle(i), Rights::READ),
             Err(HandleError::InvalidHandle)
@@ -1264,12 +1265,12 @@ fn adversarial_handle_fill_close_all_refill() {
     }
 
     // Refill.
-    for i in 0..256u32 {
-        t.insert(ch(i + 1000), Rights::READ_WRITE).unwrap();
+    for i in 0..capacity as u32 {
+        t.insert(ch(i + 10000), Rights::READ_WRITE).unwrap();
     }
 
-    // Verify all accessible.
-    for i in 0..=255u8 {
+    // Verify first 256 accessible.
+    for i in 0..=255u16 {
         assert!(t.get(Handle(i), Rights::READ).is_ok());
     }
 }
@@ -1286,7 +1287,7 @@ fn adversarial_handle_wrong_type_matrix() {
     // slot 0: Channel, 1: Timer, 2: Interrupt, 3: SchedulingContext, 4: Process, 5: Thread
 
     // channel_signal expects Channel (slot 0).
-    for &wrong in &[1u8, 2, 3, 4, 5] {
+    for &wrong in &[1u16, 2, 3, 4, 5] {
         assert_eq!(
             simulate_channel_signal(&t, wrong),
             Err("wrong type"),
@@ -1295,7 +1296,7 @@ fn adversarial_handle_wrong_type_matrix() {
     }
 
     // interrupt_ack expects Interrupt (slot 2).
-    for &wrong in &[0u8, 1, 3, 4, 5] {
+    for &wrong in &[0u16, 1, 3, 4, 5] {
         assert_eq!(
             simulate_interrupt_ack(&t, wrong),
             Err("wrong type"),
@@ -1304,7 +1305,7 @@ fn adversarial_handle_wrong_type_matrix() {
     }
 
     // process_start expects Process (slot 4).
-    for &wrong in &[0u8, 1, 2, 3, 5] {
+    for &wrong in &[0u16, 1, 2, 3, 5] {
         assert_eq!(
             simulate_process_start(&t, wrong),
             Err("wrong type"),
@@ -1313,7 +1314,7 @@ fn adversarial_handle_wrong_type_matrix() {
     }
 
     // process_kill expects Process (slot 4).
-    for &wrong in &[0u8, 1, 2, 3, 5] {
+    for &wrong in &[0u16, 1, 2, 3, 5] {
         assert_eq!(
             simulate_process_kill(&t, wrong),
             Err("wrong type"),
@@ -1322,7 +1323,7 @@ fn adversarial_handle_wrong_type_matrix() {
     }
 
     // scheduling_context_bind expects SchedulingContext (slot 3).
-    for &wrong in &[0u8, 1, 2, 4, 5] {
+    for &wrong in &[0u16, 1, 2, 4, 5] {
         assert!(
             simulate_sched_bind(&t, wrong).is_err(),
             "sched_bind should reject handle at slot {wrong}"
@@ -1330,7 +1331,7 @@ fn adversarial_handle_wrong_type_matrix() {
     }
 
     // scheduling_context_borrow expects SchedulingContext (slot 3).
-    for &wrong in &[0u8, 1, 2, 4, 5] {
+    for &wrong in &[0u16, 1, 2, 4, 5] {
         assert!(
             simulate_sched_borrow(&t, wrong).is_err(),
             "sched_borrow should reject handle at slot {wrong}"
@@ -1338,7 +1339,7 @@ fn adversarial_handle_wrong_type_matrix() {
     }
 
     // handle_send target expects Process (slot 4), source can be any type.
-    for &wrong in &[0u8, 1, 2, 3, 5] {
+    for &wrong in &[0u16, 1, 2, 3, 5] {
         assert_eq!(
             simulate_handle_send(&t, wrong, 0),
             Err("wrong target type"),
@@ -1432,7 +1433,7 @@ fn adversarial_partially_mapped_single_byte_unmapped() {
 fn adversarial_memory_share_combined() {
     // Out-of-range handle + valid PA.
     assert_eq!(
-        validate_memory_share(256, RAM_START, 1),
+        validate_memory_share(65536, RAM_START, 1),
         Err(Error::InvalidArgument)
     );
     // Valid handle + out-of-range PA.
@@ -1462,10 +1463,10 @@ fn adversarial_memory_share_combined() {
 fn adversarial_handle_send_out_of_range() {
     // Both handles out of range.
     let both_fail =
-        |target: u64, source: u64| -> bool { target > u8::MAX as u64 || source > u8::MAX as u64 };
-    assert!(both_fail(256, 0));
-    assert!(both_fail(0, 256));
-    assert!(both_fail(256, 256));
+        |target: u64, source: u64| -> bool { target > u16::MAX as u64 || source > u16::MAX as u64 };
+    assert!(both_fail(65536, 0));
+    assert!(both_fail(0, 65536));
+    assert!(both_fail(65536, 65536));
     assert!(both_fail(u64::MAX, u64::MAX));
 }
 

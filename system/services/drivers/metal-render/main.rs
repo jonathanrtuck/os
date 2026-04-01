@@ -62,9 +62,9 @@ pub(crate) const VIRTQ_SETUP: u32 = 0;
 pub(crate) const VIRTQ_RENDER: u32 = 1;
 
 /// IPC handle for the init channel.
-pub(crate) const INIT_HANDLE: u8 = 0;
+pub(crate) const INIT_HANDLE: u16 = 0;
 /// IPC handle for the core->metal-render scene update channel.
-pub(crate) const SCENE_HANDLE: u8 = 1;
+pub(crate) const SCENE_HANDLE: u16 = 1;
 
 // ── Metal object handles (guest-assigned, must be nonzero) ──────────────
 

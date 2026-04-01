@@ -58,11 +58,11 @@ pub struct StoreConfig {
     /// Content Region size in bytes.
     pub content_size: u32,
     /// Kernel channel handle for signaling init.
-    pub init_handle: u8,
+    pub init_handle: u16,
     /// Kernel channel handle for the document service channel.
-    pub core_handle: u8,
-    pub _pad3: [u8; 2],
+    pub core_handle: u16,
 }
+
 const _: () = assert!(core::mem::size_of::<StoreConfig>() <= 60);
 
 /// Query request payload (document/init → store service).
@@ -279,10 +279,9 @@ pub struct FsConfig {
     /// Document buffer capacity in bytes (content area, excluding header).
     pub doc_capacity: u32,
     /// Kernel channel handle for signaling init.
-    pub init_handle: u8,
+    pub init_handle: u16,
     /// Kernel channel handle for the core (docmodel) channel.
-    pub core_handle: u8,
-    pub _pad: [u8; 2],
+    pub core_handle: u16,
 }
 const _: () = assert!(core::mem::size_of::<FsConfig>() <= 60);
 

@@ -26,36 +26,36 @@
 //!
 //! # Syscalls
 //!
-//! | Nr | Name                      | Args                                               | Returns                     |
-//! |----|---------------------------|----------------------------------------------------|-----------------------------|
-//! | 0  | exit                      | —                                                  | does not return             |
-//! | 1  | write                     | x0=buf_ptr, x1=len                                 | bytes written               |
-//! | 2  | yield                     | —                                                  | 0                           |
-//! | 3  | handle_close              | x0=handle                                          | 0                           |
-//! | 4  | channel_signal            | x0=handle                                          | 0                           |
-//! | 5  | channel_create            | —                                                  | handle_a \| (handle_b << 8) |
-//! | 6  | scheduling_context_create | x0=budget_ns, x1=period_ns                         | handle                      |
-//! | 7  | scheduling_context_borrow | x0=handle                                          | 0                           |
-//! | 8  | scheduling_context_return | —                                                  | 0                           |
-//! | 9  | scheduling_context_bind   | x0=handle                                          | 0                           |
-//! | 10 | futex_wait                | x0=addr, x1=expected                               | 0 (may block)               |
-//! | 11 | futex_wake                | x0=addr, x1=count                                  | threads woken               |
-//! | 12 | wait                      | x0=handles_ptr, x1=count, x2=timeout_ns            | ready index (may block)     |
-//! | 13 | timer_create              | x0=timeout_ns                                      | handle                      |
-//! | 14 | interrupt_register        | x0=irq_nr                                          | handle                      |
-//! | 15 | interrupt_ack             | x0=handle                                          | 0                           |
-//! | 16 | device_map                | x0=phys_addr, x1=size                              | user VA                     |
-//! | 17 | dma_alloc                 | x0=order, x1=pa_out_ptr                            | user VA                     |
-//! | 18 | dma_free                  | x0=user_va, x1=order                               | 0                           |
-//! | 19 | thread_create             | x0=entry_va, x1=stack_top                          | handle                      |
-//! | 20 | process_create            | x0=elf_ptr, x1=elf_len                             | handle                      |
-//! | 21 | process_start             | x0=handle                                          | 0                           |
-//! | 22 | handle_send               | x0=target_handle, x1=source_handle, x2=rights_mask | 0                           |
-//! | 23 | process_kill              | x0=handle                                          | 0                           |
-//! | 24 | memory_share              | x0=target_handle, x1=pa, x2=page_count, x3=flags   | target VA                   |
-//! | 25 | memory_alloc              | x0=page_count                                      | user VA                     |
-//! | 26 | memory_free               | x0=va, x1=page_count                               | 0                           |
-//! | 27 | process_set_syscall_filter | x0=handle, x1=mask                                | 0                           |
+//! | Nr | Name                      | Args                                               | Returns                      |
+//! |----|---------------------------|----------------------------------------------------|------------------------------|
+//! | 0  | exit                      | —                                                  | does not return              |
+//! | 1  | write                     | x0=buf_ptr, x1=len                                 | bytes written                |
+//! | 2  | yield                     | —                                                  | 0                            |
+//! | 3  | handle_close              | x0=handle                                          | 0                            |
+//! | 4  | channel_signal            | x0=handle                                          | 0                            |
+//! | 5  | channel_create            | —                                                  | handle_a \| (handle_b << 16) |
+//! | 6  | scheduling_context_create | x0=budget_ns, x1=period_ns                         | handle                       |
+//! | 7  | scheduling_context_borrow | x0=handle                                          | 0                            |
+//! | 8  | scheduling_context_return | —                                                  | 0                            |
+//! | 9  | scheduling_context_bind   | x0=handle                                          | 0                            |
+//! | 10 | futex_wait                | x0=addr, x1=expected                               | 0 (may block)                |
+//! | 11 | futex_wake                | x0=addr, x1=count                                  | threads woken                |
+//! | 12 | wait                      | x0=handles_ptr, x1=count, x2=timeout_ns            | ready index (may block)      |
+//! | 13 | timer_create              | x0=timeout_ns                                      | handle                       |
+//! | 14 | interrupt_register        | x0=irq_nr                                          | handle                       |
+//! | 15 | interrupt_ack             | x0=handle                                          | 0                            |
+//! | 16 | device_map                | x0=phys_addr, x1=size                              | user VA                      |
+//! | 17 | dma_alloc                 | x0=order, x1=pa_out_ptr                            | user VA                      |
+//! | 18 | dma_free                  | x0=user_va, x1=order                               | 0                            |
+//! | 19 | thread_create             | x0=entry_va, x1=stack_top                          | handle                       |
+//! | 20 | process_create            | x0=elf_ptr, x1=elf_len                             | handle                       |
+//! | 21 | process_start             | x0=handle                                          | 0                            |
+//! | 22 | handle_send               | x0=target_handle, x1=source_handle, x2=rights_mask | 0                            |
+//! | 23 | process_kill              | x0=handle                                          | 0                            |
+//! | 24 | memory_share              | x0=target_handle, x1=pa, x2=page_count, x3=flags   | target VA                    |
+//! | 25 | memory_alloc              | x0=page_count                                      | user VA                      |
+//! | 26 | memory_free               | x0=va, x1=page_count                               | 0                            |
+//! | 27 | process_set_syscall_filter | x0=handle, x1=mask                                | 0                            |
 //!
 //! # Error codes
 //!
@@ -283,7 +283,7 @@ fn sys_channel_create() -> Result<u64, Error> {
     });
 
     match result {
-        Ok((handle_a, handle_b)) => Ok(handle_a.0 as u64 | (handle_b.0 as u64) << 8),
+        Ok((handle_a, handle_b)) => Ok(handle_a.0 as u64 | (handle_b.0 as u64) << 16),
         Err(_) => {
             // Clean up both endpoints.
             channel::close_endpoint(ch_a);
@@ -294,12 +294,15 @@ fn sys_channel_create() -> Result<u64, Error> {
     }
 }
 fn sys_channel_signal(handle_nr: u64) -> Result<u64, HandleError> {
-    if handle_nr > u8::MAX as u64 {
+    if handle_nr > u16::MAX as u64 {
         return Err(HandleError::InvalidHandle);
     }
 
     let channel_id = scheduler::current_process_do(|process| {
-        match process.handles.get(Handle(handle_nr as u8), Rights::SIGNAL) {
+        match process
+            .handles
+            .get(Handle(handle_nr as u16), Rights::SIGNAL)
+        {
             Ok(HandleObject::Channel(id)) => Ok(id),
             Ok(_) => Err(HandleError::InvalidHandle),
             Err(e) => Err(e),
@@ -447,12 +450,15 @@ fn sys_futex_wake(addr: u64, count: u64) -> Result<u64, Error> {
     Ok(woken as u64)
 }
 fn sys_interrupt_ack(handle_nr: u64) -> Result<u64, HandleError> {
-    if handle_nr > u8::MAX as u64 {
+    if handle_nr > u16::MAX as u64 {
         return Err(HandleError::InvalidHandle);
     }
 
     let int_id = scheduler::current_process_do(|process| {
-        match process.handles.get(Handle(handle_nr as u8), Rights::SIGNAL) {
+        match process
+            .handles
+            .get(Handle(handle_nr as u16), Rights::SIGNAL)
+        {
             Ok(HandleObject::Interrupt(id)) => Ok(id),
             Ok(_) => Err(HandleError::InvalidHandle),
             Err(e) => Err(e),
@@ -485,12 +491,12 @@ fn sys_interrupt_register(irq: u64) -> Result<u64, HandleError> {
     }
 }
 fn sys_handle_close(handle_nr: u64) -> Result<u64, HandleError> {
-    if handle_nr > u8::MAX as u64 {
+    if handle_nr > u16::MAX as u64 {
         return Err(HandleError::InvalidHandle);
     }
 
     let (obj, _rights) =
-        scheduler::current_process_do(|process| process.handles.close(Handle(handle_nr as u8)))?;
+        scheduler::current_process_do(|process| process.handles.close(Handle(handle_nr as u16)))?;
 
     // Release kernel resources associated with the closed handle.
     match obj {
@@ -509,7 +515,7 @@ fn sys_handle_send(
     source_handle_nr: u64,
     rights_mask: u64,
 ) -> Result<u64, Error> {
-    if target_handle_nr > u8::MAX as u64 || source_handle_nr > u8::MAX as u64 {
+    if target_handle_nr > u16::MAX as u64 || source_handle_nr > u16::MAX as u64 {
         return Err(Error::InvalidArgument);
     }
 
@@ -519,15 +525,14 @@ fn sys_handle_send(
     } else {
         Rights::from_raw(rights_mask as u32)
     };
-
-    let source_handle = Handle(source_handle_nr as u8);
+    let source_handle = Handle(source_handle_nr as u16);
     // Phase 1: Move the source handle out of the caller's table.
     // We take (not just read) the handle — move semantics prevent duplicated
     // endpoints, which would corrupt channel closed_count.
     let (target_pid, source_obj, source_rights) = scheduler::current_process_do(|process| {
         let target_pid = match process
             .handles
-            .get(Handle(target_handle_nr as u8), Rights::WRITE)
+            .get(Handle(target_handle_nr as u16), Rights::WRITE)
         {
             Ok(HandleObject::Process(id)) => id,
             Ok(_) => return Err(Error::InvalidArgument),
@@ -539,13 +544,11 @@ fn sys_handle_send(
             .handles
             .get_entry(source_handle, Rights::TRANSFER)
             .map_err(|_| Error::InvalidArgument)?;
-
         // Now close (move out). Can't fail — we just verified it exists.
         let _ = process.handles.close(source_handle);
 
         Ok((target_pid, source_obj, source_rights))
     })?;
-
     // Attenuate: target handle gets only the rights present in BOTH the
     // source handle and the mask. Rights can only be removed, never added.
     let source_rights = source_rights.attenuate(mask);
@@ -570,7 +573,6 @@ fn sys_handle_send(
                 .address_space
                 .map_channel_page(pages[0].as_u64())
                 .ok_or(Error::OutOfMemory)?;
-
             let va_b = match target.address_space.map_channel_page(pages[1].as_u64()) {
                 Some(va) => va,
                 None => {
@@ -652,10 +654,12 @@ fn sys_memory_share(
     page_count: u64,
     flags: u64,
 ) -> Result<u64, Error> {
-    if target_handle_nr > u8::MAX as u64 {
+    if target_handle_nr > u16::MAX as u64 {
         return Err(Error::InvalidArgument);
     }
+
     const MAX_SHARE_PAGES: u64 = paging::RAM_SIZE_MAX / paging::PAGE_SIZE / 2;
+
     if page_count == 0 || page_count > MAX_SHARE_PAGES {
         return Err(Error::InvalidArgument);
     }
@@ -674,7 +678,7 @@ fn sys_memory_share(
     let target_pid = scheduler::current_process_do(|process| {
         match process
             .handles
-            .get(Handle(target_handle_nr as u8), Rights::MAP)
+            .get(Handle(target_handle_nr as u16), Rights::MAP)
         {
             Ok(HandleObject::Process(id)) => Ok(id),
             Ok(_) => Err(Error::InvalidArgument),
@@ -725,7 +729,6 @@ fn sys_process_create(elf_ptr: u64, elf_len: u64) -> Result<u64, Error> {
 
         buf
     };
-
     // Create process with suspended initial thread.
     let (process_id, _thread_id) =
         process::create_from_user_elf(&elf_data).map_err(|_| Error::InvalidArgument)?;
@@ -786,12 +789,12 @@ fn sys_process_create(elf_ptr: u64, elf_len: u64) -> Result<u64, Error> {
     Ok(handle.0 as u64)
 }
 fn sys_process_kill(handle_nr: u64) -> Result<u64, Error> {
-    if handle_nr > u8::MAX as u64 {
+    if handle_nr > u16::MAX as u64 {
         return Err(Error::InvalidArgument);
     }
 
     let target_pid = scheduler::current_process_do(|process| {
-        match process.handles.get(Handle(handle_nr as u8), Rights::KILL) {
+        match process.handles.get(Handle(handle_nr as u16), Rights::KILL) {
             Ok(HandleObject::Process(id)) => Ok(id),
             Ok(_) => Err(Error::InvalidArgument),
             Err(_) => Err(Error::InvalidArgument),
@@ -852,12 +855,12 @@ fn sys_process_kill(handle_nr: u64) -> Result<u64, Error> {
     Ok(0)
 }
 fn sys_process_set_syscall_filter(handle_nr: u64, mask: u64) -> Result<u64, Error> {
-    if handle_nr > u8::MAX as u64 {
+    if handle_nr > u16::MAX as u64 {
         return Err(Error::InvalidArgument);
     }
 
     let process_id = scheduler::current_process_do(|p| {
-        match p.handles.get(Handle(handle_nr as u8), Rights::WRITE) {
+        match p.handles.get(Handle(handle_nr as u16), Rights::WRITE) {
             Ok(HandleObject::Process(id)) => Ok(id),
             Ok(_) => Err(Error::InvalidArgument),
             Err(_) => Err(Error::InvalidArgument),
@@ -876,12 +879,12 @@ fn sys_process_set_syscall_filter(handle_nr: u64, mask: u64) -> Result<u64, Erro
     .unwrap_or(Err(Error::InvalidArgument))
 }
 fn sys_process_start(handle_nr: u64) -> Result<u64, Error> {
-    if handle_nr > u8::MAX as u64 {
+    if handle_nr > u16::MAX as u64 {
         return Err(Error::InvalidArgument);
     }
 
     let process_id = scheduler::current_process_do(|p| {
-        match p.handles.get(Handle(handle_nr as u8), Rights::WRITE) {
+        match p.handles.get(Handle(handle_nr as u16), Rights::WRITE) {
             Ok(HandleObject::Process(id)) => Ok(id),
             Ok(_) => Err(Error::InvalidArgument),
             Err(_) => Err(Error::InvalidArgument),
@@ -896,12 +899,12 @@ fn sys_process_start(handle_nr: u64) -> Result<u64, Error> {
     }
 }
 fn sys_scheduling_context_bind(handle_nr: u64) -> Result<u64, Error> {
-    if handle_nr > u8::MAX as u64 {
+    if handle_nr > u16::MAX as u64 {
         return Err(Error::InvalidArgument);
     }
 
     let ctx_id = scheduler::current_process_do(|process| {
-        match process.handles.get(Handle(handle_nr as u8), Rights::READ) {
+        match process.handles.get(Handle(handle_nr as u16), Rights::READ) {
             Ok(HandleObject::SchedulingContext(id)) => Ok(id),
             _ => Err(Error::InvalidArgument),
         }
@@ -914,12 +917,12 @@ fn sys_scheduling_context_bind(handle_nr: u64) -> Result<u64, Error> {
     }
 }
 fn sys_scheduling_context_borrow(handle_nr: u64) -> Result<u64, Error> {
-    if handle_nr > u8::MAX as u64 {
+    if handle_nr > u16::MAX as u64 {
         return Err(Error::InvalidArgument);
     }
 
     let ctx_id = scheduler::current_process_do(|process| {
-        match process.handles.get(Handle(handle_nr as u8), Rights::READ) {
+        match process.handles.get(Handle(handle_nr as u16), Rights::READ) {
             Ok(HandleObject::SchedulingContext(id)) => Ok(id),
             _ => Err(Error::InvalidArgument),
         }
@@ -1049,25 +1052,28 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
     if count == 0 || count > MAX_WAIT_HANDLES {
         return dispatch_ok(ctx, Error::InvalidArgument as i64 as u64);
     }
-    // Validate user buffer.
+
+    // Validate user buffer (u16 per handle = 2 bytes each).
+    let byte_len = count * 2;
+
     if handles_ptr >= USER_VA_END {
         return dispatch_ok(ctx, Error::BadAddress as i64 as u64);
     }
-    if let Some(end) = handles_ptr.checked_add(count) {
+    if let Some(end) = handles_ptr.checked_add(byte_len) {
         if end > USER_VA_END {
             return dispatch_ok(ctx, Error::BadAddress as i64 as u64);
         }
     } else {
         return dispatch_ok(ctx, Error::BadAddress as i64 as u64);
     }
-    if !is_user_range_readable(handles_ptr, count) {
+    if !is_user_range_readable(handles_ptr, byte_len) {
         return dispatch_ok(ctx, Error::BadAddress as i64 as u64);
     }
 
-    // Read handle indices from user memory.
+    // Read handle indices from user memory (u16 per handle).
     // SAFETY: TTBR0 is still loaded. Address and length validated above.
-    let handle_bytes =
-        unsafe { core::slice::from_raw_parts(handles_ptr as *const u8, count as usize) };
+    let handle_indices =
+        unsafe { core::slice::from_raw_parts(handles_ptr as *const u16, count as usize) };
     // Resolve handles and populate thread.wait_set in-place (reuses the Vec's
     // backing allocation from previous calls — no heap alloc in steady state).
     // A stack-allocated copy is returned for use outside the scheduler lock.
@@ -1078,7 +1084,7 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
             [None; MAX_WAIT_HANDLES as usize + 1];
         let mut count = 0usize;
 
-        for (i, &h) in handle_bytes.iter().enumerate() {
+        for (i, &h) in handle_indices.iter().enumerate() {
             let obj = process.handles.get(Handle(h), Rights::WAIT)?;
 
             match obj {

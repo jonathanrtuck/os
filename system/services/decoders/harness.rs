@@ -19,8 +19,8 @@ use protocol::decode::{
     DecodeResponse, DecodeStatus, DECODE_FLAG_HEADER_ONLY, MSG_DECODE_RESPONSE,
 };
 
-const INIT_HANDLE: u8 = 0;
-const CORE_HANDLE: u8 = 1;
+const INIT_HANDLE: u16 = 0;
+const CORE_HANDLE: u16 = 1;
 
 /// Run the decoder service event loop. Never returns.
 ///

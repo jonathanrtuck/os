@@ -6,32 +6,32 @@ pub type SyscallResult<T> = Result<T, super::SyscallError>;
 /// Handle to a kernel channel endpoint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(transparent)]
-pub struct ChannelHandle(pub u8);
+pub struct ChannelHandle(pub u16);
 
 /// Handle to a registered hardware interrupt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(transparent)]
-pub struct InterruptHandle(pub u8);
+pub struct InterruptHandle(pub u16);
 
 /// Handle to a child process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(transparent)]
-pub struct ProcessHandle(pub u8);
+pub struct ProcessHandle(pub u16);
 
 /// Handle to a scheduling context.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(transparent)]
-pub struct SchedHandle(pub u8);
+pub struct SchedHandle(pub u16);
 
 /// Handle to a thread.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(transparent)]
-pub struct ThreadHandle(pub u8);
+pub struct ThreadHandle(pub u16);
 
 /// Handle to a one-shot timer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(transparent)]
-pub struct TimerHandle(pub u8);
+pub struct TimerHandle(pub u16);
 
 /// Heap usage statistics.
 #[derive(Clone, Copy, Debug)]

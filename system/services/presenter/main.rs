@@ -441,12 +441,12 @@ impl ViewState {
             rtc_epoch_at_boot: 0,
             boot_counter_at_rtc_read: 0,
             cached_lines: alloc::vec::Vec::new(),
-            input_handle: sys::ChannelHandle(u8::MAX),
-            compositor_handle: sys::ChannelHandle(u8::MAX),
-            editor_handle: sys::ChannelHandle(u8::MAX),
-            docmodel_handle: sys::ChannelHandle(u8::MAX),
-            layout_handle: sys::ChannelHandle(u8::MAX),
-            input2_handle: sys::ChannelHandle(u8::MAX),
+            input_handle: sys::ChannelHandle(u16::MAX),
+            compositor_handle: sys::ChannelHandle(u16::MAX),
+            editor_handle: sys::ChannelHandle(u16::MAX),
+            docmodel_handle: sys::ChannelHandle(u16::MAX),
+            layout_handle: sys::ChannelHandle(u16::MAX),
+            input2_handle: sys::ChannelHandle(u16::MAX),
         }
     }
 }

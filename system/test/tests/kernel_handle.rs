@@ -44,7 +44,7 @@ fn insert_returns_first_free_slot() {
 fn insert_fills_sequentially() {
     let mut t = HandleTable::new();
 
-    for i in 0..4u8 {
+    for i in 0..4u16 {
         let h = t.insert(ch(i as u32), Rights::READ).unwrap();
 
         assert_eq!(h.0, i);
@@ -68,7 +68,7 @@ fn insert_reuses_closed_slot() {
 fn insert_table_full() {
     let mut t = HandleTable::new();
 
-    for i in 0..256u32 {
+    for i in 0..MAX_HANDLES as u32 {
         t.insert(ch(i), Rights::READ).unwrap();
     }
 
@@ -484,7 +484,7 @@ fn move_handle_rollback_on_full_target() {
     let source_handle = source.insert(ch(10), Rights::READ_WRITE).unwrap();
 
     // Fill target table.
-    for i in 0..256u32 {
+    for i in 0..MAX_HANDLES as u32 {
         target.insert(ch(i + 100), Rights::READ).unwrap();
     }
 

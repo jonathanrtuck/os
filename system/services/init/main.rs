@@ -533,8 +533,7 @@ fn parse_device_manifest(next_channel: &mut usize) -> DeviceManifest {
                     mmio_pa: dev_pa,
                     irq: dev_irq,
                     init_handle: 0,
-                    service_handle: 0xFF,
-                    _pad: [0; 2],
+                    service_handle: 0xFFFF,
                 };
                 // SAFETY: DeviceConfig fits within 60-byte payload; msg_type matches the payload type.
                 let msg = unsafe { ipc::Message::from_payload(MSG_DEVICE_CONFIG, &config) };
@@ -659,7 +658,6 @@ fn load_fonts_native(
         content_size: content_capacity,
         init_handle: 0,
         core_handle: 1,
-        _pad3: [0; 2],
     };
     let doc_msg =
         unsafe { ipc::Message::from_payload(protocol::store::MSG_STORE_CONFIG, &doc_config) };
@@ -1024,8 +1022,7 @@ fn load_fonts_9p(
         mmio_pa: p9_pa,
         irq: p9_irq,
         init_handle: 0,
-        service_handle: 0xFF,
-        _pad: [0; 2],
+        service_handle: 0xFFFF,
     };
     // SAFETY: same as DeviceConfig from_payload above.
     let cfg_msg = unsafe { ipc::Message::from_payload(MSG_DEVICE_CONFIG, &dev_config) };
@@ -1396,8 +1393,7 @@ fn configure_render_service(
         mmio_pa: gpu_pa,
         irq: gpu_irq,
         init_handle: 0,
-        service_handle: 0xFF,
-        _pad: [0; 2],
+        service_handle: 0xFFFF,
     };
     // SAFETY: DeviceConfig fits within 60-byte payload; msg_type matches the payload type.
     let msg = unsafe { ipc::Message::from_payload(MSG_DEVICE_CONFIG, &dev_config) };
@@ -1695,8 +1691,7 @@ fn spawn_view_engine(
         editor_handle: 3,
         docmodel_handle: 4,
         layout_handle: 5,
-        input2_handle: if input_device_count > 1 { 6 } else { 0xFF },
-        _pad: [0; 2],
+        input2_handle: if input_device_count > 1 { 6 } else { 0xFFFF },
     };
     // SAFETY: CoreLayoutConfig fits within 60-byte payload.
     let cl_msg = unsafe { ipc::Message::from_payload(MSG_CORE_LAYOUT_CONFIG, &core_layout_config) };
@@ -1850,7 +1845,7 @@ fn spawn_layout_engine(
         content_size: content.content_size,
         layout_results_capacity: mem.layout_results_size as u32,
         core_handle: 1,
-        _pad: [0; 3],
+        _pad: [0; 2],
     };
     let layout_msg =
         // SAFETY: LayoutEngineConfig fits within 60-byte payload.
@@ -1900,7 +1895,6 @@ fn spawn_input_drivers(
         irq: input_irq,
         init_handle: 0,
         service_handle: 1,
-        _pad: [0; 2],
     };
     // SAFETY: same as DeviceConfig from_payload above.
     let msg = unsafe { ipc::Message::from_payload(MSG_DEVICE_CONFIG, &input_config) };
@@ -2128,7 +2122,6 @@ fn wire_service_channels(
                 content_size: 0,
                 init_handle: 0,
                 core_handle: 1,
-                _pad3: [0; 2],
             };
             let doc_msg = unsafe {
                 ipc::Message::from_payload(protocol::store::MSG_STORE_CONFIG, &doc_config)
@@ -2217,7 +2210,6 @@ fn wire_service_channels(
             irq: input_irq,
             init_handle: 0,
             service_handle: 1,
-            _pad: [0; 2],
         };
         // SAFETY: same as DeviceConfig from_payload above.
         let msg = unsafe { ipc::Message::from_payload(MSG_DEVICE_CONFIG, &input_config) };
@@ -2436,7 +2428,7 @@ fn monitor_children(services: &mut [ServiceDescriptor; MAX_SERVICES], service_co
     sys::print(b"  init: monitoring child processes\n");
 
     // Build handle + name arrays from service descriptors.
-    let mut handles: [u8; MAX_SERVICES] = [0; MAX_SERVICES];
+    let mut handles: [u16; MAX_SERVICES] = [0; MAX_SERVICES];
     let mut count = 0usize;
     for i in 0..*service_count {
         if services[i].active {

@@ -38,13 +38,13 @@ fn print_u64(mut n: u64) {
 }
 
 /// Worker thread entry point. Packed arguments in a u64:
-///   bits [7:0]   = wait handle (my receive endpoint)
-///   bits [15:8]  = signal handle (peer's receive endpoint)
-///   bits [63:16] = iteration count
+///   bits [15:0]  = wait handle (my receive endpoint)
+///   bits [31:16] = signal handle (peer's receive endpoint)
+///   bits [63:32] = iteration count
 extern "C" fn worker_entry(args: u64) -> ! {
-    let wait_h = (args & 0xFF) as u8;
-    let signal_h = ((args >> 8) & 0xFF) as u8;
-    let iters = args >> 16;
+    let wait_h = (args & 0xFFFF) as u16;
+    let signal_h = ((args >> 16) & 0xFFFF) as u16;
+    let iters = args >> 32;
 
     for _ in 0..iters {
         // Signal peer, then wait for peer to signal back.
@@ -182,7 +182,7 @@ pub extern "C" fn _start() -> ! {
     // Each pair: endpoint A (even index) and endpoint B (odd index).
     // Worker on side A: wait on A, signal B.
     // Worker on side B: wait on B, signal A.
-    let mut thread_handles: [u8; NUM_PAIRS * 2 + 1 + NUM_CHURN_WORKERS] =
+    let mut thread_handles: [u16; NUM_PAIRS * 2 + 1 + NUM_CHURN_WORKERS] =
         [0; NUM_PAIRS * 2 + 1 + NUM_CHURN_WORKERS];
     let mut thread_count: usize = 0;
 
@@ -195,9 +195,9 @@ pub extern "C" fn _start() -> ! {
             }
         };
 
-        // Pack arguments: wait_handle | (signal_handle << 8) | (iters << 16)
-        let args_a: u64 = ep_a.0 as u64 | ((ep_b.0 as u64) << 8) | (ITERATIONS << 16);
-        let args_b: u64 = ep_b.0 as u64 | ((ep_a.0 as u64) << 8) | (ITERATIONS << 16);
+        // Pack arguments: wait_handle | (signal_handle << 16) | (iters << 32)
+        let args_a: u64 = ep_a.0 as u64 | ((ep_b.0 as u64) << 16) | (ITERATIONS << 32);
+        let args_b: u64 = ep_b.0 as u64 | ((ep_a.0 as u64) << 16) | (ITERATIONS << 32);
 
         let stack_a = alloc_thread_stack();
         let stack_b = alloc_thread_stack();

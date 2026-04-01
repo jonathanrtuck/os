@@ -150,16 +150,16 @@ fn phase_1_invalid_syscall_numbers() {
 // -----------------------------------------------------------------------
 fn phase_2_bad_handles() {
     // Close invalid handles.
-    for h in [0u8, 1, 127, 128, 255] {
+    for h in [0u16, 1, 127, 128, 255] {
         let _ = sys::handle_close(h); // Should return InvalidHandle, not crash.
     }
 
     // Signal invalid handles.
-    for h in [0u8, 1, 127, 128, 255] {
+    for h in [0u16, 1, 127, 128, 255] {
         let _ = sys::channel_signal(sys::ChannelHandle(h));
     }
 
-    // Handle > u8::MAX via raw syscall.
+    // Handle > u16::MAX via raw syscall.
     let ret = unsafe { raw_syscall1(3, 256) } as i64; // handle_close(256)
     if ret >= 0 {
         phase_fail(b"phase 2", b"close(256) should fail");
@@ -275,7 +275,7 @@ fn phase_3_bad_addresses() {
     }
 
     // wait() with count=0.
-    let handles = [0u8];
+    let handles = [0u16];
     let ret = unsafe { raw_syscall3(12, handles.as_ptr() as u64, 0, 0) } as i64;
     if ret >= 0 {
         phase_fail(b"phase 3", b"wait with count=0 should fail");
@@ -391,8 +391,8 @@ fn phase_3_bad_addresses() {
 fn phase_4_handle_exhaustion() {
     // Fill the handle table with channels (each creates 2 handles).
     let mut count: u32 = 0;
-    let mut handles_a: [u8; 128] = [0; 128];
-    let mut handles_b: [u8; 128] = [0; 128];
+    let mut handles_a: [u16; 128] = [0; 128];
+    let mut handles_b: [u16; 128] = [0; 128];
 
     loop {
         match sys::channel_create() {
@@ -491,7 +491,7 @@ fn phase_5_memory_exhaustion() {
 // Phase 6: Timer exhaustion + recovery
 // -----------------------------------------------------------------------
 fn phase_6_timer_exhaustion() {
-    let mut timer_handles: [u8; 128] = [0; 128];
+    let mut timer_handles: [u16; 128] = [0; 128];
     let mut count: usize = 0;
 
     loop {
@@ -770,7 +770,7 @@ extern "C" fn chaos_trampoline() -> ! {
 
 fn phase_10_concurrent_chaos() {
     const NUM_CHAOS_THREADS: usize = 4;
-    let mut thread_handles: [u8; NUM_CHAOS_THREADS] = [0; NUM_CHAOS_THREADS];
+    let mut thread_handles: [u16; NUM_CHAOS_THREADS] = [0; NUM_CHAOS_THREADS];
     let mut spawned: usize = 0;
 
     for i in 0..NUM_CHAOS_THREADS {
@@ -839,7 +839,7 @@ fn phase_11_wait_edge_cases() {
 
     // Wait on 17 handles (over max) — should fail.
     // Can't easily make a 17-element array from the API, use raw syscall.
-    let big_buf = [0u8; 17];
+    let big_buf = [0u16; 17];
     let ret = unsafe { raw_syscall3(12, big_buf.as_ptr() as u64, 17, 0) } as i64;
     let _ = ret;
 
@@ -1020,14 +1020,14 @@ fn phase_17_kill_during_resource_churn() {
 
 extern "C" fn blocker_thread(handle: u64) -> ! {
     // Block on a channel handle (wait for signal that never comes).
-    let h = handle as u8;
+    let h = handle as u16;
     let _ = sys::wait(&[h], 10_000_000); // 10ms timeout as safety net.
     sys::exit();
 }
 
 extern "C" fn closer_thread(handle: u64) -> ! {
     // Close the handle the blocker is waiting on.
-    let h = handle as u8;
+    let h = handle as u16;
     // Small delay to let blocker enter wait.
     sys::yield_now();
     sys::yield_now();
@@ -1196,7 +1196,7 @@ extern "C" fn futex_waker_trampoline() -> ! {
     futex_waker(args);
 }
 
-fn spawn_with_trampoline(trampoline: u64, arg: u64) -> Option<u8> {
+fn spawn_with_trampoline(trampoline: u64, arg: u64) -> Option<u16> {
     let stack = alloc_thread_stack();
     if stack == 0 {
         return None;
@@ -1209,7 +1209,7 @@ fn spawn_with_trampoline(trampoline: u64, arg: u64) -> Option<u8> {
 fn phase_21_futex_race() {
     FUTEX_VAR.store(0, core::sync::atomic::Ordering::Relaxed);
     FUTEX_DONE.store(0, core::sync::atomic::Ordering::Relaxed);
-    let mut handles: [u8; 6] = [0; 6];
+    let mut handles: [u16; 6] = [0; 6];
     let mut count = 0usize;
 
     // 3 waiters + 3 wakers, all hammering the same futex.
@@ -1282,7 +1282,7 @@ fn phase_23_timer_fire_during_setup() {
 // -----------------------------------------------------------------------
 
 extern "C" fn channel_waiter(handle: u64) -> ! {
-    let h = handle as u8;
+    let h = handle as u16;
     let _ = sys::wait(&[h], 50_000_000); // 50ms timeout.
     sys::exit();
 }
@@ -1593,7 +1593,7 @@ fn phase_29_thread_id_recycling() {
 static WAIT_HANDLE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 extern "C" fn wait_on_shared_handle(_: u64) -> ! {
-    let h = WAIT_HANDLE.load(core::sync::atomic::Ordering::Acquire) as u8;
+    let h = WAIT_HANDLE.load(core::sync::atomic::Ordering::Acquire) as u16;
     let _ = sys::wait(&[h], u64::MAX);
     sys::exit();
 }
@@ -1668,7 +1668,7 @@ extern "C" fn channel_churn_trampoline() -> ! {
 }
 
 fn phase_31_concurrent_channel_churn() {
-    let mut handles: [u8; 4] = [0; 4];
+    let mut handles: [u16; 4] = [0; 4];
     let mut count = 0usize;
     for _ in 0..4 {
         if let Some(h) = spawn_with_trampoline(channel_churn_trampoline as u64, 0) {
@@ -1720,7 +1720,7 @@ fn phase_32_interrupt_lifecycle() {
     }
 
     // Register multiple distinct IRQs, then close all.
-    let mut int_handles: [u8; 4] = [0; 4];
+    let mut int_handles: [u16; 4] = [0; 4];
     let mut int_count = 0usize;
     for i in 0..4u32 {
         match sys::interrupt_register(133 + i) {
@@ -1920,7 +1920,7 @@ extern "C" fn sc_thread_trampoline() -> ! {
 }
 
 fn phase_35_concurrent_scheduling_contexts() {
-    let mut handles: [u8; 4] = [0; 4];
+    let mut handles: [u16; 4] = [0; 4];
     let mut count = 0usize;
     for i in 0..4u64 {
         if let Some(h) = spawn_with_trampoline(sc_thread_trampoline as u64, i * 7919 + 1) {
@@ -1978,7 +1978,7 @@ extern "C" fn dma_thread_trampoline() -> ! {
 }
 
 fn phase_36_concurrent_dma() {
-    let mut handles: [u8; 4] = [0; 4];
+    let mut handles: [u16; 4] = [0; 4];
     let mut count = 0usize;
     for i in 0..4u64 {
         if let Some(h) = spawn_with_trampoline(dma_thread_trampoline as u64, i * 6151 + 1) {

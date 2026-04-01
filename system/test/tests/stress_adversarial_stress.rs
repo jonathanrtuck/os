@@ -57,16 +57,20 @@ fn handle_exhaust_close_refill_cycles() {
 
     for cycle in 0..100 {
         let mut handles = Vec::new();
-        for i in 0..256u32 {
-            let h = t.insert(ch(cycle * 256 + i), Rights::READ_WRITE).unwrap();
+        let cap = handle::MAX_HANDLES as u32;
+
+        for i in 0..cap {
+            let h = t.insert(ch(cycle * cap + i), Rights::READ_WRITE).unwrap();
+
             handles.push(h);
         }
 
         // Table is full.
         assert!(
             t.insert(ch(9999), Rights::READ).is_err(),
-            "cycle {}: table must be full at 256",
-            cycle
+            "cycle {}: table must be full at {}",
+            cycle,
+            cap
         );
 
         // Close all.

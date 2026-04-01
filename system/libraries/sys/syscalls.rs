@@ -17,7 +17,7 @@ pub fn channel_create() -> SyscallResult<(ChannelHandle, ChannelHandle)> {
     let raw = unsafe { syscall0(nr::CHANNEL_CREATE) as i64 };
     let val = result(raw)?;
 
-    Ok((ChannelHandle(val as u8), ChannelHandle((val >> 8) as u8)))
+    Ok((ChannelHandle(val as u16), ChannelHandle((val >> 16) as u16)))
 }
 
 /// Signal the peer on a channel (write direction).
@@ -94,7 +94,7 @@ pub fn futex_wake(addr: *const u32, count: u32) -> SyscallResult<u32> {
 }
 
 /// Close a handle, releasing the associated kernel resource.
-pub fn handle_close(handle: u8) -> SyscallResult<()> {
+pub fn handle_close(handle: u16) -> SyscallResult<()> {
     let raw = unsafe { syscall1(nr::HANDLE_CLOSE, handle as u64) as i64 };
 
     result(raw)?;
@@ -113,7 +113,7 @@ pub fn handle_close(handle: u8) -> SyscallResult<()> {
 /// the source handle's rights). Pass 0 to preserve all rights from the source.
 pub fn handle_send(
     target_handle: ProcessHandle,
-    source_handle: u8,
+    source_handle: u16,
     rights_mask: u32,
 ) -> SyscallResult<()> {
     let raw = unsafe {
@@ -149,7 +149,7 @@ pub fn interrupt_ack(handle: InterruptHandle) -> SyscallResult<()> {
 pub fn interrupt_register(irq: u32) -> SyscallResult<InterruptHandle> {
     let raw = unsafe { syscall1(nr::INTERRUPT_REGISTER, irq as u64) as i64 };
 
-    result(raw).map(|v| InterruptHandle(v as u8))
+    result(raw).map(|v| InterruptHandle(v as u16))
 }
 
 /// Allocate anonymous heap memory (demand-paged, zero-filled on first touch).
@@ -212,7 +212,7 @@ pub fn memory_share(
 pub fn process_create(elf_ptr: *const u8, elf_len: usize) -> SyscallResult<ProcessHandle> {
     let raw = unsafe { syscall2(nr::PROCESS_CREATE, elf_ptr as u64, elf_len as u64) as i64 };
 
-    result(raw).map(|v| ProcessHandle(v as u8))
+    result(raw).map(|v| ProcessHandle(v as u16))
 }
 
 /// Kill a process, terminating all its threads.
@@ -277,7 +277,7 @@ pub fn scheduling_context_borrow(handle: SchedHandle) -> SyscallResult<()> {
 pub fn scheduling_context_create(budget: u64, period: u64) -> SyscallResult<SchedHandle> {
     let raw = unsafe { syscall2(nr::SCHEDULING_CONTEXT_CREATE, budget, period) as i64 };
 
-    result(raw).map(|v| SchedHandle(v as u8))
+    result(raw).map(|v| SchedHandle(v as u16))
 }
 
 /// Return a borrowed scheduling context, restoring the saved one.
@@ -296,7 +296,7 @@ pub fn scheduling_context_return() -> SyscallResult<()> {
 pub fn thread_create(entry_va: u64, stack_top: u64) -> SyscallResult<ThreadHandle> {
     let raw = unsafe { syscall2(nr::THREAD_CREATE, entry_va, stack_top) as i64 };
 
-    result(raw).map(|v| ThreadHandle(v as u8))
+    result(raw).map(|v| ThreadHandle(v as u16))
 }
 
 /// Create a one-shot timer that fires after `timeout_ns` nanoseconds.
@@ -305,7 +305,7 @@ pub fn thread_create(entry_va: u64, stack_top: u64) -> SyscallResult<ThreadHandl
 pub fn timer_create(timeout_ns: u64) -> SyscallResult<TimerHandle> {
     let raw = unsafe { syscall1(nr::TIMER_CREATE, timeout_ns) as i64 };
 
-    result(raw).map(|v| TimerHandle(v as u8))
+    result(raw).map(|v| TimerHandle(v as u16))
 }
 
 /// Wait for an event on one or more handles.
@@ -313,7 +313,7 @@ pub fn timer_create(timeout_ns: u64) -> SyscallResult<TimerHandle> {
 /// Blocks until any handle in `handles` has a pending event or the timeout
 /// expires. Returns the index of the first ready handle (0-based).
 /// Timeout of `u64::MAX` waits forever; `0` polls without blocking.
-pub fn wait(handles: &[u8], timeout_ns: u64) -> SyscallResult<usize> {
+pub fn wait(handles: &[u16], timeout_ns: u64) -> SyscallResult<usize> {
     let raw = unsafe {
         syscall3(
             nr::WAIT,

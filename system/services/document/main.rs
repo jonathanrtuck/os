@@ -173,10 +173,10 @@ static mut STATE: DocModelState = DocModelState {
     content_va: 0,
     content_size: 0,
     content_alloc: protocol::content::ContentAllocator::empty(),
-    editor_handle: sys::ChannelHandle(u8::MAX),
-    decoder_handle: sys::ChannelHandle(u8::MAX),
-    fs_handle: sys::ChannelHandle(u8::MAX),
-    core_handle: sys::ChannelHandle(u8::MAX),
+    editor_handle: sys::ChannelHandle(u16::MAX),
+    decoder_handle: sys::ChannelHandle(u16::MAX),
+    fs_handle: sys::ChannelHandle(u16::MAX),
+    core_handle: sys::ChannelHandle(u16::MAX),
 };
 
 fn state() -> &'static mut DocModelState {

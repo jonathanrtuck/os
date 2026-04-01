@@ -1,26 +1,40 @@
-// AUDIT: 2026-03-11 — 0 unsafe blocks (pure safe Rust). 6-category checklist applied.
-// Handle lifecycle verified: create returns first free slot, close clears slot and
-// returns (object, rights), use-after-close returns InvalidHandle, double-close returns
-// InvalidHandle. Table growth: fixed 256 slots, insert returns TableFull when exhausted.
-// Concurrent access: table is per-process, accessed only under scheduler lock — no
-// data race possible. insert_at for rollback semantics verified correct (SlotOccupied
-// on conflict). drain iterator correctly yields all occupied slots and clears table.
-// No bugs found.
+// AUDIT: 2026-04-01 — 0 unsafe blocks (pure safe Rust). Two-level table.
+// Handle lifecycle verified: create returns first free slot (base then overflow),
+// close clears slot and returns (object, rights), use-after-close returns
+// InvalidHandle, double-close returns InvalidHandle. Table growth: base 256 inline
+// + overflow pages on demand (256 entries each, heap-allocated). Max 4096 handles.
+// Concurrent access: table is per-process, accessed only under scheduler lock.
+// insert_at for rollback semantics verified correct (SlotOccupied on conflict).
+// drain iterator correctly yields all occupied slots and clears table.
 
-//! Per-process handle table.
+//! Per-process handle table (two-level).
 //!
-//! Each user process owns a handle table — a fixed-size array of slots.
-//! A handle is an integer index into this table. Each slot holds a reference
-//! to a kernel object (channel endpoint, future: document mapping) plus a
-//! rights bitfield (read, write). The kernel validates handles and rights
-//! on every operation.
+//! Each user process owns a handle table. A handle is a u16 index into this
+//! table. Each slot holds a reference to a kernel object plus a rights
+//! bitfield. The kernel validates handles and rights on every operation.
+//!
+//! The table has two levels:
+//! - **Base** (inline): 256 slots, no allocation. Handles 0-255.
+//! - **Overflow** (heap): additional 256-entry pages allocated on demand.
+//!
+//! This gives O(1) lookup for common cases (handles 0-255) and bounded
+//! growth for compound documents that need many channels.
+
+#[cfg(any(test, not(test)))]
+extern crate alloc;
+
+use alloc::{boxed::Box, vec::Vec};
 
 use super::{
     interrupt::InterruptId, process::ProcessId, scheduling_context::SchedulingContextId,
     thread::ThreadId, timer::TimerId,
 };
 
-const MAX_HANDLES: usize = 256;
+const BASE_SIZE: usize = 256;
+const PAGE_SIZE: usize = 256;
+/// Maximum handles per process. 4096 = 16 pages (base + 15 overflow).
+/// 4096 * 16 bytes/entry = 64 KiB worst case per process.
+pub const MAX_HANDLES: usize = 4096;
 
 // ---------------------------------------------------------------------------
 // ID and value types
@@ -30,7 +44,7 @@ const MAX_HANDLES: usize = 256;
 pub struct ChannelId(pub u32);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Handle(pub u8);
+pub struct Handle(pub u16);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HandleObject {
@@ -97,8 +111,10 @@ pub enum HandleError {
 }
 
 // ---------------------------------------------------------------------------
-// Handle table
+// Handle table (two-level)
 // ---------------------------------------------------------------------------
+
+type OverflowPage = Box<[Option<HandleEntry>; PAGE_SIZE]>;
 
 #[derive(Clone, Copy)]
 struct HandleEntry {
@@ -107,27 +123,89 @@ struct HandleEntry {
 }
 
 pub struct HandleTable {
-    entries: [Option<HandleEntry>; MAX_HANDLES],
+    base: [Option<HandleEntry>; BASE_SIZE],
+    overflow: Vec<OverflowPage>,
 }
 
 impl HandleTable {
     pub const fn new() -> Self {
         Self {
-            entries: [None; MAX_HANDLES],
+            base: [None; BASE_SIZE],
+            overflow: Vec::new(),
+        }
+    }
+
+    /// Total capacity: base + all allocated overflow pages.
+    fn capacity(&self) -> usize {
+        BASE_SIZE + self.overflow.len() * PAGE_SIZE
+    }
+
+    /// Get a reference to the slot at `index`, or None if beyond allocated range.
+    fn slot(&self, index: usize) -> Option<&Option<HandleEntry>> {
+        if index < BASE_SIZE {
+            Some(&self.base[index])
+        } else {
+            let overflow_idx = index - BASE_SIZE;
+            let page = overflow_idx / PAGE_SIZE;
+            let offset = overflow_idx % PAGE_SIZE;
+
+            self.overflow.get(page).map(|p| &p[offset])
+        }
+    }
+
+    /// Get a mutable reference to the slot at `index`, or None if beyond allocated range.
+    fn slot_mut(&mut self, index: usize) -> Option<&mut Option<HandleEntry>> {
+        if index < BASE_SIZE {
+            Some(&mut self.base[index])
+        } else {
+            let overflow_idx = index - BASE_SIZE;
+            let page = overflow_idx / PAGE_SIZE;
+            let offset = overflow_idx % PAGE_SIZE;
+
+            self.overflow.get_mut(page).map(|p| &mut p[offset])
         }
     }
 
     /// Insert a new handle. Returns the handle index, or TableFull.
     pub fn insert(&mut self, object: HandleObject, rights: Rights) -> Result<Handle, HandleError> {
-        for (i, slot) in self.entries.iter_mut().enumerate() {
+        // Scan base for free slot.
+        for (i, slot) in self.base.iter_mut().enumerate() {
             if slot.is_none() {
                 *slot = Some(HandleEntry { object, rights });
 
-                return Ok(Handle(i as u8));
+                return Ok(Handle(i as u16));
             }
         }
 
-        Err(HandleError::TableFull)
+        // Scan existing overflow pages.
+        for (page_idx, page) in self.overflow.iter_mut().enumerate() {
+            for (offset, slot) in page.iter_mut().enumerate() {
+                if slot.is_none() {
+                    *slot = Some(HandleEntry { object, rights });
+
+                    let index = BASE_SIZE + page_idx * PAGE_SIZE + offset;
+
+                    return Ok(Handle(index as u16));
+                }
+            }
+        }
+
+        // All existing pages full — allocate a new overflow page if within limit.
+        let new_capacity = self.capacity() + PAGE_SIZE;
+
+        if new_capacity > MAX_HANDLES {
+            return Err(HandleError::TableFull);
+        }
+
+        let mut page = Box::new([None; PAGE_SIZE]);
+
+        page[0] = Some(HandleEntry { object, rights });
+
+        let index = BASE_SIZE + self.overflow.len() * PAGE_SIZE;
+
+        self.overflow.push(page);
+
+        Ok(Handle(index as u16))
     }
 
     /// Insert at a specific slot. The slot must be empty. Used for rollback
@@ -139,7 +217,22 @@ impl HandleTable {
         object: HandleObject,
         rights: Rights,
     ) -> Result<(), HandleError> {
-        let slot = &mut self.entries[handle.0 as usize];
+        let index = handle.0 as usize;
+
+        // Ensure overflow pages exist up to the required index.
+        if index >= BASE_SIZE {
+            let required_page = (index - BASE_SIZE) / PAGE_SIZE;
+
+            while self.overflow.len() <= required_page {
+                if self.capacity() + PAGE_SIZE > MAX_HANDLES {
+                    return Err(HandleError::TableFull);
+                }
+
+                self.overflow.push(Box::new([None; PAGE_SIZE]));
+            }
+        }
+
+        let slot = self.slot_mut(index).ok_or(HandleError::InvalidHandle)?;
 
         if slot.is_some() {
             return Err(HandleError::SlotOccupied);
@@ -152,8 +245,9 @@ impl HandleTable {
 
     /// Look up a handle and verify it has the required rights.
     pub fn get(&self, handle: Handle, required: Rights) -> Result<HandleObject, HandleError> {
-        let entry = self.entries[handle.0 as usize]
-            .as_ref()
+        let entry = self
+            .slot(handle.0 as usize)
+            .and_then(|s| s.as_ref())
             .ok_or(HandleError::InvalidHandle)?;
 
         if !entry.rights.contains(required) {
@@ -163,15 +257,16 @@ impl HandleTable {
         Ok(entry.object)
     }
 
-    /// Look up a handle, verify rights, and return both the object and its rights (used by test crate).
-    #[allow(dead_code)]
+    /// Look up a handle, verify rights, and return both the object and its rights.
+    #[allow(dead_code)] // used by test crate and handle_send
     pub fn get_entry(
         &self,
         handle: Handle,
         required: Rights,
     ) -> Result<(HandleObject, Rights), HandleError> {
-        let entry = self.entries[handle.0 as usize]
-            .as_ref()
+        let entry = self
+            .slot(handle.0 as usize)
+            .and_then(|s| s.as_ref())
             .ok_or(HandleError::InvalidHandle)?;
 
         if !entry.rights.contains(required) {
@@ -183,7 +278,9 @@ impl HandleTable {
 
     /// Close a handle (clear the slot). Returns the object and rights that were there.
     pub fn close(&mut self, handle: Handle) -> Result<(HandleObject, Rights), HandleError> {
-        let slot = &mut self.entries[handle.0 as usize];
+        let slot = self
+            .slot_mut(handle.0 as usize)
+            .ok_or(HandleError::InvalidHandle)?;
         let entry = slot.ok_or(HandleError::InvalidHandle)?;
         let result = (entry.object, entry.rights);
 
@@ -214,13 +311,17 @@ impl Iterator for DrainHandles<'_> {
     type Item = (HandleObject, Rights);
 
     fn next(&mut self) -> Option<Self::Item> {
-        while self.index < MAX_HANDLES {
+        let total = self.table.capacity();
+
+        while self.index < total {
             let i = self.index;
 
             self.index += 1;
 
-            if let Some(entry) = self.table.entries[i].take() {
-                return Some((entry.object, entry.rights));
+            if let Some(slot) = self.table.slot_mut(i) {
+                if let Some(entry) = slot.take() {
+                    return Some((entry.object, entry.rights));
+                }
             }
         }
 

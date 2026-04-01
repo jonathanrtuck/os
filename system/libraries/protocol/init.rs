@@ -166,14 +166,15 @@ pub struct DocConfig {
     /// Byte length of the encoded image in the File Store.
     pub img_file_store_length: u32,
     /// Kernel channel handle for the editor channel.
-    pub editor_handle: u8,
+    pub editor_handle: u16,
     /// Kernel channel handle for the decoder channel.
-    pub decoder_handle: u8,
+    pub decoder_handle: u16,
     /// Kernel channel handle for the document service (filesystem) channel.
-    pub fs_handle: u8,
+    pub fs_handle: u16,
     /// Kernel channel handle for the core (presenter) channel.
-    pub core_handle: u8,
+    pub core_handle: u16,
 }
+
 const _: () = assert!(core::mem::size_of::<DocConfig>() <= 60);
 
 // ── Legacy 9P filesystem (init ↔ virtio-9p driver) ──────────────────

@@ -281,7 +281,7 @@ fn test_handle_send_rollback_handle_insert_fails_buggy_leaks() {
     // because the target handle table is full.
     let mut target_handles = HandleTable::new();
     // Fill the target handle table.
-    for i in 0..256u32 {
+    for i in 0..handle::MAX_HANDLES as u32 {
         target_handles
             .insert(HandleObject::Channel(ChannelId(i + 100)), Rights::READ)
             .expect("fill target handles");
@@ -319,7 +319,7 @@ fn test_handle_send_rollback_handle_insert_fails_buggy_leaks() {
 fn test_handle_send_rollback_handle_insert_fails_fixed_cleans_up() {
     // Same scenario with the fix: both pages are unmapped on insert failure.
     let mut target_handles = HandleTable::new();
-    for i in 0..256u32 {
+    for i in 0..handle::MAX_HANDLES as u32 {
         target_handles
             .insert(HandleObject::Channel(ChannelId(i + 100)), Rights::READ)
             .expect("fill target handles");

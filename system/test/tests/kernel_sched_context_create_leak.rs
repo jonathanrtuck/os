@@ -139,9 +139,9 @@ fn sys_scheduling_context_create_model(
 // Helper: fill the handle table to capacity
 // ==========================================================================
 
-/// Fill all 256 handle table slots with dummy channel handles.
+/// Fill all handle table slots with dummy channel handles.
 fn fill_handle_table(handles: &mut HandleTable) {
-    for i in 0..256u32 {
+    for i in 0..handle::MAX_HANDLES as u32 {
         handles
             .insert(HandleObject::Channel(ChannelId(i)), Rights::READ)
             .expect("should be able to fill handle table");

@@ -270,7 +270,7 @@ impl LayoutEngineState {
             layout_results_capacity: 0,
             viewport_state_va: 0,
             generation: 0,
-            core_handle: sys::ChannelHandle(u8::MAX),
+            core_handle: sys::ChannelHandle(u16::MAX),
             fonts: FontState::new(),
         }
     }
@@ -1183,9 +1183,9 @@ fn write_layout_results(
         let vr = VisibleRun {
             glyph_data_offset: glyph_cursor,
             glyph_count: glyphs.len() as u16,
-            font_size: 0, // mono: font_size comes from viewport state
+            font_size: 0,     // mono: font_size comes from viewport state
             y_mpt: *y * 1024, // plain text: y is in points, convert to mpt
-            style_id: 0, // mono style
+            style_id: 0,      // mono style
             color_rgba: text_color_rgba,
             byte_offset: bo,
             byte_length: bl,

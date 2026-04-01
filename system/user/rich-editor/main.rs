@@ -121,8 +121,8 @@ pub extern "C" fn _start() -> ! {
     // Handle 2: Document-model (A) — sends write operations.
     let docmodel_ch = unsafe { ipc::Channel::from_base(channel_shm_va(2), ipc::PAGE_SIZE, 1) };
 
-    const OS_HANDLE: u8 = 1;
-    const DOCMODEL_HANDLE: u8 = 2;
+    const OS_HANDLE: u16 = 1;
+    const DOCMODEL_HANDLE: u16 = 2;
 
     // Editor-local cursor position (byte offset in document).
     // Synced from core via MSG_SET_CURSOR.

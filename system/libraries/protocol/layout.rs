@@ -32,8 +32,8 @@ pub struct LayoutEngineConfig {
     /// Layout results region capacity in bytes.
     pub layout_results_capacity: u32,
     /// Kernel channel handle for the core (presenter) channel.
-    pub core_handle: u8,
-    pub _pad: [u8; 3],
+    pub core_handle: u16,
+    pub _pad: [u8; 2],
 }
 
 const _: () = assert!(core::mem::size_of::<LayoutEngineConfig>() <= 60);
@@ -53,19 +53,18 @@ pub struct CoreLayoutConfig {
     /// VA of the viewport state register (read-write for C).
     pub viewport_state_va: u64,
     /// Kernel channel handle for the input driver channel.
-    pub input_handle: u8,
+    pub input_handle: u16,
     /// Kernel channel handle for the compositor (render service) channel.
-    pub compositor_handle: u8,
-    /// Kernel channel handle for the editor channel.
-    pub editor_handle: u8,
-    /// Kernel channel handle for the document channel.
-    pub docmodel_handle: u8,
+    pub compositor_handle: u16,
     /// Kernel channel handle for the layout engine channel.
-    pub layout_handle: u8,
+    pub layout_handle: u16,
+    /// Kernel channel handle for the editor channel.
+    pub editor_handle: u16,
+    /// Kernel channel handle for the document channel.
+    pub docmodel_handle: u16,
     /// Kernel channel handle for the second input device (tablet).
-    /// 0xFF if no second input device is present.
-    pub input2_handle: u8,
-    pub _pad: [u8; 2],
+    /// 0xFFFF if no second input device is present.
+    pub input2_handle: u16,
 }
 
 const _: () = assert!(core::mem::size_of::<CoreLayoutConfig>() <= 60);

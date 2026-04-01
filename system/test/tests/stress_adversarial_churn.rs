@@ -1120,7 +1120,7 @@ fn churn_handle_all_types_insert_close_100_cycles() {
         }
 
         // Verify all gone.
-        for i in 0..6u8 {
+        for i in 0..6u16 {
             assert!(matches!(
                 t.get(Handle(i), Rights::READ),
                 Err(HandleError::InvalidHandle)
@@ -1129,16 +1129,17 @@ fn churn_handle_all_types_insert_close_100_cycles() {
     }
 }
 
-/// Handle table churn: fill all 256 slots, close all, refill — 5 rounds.
+/// Handle table churn: fill all slots, close all, refill — 5 rounds.
 #[test]
 fn churn_handle_fill_drain_refill_5_rounds() {
     let mut t = HandleTable::new();
+    let capacity = handle::MAX_HANDLES;
 
     for round in 0..5u32 {
         // Fill all slots.
-        for i in 0..256u32 {
+        for i in 0..capacity as u32 {
             t.insert(
-                HandleObject::Channel(ChannelId(round * 1000 + i)),
+                HandleObject::Channel(ChannelId(round * 10000 + i)),
                 Rights::READ_WRITE,
             )
             .expect("insert should succeed");
@@ -1146,7 +1147,7 @@ fn churn_handle_fill_drain_refill_5_rounds() {
 
         // Table full.
         assert!(matches!(
-            t.insert(HandleObject::Channel(ChannelId(9999)), Rights::READ),
+            t.insert(HandleObject::Channel(ChannelId(9_999_999)), Rights::READ),
             Err(HandleError::TableFull)
         ));
 
@@ -1154,12 +1155,12 @@ fn churn_handle_fill_drain_refill_5_rounds() {
         let drained: Vec<_> = t.drain().collect();
         assert_eq!(
             drained.len(),
-            256,
-            "round {round}: drain should yield 256 entries"
+            capacity,
+            "round {round}: drain should yield {capacity} entries"
         );
 
-        // Verify all slots empty.
-        for i in 0..=255u8 {
+        // Verify first 256 slots empty (spot check).
+        for i in 0..=255u16 {
             assert!(matches!(
                 t.get(Handle(i), Rights::READ),
                 Err(HandleError::InvalidHandle)
@@ -1193,7 +1194,7 @@ fn churn_handle_interleaved_insert_close() {
     }
 
     // Verify completely empty.
-    for i in 0..=255u8 {
+    for i in 0..=255u16 {
         assert!(matches!(
             t.get(Handle(i), Rights::READ),
             Err(HandleError::InvalidHandle)

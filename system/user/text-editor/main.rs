@@ -103,7 +103,7 @@ pub extern "C" fn _start() -> ! {
     // SHM slot 1, endpoint 1: we receive input events, send write requests.
     let os_ch = unsafe { ipc::Channel::from_base(channel_shm_va(1), ipc::PAGE_SIZE, 1) };
 
-    const OS_HANDLE: u8 = 1;
+    const OS_HANDLE: u16 = 1;
 
     // Editor-local cursor position (byte offset in document).
     // Synced from core via MSG_SET_CURSOR.

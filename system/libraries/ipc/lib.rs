@@ -149,15 +149,6 @@ impl Channel {
         self.send.init();
         self.recv.init();
     }
-    /// Send a message on this channel. Returns `true` if sent.
-    pub fn send(&self, msg: &Message) -> bool {
-        self.send.send(msg)
-    }
-    /// Try to receive a message. Returns `true` if a message was read.
-    pub fn try_recv(&self, out: &mut Message) -> bool {
-        self.recv.try_recv(out)
-    }
-
     /// Block until a message arrives on this channel.
     ///
     /// Loops `sys::wait` + `try_recv` to handle spurious wakeups correctly.
@@ -168,7 +159,7 @@ impl Channel {
     /// a single `wait` + `try_recv` — signals are level-triggered booleans,
     /// not message counters, and can arrive before the wait call.
     #[cfg(target_os = "none")]
-    pub fn recv_blocking(&self, handle: u8, out: &mut Message) -> bool {
+    pub fn recv_blocking(&self, handle: u16, out: &mut Message) -> bool {
         loop {
             if self.try_recv(out) {
                 return true;
@@ -177,6 +168,14 @@ impl Channel {
                 return false;
             }
         }
+    }
+    /// Send a message on this channel. Returns `true` if sent.
+    pub fn send(&self, msg: &Message) -> bool {
+        self.send.send(msg)
+    }
+    /// Try to receive a message. Returns `true` if a message was read.
+    pub fn try_recv(&self, out: &mut Message) -> bool {
+        self.recv.try_recv(out)
     }
 }
 
