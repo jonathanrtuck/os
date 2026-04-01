@@ -51,9 +51,18 @@ const PAGE_SIZE: usize = system_config::PAGE_SIZE as usize;
 static HEAP: heap::UserHeap = heap::UserHeap::new();
 
 // ---------------------------------------------------------------------------
-// Panic handler — exits the process instead of spinning.
+// Panic handler — prints location and exits.
 // ---------------------------------------------------------------------------
 #[panic_handler]
-fn panic(_: &core::panic::PanicInfo) -> ! {
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    print(b"PANIC: ");
+    if let Some(loc) = info.location() {
+        print(loc.file().as_bytes());
+        print(b":");
+        print_u32(loc.line());
+    } else {
+        print(b"(no location)");
+    }
+    print(b"\n");
     exit()
 }

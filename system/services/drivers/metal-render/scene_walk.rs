@@ -15,6 +15,7 @@ use crate::{
     dma::DmaBuf,
     path::{draw_path_stencil_cover, parse_path_to_points, PathPointsBuf},
     round_font_size,
+    stroke_cache::StrokeCache,
     virtio_helpers::send_setup,
     DSS_CLIP_TEST, DSS_NONE, DSS_STENCIL_WRITE, IMG_TEX_DIM, MAX_INLINE_BYTES, PIPE_GLYPH,
     PIPE_ROUNDED_RECT, PIPE_SHADOW, PIPE_SOLID, PIPE_SOLID_NO_MSAA, PIPE_STENCIL_WRITE,
@@ -39,6 +40,7 @@ pub(crate) const MAX_BLURS: usize = 4;
 
 pub(crate) struct RenderContext<'a> {
     pub(crate) cmdbuf: &'a mut metal::CommandBuffer,
+    pub(crate) setup_cmdbuf: &'a mut metal::CommandBuffer,
     pub(crate) solid_verts: &'a mut Vec<u8>,
     pub(crate) glyph_verts: &'a mut Vec<u8>,
     pub(crate) atlas: &'a GlyphAtlas,
@@ -52,6 +54,16 @@ pub(crate) struct RenderContext<'a> {
     pub(crate) path_buf: &'a mut PathPointsBuf,
     pub(crate) image_atlas: &'a mut ImageAtlas,
     pub(crate) content_region: &'a [u8],
+    /// Scratch buffer for immediate-mode vertex draws (rounded rects,
+    /// transformed quads, clip fans). Reused across nodes — clear before
+    /// each use. Avoids per-node heap allocations in the render loop.
+    pub(crate) scratch_verts: &'a mut Vec<u8>,
+    /// Reusable buffer for stencil fan triangle vertices. Cleared and
+    /// refilled per path — avoids per-path heap allocation in the render loop.
+    pub(crate) fan_verts: &'a mut Vec<u8>,
+    /// Stroke expansion cache: memoizes expand_stroke results by content hash.
+    /// Eliminates per-frame stroke expansion for unchanged paths.
+    pub(crate) stroke_cache: &'a mut StrokeCache,
     pub(crate) vw: f32,
     pub(crate) vh: f32,
     pub(crate) scale: f32,
@@ -109,6 +121,23 @@ pub(crate) fn walk_scene(
     let vw = ctx.vw;
     let vh = ctx.vh;
     let scale = ctx.scale;
+
+    // Viewport culling: skip nodes entirely outside the current clip rect.
+    // This avoids generating Metal commands for off-screen content (e.g.,
+    // the off-screen document space during a Ctrl+Tab slide animation).
+    if w > 0.0 && h > 0.0 {
+        let node_right = abs_x + w;
+        let node_bottom = abs_y + h;
+        let clip_right = clip.x + clip.w;
+        let clip_bottom = clip.y + clip.h;
+        if abs_x >= clip_right
+            || node_right <= clip.x
+            || abs_y >= clip_bottom
+            || node_bottom <= clip.y
+        {
+            return;
+        }
+    }
 
     // Collect backdrop blur request (processed after initial render pass).
     let is_blur_node = node.backdrop_blur_radius > 0;
@@ -238,9 +267,9 @@ pub(crate) fn walk_scene(
                 pack_rounded_rect_params(half_w_px, half_h_px, radius_px, bw_px, br, bg_b, bb, ba);
             ctx.cmdbuf.set_render_pipeline(PIPE_ROUNDED_RECT);
             ctx.cmdbuf.set_fragment_bytes(0, &params);
-            let mut rrect_verts: Vec<u8> = Vec::with_capacity(6 * VERTEX_BYTES);
+            ctx.scratch_verts.clear();
             emit_transformed_rounded_rect_quad(
-                &mut rrect_verts,
+                ctx.scratch_verts,
                 node_origin_x,
                 node_origin_y,
                 w,
@@ -254,15 +283,15 @@ pub(crate) fn walk_scene(
                 b,
                 a,
             );
-            ctx.cmdbuf.set_vertex_bytes(0, &rrect_verts);
+            ctx.cmdbuf.set_vertex_bytes(0, ctx.scratch_verts);
             ctx.cmdbuf.draw_primitives(metal::PRIM_TRIANGLE, 0, 6);
             ctx.cmdbuf.set_render_pipeline(PIPE_SOLID);
         } else if has_nontrivial_transform {
             // Transformed solid quad (no corner rounding, no border).
             flush_solid_vertices(ctx.cmdbuf, ctx.solid_verts);
-            let mut xf_verts: Vec<u8> = Vec::with_capacity(6 * VERTEX_BYTES);
+            ctx.scratch_verts.clear();
             emit_transformed_quad(
-                &mut xf_verts,
+                ctx.scratch_verts,
                 node_origin_x,
                 node_origin_y,
                 w,
@@ -276,7 +305,7 @@ pub(crate) fn walk_scene(
                 b,
                 a,
             );
-            ctx.cmdbuf.set_vertex_bytes(0, &xf_verts);
+            ctx.cmdbuf.set_vertex_bytes(0, ctx.scratch_verts);
             ctx.cmdbuf.draw_primitives(metal::PRIM_TRIANGLE, 0, 6);
         } else if corner_r > 0 || has_border {
             // SDF rounded rect: flush pending solid verts, switch pipeline,
@@ -301,9 +330,9 @@ pub(crate) fn walk_scene(
                 pack_rounded_rect_params(half_w_px, half_h_px, radius_px, bw_px, br, bg_b, bb, ba);
             ctx.cmdbuf.set_render_pipeline(PIPE_ROUNDED_RECT);
             ctx.cmdbuf.set_fragment_bytes(0, &params);
-            let mut rrect_verts: Vec<u8> = Vec::with_capacity(6 * VERTEX_BYTES);
+            ctx.scratch_verts.clear();
             emit_rounded_rect_quad(
-                &mut rrect_verts,
+                ctx.scratch_verts,
                 abs_x,
                 abs_y,
                 w,
@@ -316,7 +345,7 @@ pub(crate) fn walk_scene(
                 b,
                 a,
             );
-            ctx.cmdbuf.set_vertex_bytes(0, &rrect_verts);
+            ctx.cmdbuf.set_vertex_bytes(0, ctx.scratch_verts);
             ctx.cmdbuf.draw_primitives(metal::PRIM_TRIANGLE, 0, 6);
             ctx.cmdbuf.set_render_pipeline(PIPE_SOLID);
         } else {
@@ -358,10 +387,10 @@ pub(crate) fn walk_scene(
         );
         ctx.cmdbuf.set_render_pipeline(PIPE_ROUNDED_RECT);
         ctx.cmdbuf.set_fragment_bytes(0, &params);
-        let mut rrect_verts: Vec<u8> = Vec::with_capacity(6 * VERTEX_BYTES);
+        ctx.scratch_verts.clear();
         if has_nontrivial_transform {
             emit_transformed_rounded_rect_quad(
-                &mut rrect_verts,
+                ctx.scratch_verts,
                 node_origin_x,
                 node_origin_y,
                 w,
@@ -377,7 +406,7 @@ pub(crate) fn walk_scene(
             );
         } else {
             emit_rounded_rect_quad(
-                &mut rrect_verts,
+                ctx.scratch_verts,
                 abs_x,
                 abs_y,
                 w,
@@ -391,7 +420,7 @@ pub(crate) fn walk_scene(
                 0.0,
             );
         }
-        ctx.cmdbuf.set_vertex_bytes(0, &rrect_verts);
+        ctx.cmdbuf.set_vertex_bytes(0, ctx.scratch_verts);
         ctx.cmdbuf.draw_primitives(metal::PRIM_TRIANGLE, 0, 6);
         ctx.cmdbuf.set_render_pipeline(PIPE_SOLID);
     }
@@ -513,16 +542,23 @@ pub(crate) fn walk_scene(
                         scale,
                         opacity,
                         ctx.path_buf,
+                        ctx.fan_verts,
                     );
                 }
                 // Stroke pass: expand and render stroked outline on top.
+                // Uses the stroke cache to avoid re-expanding unchanged paths.
                 if stroke_width > 0 && stroke_color.a > 0 {
                     let offset = contours.offset as usize;
                     let end = offset + contours.length as usize;
                     if end <= data_buf.len() {
                         let src = &data_buf[offset..end];
                         let sw_pt = stroke_width as f32 / 256.0;
-                        let expanded = scene::stroke::expand_stroke(src, sw_pt);
+                        let expanded = ctx.stroke_cache.get_or_expand(
+                            node.content_hash,
+                            stroke_width,
+                            src,
+                            sw_pt,
+                        );
                         if !expanded.is_empty() {
                             let exp_ref = scene::DataRef {
                                 offset: 0,
@@ -531,7 +567,7 @@ pub(crate) fn walk_scene(
                             draw_path_stencil_cover(
                                 ctx.cmdbuf,
                                 ctx.solid_verts,
-                                &expanded,
+                                expanded,
                                 exp_ref,
                                 stroke_color,
                                 scene::FillRule::Winding,
@@ -544,6 +580,7 @@ pub(crate) fn walk_scene(
                                 scale,
                                 opacity,
                                 ctx.path_buf,
+                                ctx.fan_verts,
                             );
                         }
                     }
@@ -569,8 +606,8 @@ pub(crate) fn walk_scene(
                     flush_solid_vertices(ctx.cmdbuf, ctx.solid_verts);
 
                     // Upload to the image's sub-rectangle in the atlas.
-                    let mut setup_cmdbuf = metal::CommandBuffer::new();
-                    setup_cmdbuf.upload_texture(
+                    ctx.setup_cmdbuf.clear();
+                    ctx.setup_cmdbuf.upload_texture(
                         TEX_IMAGE,
                         atlas_x as u16,
                         atlas_y as u16,
@@ -584,7 +621,7 @@ pub(crate) fn walk_scene(
                         ctx.setup_vq,
                         ctx.irq_handle,
                         ctx.setup_dma,
-                        &setup_cmdbuf,
+                        ctx.setup_cmdbuf,
                     );
 
                     // UV coordinates into this image's atlas sub-rectangle.
@@ -643,8 +680,8 @@ pub(crate) fn walk_scene(
                         {
                             flush_solid_vertices(ctx.cmdbuf, ctx.solid_verts);
 
-                            let mut setup_cmdbuf = metal::CommandBuffer::new();
-                            setup_cmdbuf.upload_texture(
+                            ctx.setup_cmdbuf.clear();
+                            ctx.setup_cmdbuf.upload_texture(
                                 TEX_IMAGE,
                                 atlas_x as u16,
                                 atlas_y as u16,
@@ -658,7 +695,7 @@ pub(crate) fn walk_scene(
                                 ctx.setup_vq,
                                 ctx.irq_handle,
                                 ctx.setup_dma,
-                                &setup_cmdbuf,
+                                ctx.setup_cmdbuf,
                             );
 
                             let u0 = atlas_x as f32 / IMG_TEX_DIM as f32;
@@ -733,7 +770,7 @@ pub(crate) fn walk_scene(
 
                 if n_pts >= 3 {
                     // Build fan triangles for the clip path.
-                    let mut fan_verts: Vec<u8> = Vec::with_capacity(n_pts * 3 * VERTEX_BYTES);
+                    ctx.scratch_verts.clear();
                     let mut cx_sum: f32 = 0.0;
                     let mut cy_sum: f32 = 0.0;
                     for i in 0..n_pts {
@@ -749,14 +786,15 @@ pub(crate) fn walk_scene(
                         for &(px, py) in &[(centroid_x, centroid_y), (bx, by), (ax, ay)] {
                             let ndc_x = ((abs_x + px) * scale / vw) * 2.0 - 1.0;
                             let ndc_y = 1.0 - ((abs_y + py) * scale / vh) * 2.0;
-                            fan_verts.extend_from_slice(&ndc_x.to_le_bytes());
-                            fan_verts.extend_from_slice(&ndc_y.to_le_bytes());
-                            fan_verts.extend_from_slice(&0.0f32.to_le_bytes());
-                            fan_verts.extend_from_slice(&0.0f32.to_le_bytes());
-                            fan_verts.extend_from_slice(&0.0f32.to_le_bytes());
-                            fan_verts.extend_from_slice(&0.0f32.to_le_bytes());
-                            fan_verts.extend_from_slice(&0.0f32.to_le_bytes());
-                            fan_verts.extend_from_slice(&1.0f32.to_le_bytes()); // a=1 (non-zero)
+                            ctx.scratch_verts.extend_from_slice(&ndc_x.to_le_bytes());
+                            ctx.scratch_verts.extend_from_slice(&ndc_y.to_le_bytes());
+                            ctx.scratch_verts.extend_from_slice(&0.0f32.to_le_bytes());
+                            ctx.scratch_verts.extend_from_slice(&0.0f32.to_le_bytes());
+                            ctx.scratch_verts.extend_from_slice(&0.0f32.to_le_bytes());
+                            ctx.scratch_verts.extend_from_slice(&0.0f32.to_le_bytes());
+                            ctx.scratch_verts.extend_from_slice(&0.0f32.to_le_bytes());
+                            ctx.scratch_verts.extend_from_slice(&1.0f32.to_le_bytes());
+                            // a=1 (non-zero)
                         }
                     }
 
@@ -765,9 +803,10 @@ pub(crate) fn walk_scene(
                     ctx.cmdbuf.set_depth_stencil_state(DSS_STENCIL_WRITE);
                     ctx.cmdbuf.set_stencil_ref(1);
                     let mut sent = 0;
-                    while sent < fan_verts.len() {
-                        let chunk_end = core::cmp::min(sent + MAX_INLINE_BYTES, fan_verts.len());
-                        let chunk = &fan_verts[sent..chunk_end];
+                    while sent < ctx.scratch_verts.len() {
+                        let chunk_end =
+                            core::cmp::min(sent + MAX_INLINE_BYTES, ctx.scratch_verts.len());
+                        let chunk = &ctx.scratch_verts[sent..chunk_end];
                         let vc = chunk.len() / VERTEX_BYTES;
                         ctx.cmdbuf.set_vertex_bytes(0, chunk);
                         ctx.cmdbuf

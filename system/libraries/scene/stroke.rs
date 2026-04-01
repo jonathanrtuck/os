@@ -532,22 +532,30 @@ fn right_end(segs: &[Seg], normals: &[Pt], i: usize, hw: f32) -> Pt {
 /// Returns new path command bytes representing the filled outline of the stroke.
 /// Uses the winding fill rule (outer CCW, inner CW for CCW-wound input).
 pub fn expand_stroke(data: &[u8], stroke_width: f32) -> Vec<u8> {
+    let mut out = Vec::new();
+    expand_stroke_into(data, stroke_width, &mut out);
+    out
+}
+
+/// Expand a stroked path into filled path commands, writing into a
+/// caller-provided buffer. Clears `out` before writing. The buffer
+/// retains its capacity across calls, eliminating allocation in
+/// steady state (e.g., when reused by a stroke cache).
+pub fn expand_stroke_into(data: &[u8], stroke_width: f32, out: &mut Vec<u8>) {
+    out.clear();
     if data.is_empty() || stroke_width <= 0.0 {
-        return Vec::new();
+        return;
     }
 
     let half_w = stroke_width * 0.5;
     let subpaths = parse_subpaths(data);
-    let mut out = Vec::new();
 
     for sp in &subpaths {
         if sp.segments.is_empty() {
             continue;
         }
-        expand_subpath(&mut out, &sp.segments, sp.closed, half_w);
+        expand_subpath(out, &sp.segments, sp.closed, half_w);
     }
-
-    out
 }
 
 /// Expand a single sub-path (open or closed) into filled stroke geometry.

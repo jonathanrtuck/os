@@ -242,6 +242,7 @@ pub(crate) fn draw_path_stencil_cover(
     scale: f32,
     opacity: f32,
     path_buf: &mut PathPointsBuf,
+    fan_verts: &mut Vec<u8>,
 ) {
     let offset = contours.offset as usize;
     let end = offset + contours.length as usize;
@@ -263,7 +264,7 @@ pub(crate) fn draw_path_stencil_cover(
     // produces correct stencil winding for any polygon — convex, concave, or
     // multi-contour. This is the standard GPU path fill algorithm.
     let n = parsed.n;
-    let mut fan_verts: Vec<u8> = Vec::with_capacity(n * 3 * VERTEX_BYTES);
+    fan_verts.clear();
     let to_ndc_x = |px: f32| -> f32 { ((node_x + px) * scale / vw) * 2.0 - 1.0 };
     let to_ndc_y = |py: f32| -> f32 { 1.0 - ((node_y + py) * scale / vh) * 2.0 };
 

@@ -40,6 +40,8 @@ mod pipeline;
 mod scene_walk;
 #[path = "shaders.rs"]
 mod shaders;
+#[path = "stroke_cache.rs"]
+mod stroke_cache;
 #[path = "virtio_helpers.rs"]
 mod virtio_helpers;
 
@@ -49,7 +51,7 @@ use path::PathPointsBuf;
 use render::geometry::{
     emit_quad, pack_blur_params, pack_copy_params, scale_pointer_coord, ClipRect, ImageAtlas,
 };
-use scene_walk::{flush_solid_vertices, flush_vertices_raw, BlurReq, RenderContext};
+use scene_walk::{flush_solid_vertices, flush_vertices_raw, BlurReq, RenderContext, MAX_BLURS};
 use virtio_helpers::{send_render, send_setup};
 
 // ── Constants ────────────────────────────────────────────────────────────
@@ -248,8 +250,10 @@ pub extern "C" fn _start() -> ! {
     // Setup buffer: 2 MiB (order 9) — enough for shader source + atlas upload + image textures.
     // Increased from 512 KiB to handle Content Region images (e.g., 800x537 BGRA = 1.6 MiB).
     let setup_dma = DmaBuf::alloc(9);
-    // Render buffer: 64 KiB (order 4) — per-frame command buffer.
-    let render_dma = DmaBuf::alloc(4);
+    // Render buffer: 256 KiB (order 6) — per-frame command buffer.
+    // Needs headroom for frames where multiple document spaces are visible
+    // simultaneously (e.g., during Ctrl+Tab slide animation).
+    let render_dma = DmaBuf::alloc(6);
 
     pipeline::setup_pipelines(
         &device,
@@ -573,6 +577,7 @@ pub extern "C" fn _start() -> ! {
     // Pre-allocate vertex buffers outside the loop.
     let mut vertex_buf: Vec<u8> = Vec::with_capacity(MAX_INLINE_BYTES);
     let mut glyph_vertex_buf: Vec<u8> = Vec::with_capacity(MAX_INLINE_BYTES);
+    let mut scratch_verts: Vec<u8> = Vec::with_capacity(6 * render::geometry::VERTEX_BYTES);
 
     // Heap-allocate shared path buffer to avoid 4 KiB stack arrays inside
     // recursive walk_scene (stack overflow at 16 KiB, tight at 64 KiB).
@@ -585,6 +590,12 @@ pub extern "C" fn _start() -> ! {
     let path_buf = unsafe { &mut *path_buf_ptr };
 
     let mut cmdbuf = metal::CommandBuffer::new();
+    let mut setup_cmdbuf = metal::CommandBuffer::new();
+    let mut blurs: Vec<BlurReq> = Vec::with_capacity(MAX_BLURS);
+    let mut fan_verts: Vec<u8> = Vec::with_capacity(MAX_INLINE_BYTES);
+    let mut stroke_cache = stroke_cache::StrokeCache::new();
+    let mut cursor_verts: Vec<u8> = Vec::new();
+    let mut cursor_fan_verts: Vec<u8> = Vec::new();
 
     // Cursor state (from CursorState shared page).
     let mut cursor_shape_gen: u32 = 0;
@@ -824,7 +835,7 @@ pub extern "C" fn _start() -> ! {
         cmdbuf.clear();
         vertex_buf.clear();
         glyph_vertex_buf.clear();
-        let mut blurs: Vec<BlurReq> = Vec::new();
+        blurs.clear();
 
         // Begin render pass: MSAA float16 target, resolve to float16 TEX_RESOLVE.
         // Clear color in linear space; BG_BASE = sRGB(32) = linear ~0.0144.
@@ -852,6 +863,7 @@ pub extern "C" fn _start() -> ! {
         {
             let mut render_ctx = RenderContext {
                 cmdbuf: &mut cmdbuf,
+                setup_cmdbuf: &mut setup_cmdbuf,
                 solid_verts: &mut vertex_buf,
                 glyph_verts: &mut glyph_vertex_buf,
                 atlas: &glyph_atlas,
@@ -865,6 +877,9 @@ pub extern "C" fn _start() -> ! {
                 path_buf,
                 image_atlas: &mut image_atlas,
                 content_region: content_slice,
+                scratch_verts: &mut scratch_verts,
+                fan_verts: &mut fan_verts,
+                stroke_cache: &mut stroke_cache,
                 vw,
                 vh,
                 scale,
@@ -1127,7 +1142,7 @@ pub extern "C" fn _start() -> ! {
                     length: data_len,
                 };
                 let stroke_only = flags & protocol::view::CursorState::FLAG_STROKE_ONLY != 0;
-                let mut cursor_verts: Vec<u8> = Vec::new();
+                cursor_verts.clear();
 
                 // Shadow offset in viewbox units.
                 let shadow_dx_vb = CURSOR_SHADOW_DX / px_scale;
@@ -1175,6 +1190,7 @@ pub extern "C" fn _start() -> ! {
                         px_scale,
                         1.0,
                         path_buf,
+                        &mut cursor_fan_verts,
                     );
                 }
                 if stroke_only {
@@ -1201,6 +1217,7 @@ pub extern "C" fn _start() -> ! {
                             px_scale,
                             1.0,
                             path_buf,
+                            &mut cursor_fan_verts,
                         );
                     }
                 } else {
@@ -1220,6 +1237,7 @@ pub extern "C" fn _start() -> ! {
                         px_scale,
                         1.0,
                         path_buf,
+                        &mut cursor_fan_verts,
                     );
                 }
                 flush_solid_vertices(&mut cmdbuf, &mut cursor_verts);
@@ -1322,6 +1340,7 @@ pub extern "C" fn _start() -> ! {
                         px_scale,
                         1.0,
                         path_buf,
+                        &mut cursor_fan_verts,
                     );
                 }
                 if stroke_only {
@@ -1348,6 +1367,7 @@ pub extern "C" fn _start() -> ! {
                             px_scale,
                             1.0,
                             path_buf,
+                            &mut cursor_fan_verts,
                         );
                     }
                 } else {
@@ -1367,6 +1387,7 @@ pub extern "C" fn _start() -> ! {
                         px_scale,
                         1.0,
                         path_buf,
+                        &mut cursor_fan_verts,
                     );
                 }
                 flush_solid_vertices(&mut cmdbuf, &mut cursor_verts);
