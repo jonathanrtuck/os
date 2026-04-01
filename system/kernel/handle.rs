@@ -48,10 +48,40 @@ pub struct Rights(u32);
 impl Rights {
     pub const READ: Self = Self(1 << 0);
     pub const WRITE: Self = Self(1 << 1);
+    pub const SIGNAL: Self = Self(1 << 2);
+    pub const WAIT: Self = Self(1 << 3);
+    pub const MAP: Self = Self(1 << 4);
+    pub const TRANSFER: Self = Self(1 << 5);
+    pub const CREATE: Self = Self(1 << 6);
+    pub const KILL: Self = Self(1 << 7);
+
+    /// All defined rights. Bits 8-31 are reserved.
+    pub const ALL: Self = Self(0xFF);
+    pub const NONE: Self = Self(0);
+
+    /// Backward-compat alias: READ | WRITE.
     pub const READ_WRITE: Self = Self((1 << 0) | (1 << 1));
 
-    pub fn contains(self, required: Self) -> bool {
+    pub const fn contains(self, required: Self) -> bool {
         self.0 & required.0 == required.0
+    }
+
+    /// Combine two rights sets (bitwise OR).
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// Reduce rights: result has only the bits present in both self and mask.
+    /// This is the core capability attenuation operation — rights can only be
+    /// removed, never added.
+    pub const fn attenuate(self, mask: Self) -> Self {
+        Self(self.0 & mask.0)
+    }
+
+    /// Construct from a raw u32 (e.g., from a syscall argument). Masks to
+    /// defined bits only — undefined bits are silently dropped.
+    pub const fn from_raw(raw: u32) -> Self {
+        Self(raw & 0xFF)
     }
 }
 

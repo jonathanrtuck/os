@@ -570,12 +570,12 @@ Creates a new thread in the calling process. Shares address space and handle tab
 
 **Syscalls:**
 
-| Nr  | Syscall        | Args                                     | Returns                     |
-| --- | -------------- | ---------------------------------------- | --------------------------- |
-| 5   | channel_create | —                                        | handle_a \| (handle_b << 8) |
-| 22  | handle_send    | x0=target_proc_handle, x1=handle_to_send | 0                           |
+| Nr  | Syscall        | Args                                                     | Returns                     |
+| --- | -------------- | -------------------------------------------------------- | --------------------------- |
+| 5   | channel_create | —                                                        | handle_a \| (handle_b << 8) |
+| 22  | handle_send    | x0=target_proc_handle, x1=handle_to_send, x2=rights_mask | 0                           |
 
-`handle_send` copies a handle from the caller's table into the target process's table. Only works on suspended processes (Process.started == false). Caller retains its copy. For Channel handles, also maps the shared page into the target's address space.
+`handle_send` moves a handle from the caller's table into the target process's table with optional rights attenuation. The target handle receives `source_rights & rights_mask` (rights can only be removed, never added). `rights_mask=0` means preserve all rights from the source. Only works on suspended processes (Process.started == false). For Channel handles, also maps the shared page into the target's address space.
 
 `channel_create` allocates a new channel (shared page + two endpoints), maps the shared page into the caller, and inserts both endpoint handles. Returns packed `handle_a | (handle_b << 8)`.
 

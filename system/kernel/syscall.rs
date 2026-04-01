@@ -21,41 +21,41 @@
 //! | Register | Direction | Role                                   |
 //! |----------|-----------|----------------------------------------|
 //! | x8       | in        | Syscall number (see `nr` module)       |
-//! | x0..x5   | in        | Arguments (syscall-specific)            |
+//! | x0..x5   | in        | Arguments (syscall-specific)           |
 //! | x0       | out       | Return value: ≥0 success, <0 error     |
 //!
 //! # Syscalls
 //!
-//! | Nr | Name                      | Args                              | Returns          |
-//! |----|---------------------------|-----------------------------------|------------------|
-//! | 0  | exit                      | —                                 | does not return  |
-//! | 1  | write                     | x0=buf_ptr, x1=len                | bytes written    |
-//! | 2  | yield                     | —                                 | 0                |
-//! | 3  | handle_close              | x0=handle                         | 0                |
-//! | 4  | channel_signal            | x0=handle                         | 0                |
-//! | 5  | channel_create            | —                                 | handle_a \| (handle_b << 8) |
-//! | 6  | scheduling_context_create | x0=budget_ns, x1=period_ns        | handle           |
-//! | 7  | scheduling_context_borrow | x0=handle                         | 0                |
-//! | 8  | scheduling_context_return | —                                 | 0                |
-//! | 9  | scheduling_context_bind   | x0=handle                         | 0                |
-//! | 10 | futex_wait                | x0=addr, x1=expected              | 0 (may block)    |
-//! | 11 | futex_wake                | x0=addr, x1=count                 | threads woken    |
-//! | 12 | wait                      | x0=handles_ptr, x1=count, x2=timeout_ns | ready index (may block) |
-//! | 13 | timer_create              | x0=timeout_ns                     | handle           |
-//! | 14 | interrupt_register        | x0=irq_nr                         | handle           |
-//! | 15 | interrupt_ack             | x0=handle                         | 0                |
-//! | 16 | device_map                | x0=phys_addr, x1=size             | user VA          |
-//! | 17 | dma_alloc                 | x0=order, x1=pa_out_ptr           | user VA          |
-//! | 18 | dma_free                  | x0=user_va, x1=order              | 0                |
-//! | 19 | thread_create             | x0=entry_va, x1=stack_top         | handle           |
-//! | 20 | process_create            | x0=elf_ptr, x1=elf_len            | handle           |
-//! | 21 | process_start             | x0=handle                         | 0                |
-//! | 22 | handle_send               | x0=target_handle, x1=source_handle | 0               |
-//! | 23 | process_kill              | x0=handle                          | 0               |
-//! | 24 | memory_share              | x0=target_handle, x1=pa, x2=page_count, x3=flags | target VA   |
-//! | 25 | memory_alloc              | x0=page_count                           | user VA     |
-//! | 26 | memory_free               | x0=va, x1=page_count                   | 0           |
-//! | 27 | process_set_syscall_filter | x0=handle, x1=mask                     | 0           |
+//! | Nr | Name                      | Args                                               | Returns                     |
+//! |----|---------------------------|----------------------------------------------------|-----------------------------|
+//! | 0  | exit                      | —                                                  | does not return             |
+//! | 1  | write                     | x0=buf_ptr, x1=len                                 | bytes written               |
+//! | 2  | yield                     | —                                                  | 0                           |
+//! | 3  | handle_close              | x0=handle                                          | 0                           |
+//! | 4  | channel_signal            | x0=handle                                          | 0                           |
+//! | 5  | channel_create            | —                                                  | handle_a \| (handle_b << 8) |
+//! | 6  | scheduling_context_create | x0=budget_ns, x1=period_ns                         | handle                      |
+//! | 7  | scheduling_context_borrow | x0=handle                                          | 0                           |
+//! | 8  | scheduling_context_return | —                                                  | 0                           |
+//! | 9  | scheduling_context_bind   | x0=handle                                          | 0                           |
+//! | 10 | futex_wait                | x0=addr, x1=expected                               | 0 (may block)               |
+//! | 11 | futex_wake                | x0=addr, x1=count                                  | threads woken               |
+//! | 12 | wait                      | x0=handles_ptr, x1=count, x2=timeout_ns            | ready index (may block)     |
+//! | 13 | timer_create              | x0=timeout_ns                                      | handle                      |
+//! | 14 | interrupt_register        | x0=irq_nr                                          | handle                      |
+//! | 15 | interrupt_ack             | x0=handle                                          | 0                           |
+//! | 16 | device_map                | x0=phys_addr, x1=size                              | user VA                     |
+//! | 17 | dma_alloc                 | x0=order, x1=pa_out_ptr                            | user VA                     |
+//! | 18 | dma_free                  | x0=user_va, x1=order                               | 0                           |
+//! | 19 | thread_create             | x0=entry_va, x1=stack_top                          | handle                      |
+//! | 20 | process_create            | x0=elf_ptr, x1=elf_len                             | handle                      |
+//! | 21 | process_start             | x0=handle                                          | 0                           |
+//! | 22 | handle_send               | x0=target_handle, x1=source_handle, x2=rights_mask | 0                           |
+//! | 23 | process_kill              | x0=handle                                          | 0                           |
+//! | 24 | memory_share              | x0=target_handle, x1=pa, x2=page_count, x3=flags   | target VA                   |
+//! | 25 | memory_alloc              | x0=page_count                                      | user VA                     |
+//! | 26 | memory_free               | x0=va, x1=page_count                               | 0                           |
+//! | 27 | process_set_syscall_filter | x0=handle, x1=mask                                | 0                           |
 //!
 //! # Error codes
 //!
@@ -229,11 +229,11 @@ fn sys_channel_create() -> Result<u64, Error> {
     let result = scheduler::current_process_do(|process| {
         let handle_a = process
             .handles
-            .insert(HandleObject::Channel(ch_a), Rights::READ_WRITE)?;
+            .insert(HandleObject::Channel(ch_a), Rights::ALL)?;
 
         match process
             .handles
-            .insert(HandleObject::Channel(ch_b), Rights::READ_WRITE)
+            .insert(HandleObject::Channel(ch_b), Rights::ALL)
         {
             Ok(handle_b) => {
                 // Both handles inserted — now map both shared pages using the
@@ -299,7 +299,7 @@ fn sys_channel_signal(handle_nr: u64) -> Result<u64, HandleError> {
     }
 
     let channel_id = scheduler::current_process_do(|process| {
-        match process.handles.get(Handle(handle_nr as u8), Rights::WRITE) {
+        match process.handles.get(Handle(handle_nr as u8), Rights::SIGNAL) {
             Ok(HandleObject::Channel(id)) => Ok(id),
             Ok(_) => Err(HandleError::InvalidHandle),
             Err(e) => Err(e),
@@ -452,7 +452,7 @@ fn sys_interrupt_ack(handle_nr: u64) -> Result<u64, HandleError> {
     }
 
     let int_id = scheduler::current_process_do(|process| {
-        match process.handles.get(Handle(handle_nr as u8), Rights::WRITE) {
+        match process.handles.get(Handle(handle_nr as u8), Rights::SIGNAL) {
             Ok(HandleObject::Interrupt(id)) => Ok(id),
             Ok(_) => Err(HandleError::InvalidHandle),
             Err(e) => Err(e),
@@ -473,7 +473,7 @@ fn sys_interrupt_register(irq: u64) -> Result<u64, HandleError> {
     match scheduler::current_process_do(|process| {
         process
             .handles
-            .insert(HandleObject::Interrupt(int_id), Rights::READ_WRITE)
+            .insert(HandleObject::Interrupt(int_id), Rights::ALL)
     }) {
         Ok(handle) => Ok(handle.0 as u64),
         Err(e) => {
@@ -504,10 +504,21 @@ fn sys_handle_close(handle_nr: u64) -> Result<u64, HandleError> {
 
     Ok(0)
 }
-fn sys_handle_send(target_handle_nr: u64, source_handle_nr: u64) -> Result<u64, Error> {
+fn sys_handle_send(
+    target_handle_nr: u64,
+    source_handle_nr: u64,
+    rights_mask: u64,
+) -> Result<u64, Error> {
     if target_handle_nr > u8::MAX as u64 || source_handle_nr > u8::MAX as u64 {
         return Err(Error::InvalidArgument);
     }
+
+    // Attenuation mask: 0 means "preserve all rights from source."
+    let mask = if rights_mask == 0 {
+        Rights::ALL
+    } else {
+        Rights::from_raw(rights_mask as u32)
+    };
 
     let source_handle = Handle(source_handle_nr as u8);
     // Phase 1: Move the source handle out of the caller's table.
@@ -522,13 +533,22 @@ fn sys_handle_send(target_handle_nr: u64, source_handle_nr: u64) -> Result<u64, 
             Ok(_) => return Err(Error::InvalidArgument),
             Err(_) => return Err(Error::InvalidArgument),
         };
+        // Verify the source handle has TRANSFER right before moving it.
+        // Without this check, any handle could be delegated to another process.
         let (source_obj, source_rights) = process
             .handles
-            .close(source_handle)
+            .get_entry(source_handle, Rights::TRANSFER)
             .map_err(|_| Error::InvalidArgument)?;
+
+        // Now close (move out). Can't fail — we just verified it exists.
+        let _ = process.handles.close(source_handle);
 
         Ok((target_pid, source_obj, source_rights))
     })?;
+
+    // Attenuate: target handle gets only the rights present in BOTH the
+    // source handle and the mask. Rights can only be removed, never added.
+    let source_rights = source_rights.attenuate(mask);
     // Phase 1.5: If the source is a Channel, get shared page PAs (channel lock).
     let channel_pages = match source_obj {
         HandleObject::Channel(ch_id) => channel::shared_pages(ch_id),
@@ -654,7 +674,7 @@ fn sys_memory_share(
     let target_pid = scheduler::current_process_do(|process| {
         match process
             .handles
-            .get(Handle(target_handle_nr as u8), Rights::WRITE)
+            .get(Handle(target_handle_nr as u8), Rights::MAP)
         {
             Ok(HandleObject::Process(id)) => Ok(id),
             Ok(_) => Err(Error::InvalidArgument),
@@ -716,7 +736,7 @@ fn sys_process_create(elf_ptr: u64, elf_len: u64) -> Result<u64, Error> {
     // Insert Process handle into the caller's handle table.
     let handle = scheduler::current_process_do(|p| {
         p.handles
-            .insert(HandleObject::Process(process_id), Rights::READ_WRITE)
+            .insert(HandleObject::Process(process_id), Rights::ALL)
     })
     .map_err(|_| {
         // Full cleanup: kill the process + its suspended thread, then
@@ -771,7 +791,7 @@ fn sys_process_kill(handle_nr: u64) -> Result<u64, Error> {
     }
 
     let target_pid = scheduler::current_process_do(|process| {
-        match process.handles.get(Handle(handle_nr as u8), Rights::WRITE) {
+        match process.handles.get(Handle(handle_nr as u8), Rights::KILL) {
             Ok(HandleObject::Process(id)) => Ok(id),
             Ok(_) => Err(Error::InvalidArgument),
             Err(_) => Err(Error::InvalidArgument),
@@ -917,7 +937,7 @@ fn sys_scheduling_context_create(budget: u64, period: u64) -> Result<u64, Error>
     let handle = scheduler::current_process_do(|process| {
         process
             .handles
-            .insert(HandleObject::SchedulingContext(ctx_id), Rights::READ_WRITE)
+            .insert(HandleObject::SchedulingContext(ctx_id), Rights::ALL)
     })
     .map_err(|_| {
         // Handle table full — release the scheduling context to avoid leaking
@@ -957,7 +977,7 @@ fn sys_thread_create(entry_va: u64, stack_top: u64) -> Result<u64, Error> {
     let handle = scheduler::current_process_do(|process| {
         process
             .handles
-            .insert(HandleObject::Thread(thread_id), Rights::READ)
+            .insert(HandleObject::Thread(thread_id), Rights::ALL)
     })
     .map_err(|_| {
         // Handle table full — thread is already running, but the caller
@@ -974,7 +994,7 @@ fn sys_timer_create(timeout_ns: u64) -> Result<u64, HandleError> {
     match scheduler::current_process_do(|process| {
         process
             .handles
-            .insert(HandleObject::Timer(timer_id), Rights::READ)
+            .insert(HandleObject::Timer(timer_id), Rights::ALL)
     }) {
         Ok(handle) => Ok(handle.0 as u64),
         Err(e) => {
@@ -1059,7 +1079,7 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
         let mut count = 0usize;
 
         for (i, &h) in handle_bytes.iter().enumerate() {
-            let obj = process.handles.get(Handle(h), Rights::READ)?;
+            let obj = process.handles.get(Handle(h), Rights::WAIT)?;
 
             match obj {
                 HandleObject::Channel(_)
@@ -1405,7 +1425,14 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
         nr::THREAD_CREATE => dispatch_ok(ctx, result_to_u64!(sys_thread_create(x0, x1))),
         nr::PROCESS_CREATE => dispatch_ok(ctx, result_to_u64!(sys_process_create(x0, x1))),
         nr::PROCESS_START => dispatch_ok(ctx, result_to_u64!(sys_process_start(x0))),
-        nr::HANDLE_SEND => dispatch_ok(ctx, result_to_u64!(sys_handle_send(x0, x1))),
+        nr::HANDLE_SEND => {
+            // SAFETY: ctx is valid, x[2] is within [u64; 31] bounds. addr_of!
+            // avoids creating a reference (same aliasing UB prevention as above).
+            let xbase = unsafe { core::ptr::addr_of!((*ctx).x) as *const u64 };
+            let x2 = unsafe { xbase.add(2).read() };
+
+            dispatch_ok(ctx, result_to_u64!(sys_handle_send(x0, x1, x2)))
+        }
         nr::PROCESS_KILL => dispatch_ok(ctx, result_to_u64!(sys_process_kill(x0))),
         nr::MEMORY_SHARE => {
             // SAFETY: ctx is valid, x[2]/x[3] are within [u64; 31] bounds. addr_of!

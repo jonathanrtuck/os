@@ -353,7 +353,7 @@ fn spawn_with_channel(
         }
     };
 
-    if let Err(_) = sys::handle_send(proc_handle, ch_b.0) {
+    if let Err(_) = sys::handle_send(proc_handle, ch_b.0, 0) {
         sys::print(b"       spawn: handle_send FAILED\n");
 
         return None;
@@ -641,7 +641,7 @@ fn load_fonts_native(
     });
     *next_channel += 1;
 
-    sys::handle_send(fs_proc, doc_core_b.0).unwrap_or_else(|_| {
+    sys::handle_send(fs_proc, doc_core_b.0, 0).unwrap_or_else(|_| {
         sys::print(b"init: handle_send (doc core-ch B) failed\n");
         sys::exit();
     });
@@ -1385,7 +1385,7 @@ fn configure_render_service(
         });
 
     // Send scene update channel endpoint B to render service.
-    sys::handle_send(gpu_proc, cv_b.0).unwrap_or_else(|_| {
+    sys::handle_send(gpu_proc, cv_b.0, 0).unwrap_or_else(|_| {
         sys::print(b"init: handle_send (core-render B) failed\n");
         sys::exit();
     });
@@ -1884,12 +1884,12 @@ fn spawn_input_drivers(
 
     *next_channel += 1;
 
-    sys::handle_send(input_proc_handle, ic_a.0).unwrap_or_else(|_| {
+    sys::handle_send(input_proc_handle, ic_a.0, 0).unwrap_or_else(|_| {
         sys::print(b"init: handle_send (input-core A) failed\n");
         sys::exit();
     });
     // Send to C (first handle after init channel).
-    sys::handle_send(core_proc, ic_b.0).unwrap_or_else(|_| {
+    sys::handle_send(core_proc, ic_b.0, 0).unwrap_or_else(|_| {
         sys::print(b"init: handle_send (input-core B) failed\n");
         sys::exit();
     });
@@ -1987,7 +1987,7 @@ fn wire_service_channels(
     next_channel: &mut usize,
 ) -> Option<sys::ProcessHandle> {
     // Scene update channel endpoint A → C.
-    sys::handle_send(core_proc, cv_a.0).unwrap_or_else(|_| {
+    sys::handle_send(core_proc, cv_a.0, 0).unwrap_or_else(|_| {
         sys::print(b"init: handle_send (core-render A) failed\n");
         sys::exit();
     });
@@ -2002,11 +2002,11 @@ fn wire_service_channels(
 
     *next_channel += 1;
 
-    sys::handle_send(core_proc, ce_a.0).unwrap_or_else(|_| {
+    sys::handle_send(core_proc, ce_a.0, 0).unwrap_or_else(|_| {
         sys::print(b"init: handle_send (core-editor A) failed\n");
         sys::exit();
     });
-    sys::handle_send(editor_proc, ce_b.0).unwrap_or_else(|_| {
+    sys::handle_send(editor_proc, ce_b.0, 0).unwrap_or_else(|_| {
         sys::print(b"init: handle_send (core-editor B) failed\n");
         sys::exit();
     });
@@ -2021,11 +2021,11 @@ fn wire_service_channels(
 
     *next_channel += 1;
 
-    sys::handle_send(docmodel_proc, ea_a.0).unwrap_or_else(|_| {
+    sys::handle_send(docmodel_proc, ea_a.0, 0).unwrap_or_else(|_| {
         sys::print(b"init: handle_send (editor-docmodel A) failed\n");
         sys::exit();
     });
-    sys::handle_send(editor_proc, ea_b.0).unwrap_or_else(|_| {
+    sys::handle_send(editor_proc, ea_b.0, 0).unwrap_or_else(|_| {
         sys::print(b"init: handle_send (editor-docmodel B) failed\n");
         sys::exit();
     });
@@ -2074,11 +2074,11 @@ fn wire_service_channels(
                 });
                 *next_channel += 1;
 
-                sys::handle_send(docmodel_proc, dc_a.0).unwrap_or_else(|_| {
+                sys::handle_send(docmodel_proc, dc_a.0, 0).unwrap_or_else(|_| {
                     sys::print(b"init: handle_send (docmodel-decoder A) failed\n");
                     sys::exit();
                 });
-                sys::handle_send(dec_proc, dc_b.0).unwrap_or_else(|_| {
+                sys::handle_send(dec_proc, dc_b.0, 0).unwrap_or_else(|_| {
                     sys::print(b"init: handle_send (docmodel-decoder B) failed\n");
                     sys::exit();
                 });
@@ -2103,7 +2103,7 @@ fn wire_service_channels(
             // Channel was pre-created; endpoint B already sent to doc.
             // Send endpoint A to A.
             if let Some(ch_a) = doc_core_ch {
-                sys::handle_send(docmodel_proc, ch_a.0).unwrap_or_else(|_| {
+                sys::handle_send(docmodel_proc, ch_a.0, 0).unwrap_or_else(|_| {
                     sys::print(b"init: handle_send (docmodel-doc A) failed\n");
                     sys::exit();
                 });
@@ -2142,11 +2142,11 @@ fn wire_service_channels(
             });
             *next_channel += 1;
 
-            sys::handle_send(docmodel_proc, cf_a.0).unwrap_or_else(|_| {
+            sys::handle_send(docmodel_proc, cf_a.0, 0).unwrap_or_else(|_| {
                 sys::print(b"init: handle_send (docmodel-doc A) failed\n");
                 sys::exit();
             });
-            sys::handle_send(fs_proc, cf_b.0).unwrap_or_else(|_| {
+            sys::handle_send(fs_proc, cf_b.0, 0).unwrap_or_else(|_| {
                 sys::print(b"init: handle_send (docmodel-doc B) failed\n");
                 sys::exit();
             });
@@ -2161,11 +2161,11 @@ fn wire_service_channels(
     });
     *next_channel += 1;
 
-    sys::handle_send(core_proc, ac_a.0).unwrap_or_else(|_| {
+    sys::handle_send(core_proc, ac_a.0, 0).unwrap_or_else(|_| {
         sys::print(b"init: handle_send (docmodel-core A) failed\n");
         sys::exit();
     });
-    sys::handle_send(docmodel_proc, ac_b.0).unwrap_or_else(|_| {
+    sys::handle_send(docmodel_proc, ac_b.0, 0).unwrap_or_else(|_| {
         sys::print(b"init: handle_send (docmodel-core B) failed\n");
         sys::exit();
     });
@@ -2179,11 +2179,11 @@ fn wire_service_channels(
     });
     *next_channel += 1;
 
-    sys::handle_send(layout_proc, bc_a.0).unwrap_or_else(|_| {
+    sys::handle_send(layout_proc, bc_a.0, 0).unwrap_or_else(|_| {
         sys::print(b"init: handle_send (layout-core A) failed\n");
         sys::exit();
     });
-    sys::handle_send(core_proc, bc_b.0).unwrap_or_else(|_| {
+    sys::handle_send(core_proc, bc_b.0, 0).unwrap_or_else(|_| {
         sys::print(b"init: handle_send (layout-core B) failed\n");
         sys::exit();
     });
@@ -2202,11 +2202,11 @@ fn wire_service_channels(
 
         *next_channel += 1;
 
-        sys::handle_send(input_proc_handle, ic_a.0).unwrap_or_else(|_| {
+        sys::handle_send(input_proc_handle, ic_a.0, 0).unwrap_or_else(|_| {
             sys::print(b"init: handle_send (input-core A) failed\n");
             sys::exit();
         });
-        sys::handle_send(core_proc, ic_b.0).unwrap_or_else(|_| {
+        sys::handle_send(core_proc, ic_b.0, 0).unwrap_or_else(|_| {
             sys::print(b"init: handle_send (input-core B) failed\n");
             sys::exit();
         });

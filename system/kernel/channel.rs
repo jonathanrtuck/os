@@ -199,7 +199,7 @@ pub fn setup_endpoint(id: ChannelId, pid: ProcessId) -> Result<Handle, HandleErr
             .ok_or(HandleError::TableFull)?;
         process
             .handles
-            .insert(HandleObject::Channel(id), Rights::READ_WRITE)
+            .insert(HandleObject::Channel(id), Rights::ALL)
     })
     .unwrap_or(Err(HandleError::InvalidHandle))
 }

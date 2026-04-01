@@ -102,18 +102,26 @@ pub fn handle_close(handle: u8) -> SyscallResult<()> {
     Ok(())
 }
 
-/// Send a handle to a suspended child process.
+/// Send a handle to a suspended child process, optionally attenuating rights.
 ///
-/// Copies the handle at `source_handle` (in the caller's table) into the
+/// Moves the handle at `source_handle` (in the caller's table) into the
 /// target process identified by `target_handle` (which must be a Process
 /// handle). The target must not have been started yet. For channel handles,
 /// the shared page is also mapped into the target's address space.
-pub fn handle_send(target_handle: ProcessHandle, source_handle: u8) -> SyscallResult<()> {
+///
+/// `rights_mask` controls which rights the target receives (bitwise AND with
+/// the source handle's rights). Pass 0 to preserve all rights from the source.
+pub fn handle_send(
+    target_handle: ProcessHandle,
+    source_handle: u8,
+    rights_mask: u32,
+) -> SyscallResult<()> {
     let raw = unsafe {
-        syscall2(
+        syscall3(
             nr::HANDLE_SEND,
             target_handle.0 as u64,
             source_handle as u64,
+            rights_mask as u64,
         ) as i64
     };
 

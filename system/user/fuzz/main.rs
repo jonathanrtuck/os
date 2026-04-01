@@ -1775,7 +1775,7 @@ fn phase_33_handle_send_success() {
     };
 
     // Send endpoint B to the child. The child will get it at some handle slot.
-    if sys::handle_send(proc_h, ch_b.0).is_err() {
+    if sys::handle_send(proc_h, ch_b.0, 0).is_err() {
         let _ = sys::handle_close(ch_a.0);
         let _ = sys::process_kill(proc_h);
         let _ = sys::handle_close(proc_h.0);
