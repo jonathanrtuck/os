@@ -176,7 +176,8 @@ impl<'a> TripleWriter<'a> {
 
         // Determine a free buffer to use as initial acquired slot.
         let latest = triple_read_ctrl(buf.as_mut_ptr(), CTRL_LATEST_BUF);
-        let reader = triple_read_ctrl(buf.as_mut_ptr(), CTRL_READER_BUF);
+        // Acquire: pairs with reader's Release store of reader_buf.
+        let reader = triple_read_ctrl_acquire(buf.as_mut_ptr(), CTRL_READER_BUF);
         let free = if reader == NO_READER || reader > 2 || reader == latest {
             // Pick any buffer that isn't latest.
             if latest == 0 {
@@ -217,7 +218,8 @@ impl<'a> TripleWriter<'a> {
     /// copy first and then get a writer via a second `acquire()` call.
     fn select_free_buffer(&mut self) {
         let latest = triple_read_ctrl(self.buf.as_mut_ptr(), CTRL_LATEST_BUF);
-        let reader = triple_read_ctrl(self.buf.as_mut_ptr(), CTRL_READER_BUF);
+        // Acquire: pairs with reader's Release store of reader_buf.
+        let reader = triple_read_ctrl_acquire(self.buf.as_mut_ptr(), CTRL_READER_BUF);
 
         // Find a free buffer (not latest, not reader).
         // When reader == latest or reader is inactive (NO_READER),
@@ -462,28 +464,42 @@ impl TripleReader {
     pub unsafe fn new(buf: *mut u8, len: usize) -> Self {
         assert!(len >= TRIPLE_SCENE_SIZE);
 
-        // Acquire load: pairs with the writer's release store in publish().
-        // Ensures all scene data written before publish() is visible to us
-        // before we access the buffer contents.
-        let latest = triple_read_ctrl_acquire(buf, CTRL_LATEST_BUF);
+        // Validated claim loop. The load of latest_buf and store of
+        // reader_buf are not a single atomic operation. A concurrent
+        // publish() between them changes latest — the old latest
+        // becomes available and the writer's next acquire() could pick
+        // it before seeing our claim, creating a data race.
+        //
+        // Fix: after claiming, Acquire-reload latest_buf. If it changed,
+        // a publish happened during our window — retry. latest_buf uses
+        // a Release/Acquire pair with publish(), so the Acquire reload
+        // is properly synchronized. Three ABA cycles (latest_buf has
+        // only 3 values) in the ~100 ns between two LDAR instructions
+        // is physically impossible.
+        loop {
+            // Acquire: pairs with writer's Release in publish().
+            // Ensures all scene data is visible before we read it.
+            let latest = triple_read_ctrl_acquire(buf, CTRL_LATEST_BUF);
 
-        // Claim this buffer so the writer won't recycle it.
-        // NOTE: The load of latest_buf and store of reader_buf are not a single
-        // atomic operation. A concurrent publish() between them could make the
-        // writer pick `latest` as its free buffer before we claim it. This is
-        // safe because: (1) only one reader exists per scene graph (architectural
-        // invariant), and (2) the writer's next acquire() re-reads reader_buf
-        // and will see our claim before writing.
-        triple_write_ctrl(buf, CTRL_READER_BUF, latest);
+            // Claim with Release so writer's Acquire of reader_buf
+            // sees it.
+            triple_write_ctrl_release(buf, CTRL_READER_BUF, latest);
 
-        let read_off = buf_offset(latest);
-        let read_gen = read_generation(buf as *const u8, read_off);
-
-        Self {
-            buf,
-            len,
-            read_off,
-            read_gen,
+            // Acquire-reload: if latest_buf is unchanged, no publish
+            // happened during our claim — the writer hasn't acquired
+            // a new buffer, so our claimed buffer is safe.
+            let latest2 = triple_read_ctrl_acquire(buf, CTRL_LATEST_BUF);
+            if latest == latest2 {
+                let read_off = buf_offset(latest);
+                let read_gen = read_generation(buf as *const u8, read_off);
+                return Self {
+                    buf,
+                    len,
+                    read_off,
+                    read_gen,
+                };
+            }
+            // A publish happened — retry with the new latest.
         }
     }
 
@@ -563,18 +579,17 @@ impl TripleReader {
     ///
     /// Note: `Drop` handles cleanup automatically if this is not called.
     pub fn finish_read(&self, generation: u32) {
-        // Write reader_done_gen with release fence so writer sees it.
         triple_write_ctrl_release(self.buf, CTRL_READER_DONE_GEN, generation);
-        // Release reader_buf — buffer is now free for the writer.
-        triple_write_ctrl(self.buf, CTRL_READER_BUF, NO_READER);
+        // Release: pairs with writer's Acquire in select_free_buffer.
+        triple_write_ctrl_release(self.buf, CTRL_READER_BUF, NO_READER);
     }
 }
 
 impl Drop for TripleReader {
     fn drop(&mut self) {
-        // Release the reader buffer claim so the writer can reuse it.
         triple_write_ctrl_release(self.buf, CTRL_READER_DONE_GEN, self.read_gen);
-        triple_write_ctrl(self.buf, CTRL_READER_BUF, NO_READER);
+        // Release: pairs with writer's Acquire in select_free_buffer.
+        triple_write_ctrl_release(self.buf, CTRL_READER_BUF, NO_READER);
     }
 }
 
