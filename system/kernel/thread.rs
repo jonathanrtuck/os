@@ -197,27 +197,20 @@ impl Thread {
         }
     }
 
-    /// Boot thread — zeroed context, no stack, no address space.
+    /// Boot/idle thread — one per core, zeroed context, uses the core's boot stack.
     ///
-    /// The boot thread represents the initial execution context (kernel_main).
-    /// Its context is populated by exception.S on the first exception entry.
-    pub fn new_boot() -> Box<Self> {
-        Box::new(Self::base(
-            ThreadId(0),
-            ThreadState::Running,
-            TrustLevel::Kernel,
-        ))
-    }
-
-    /// Idle thread — runs at EL1, no stack (uses boot stack), never enqueued.
+    /// Serves dual purpose: represents the initial execution context (kernel_main
+    /// on core 0, secondary_main on cores 1+), and acts as the idle fallback when
+    /// no user threads are runnable. Context is populated by exception.S save_context
+    /// on the first exception entry.
     ///
-    /// One per core. Falls through to WFE when nothing else is runnable.
-    /// The idle thread's Context is used as a save area when the core has
-    /// no user threads to run.
-    pub fn new_idle(core_id: u64) -> Box<Self> {
+    /// Marked with IDLE_THREAD_ID_MARKER so park_old returns it to the per-core
+    /// idle slot (never the global ready queue). This prevents cross-core migration:
+    /// each boot thread stays on its originating core, using that core's boot stack.
+    pub fn new_boot_idle(core_id: u64) -> Box<Self> {
         Box::new(Self::base(
             ThreadId(core_id | IDLE_THREAD_ID_MARKER),
-            ThreadState::Ready,
+            ThreadState::Running,
             TrustLevel::Kernel,
         ))
     }

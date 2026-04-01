@@ -14,12 +14,13 @@ cargo test -- --test-threads=1
 
 All scripts build the kernel (release) and boot QEMU automatically.
 
-| Script                     | Devices              | Display         | Duration     | What it tests                                            |
-| -------------------------- | -------------------- | --------------- | ------------ | -------------------------------------------------------- |
-| `smoke.sh`                 | blk                  | none            | 10s          | Boot sequence, serial output markers                     |
-| `stress.sh [timeout]`      | blk                  | none            | 180s default | Headless fuzz + IPC/scheduler/timer stress (4 SMP cores) |
-| `crash.sh [duration]`      | blk + gpu + keyboard | macOS window    | 30s default  | Rapid keystroke input via AppleScript                    |
-| `integration.sh [timeout]` | blk + gpu + keyboard | `-display none` | 15s default  | Full boot + driver spawn + display pipeline              |
+| Script                     | Devices              | Display         | Duration     | What it tests                                                  |
+| -------------------------- | -------------------- | --------------- | ------------ | -------------------------------------------------------------- |
+| `smoke.sh`                 | blk                  | none            | 10s          | Boot sequence, serial output markers                           |
+| `stress.sh [timeout]`      | blk                  | none            | 180s default | Headless fuzz + IPC/scheduler/timer/churn stress (4 SMP cores) |
+| `smp-stress.sh [duration]` | blk + gpu + keyboard | headless        | 60s default  | Rapid Ctrl+Tab via hypervisor (context switch race trigger)    |
+| `crash.sh [duration]`      | blk + gpu + keyboard | macOS window    | 30s default  | Rapid keystroke input via AppleScript                          |
+| `integration.sh [timeout]` | blk + gpu + keyboard | `-display none` | 15s default  | Full boot + driver spawn + display pipeline                    |
 
 **QMP limitation:** QEMU's `sendkey`/`input-send-event` does NOT route to `virtio-keyboard-device`. `crash.sh` works around this by sending real keystrokes to the QEMU window via AppleScript (macOS only). The other scripts don't require keyboard input.
 

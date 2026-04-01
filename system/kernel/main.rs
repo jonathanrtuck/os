@@ -517,6 +517,17 @@ pub extern "C" fn irq_handler(ctx: *mut Context) -> *const Context {
 
     debug_assert!(!ctx.is_null(), "irq_handler: ctx is null (TPIDR_EL1 was 0)");
 
+    // Stack canary: detect corruption of this function's stack frame during
+    // schedule_inner. If any code path writes to our saved LR position, this
+    // canary (adjacent on the stack) will also be overwritten.
+    let mut canary: u64 = 0;
+
+    // SAFETY: volatile write to a stack-local ensures the canary is physically
+    // written before any function calls that might corrupt the stack.
+    unsafe {
+        core::ptr::write_volatile(&mut canary, 0xCAFE_BABE_1240_0001_u64);
+    }
+
     let mut next: *const Context = ctx;
 
     if let Some(id) = interrupt_controller::GIC.acknowledge() {
@@ -539,6 +550,29 @@ pub extern "C" fn irq_handler(ctx: *mut Context) -> *const Context {
         interrupt_controller::GIC.end_of_interrupt(id);
     }
 
+    // SAFETY: volatile read of stack-local canary. If the stack frame was
+    // corrupted during schedule_inner (the deferred_drops race that was fixed,
+    // or any future bug), this catches it before the corrupted LR causes a
+    // mysterious instruction abort.
+    let check = unsafe { core::ptr::read_volatile(&canary) };
+
+    if check != 0xCAFE_BABE_1240_0001 {
+        serial::panic_puts("\n🛑 irq_handler: stack canary corrupt! got=0x");
+        serial::panic_put_hex(check);
+        serial::panic_puts(" expected=0xCAFEBABE12400001\n  SP=0x");
+        let sp_val: u64;
+        unsafe { core::arch::asm!("mov {}, sp", out(reg) sp_val, options(nostack, nomem)) };
+        serial::panic_put_hex(sp_val);
+        serial::panic_puts(" TPIDR=0x");
+        let tpidr_val: u64;
+        unsafe { core::arch::asm!("mrs {}, tpidr_el1", out(reg) tpidr_val, options(nostack)) };
+        serial::panic_put_hex(tpidr_val);
+        serial::panic_puts(" core=");
+        serial::panic_put_u32(per_core::core_id());
+        serial::panic_puts("\n");
+        panic!("irq_handler: stack canary corrupt");
+    }
+
     debug_assert!(
         !next.is_null(),
         "irq_handler: returning null context pointer"
@@ -548,6 +582,12 @@ pub extern "C" fn irq_handler(ctx: *mut Context) -> *const Context {
 
     next
 }
+/// Atomic gate for panic output serialization. The first core to CAS this
+/// from 0 to its core_id+1 "wins" and prints diagnostics. Other cores spin
+/// until the winner finishes, then print their own. Without this, concurrent
+/// panics produce unreadable interleaved UART output.
+static PANIC_GATE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
 /// Handle fatal exceptions from EL1 (kernel faults).
 ///
 /// Called from exception.S on a per-core emergency stack (the original SP
@@ -563,6 +603,31 @@ pub extern "C" fn kernel_fault_handler(
     lr: u64,
     tpidr: u64,
 ) -> ! {
+    // Serialize panic output across cores. First core proceeds immediately;
+    // others spin-wait (with a timeout) for the first core to finish.
+    let my_core = per_core::core_id() + 1; // +1 so 0 means "unclaimed"
+
+    if PANIC_GATE
+        .compare_exchange(
+            0,
+            my_core,
+            core::sync::atomic::Ordering::AcqRel,
+            core::sync::atomic::Ordering::Relaxed,
+        )
+        .is_err()
+    {
+        // Another core is already printing. Wait for it to finish (spin with
+        // a bounded timeout — 100M iterations ≈ seconds on most cores).
+        for _ in 0..100_000_000u64 {
+            if PANIC_GATE.load(core::sync::atomic::Ordering::Acquire) == 0 {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        // Reclaim the gate for our output.
+        PANIC_GATE.store(my_core, core::sync::atomic::Ordering::Release);
+    }
+
     let ec = (esr >> 26) & 0x3F;
     let type_name = match exc_type {
         0 => "sync",
@@ -645,6 +710,9 @@ pub extern "C" fn kernel_fault_handler(
     }
 
     serial::panic_puts("\n");
+
+    // Release the panic gate so other cores (if also faulted) can print their diagnostics.
+    PANIC_GATE.store(0, core::sync::atomic::Ordering::Release);
 
     panic!("unrecoverable kernel fault");
 }
@@ -887,7 +955,23 @@ pub extern "C" fn secondary_main(core_id: u64) -> ! {
 pub extern "C" fn svc_handler(ctx: *mut Context) -> *const Context {
     debug_assert!(!ctx.is_null(), "svc_handler: ctx is null (TPIDR_EL1 was 0)");
 
+    let mut canary: u64 = 0;
+
+    // SAFETY: volatile write to stack-local canary.
+    unsafe {
+        core::ptr::write_volatile(&mut canary, 0xCAFE_BABE_5BC0_0002_u64);
+    }
+
     let result = syscall::dispatch(ctx);
+    // SAFETY: volatile read of stack-local canary.
+    let check = unsafe { core::ptr::read_volatile(&canary) };
+
+    if check != 0xCAFE_BABE_5BC0_0002 {
+        panic!(
+            "svc_handler: stack canary corrupt (got {check:#018x}), \
+             stack frame was overwritten during syscall dispatch"
+        );
+    }
 
     debug_assert!(
         !result.is_null(),
@@ -970,6 +1054,27 @@ pub extern "C" fn user_fault_handler(ctx: *mut Context) -> *const Context {
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
+    // Serialize panic output across cores (same gate as kernel_fault_handler).
+    let my_core = per_core::core_id() + 1;
+
+    if PANIC_GATE
+        .compare_exchange(
+            0,
+            my_core,
+            core::sync::atomic::Ordering::AcqRel,
+            core::sync::atomic::Ordering::Relaxed,
+        )
+        .is_err()
+    {
+        for _ in 0..100_000_000u64 {
+            if PANIC_GATE.load(core::sync::atomic::Ordering::Acquire) == 0 {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        PANIC_GATE.store(my_core, core::sync::atomic::Ordering::Release);
+    }
+
     // Use panic_ variants to bypass the UART lock (may already be held).
     serial::panic_puts("\n😱 panicking…\n");
 
@@ -985,6 +1090,9 @@ fn panic(info: &PanicInfo) -> ! {
     }
 
     metrics::panic_dump();
+
+    // Release the panic gate so other cores can print (if they also faulted).
+    PANIC_GATE.store(0, core::sync::atomic::Ordering::Release);
 
     // Signal the hypervisor to capture state and write a crash report.
     // pvpanic is the primary mechanism — the hypervisor exits immediately.

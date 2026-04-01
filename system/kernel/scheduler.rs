@@ -44,7 +44,10 @@ static STATE: IrqMutex<State> = IrqMutex::new(State {
     queue: RunQueue { ready: Vec::new() },
     blocked: Vec::new(),
     suspended: Vec::new(),
-    deferred_drops: Vec::new(),
+    deferred_drops: {
+        const EMPTY: Vec<Box<Thread>> = Vec::new();
+        [EMPTY; per_core::MAX_CORES]
+    },
     cores: {
         const INIT: PerCoreState = PerCoreState {
             current: None,
@@ -86,7 +89,16 @@ struct State {
     queue: RunQueue,
     blocked: Vec<Box<Thread>>,
     suspended: Vec<Box<Thread>>,
-    deferred_drops: Vec<Box<Thread>>,
+    /// Per-core deferred thread drops. When a thread exits, it can't be dropped
+    /// immediately because schedule_inner is still executing on its kernel stack.
+    /// The thread is pushed to this core's slot and drained at the start of this
+    /// core's NEXT schedule_inner — by which time this core has switched to a
+    /// different stack via restore_context_and_eret.
+    ///
+    /// CRITICAL: This MUST be per-core. A global Vec would allow core A to drain
+    /// core B's deferred drops while core B is still on the exited thread's stack
+    /// (use-after-free race between lock release and restore_context_and_eret).
+    deferred_drops: [Vec<Box<Thread>>; per_core::MAX_CORES],
     cores: [PerCoreState; per_core::MAX_CORES],
     next_id: u64,
     /// All processes. Index = ProcessId.0.
@@ -381,9 +393,12 @@ fn scheduler_deadline_ticks(
 }
 #[inline(never)]
 fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Context {
-    // Drop threads deferred from the previous schedule_inner. Safe now because
-    // we're on the current (live) thread's kernel stack, not the exited one's.
-    s.deferred_drops.clear();
+    // Drop threads deferred from THIS CORE's previous schedule_inner. Safe now
+    // because we're on the current (live) thread's kernel stack, not the exited
+    // one's. Only this core's slot is drained — other cores may still be on
+    // their exited threads' stacks between their lock release and their
+    // restore_context_and_eret SP switch.
+    s.deferred_drops[core].clear();
 
     reap_exited(&mut s.queue, &mut s.blocked);
 
@@ -419,10 +434,10 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
         } else if old_thread.is_exited() {
             // Defer drop — we're still running on this thread's kernel stack.
             // Dropping now would free the stack pages while schedule_inner is
-            // still executing on them (use-after-free). The deferred_drops list
-            // is drained at the start of the next schedule_inner call, when
-            // we're safely on a different thread's stack.
-            s.deferred_drops.push(old_thread);
+            // still executing on them (use-after-free). The per-core deferred_drops
+            // slot is drained at the start of THIS CORE's next schedule_inner,
+            // when we're safely on a different thread's stack.
+            s.deferred_drops[core].push(old_thread);
         } else {
             // Blocked — park until wake() re-enqueues it.
             s.blocked.push(old_thread);
@@ -498,6 +513,26 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
         !result.is_null(),
         "schedule_inner returned null context pointer"
     );
+
+    // Validate the Context we're about to restore has a sane kernel SP.
+    // A zeroed Context (sp=0) or a user-range SP would cause a cascade of
+    // faults when the exception handler tries to use the stack.
+    // SAFETY: result is a valid Context pointer (just checked non-null).
+    let result_sp = unsafe { core::ptr::addr_of!((*result).sp).read() };
+    let result_spsr = unsafe { core::ptr::addr_of!((*result).spsr).read() };
+    let result_mode = result_spsr & 0xF;
+
+    // Only check SP for EL1 returns — EL0 threads use SP_EL0 (not Context.sp).
+    if (result_mode == 4 || result_mode == 5)
+        && (result_sp < memory::KERNEL_VA_OFFSET as u64 || result_sp == 0)
+    {
+        // The idle thread on its first activation would hit this — but with
+        // the merged boot/idle thread, it should never have a zeroed Context.
+        panic!(
+            "schedule_inner: EL1 context has non-kernel SP={result_sp:#x} \
+             (mode={result_mode}, core={core})"
+        );
+    }
 
     // Update TPIDR_EL1 to point at the new thread's Context while the
     // scheduler lock is held and IRQs are masked. This is critical: when the
@@ -1147,12 +1182,14 @@ pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
 #[inline(never)]
 pub fn init() {
     let mut s = STATE.lock();
-    let boot_thread = Thread::new_boot();
+    let boot_thread = Thread::new_boot_idle(0);
     let ctx_ptr = boot_thread.context_ptr();
 
+    // The boot thread IS the idle thread. It starts as `current` and moves to
+    // the `idle` slot on the first schedule_inner that picks a user thread.
+    // No separate idle thread needed — the zeroed Context is populated by
+    // save_context on the first exception (timer IRQ during WFI loop).
     s.cores[0].current = Some(boot_thread);
-    // Create idle thread for core 0 (used when no runnable threads exist).
-    s.cores[0].idle = Some(Thread::new_idle(0));
 
     // Create the default scheduling context for kernel-spawned user threads.
     // ref_count starts at 1 (the State itself holds a logical reference).
@@ -1178,19 +1215,16 @@ pub fn init() {
         );
     }
 }
-/// Initialize a secondary core's scheduler state with an idle thread.
+/// Initialize a secondary core's scheduler state with a boot/idle thread.
 ///
-/// Called from `secondary_main` on each secondary core. Creates the idle
-/// thread, sets TPIDR_EL1, and makes the idle thread the current thread.
+/// Called from `secondary_main` on each secondary core. Creates a single
+/// boot/idle thread (same as core 0's pattern) and sets TPIDR_EL1.
 #[inline(never)]
 pub fn init_secondary(core_id: u32) {
     let mut s = STATE.lock();
     let idx = core_id as usize;
-
-    s.cores[idx].idle = Some(Thread::new_idle(core_id as u64));
-
-    // Create a boot thread for this core as its current thread.
-    let boot_thread = Thread::new_boot();
+    // Single boot/idle thread per core — no separate idle thread.
+    let boot_thread = Thread::new_boot_idle(core_id as u64);
     let boot_ctx_ptr = boot_thread.context_ptr();
 
     s.cores[idx].current = Some(boot_thread);

@@ -1,0 +1,213 @@
+══════════════════════════════════════════════════════════
+  HYPERVISOR CRASH REPORT
+  2026-03-31 23:14:39
+══════════════════════════════════════════════════════════
+
+── Configuration ─────────────────────────────────────────
+  Kernel:  /Users/user/Sites/os/system/target/aarch64-unknown-none/release/kernel
+  RAM:     256 MiB
+  CPUs:    4
+  GPU:     Metal
+
+── vCPU 0 ─────────────────────────────────────────────────
+  Exit count:  13738
+
+── Registers (hypervisor-side) ───────────────────────────────
+  PC   = 0xfffffff04009c374  (during panic output, not the faulting instruction)
+  CPSR = 0x00000000600003c5
+
+  x0   = 0x0000000000051184  x1   = 0xfffffff0422dffb0
+  x2   = 0xfffffff04018b2f0  x3   = 0x0000000000000000
+  x4   = 0x0000000042cb0400  x5   = 0x0000000042cb0488
+  x6   = 0x0000000000000000  x7   = 0x0000000000000000
+  x8   = 0xfffffff009020000  x9   = 0x0000000000000001
+  x10  = 0x0000000000000010  x11  = 0xfffffff009000000
+  x12  = 0x0000000000000034  x13  = 0x00000000fff0bdc1
+  x14  = 0x00000000fff0bdc1  x15  = 0x0000000000000010
+  x16  = 0x0000000000000010  x17  = 0x0000000000000010
+  x18  = 0x0000000000000000  x19  = 0xfffffff0422dff78
+  x20  = 0xfffffff041220000  x21  = 0x00000000fff0bdc1
+  x22  = 0x0000000000000000  x23  = 0x0000000000000000
+  x24  = 0x0000000000000000  x25  = 0x0000000000000004
+  x26  = 0x000000000000002b  x27  = 0x0000000000000001
+  x28  = 0x0000000000000000  x29  = 0xfffffff0422dff90
+  x30  = 0xfffffff04009c364
+
+── System Registers ──────────────────────────────────────
+  ELR_EL1    = 0x0000000000400c5c  ← faulting instruction
+  ESR_EL1    = 0x0000000056000000  (EC=0x15: SVC (EL0))
+  FAR_EL1    = 0x00000000011dc000  ← faulting address
+  SPSR_EL1   = 0x0000000080000000
+  SP_EL1     = 0xfffffff0422dff40
+  SCTLR_EL1  = 0x0000000030c5199d
+  TCR_EL1    = 0x00000002751cb51c
+  TTBR0_EL1  = 0x000a000042c08000
+  TTBR1_EL1  = 0x00000000411fc000
+  MPIDR_EL1  = 0x0000000000000000
+  TPIDR_EL1  = 0xfffffff042250400
+  VBAR_EL1   = 0xfffffff04009b000
+  CNTV_CTL   = 0x0000000000000001
+  CNTV_CVAL  = 0x000004f2d614016b
+
+══════════════════════════════════════════════════════════
+  SERIAL OUTPUT
+══════════════════════════════════════════════════════════
+
+🥾 booting…
+  📦 heap - 16mib (linked-list + slab)
+  🌳 dtb - 8 devices discovered
+  💾 memory - 256mib ram, w^x page tables
+  🧩 frames - 14188 free (buddy allocator, 4k–8m)
+  🚨 pvpanic - registered
+  ⚡ interrupts - gic v3 (hardcoded)
+  📋 scheduler - eevdf + scheduling contexts
+  🔌 virtio - 5 devices found
+  🕐 rtc - pl031 discovered
+  📦 services - pack mapped into init
+  🔀 processes - init started with device manifest
+  🧵 smp - booting secondaries via psci
+  ✓ core 1 online
+  ✓ core 2 online
+  ⏱️  timer - tickless
+  ✓ core 3 online
+  🔧 init - proto-os-service starting
+🥾 booted.
+     6 devices in manifest
+     device 0: id=9
+     spawning driver (elf 897640 bytes)
+       spawned (process+channel+handle ok)
+     device 1: id=18
+     spawning driver (elf 895688 bytes)
+       spawned (process+channel+handle ok)
+     device 2: id=18
+     spawning driver (elf 895688 bytes)
+       spawned (process+channel+handle ok)
+     device 3: id=22
+     spawning driver (elf 2173120 bytes)
+       spawned (process+channel+handle ok)
+     device 4: id=2
+     spawning driver (elf 1113992 bytes)
+       spawned (process+channel+handle ok)
+     device 5: id=200
+     pl031 rtc registered
+     loading fonts from native filesystem
+     starting document service
+  📄 store - starting
+     waiting for document service ready
+     mounting existing filesystem...
+     opening existing store
+     store service ready
+     entering boot-query phase
+     document service ready
+     loading font: mono
+     mono font loaded: 303144 bytes
+     loading font: sans
+     sans font loaded: 879708 bytes
+     loading font: serif
+     serif font loaded: 1196808 bytes
+     loading font: mono-italic
+     mono-italic font loaded: 308888 bytes
+     loading font: sans-italic
+     sans-italic font loaded: 910252 bytes
+     loading font: serif-italic
+     serif-italic font loaded: 843444 bytes
+     content region header written
+     loading test.png
+     png loaded: 884951 bytes
+     setting up metal pipeline
+     document buffer: 4 KiB shared
+     scene graph: shared memory allocated
+     pointer state register: 4 KiB shared
+     layout results: 256 KiB shared
+     viewport state register: 4 KiB shared
+     cursor state page: 4 KiB shared
+     creating core→metal channel
+     starting metal (display query)
+     waiting for display info
+  🔱 metal-render - starting
+  🔱 metal-render: virtio device ready (2 queues)
+     display 4112x2658@120Hz
+     waiting for gpu config
+     boot-query phase complete
+     display resolution: 4112x2658
+     handshake complete, sending GPU_READY
+     waiting for render config
+     render config sent to metal
+       spawned (process+channel+handle ok)
+     rtc config sent to core
+     spawning document
+       spawned (process+channel+handle ok)
+     spawning layout
+       spawned (process+channel+handle ok)
+     layout config sent
+     creating input→core channel
+     input device 0 channel created
+     spawning rich editor
+       spawned (process+channel+handle ok)
+     creating core↔editor channel
+     creating editor↔document channel
+     spawning png-decode
+       spawned (process+channel+handle ok)
+     creating docmodel↔decoder channel
+     creating docmodel↔document channel
+     creating docmodel↔core channel
+     creating layout↔presenter channel
+     creating input→core channel
+     starting png-decode
+  png-decode: starting
+  png-decode: config received, entering decode loop
+     render config: scene_va=0x000000000xc0000000 content_size=16777216
+     starting input driver
+  ⌨️  virtio-input ready
+     starting input driver
+  ⌨️  virtio-input ready
+     shaders compiled
+     starting rich editor
+  📝 rich-editor starting
+     document buffer mapped (read-only)
+     entering event loop
+     functions loaded
+     starting document
+  📄 document starting
+     config received
+     pipelines created
+     rich text document loaded
+     initial undo snapshot taken
+     textures created
+     initializing glyph atlas
+     sans font pre-populated
+     atlas: packed 186 glyphs
+     starting layout
+  📐 layout - starting
+  layout: fonts discovered
+  layout: ready, waiting for recompute signals
+     starting presenter
+  🧠 presenter - starting
+     metal pipeline running
+  init: monitoring child processes
+     atlas uploaded to GPU
+     entering render loop
+     PNG decoded into Content Region
+     boot complete
+     entering event loop
+     layout config received
+     font metrics loaded
+     sans font (Inter) loaded
+     serif font loaded
+     pl031 rtc mapped
+     loading scene published
+     image decoded via A
+     document loaded via A
+     boot init complete
+     tablet input channel detected
+     entering event loop
+
+😱 panicking…
+kernel/main.rs:560
+📊 kernel metrics
+  core 0: ctx_sw=352 syscall=6814 pgfault=1046 tick=225 spin=210827
+  core 1: ctx_sw=154 syscall=1368 pgfault=743 tick=213 spin=151675
+  core 2: ctx_sw=161 syscall=1306 pgfault=634 tick=213 spin=109120
+  core 3: ctx_sw=160 syscall=881 pgfault=392 tick=212 spin=332164
+
+💥 

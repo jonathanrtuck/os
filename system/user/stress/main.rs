@@ -16,6 +16,11 @@
 const ITERATIONS: u64 = 10_000_000;
 const NUM_PAIRS: usize = 3;
 const TIMER_ITERATIONS: u64 = 1_000_000;
+/// Thread churn: each churn worker creates a short-lived thread, waits for it
+/// to exit, frees the stack, and repeats. This exercises the kernel's
+/// deferred_drops path (thread exit → stack free) under SMP load.
+const CHURN_ITERATIONS: u64 = 50_000;
+const NUM_CHURN_WORKERS: usize = 4;
 
 fn print_u64(mut n: u64) {
     if n == 0 {
@@ -64,6 +69,92 @@ extern "C" fn timer_worker(_args: u64) -> ! {
     sys::exit();
 }
 
+/// Thread that exits immediately — the simplest possible thread lifecycle.
+/// Used by churn workers to stress the create→schedule→exit→deferred_drop path.
+extern "C" fn exit_immediately(_args: u64) -> ! {
+    sys::exit();
+}
+
+/// Trampoline for exit_immediately (reads args from stack, same pattern as workers).
+#[unsafe(no_mangle)]
+extern "C" fn exit_trampoline() -> ! {
+    let args: u64;
+    unsafe {
+        core::arch::asm!(
+            "ldr {0}, [sp, #8]",
+            out(reg) args,
+            options(nostack)
+        );
+    }
+    exit_immediately(args);
+}
+
+/// Churn worker: rapidly create and destroy threads.
+/// Each iteration:
+///   1. Allocate a stack (memory_alloc)
+///   2. Create a thread that immediately exits (thread_create)
+///   3. Wait for the thread to exit (wait on thread handle)
+///   4. Close the thread handle (handle_close)
+///   5. Free the stack (memory_free)
+///
+/// This exercises the kernel's thread lifecycle under SMP load:
+///   thread_create → scheduler picks it → thread exits → deferred_drops →
+///   next schedule_inner drains drops → stack freed
+///
+/// With the OLD buggy global deferred_drops, this would crash because
+/// another core could drain the drops while the originating core was still
+/// on the exited thread's kernel stack.
+extern "C" fn churn_worker(args: u64) -> ! {
+    let iters = args;
+
+    for _ in 0..iters {
+        const STACK_PAGES: u64 = 1;
+        let stack_va = match sys::memory_alloc(STACK_PAGES) {
+            Ok(va) => va,
+            Err(_) => {
+                // OOM — yield and retry.
+                let _ = sys::wait(&[], 0);
+                continue;
+            }
+        };
+        let stack_top = (stack_va + (STACK_PAGES as usize * ipc::PAGE_SIZE)) as u64;
+
+        // Write dummy args to stack (trampoline reads from SP+8).
+        let args_ptr = (stack_top - 8) as *mut u64;
+        unsafe { core::ptr::write_volatile(args_ptr, 0) };
+
+        match sys::thread_create(exit_trampoline as u64, stack_top - 16) {
+            Ok(h) => {
+                // Wait for thread to exit.
+                let _ = sys::wait(&[h.0], u64::MAX);
+                let _ = sys::handle_close(h.0);
+            }
+            Err(_) => {
+                // Thread creation failed (OOM) — continue.
+            }
+        }
+
+        // Free the stack.
+        let _ = sys::memory_free(stack_va, STACK_PAGES);
+    }
+
+    sys::exit();
+}
+
+/// Trampoline for churn_worker.
+#[unsafe(no_mangle)]
+extern "C" fn churn_trampoline() -> ! {
+    let args: u64;
+    unsafe {
+        core::arch::asm!(
+            "ldr {0}, [sp, #8]",
+            out(reg) args,
+            options(nostack)
+        );
+    }
+    churn_worker(args);
+}
+
 /// Allocate a user stack for a new thread. Returns the stack top VA.
 fn alloc_thread_stack() -> u64 {
     const STACK_PAGES: u64 = 4; // 64 KiB
@@ -91,7 +182,8 @@ pub extern "C" fn _start() -> ! {
     // Each pair: endpoint A (even index) and endpoint B (odd index).
     // Worker on side A: wait on A, signal B.
     // Worker on side B: wait on B, signal A.
-    let mut thread_handles: [u8; NUM_PAIRS * 2 + 1] = [0; NUM_PAIRS * 2 + 1];
+    let mut thread_handles: [u8; NUM_PAIRS * 2 + 1 + NUM_CHURN_WORKERS] =
+        [0; NUM_PAIRS * 2 + 1 + NUM_CHURN_WORKERS];
     let mut thread_count: usize = 0;
 
     for pair in 0..NUM_PAIRS {
@@ -175,6 +267,29 @@ pub extern "C" fn _start() -> ! {
         Err(_) => {
             sys::print(b"stress: timer thread failed\n");
         }
+    }
+
+    // Start churn workers: rapidly create/destroy threads to stress deferred_drops.
+    for churn_idx in 0..NUM_CHURN_WORKERS {
+        let churn_stack = alloc_thread_stack();
+        let churn_args_ptr = (churn_stack - 8) as *mut u64;
+        unsafe { core::ptr::write_volatile(churn_args_ptr, CHURN_ITERATIONS) };
+
+        match sys::thread_create(churn_trampoline as u64, churn_stack - 16) {
+            Ok(h) => {
+                thread_handles[thread_count] = h.0;
+                thread_count += 1;
+            }
+            Err(_) => {
+                sys::print(b"stress: churn thread failed\n");
+            }
+        }
+
+        sys::print(b"     churn worker ");
+        print_u64(churn_idx as u64);
+        sys::print(b" started (");
+        print_u64(CHURN_ITERATIONS);
+        sys::print(b" create/exit cycles)\n");
     }
 
     sys::print(b"     ");

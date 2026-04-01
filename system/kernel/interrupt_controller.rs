@@ -319,6 +319,14 @@ impl InterruptController for GicV3 {
     /// For PPIs/SGIs (id < 32): configures via GICR on the current core.
     /// For SPIs (id >= 32): configures via GICD, routes to core 0.
     fn enable_irq(&self, id: u32) {
+        // SAFETY: DSB SY before Device-memory writes ensures prior Normal-memory
+        // stores (e.g., handler registration in interrupt.rs) are globally visible
+        // before the IRQ is enabled. Without this, a Device store (GICD/GICR
+        // ISENABLER) could reach the GIC before a Normal store (handler table
+        // entry) reaches other cores' caches — the GIC fires the IRQ, the
+        // handler reads stale data. nostack correct.
+        unsafe { core::arch::asm!("dsb sy", options(nostack)) };
+
         if id < 32 {
             // PPI/SGI: configure at the redistributor of the current core.
             let core_id = per_core::core_id();
