@@ -130,6 +130,24 @@ pub fn handle_send(
     Ok(())
 }
 
+/// Set the badge on a handle. The badge is an opaque u64 value that
+/// travels with the handle through `handle_send`. Services use badges
+/// to identify which client a handle was sent to.
+pub fn handle_set_badge(handle: u16, badge: u64) -> SyscallResult<()> {
+    let raw = unsafe { syscall2(nr::HANDLE_SET_BADGE, handle as u64, badge) as i64 };
+
+    result(raw)?;
+
+    Ok(())
+}
+
+/// Read the badge on a handle.
+pub fn handle_get_badge(handle: u16) -> SyscallResult<u64> {
+    let raw = unsafe { syscall1(nr::HANDLE_GET_BADGE, handle as u64) as i64 };
+
+    result(raw)
+}
+
 /// Acknowledge an interrupt, allowing the device to fire again.
 ///
 /// Clears the pending flag and re-enables the IRQ in the GIC. Must be called

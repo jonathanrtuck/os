@@ -1102,7 +1102,7 @@ pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
                 .take()
                 .expect("process not found");
             let handle_objects: Vec<HandleObject> =
-                process.handles.drain().map(|(obj, _)| obj).collect();
+                process.handles.drain().map(|(obj, _, _)| obj).collect();
             let handles = categorize_handles(handle_objects, &mut s);
 
             ExitInfo::Last {
@@ -1359,7 +1359,7 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
     let handle_objects: Vec<HandleObject> = {
         let process = s.processes[target_pid.0 as usize].as_mut().unwrap();
 
-        process.handles.drain().map(|(obj, _)| obj).collect()
+        process.handles.drain().map(|(obj, _, _)| obj).collect()
     };
     let handles = categorize_handles(handle_objects, &mut s);
     // Take or defer the process based on whether threads are still running.

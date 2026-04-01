@@ -56,6 +56,8 @@
 //! | 25 | memory_alloc              | x0=page_count                                      | user VA                      |
 //! | 26 | memory_free               | x0=va, x1=page_count                               | 0                            |
 //! | 27 | process_set_syscall_filter | x0=handle, x1=mask                                | 0                            |
+//! | 28 | handle_set_badge          | x0=handle, x1=badge                                | 0                            |
+//! | 29 | handle_get_badge          | x0=handle                                          | badge                        |
 //!
 //! # Error codes
 //!
@@ -122,6 +124,8 @@ pub mod nr {
     pub const MEMORY_ALLOC: u64 = 25;
     pub const MEMORY_FREE: u64 = 26;
     pub const PROCESS_SET_SYSCALL_FILTER: u64 = 27;
+    pub const HANDLE_SET_BADGE: u64 = 28;
+    pub const HANDLE_GET_BADGE: u64 = 29;
 }
 
 /// Maximum DMA allocation order — matches page_allocator::MAX_ORDER.
@@ -495,7 +499,7 @@ fn sys_handle_close(handle_nr: u64) -> Result<u64, HandleError> {
         return Err(HandleError::InvalidHandle);
     }
 
-    let (obj, _rights) =
+    let (obj, _rights, _badge) =
         scheduler::current_process_do(|process| process.handles.close(Handle(handle_nr as u16)))?;
 
     // Release kernel resources associated with the closed handle.
@@ -509,6 +513,28 @@ fn sys_handle_close(handle_nr: u64) -> Result<u64, HandleError> {
     }
 
     Ok(0)
+}
+fn sys_handle_set_badge(handle_nr: u64, badge: u64) -> Result<u64, HandleError> {
+    if handle_nr > u16::MAX as u64 {
+        return Err(HandleError::InvalidHandle);
+    }
+
+    scheduler::current_process_do(|process| {
+        process
+            .handles
+            .set_badge(Handle(handle_nr as u16), badge)
+    })?;
+
+    Ok(0)
+}
+fn sys_handle_get_badge(handle_nr: u64) -> Result<u64, HandleError> {
+    if handle_nr > u16::MAX as u64 {
+        return Err(HandleError::InvalidHandle);
+    }
+
+    scheduler::current_process_do(|process| {
+        process.handles.get_badge(Handle(handle_nr as u16))
+    })
 }
 fn sys_handle_send(
     target_handle_nr: u64,
@@ -529,7 +555,8 @@ fn sys_handle_send(
     // Phase 1: Move the source handle out of the caller's table.
     // We take (not just read) the handle — move semantics prevent duplicated
     // endpoints, which would corrupt channel closed_count.
-    let (target_pid, source_obj, source_rights) = scheduler::current_process_do(|process| {
+    let (target_pid, source_obj, source_rights, source_badge) =
+        scheduler::current_process_do(|process| {
         let target_pid = match process
             .handles
             .get(Handle(target_handle_nr as u16), Rights::WRITE)
@@ -540,14 +567,16 @@ fn sys_handle_send(
         };
         // Verify the source handle has TRANSFER right before moving it.
         // Without this check, any handle could be delegated to another process.
-        let (source_obj, source_rights) = process
+        process
             .handles
             .get_entry(source_handle, Rights::TRANSFER)
             .map_err(|_| Error::InvalidArgument)?;
         // Now close (move out). Can't fail — we just verified it exists.
-        let _ = process.handles.close(source_handle);
+        // close returns (object, rights, badge).
+        let (source_obj, source_rights, source_badge) =
+            process.handles.close(source_handle).unwrap();
 
-        Ok((target_pid, source_obj, source_rights))
+        Ok((target_pid, source_obj, source_rights, source_badge))
     })?;
     // Attenuate: target handle gets only the rights present in BOTH the
     // source handle and the mask. Rights can only be removed, never added.
@@ -582,7 +611,11 @@ fn sys_handle_send(
                 }
             };
 
-            if target.handles.insert(source_obj, source_rights).is_err() {
+            if target
+                .handles
+                .insert_with_badge(source_obj, source_rights, source_badge)
+                .is_err()
+            {
                 // Handle insert failed — unmap both pages.
                 target.address_space.unmap_channel_page(va_a);
                 target.address_space.unmap_channel_page(va_b);
@@ -591,7 +624,7 @@ fn sys_handle_send(
         } else {
             target
                 .handles
-                .insert(source_obj, source_rights)
+                .insert_with_badge(source_obj, source_rights, source_badge)
                 .map_err(|_| Error::InvalidArgument)?;
         }
 
@@ -604,7 +637,7 @@ fn sys_handle_send(
         scheduler::current_process_do(|process| {
             let _ = process
                 .handles
-                .insert_at(source_handle, source_obj, source_rights);
+                .insert_at(source_handle, source_obj, source_rights, source_badge);
         });
 
         return Err(e);
@@ -1453,6 +1486,12 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
         nr::MEMORY_FREE => dispatch_ok(ctx, result_to_u64!(sys_memory_free(x0, x1))),
         nr::PROCESS_SET_SYSCALL_FILTER => {
             dispatch_ok(ctx, result_to_u64!(sys_process_set_syscall_filter(x0, x1)))
+        }
+        nr::HANDLE_SET_BADGE => {
+            dispatch_ok(ctx, result_to_u64!(sys_handle_set_badge(x0, x1)))
+        }
+        nr::HANDLE_GET_BADGE => {
+            dispatch_ok(ctx, result_to_u64!(sys_handle_get_badge(x0)))
         }
 
         _ => dispatch_ok(

@@ -120,6 +120,7 @@ type OverflowPage = Box<[Option<HandleEntry>; PAGE_SIZE]>;
 struct HandleEntry {
     object: HandleObject,
     rights: Rights,
+    badge: u64,
 }
 
 pub struct HandleTable {
@@ -171,7 +172,7 @@ impl HandleTable {
         // Scan base for free slot.
         for (i, slot) in self.base.iter_mut().enumerate() {
             if slot.is_none() {
-                *slot = Some(HandleEntry { object, rights });
+                *slot = Some(HandleEntry { object, rights, badge: 0 });
 
                 return Ok(Handle(i as u16));
             }
@@ -181,7 +182,7 @@ impl HandleTable {
         for (page_idx, page) in self.overflow.iter_mut().enumerate() {
             for (offset, slot) in page.iter_mut().enumerate() {
                 if slot.is_none() {
-                    *slot = Some(HandleEntry { object, rights });
+                    *slot = Some(HandleEntry { object, rights, badge: 0 });
 
                     let index = BASE_SIZE + page_idx * PAGE_SIZE + offset;
 
@@ -199,7 +200,7 @@ impl HandleTable {
 
         let mut page = Box::new([None; PAGE_SIZE]);
 
-        page[0] = Some(HandleEntry { object, rights });
+        page[0] = Some(HandleEntry { object, rights, badge: 0 });
 
         let index = BASE_SIZE + self.overflow.len() * PAGE_SIZE;
 
@@ -216,6 +217,7 @@ impl HandleTable {
         handle: Handle,
         object: HandleObject,
         rights: Rights,
+        badge: u64,
     ) -> Result<(), HandleError> {
         let index = handle.0 as usize;
 
@@ -238,7 +240,7 @@ impl HandleTable {
             return Err(HandleError::SlotOccupied);
         }
 
-        *slot = Some(HandleEntry { object, rights });
+        *slot = Some(HandleEntry { object, rights, badge });
 
         Ok(())
     }
@@ -276,17 +278,57 @@ impl HandleTable {
         Ok((entry.object, entry.rights))
     }
 
-    /// Close a handle (clear the slot). Returns the object and rights that were there.
-    pub fn close(&mut self, handle: Handle) -> Result<(HandleObject, Rights), HandleError> {
+    /// Insert with an explicit badge (used when transferring a badged handle).
+    pub fn insert_with_badge(
+        &mut self,
+        object: HandleObject,
+        rights: Rights,
+        badge: u64,
+    ) -> Result<Handle, HandleError> {
+        let handle = self.insert(object, rights)?;
+        // Overwrite the badge (insert sets it to 0).
+        if let Some(slot) = self.slot_mut(handle.0 as usize) {
+            if let Some(entry) = slot.as_mut() {
+                entry.badge = badge;
+            }
+        }
+
+        Ok(handle)
+    }
+
+    /// Close a handle (clear the slot). Returns the object, rights, and badge.
+    pub fn close(&mut self, handle: Handle) -> Result<(HandleObject, Rights, u64), HandleError> {
         let slot = self
             .slot_mut(handle.0 as usize)
             .ok_or(HandleError::InvalidHandle)?;
         let entry = slot.ok_or(HandleError::InvalidHandle)?;
-        let result = (entry.object, entry.rights);
+        let result = (entry.object, entry.rights, entry.badge);
 
         *slot = None;
 
         Ok(result)
+    }
+
+    /// Set the badge on a handle.
+    pub fn set_badge(&mut self, handle: Handle, badge: u64) -> Result<(), HandleError> {
+        let slot = self
+            .slot_mut(handle.0 as usize)
+            .ok_or(HandleError::InvalidHandle)?;
+        let entry = slot.as_mut().ok_or(HandleError::InvalidHandle)?;
+
+        entry.badge = badge;
+
+        Ok(())
+    }
+
+    /// Read the badge on a handle.
+    pub fn get_badge(&self, handle: Handle) -> Result<u64, HandleError> {
+        let entry = self
+            .slot(handle.0 as usize)
+            .and_then(|s| s.as_ref())
+            .ok_or(HandleError::InvalidHandle)?;
+
+        Ok(entry.badge)
     }
 
     /// Iterate over all occupied handles (for cleanup on process exit).
@@ -308,7 +350,7 @@ pub struct DrainHandles<'a> {
 }
 
 impl Iterator for DrainHandles<'_> {
-    type Item = (HandleObject, Rights);
+    type Item = (HandleObject, Rights, u64);
 
     fn next(&mut self) -> Option<Self::Item> {
         let total = self.table.capacity();
@@ -320,7 +362,7 @@ impl Iterator for DrainHandles<'_> {
 
             if let Some(slot) = self.table.slot_mut(i) {
                 if let Some(entry) = slot.take() {
-                    return Some((entry.object, entry.rights));
+                    return Some((entry.object, entry.rights, entry.badge));
                 }
             }
         }

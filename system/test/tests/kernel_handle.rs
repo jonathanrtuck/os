@@ -135,7 +135,7 @@ fn close_returns_object() {
 
     t.insert(ch(7), Rights::READ).unwrap();
 
-    let (obj, _) = t.close(Handle(0)).unwrap();
+    let (obj, _, _) = t.close(Handle(0)).unwrap();
 
     assert!(matches!(obj, HandleObject::Channel(ChannelId(7))));
 }
@@ -195,15 +195,15 @@ fn drain_returns_all_and_clears() {
     assert_eq!(items.len(), 3);
     assert!(matches!(
         items[0],
-        (HandleObject::Channel(ChannelId(10)), _)
+        (HandleObject::Channel(ChannelId(10)), _, _)
     ));
     assert!(matches!(
         items[1],
-        (HandleObject::Channel(ChannelId(20)), _)
+        (HandleObject::Channel(ChannelId(20)), _, _)
     ));
     assert!(matches!(
         items[2],
-        (HandleObject::Channel(ChannelId(30)), _)
+        (HandleObject::Channel(ChannelId(30)), _, _)
     ));
 
     // Table is now empty.
@@ -223,8 +223,8 @@ fn drain_skips_closed_slots() {
     let items: Vec<_> = t.drain().collect();
 
     assert_eq!(items.len(), 2);
-    assert!(matches!(items[0], (HandleObject::Channel(ChannelId(1)), _)));
-    assert!(matches!(items[1], (HandleObject::Channel(ChannelId(3)), _)));
+    assert!(matches!(items[0], (HandleObject::Channel(ChannelId(1)), _, _)));
+    assert!(matches!(items[1], (HandleObject::Channel(ChannelId(3)), _, _)));
 }
 
 // --- SchedulingContext handles ---
@@ -256,15 +256,16 @@ fn drain_mixed_channel_and_scheduling_context() {
     let items: Vec<_> = t.drain().collect();
 
     assert_eq!(items.len(), 3);
-    assert!(matches!(items[0], (HandleObject::Channel(ChannelId(1)), _)));
+    assert!(matches!(items[0], (HandleObject::Channel(ChannelId(1)), _, _)));
     assert!(matches!(
         items[1],
         (
             HandleObject::SchedulingContext(scheduling_context::SchedulingContextId(2)),
+            _,
             _
         )
     ));
-    assert!(matches!(items[2], (HandleObject::Channel(ChannelId(3)), _)));
+    assert!(matches!(items[2], (HandleObject::Channel(ChannelId(3)), _, _)));
 }
 
 // --- Interrupt handles ---
@@ -312,21 +313,22 @@ fn drain_mixed_all_handle_types() {
     let items: Vec<_> = t.drain().collect();
 
     assert_eq!(items.len(), 4);
-    assert!(matches!(items[0], (HandleObject::Channel(ChannelId(1)), _)));
+    assert!(matches!(items[0], (HandleObject::Channel(ChannelId(1)), _, _)));
     assert!(matches!(
         items[1],
-        (HandleObject::Interrupt(interrupt::InterruptId(2)), _)
+        (HandleObject::Interrupt(interrupt::InterruptId(2)), _, _)
     ));
     assert!(matches!(
         items[2],
         (
             HandleObject::SchedulingContext(scheduling_context::SchedulingContextId(3)),
+            _,
             _
         )
     ));
     assert!(matches!(
         items[3],
-        (HandleObject::Timer(timer::TimerId(4)), _)
+        (HandleObject::Timer(timer::TimerId(4)), _, _)
     ));
 }
 
@@ -355,10 +357,10 @@ fn drain_includes_thread_handles() {
     let items: Vec<_> = t.drain().collect();
 
     assert_eq!(items.len(), 2);
-    assert!(matches!(items[0], (HandleObject::Channel(ChannelId(1)), _)));
+    assert!(matches!(items[0], (HandleObject::Channel(ChannelId(1)), _, _)));
     assert!(matches!(
         items[1],
-        (HandleObject::Thread(thread::ThreadId(2)), _)
+        (HandleObject::Thread(thread::ThreadId(2)), _, _)
     ));
 }
 
@@ -387,10 +389,10 @@ fn drain_includes_process_handles() {
     let items: Vec<_> = t.drain().collect();
 
     assert_eq!(items.len(), 2);
-    assert!(matches!(items[0], (HandleObject::Channel(ChannelId(1)), _)));
+    assert!(matches!(items[0], (HandleObject::Channel(ChannelId(1)), _, _)));
     assert!(matches!(
         items[1],
-        (HandleObject::Process(process::ProcessId(2)), _)
+        (HandleObject::Process(process::ProcessId(2)), _, _)
     ));
 }
 
@@ -402,7 +404,7 @@ fn close_returns_object_and_rights() {
 
     t.insert(ch(7), Rights::READ_WRITE).unwrap();
 
-    let (obj, rights) = t.close(Handle(0)).unwrap();
+    let (obj, rights, _) = t.close(Handle(0)).unwrap();
 
     assert!(matches!(obj, HandleObject::Channel(ChannelId(7))));
     assert!(rights.contains(Rights::READ));
@@ -423,7 +425,7 @@ fn insert_at_specific_slot() {
     t.close(Handle(1)).unwrap();
 
     // Insert at slot 1 specifically.
-    t.insert_at(Handle(1), ch(99), Rights::READ_WRITE).unwrap();
+    t.insert_at(Handle(1), ch(99), Rights::READ_WRITE, 0).unwrap();
 
     let (obj, rights) = t.get_entry(Handle(1), Rights::READ).unwrap();
 
@@ -437,7 +439,7 @@ fn insert_at_occupied_slot_fails() {
 
     t.insert(ch(1), Rights::READ).unwrap();
 
-    let err = t.insert_at(Handle(0), ch(2), Rights::READ).unwrap_err();
+    let err = t.insert_at(Handle(0), ch(2), Rights::READ, 0).unwrap_err();
 
     assert!(matches!(err, HandleError::SlotOccupied));
 }
@@ -446,9 +448,9 @@ fn insert_at_occupied_slot_fails() {
 fn insert_at_then_close_roundtrip() {
     let mut t = HandleTable::new();
 
-    t.insert_at(Handle(5), ch(42), Rights::READ_WRITE).unwrap();
+    t.insert_at(Handle(5), ch(42), Rights::READ_WRITE, 0).unwrap();
 
-    let (obj, rights) = t.close(Handle(5)).unwrap();
+    let (obj, rights, _) = t.close(Handle(5)).unwrap();
 
     assert!(matches!(obj, HandleObject::Channel(ChannelId(42))));
     assert!(rights.contains(Rights::READ_WRITE));
@@ -464,7 +466,7 @@ fn move_handle_take_and_insert() {
     source.insert(ch(10), Rights::READ_WRITE).unwrap();
 
     // Take from source (move out).
-    let (obj, rights) = source.close(Handle(0)).unwrap();
+    let (obj, rights, _) = source.close(Handle(0)).unwrap();
 
     assert!(source.get(Handle(0), Rights::READ).is_err());
 
@@ -489,13 +491,13 @@ fn move_handle_rollback_on_full_target() {
     }
 
     // Take from source.
-    let (obj, rights) = source.close(source_handle).unwrap();
+    let (obj, rights, _) = source.close(source_handle).unwrap();
 
     // Target insert fails.
     assert!(target.insert(obj, rights).is_err());
 
     // Rollback: restore to original slot.
-    source.insert_at(source_handle, obj, rights).unwrap();
+    source.insert_at(source_handle, obj, rights, 0).unwrap();
 
     // Source handle is back where it was.
     let (restored, _) = source.get_entry(source_handle, Rights::READ).unwrap();
@@ -545,7 +547,7 @@ fn close_and_reinsert_at_same_slot() {
     t.insert(ch(1), Rights::READ).unwrap();
 
     t.close(Handle(0)).unwrap();
-    t.insert_at(Handle(0), ch(2), Rights::READ_WRITE).unwrap();
+    t.insert_at(Handle(0), ch(2), Rights::READ_WRITE, 0).unwrap();
 
     let obj = t.get(Handle(0), Rights::READ).unwrap();
 
@@ -557,7 +559,7 @@ fn insert_at_max_slot() {
     // Insert at the highest possible slot (255).
     let mut t = HandleTable::new();
 
-    t.insert_at(Handle(255), ch(99), Rights::READ_WRITE)
+    t.insert_at(Handle(255), ch(99), Rights::READ_WRITE, 0)
         .unwrap();
 
     let obj = t.get(Handle(255), Rights::READ).unwrap();

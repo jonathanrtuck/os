@@ -1074,7 +1074,7 @@ fn churn_handle_channel_insert_close_200_cycles() {
         ));
 
         // Close it.
-        let (obj, _rights) = t.close(h).expect("close should succeed");
+        let (obj, _rights, _) = t.close(h).expect("close should succeed");
         assert!(
             matches!(obj, HandleObject::Channel(_)),
             "cycle {cycle}: closed object should be Channel"
@@ -1349,14 +1349,14 @@ fn churn_handle_channel_full_lifecycle_100_cycles() {
         ));
 
         // Close handles (returns the ChannelId for cleanup).
-        let (obj0, _) = ht.close(h0).unwrap();
+        let (obj0, _, _) = ht.close(h0).unwrap();
         let id0 = match obj0 {
             HandleObject::Channel(id) => id,
             _ => panic!("expected Channel"),
         };
         ct.close_endpoint(id0);
 
-        let (obj1, _) = ht.close(h1).unwrap();
+        let (obj1, _, _) = ht.close(h1).unwrap();
         let id1 = match obj1 {
             HandleObject::Channel(id) => id,
             _ => panic!("expected Channel"),
@@ -1401,7 +1401,7 @@ fn churn_handle_timer_full_lifecycle_100_cycles() {
         ));
 
         // Close handle → destroy timer.
-        let (obj, _) = ht.close(h).unwrap();
+        let (obj, _, _) = ht.close(h).unwrap();
         let id = match obj {
             HandleObject::Timer(id) => id,
             _ => panic!("expected Timer"),
@@ -1435,7 +1435,7 @@ fn churn_handle_sched_ctx_full_lifecycle_100_cycles() {
         ));
 
         // Close handle → release context.
-        let (obj, _) = ht.close(h).unwrap();
+        let (obj, _, _) = ht.close(h).unwrap();
         let id = match obj {
             HandleObject::SchedulingContext(id) => id,
             _ => panic!("expected SchedulingContext"),

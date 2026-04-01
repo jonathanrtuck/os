@@ -31,6 +31,8 @@ pub mod nr {
     pub const MEMORY_ALLOC: u64 = 25;
     pub const MEMORY_FREE: u64 = 26;
     pub const PROCESS_SET_SYSCALL_FILTER: u64 = 27;
+    pub const HANDLE_SET_BADGE: u64 = 28;
+    pub const HANDLE_GET_BADGE: u64 = 29;
 }
 
 pub fn align_up(addr: usize, align: usize) -> usize {

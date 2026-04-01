@@ -136,7 +136,7 @@ fn close_overflow_handle() {
     }
 
     // Close an overflow handle.
-    let (obj, _) = t.close(Handle(258)).unwrap();
+    let (obj, _, _) = t.close(Handle(258)).unwrap();
 
     assert!(matches!(obj, HandleObject::Channel(ChannelId(258))));
 
@@ -190,7 +190,7 @@ fn insert_at_overflow_index() {
     t.close(Handle(257)).unwrap();
 
     // insert_at should work for overflow slot.
-    t.insert_at(Handle(257), ch(7777), Rights::READ).unwrap();
+    t.insert_at(Handle(257), ch(7777), Rights::READ, 0).unwrap();
 
     let (obj, rights) = t.get_entry(Handle(257), Rights::READ).unwrap();
 
@@ -207,7 +207,7 @@ fn insert_at_occupied_overflow_fails() {
         t.insert(ch(i), Rights::ALL).unwrap();
     }
 
-    let err = t.insert_at(Handle(258), ch(0), Rights::ALL).unwrap_err();
+    let err = t.insert_at(Handle(258), ch(0), Rights::ALL, 0).unwrap_err();
 
     assert!(matches!(err, HandleError::SlotOccupied));
 }

@@ -30,7 +30,8 @@ pub use heap::heap_stats;
 pub use io::{format_u32, print, print_u32, write};
 pub use syscalls::{
     channel_create, channel_signal, device_map, dma_alloc, dma_free, exit, futex_wait, futex_wake,
-    handle_close, handle_send, interrupt_ack, interrupt_register, memory_alloc, memory_free,
+    handle_close, handle_get_badge, handle_send, handle_set_badge, interrupt_ack,
+    interrupt_register, memory_alloc, memory_free,
     memory_share, process_create, process_kill, process_set_syscall_filter, process_start,
     scheduling_context_bind, scheduling_context_borrow, scheduling_context_create,
     scheduling_context_return, thread_create, timer_create, wait, yield_now,

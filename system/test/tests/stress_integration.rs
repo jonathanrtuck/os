@@ -429,7 +429,7 @@ impl ProcessTable {
         }
     }
 
-    fn kill(&mut self, id: process::ProcessId) -> Vec<(HandleObject, Rights)> {
+    fn kill(&mut self, id: process::ProcessId) -> Vec<(HandleObject, Rights, u64)> {
         let p = &mut self.processes[id.0 as usize];
         if p.state == ProcessState::Exited {
             return Vec::new();
@@ -979,7 +979,7 @@ fn integration_stress_process_churn_with_handle_transfer_75_cycles() {
         );
 
         // Step 6: Perform resource cleanup for each drained handle.
-        for (obj, _rights) in &drained {
+        for (obj, _rights, _) in &drained {
             match obj {
                 HandleObject::Channel(id) => channels.close_endpoint(*id),
                 HandleObject::SchedulingContext(id) => {
@@ -1053,7 +1053,7 @@ fn integration_stress_process_churn_interleaved_60() {
 
     for lp in &live {
         let drained = processes.kill(lp.pid);
-        for (obj, _) in &drained {
+        for (obj, _, _) in &drained {
             match obj {
                 HandleObject::Channel(id) => channels.close_endpoint(*id),
                 HandleObject::SchedulingContext(id) => {
@@ -1090,7 +1090,7 @@ fn integration_stress_process_churn_kill_before_start_50() {
         let drained = processes.kill(pid);
         assert_eq!(drained.len(), 1, "cycle {cycle}: one handle drained");
 
-        for (obj, _) in &drained {
+        for (obj, _, _) in &drained {
             if let HandleObject::Channel(id) = obj {
                 channels.close_endpoint(*id);
             }
@@ -1139,7 +1139,7 @@ fn integration_stress_process_churn_multi_handle_transfer_50() {
         let drained = processes.kill(pid);
         assert_eq!(drained.len(), 3, "cycle {cycle}: 3 handles drained");
 
-        for (obj, _) in &drained {
+        for (obj, _, _) in &drained {
             match obj {
                 HandleObject::Channel(id) => channels.close_endpoint(*id),
                 HandleObject::Timer(id) => {
@@ -1627,7 +1627,7 @@ fn integration_stress_process_churn_with_wait_cleanup() {
 
         // Kill the process — closes ep0, which wakes peer (ep1).
         let drained = processes.kill(pid);
-        for (obj, _) in &drained {
+        for (obj, _, _) in &drained {
             if let HandleObject::Channel(id) = obj {
                 channels.close_endpoint(*id);
             }

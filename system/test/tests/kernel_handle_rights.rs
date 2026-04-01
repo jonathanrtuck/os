@@ -238,7 +238,7 @@ fn close_returns_original_rights() {
     let mut t = HandleTable::new();
     let rights = Rights::MAP.union(Rights::TRANSFER);
     let h = t.insert(ch(1), rights).unwrap();
-    let (_, returned) = t.close(h).unwrap();
+    let (_, returned, _) = t.close(h).unwrap();
 
     assert!(returned.contains(Rights::MAP));
     assert!(returned.contains(Rights::TRANSFER));
@@ -290,7 +290,7 @@ fn simulated_attenuated_send() {
     let h = source.insert(ch(42), Rights::ALL).unwrap();
 
     // Take from source (move semantics).
-    let (obj, original_rights) = source.close(h).unwrap();
+    let (obj, original_rights, _) = source.close(h).unwrap();
 
     // Attenuate.
     let mask = Rights::READ.union(Rights::SIGNAL).union(Rights::WAIT);
@@ -328,7 +328,7 @@ fn attenuated_send_with_zero_mask_preserves_all() {
 
     let original = Rights::READ.union(Rights::WRITE).union(Rights::SIGNAL);
     let h = source.insert(ch(1), original).unwrap();
-    let (obj, rights) = source.close(h).unwrap();
+    let (obj, rights, _) = source.close(h).unwrap();
 
     // Using ALL as mask = no attenuation.
     let attenuated = rights.attenuate(Rights::ALL);
@@ -354,7 +354,7 @@ fn multi_hop_attenuation_only_reduces() {
     let ha = table_a.insert(ch(1), Rights::ALL).unwrap();
 
     // A → B: attenuate to READ | WRITE | SIGNAL | WAIT | TRANSFER.
-    let (obj, rights_a) = table_a.close(ha).unwrap();
+    let (obj, rights_a, _) = table_a.close(ha).unwrap();
     let mask_ab = Rights::READ
         .union(Rights::WRITE)
         .union(Rights::SIGNAL)
@@ -371,7 +371,7 @@ fn multi_hop_attenuation_only_reduces() {
     ));
 
     // B → C: attenuate to READ | SIGNAL (drop WRITE, WAIT, TRANSFER).
-    let (obj, rights_b) = table_b.close(hb).unwrap();
+    let (obj, rights_b, _) = table_b.close(hb).unwrap();
     let mask_bc = Rights::READ.union(Rights::SIGNAL);
     let rights_c = rights_b.attenuate(mask_bc);
     let hc = table_c.insert(obj, rights_c).unwrap();

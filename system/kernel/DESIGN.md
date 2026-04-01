@@ -573,11 +573,15 @@ Creates a new thread in the calling process. Shares address space and handle tab
 | Nr  | Syscall        | Args                                                     | Returns                     |
 | --- | -------------- | -------------------------------------------------------- | --------------------------- |
 | 5   | channel_create | —                                                        | handle_a \| (handle_b << 8) |
-| 22  | handle_send    | x0=target_proc_handle, x1=handle_to_send, x2=rights_mask | 0                           |
+| 22  | handle_send    | x0=target_proc_handle, x1=handle_to_send, x2=rights_mask | 0             |
+| 28  | handle_set_badge | x0=handle, x1=badge                                    | 0             |
+| 29  | handle_get_badge | x0=handle                                              | badge         |
 
-`handle_send` moves a handle from the caller's table into the target process's table with optional rights attenuation. The target handle receives `source_rights & rights_mask` (rights can only be removed, never added). `rights_mask=0` means preserve all rights from the source. Only works on suspended processes (Process.started == false). For Channel handles, also maps the shared page into the target's address space.
+`handle_send` moves a handle from the caller's table into the target process's table with optional rights attenuation. The target handle receives `source_rights & rights_mask` (rights can only be removed, never added). `rights_mask=0` means preserve all rights from the source. The handle's badge is preserved through the transfer. Only works on suspended processes (Process.started == false). For Channel handles, also maps the shared page into the target's address space.
 
-`channel_create` allocates a new channel (shared page + two endpoints), maps the shared page into the caller, and inserts both endpoint handles. Returns packed `handle_a | (handle_b << 8)`.
+`handle_set_badge` / `handle_get_badge`: each handle carries an opaque u64 badge (default 0). Init sets badges on handles before sending them to services, so services can identify which client a handle was assigned to. Badges are preserved through `handle_send` and survive rights attenuation.
+
+`channel_create` allocates a new channel (shared page + two endpoints), maps the shared page into the caller, and inserts both endpoint handles. Returns packed `handle_a | (handle_b << 16)`.
 
 **Channel refactoring (complete):** Rewrote `channel.rs` from ThreadId-based to encoded ChannelId-based design. `ChannelId(channel_index * 2 + endpoint_index)` — endpoint identity embedded in the ID. Explicit `register_waiter`/`unregister_waiter` pattern (same as timer/interrupt/thread_exit/process_exit). Two-phase wake: channel lock → release → scheduler lock. `signal()` computes peer ChannelId from encoding, passes as wake reason.
 
