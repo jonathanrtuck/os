@@ -1654,6 +1654,72 @@ pub fn start_suspended_threads(process_id: ProcessId) -> bool {
 
     started
 }
+/// Suspend a thread by ThreadId. Removes it from the ready queue or blocked
+/// list and moves it to the suspended list. Returns true on success, false
+/// if the thread is currently running (caller must retry after preemption)
+/// or not found.
+pub fn suspend_thread(id: ThreadId) -> bool {
+    let mut s = STATE.lock();
+
+    // Check ready queue.
+    if let Some(pos) = s.queue.ready.iter().position(|t| t.id() == id) {
+        let thread = s.queue.ready.swap_remove(pos);
+        s.suspended.push(thread);
+        return true;
+    }
+
+    // Check blocked list.
+    if let Some(pos) = s.blocked.iter().position(|t| t.id() == id) {
+        let thread = s.blocked.swap_remove(pos);
+        s.suspended.push(thread);
+        return true;
+    }
+
+    // Thread is running or not found — can't suspend.
+    false
+}
+/// Resume a suspended thread. Moves it from the suspended list to the ready
+/// queue. Returns true on success, false if not found in suspended list.
+pub fn resume_thread(id: ThreadId) -> bool {
+    let mut s = STATE.lock();
+
+    if let Some(pos) = s.suspended.iter().position(|t| t.id() == id) {
+        let mut thread = s.suspended.swap_remove(pos);
+
+        thread.scheduling.eevdf = thread.scheduling.eevdf.mark_eligible();
+        s.queue.ready.push(thread);
+
+        ipi_kick_idle_core(&s, per_core::core_id() as usize);
+
+        return true;
+    }
+
+    false
+}
+/// Read the saved register state of a suspended thread.
+///
+/// Copies the thread's Context to a caller-provided buffer. The thread
+/// must be in the suspended list (not running). Returns the Context size
+/// in bytes on success, or 0 if the thread is not suspended.
+/// # Safety
+///
+/// `dst` must point to a valid, writable buffer of at least
+/// `size_of::<Context>()` bytes.
+pub unsafe fn read_thread_state(id: ThreadId, dst: *mut u8) -> bool {
+    let s = STATE.lock();
+
+    if let Some(thread) = s.suspended.iter().find(|t| t.id() == id) {
+        let src = &thread.context as *const super::Context as *const u8;
+        let size = core::mem::size_of::<super::Context>();
+
+        // SAFETY: src is the thread's Context (valid, aligned). dst validated by caller.
+        core::ptr::copy_nonoverlapping(src, dst, size);
+
+        true
+    } else {
+        false
+    }
+}
 /// Push a single entry to the current thread's wait set.
 ///
 /// Used by `sys_wait` to add the internal timeout timer entry after the

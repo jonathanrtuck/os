@@ -75,7 +75,7 @@
 use alloc::vec::Vec;
 
 use super::{
-    channel, futex,
+    channel, event, futex,
     handle::{ChannelId, Handle, HandleError, HandleObject, Rights},
     interrupt,
     interrupt::InterruptId,
@@ -87,7 +87,7 @@ use super::{
     thread::{ThreadId, WaitEntry},
     thread_exit, timer,
     timer::TimerId,
-    event, vmo, Context,
+    vmo, Context,
 };
 
 /// Syscall numbers. Grouped by abstraction layer, dense 0–36.
@@ -140,15 +140,20 @@ pub mod nr {
     pub const PROCESS_KILL: u64 = 32;
     pub const PROCESS_SET_SYSCALL_FILTER: u64 = 33;
     pub const THREAD_CREATE: u64 = 34;
-    // --- Scheduling (35–38) ---
-    pub const SCHEDULING_CONTEXT_CREATE: u64 = 35;
-    pub const SCHEDULING_CONTEXT_BORROW: u64 = 36;
-    pub const SCHEDULING_CONTEXT_RETURN: u64 = 37;
-    pub const SCHEDULING_CONTEXT_BIND: u64 = 38;
-    // --- Device layer (39–41) ---
-    pub const DEVICE_MAP: u64 = 39;
-    pub const INTERRUPT_REGISTER: u64 = 40;
-    pub const INTERRUPT_ACK: u64 = 41;
+    pub const THREAD_SUSPEND: u64 = 35;
+    pub const THREAD_RESUME: u64 = 36;
+    pub const THREAD_READ_STATE: u64 = 37;
+    // --- Scheduling (38–41) ---
+    pub const SCHEDULING_CONTEXT_CREATE: u64 = 38;
+    pub const SCHEDULING_CONTEXT_BORROW: u64 = 39;
+    pub const SCHEDULING_CONTEXT_RETURN: u64 = 40;
+    pub const SCHEDULING_CONTEXT_BIND: u64 = 41;
+    // --- Time (42) ---
+    pub const CLOCK_GET: u64 = 42;
+    // --- Device layer (43–45) ---
+    pub const DEVICE_MAP: u64 = 43;
+    pub const INTERRUPT_REGISTER: u64 = 44;
+    pub const INTERRUPT_ACK: u64 = 45;
 }
 
 /// Maximum DMA allocation order — matches page_allocator::MAX_ORDER.
@@ -1512,6 +1517,86 @@ fn sys_event_reset(handle_nr: u64) -> Result<u64, Error> {
 
     Ok(0)
 }
+fn sys_thread_suspend(handle_nr: u64) -> Result<u64, Error> {
+    if handle_nr > u16::MAX as u64 {
+        return Err(Error::InvalidArgument);
+    }
+
+    let thread_id = scheduler::current_process_do(|process| {
+        let obj = process
+            .handles
+            .get(Handle(handle_nr as u16), Rights::WRITE)?;
+
+        match obj {
+            HandleObject::Thread(id) => Ok(id),
+            _ => Err(HandleError::InvalidHandle),
+        }
+    })?;
+
+    if scheduler::suspend_thread(thread_id) {
+        Ok(0)
+    } else {
+        // Thread is running or not found — can't suspend right now.
+        Err(Error::InvalidArgument)
+    }
+}
+fn sys_thread_resume(handle_nr: u64) -> Result<u64, Error> {
+    if handle_nr > u16::MAX as u64 {
+        return Err(Error::InvalidArgument);
+    }
+
+    let thread_id = scheduler::current_process_do(|process| {
+        let obj = process
+            .handles
+            .get(Handle(handle_nr as u16), Rights::WRITE)?;
+
+        match obj {
+            HandleObject::Thread(id) => Ok(id),
+            _ => Err(HandleError::InvalidHandle),
+        }
+    })?;
+
+    if scheduler::resume_thread(thread_id) {
+        Ok(0)
+    } else {
+        Err(Error::InvalidArgument) // Not in suspended list
+    }
+}
+fn sys_thread_read_state(handle_nr: u64, buf_va: u64) -> Result<u64, Error> {
+    if handle_nr > u16::MAX as u64 {
+        return Err(Error::InvalidArgument);
+    }
+
+    let ctx_size = core::mem::size_of::<Context>() as u64;
+
+    // Validate output buffer.
+    if buf_va >= USER_VA_END || buf_va + ctx_size > USER_VA_END {
+        return Err(Error::BadAddress);
+    }
+
+    let thread_id = scheduler::current_process_do(|process| {
+        let obj = process
+            .handles
+            .get(Handle(handle_nr as u16), Rights::READ)?;
+
+        match obj {
+            HandleObject::Thread(id) => Ok(id),
+            _ => Err(HandleError::InvalidHandle),
+        }
+    })?;
+
+    // SAFETY: buf_va validated as user VA in range. Thread must be suspended.
+    let ok = unsafe { scheduler::read_thread_state(thread_id, buf_va as *mut u8) };
+
+    if ok {
+        Ok(ctx_size)
+    } else {
+        Err(Error::InvalidArgument) // Thread not suspended
+    }
+}
+fn sys_clock_get() -> Result<u64, Error> {
+    Ok(timer::counter_to_ns(timer::counter()))
+}
 fn sys_vmo_set_pager(vmo_handle_nr: u64, channel_handle_nr: u64) -> Result<u64, Error> {
     if vmo_handle_nr > u16::MAX as u64 || channel_handle_nr > u16::MAX as u64 {
         return Err(Error::InvalidArgument);
@@ -2116,6 +2201,10 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
         nr::EVENT_CREATE => dispatch_ok(ctx, result_to_u64!(sys_event_create())),
         nr::EVENT_SIGNAL => dispatch_ok(ctx, result_to_u64!(sys_event_signal(x0))),
         nr::EVENT_RESET => dispatch_ok(ctx, result_to_u64!(sys_event_reset(x0))),
+        nr::THREAD_SUSPEND => dispatch_ok(ctx, result_to_u64!(sys_thread_suspend(x0))),
+        nr::THREAD_RESUME => dispatch_ok(ctx, result_to_u64!(sys_thread_resume(x0))),
+        nr::THREAD_READ_STATE => dispatch_ok(ctx, result_to_u64!(sys_thread_read_state(x0, x1))),
+        nr::CLOCK_GET => dispatch_ok(ctx, result_to_u64!(sys_clock_get())),
         nr::PAGER_SUPPLY => {
             let xbase = unsafe { core::ptr::addr_of!((*ctx).x) as *const u64 };
             let x2 = unsafe { xbase.add(2).read() };

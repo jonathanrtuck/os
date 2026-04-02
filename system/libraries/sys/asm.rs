@@ -49,15 +49,20 @@ pub mod nr {
     pub const PROCESS_KILL: u64 = 32;
     pub const PROCESS_SET_SYSCALL_FILTER: u64 = 33;
     pub const THREAD_CREATE: u64 = 34;
-    // --- Scheduling (35–38) ---
-    pub const SCHEDULING_CONTEXT_CREATE: u64 = 35;
-    pub const SCHEDULING_CONTEXT_BORROW: u64 = 36;
-    pub const SCHEDULING_CONTEXT_RETURN: u64 = 37;
-    pub const SCHEDULING_CONTEXT_BIND: u64 = 38;
-    // --- Device layer (39–41) ---
-    pub const DEVICE_MAP: u64 = 39;
-    pub const INTERRUPT_REGISTER: u64 = 40;
-    pub const INTERRUPT_ACK: u64 = 41;
+    pub const THREAD_SUSPEND: u64 = 35;
+    pub const THREAD_RESUME: u64 = 36;
+    pub const THREAD_READ_STATE: u64 = 37;
+    // --- Scheduling (38–41) ---
+    pub const SCHEDULING_CONTEXT_CREATE: u64 = 38;
+    pub const SCHEDULING_CONTEXT_BORROW: u64 = 39;
+    pub const SCHEDULING_CONTEXT_RETURN: u64 = 40;
+    pub const SCHEDULING_CONTEXT_BIND: u64 = 41;
+    // --- Time (42) ---
+    pub const CLOCK_GET: u64 = 42;
+    // --- Device layer (43–45) ---
+    pub const DEVICE_MAP: u64 = 43;
+    pub const INTERRUPT_REGISTER: u64 = 44;
+    pub const INTERRUPT_ACK: u64 = 45;
 }
 
 pub fn align_up(addr: usize, align: usize) -> usize {

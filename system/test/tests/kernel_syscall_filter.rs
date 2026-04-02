@@ -10,7 +10,7 @@
 //! - SyscallBlocked error code value
 //! - Out-of-range syscall numbers bypass the filter
 
-// --- Must match kernel/syscall.rs::nr exactly (dense 0–41) ---
+// --- Must match kernel/syscall.rs::nr exactly (dense 0–45) ---
 
 mod nr {
     // Runtime basics (0–2)
@@ -53,23 +53,28 @@ mod nr {
     pub const EVENT_CREATE: u64 = 27;
     pub const EVENT_SIGNAL: u64 = 28;
     pub const EVENT_RESET: u64 = 29;
-    // Process/thread lifecycle (30–34)
+    // Process/thread lifecycle (30–37)
     pub const PROCESS_CREATE: u64 = 30;
     pub const PROCESS_START: u64 = 31;
     pub const PROCESS_KILL: u64 = 32;
     pub const PROCESS_SET_SYSCALL_FILTER: u64 = 33;
     pub const THREAD_CREATE: u64 = 34;
-    // Scheduling (35–38)
-    pub const SCHEDULING_CONTEXT_CREATE: u64 = 35;
-    pub const SCHEDULING_CONTEXT_BORROW: u64 = 36;
-    pub const SCHEDULING_CONTEXT_RETURN: u64 = 37;
-    pub const SCHEDULING_CONTEXT_BIND: u64 = 38;
-    // Device layer (39–41)
-    pub const DEVICE_MAP: u64 = 39;
-    pub const INTERRUPT_REGISTER: u64 = 40;
-    pub const INTERRUPT_ACK: u64 = 41;
+    pub const THREAD_SUSPEND: u64 = 35;
+    pub const THREAD_RESUME: u64 = 36;
+    pub const THREAD_READ_STATE: u64 = 37;
+    // Scheduling (38–41)
+    pub const SCHEDULING_CONTEXT_CREATE: u64 = 38;
+    pub const SCHEDULING_CONTEXT_BORROW: u64 = 39;
+    pub const SCHEDULING_CONTEXT_RETURN: u64 = 40;
+    pub const SCHEDULING_CONTEXT_BIND: u64 = 41;
+    // Clock (42)
+    pub const CLOCK_GET: u64 = 42;
+    // Device layer (43–45)
+    pub const DEVICE_MAP: u64 = 43;
+    pub const INTERRUPT_REGISTER: u64 = 44;
+    pub const INTERRUPT_ACK: u64 = 45;
     /// Total syscall count (for iteration bounds).
-    pub const COUNT: u64 = 42;
+    pub const COUNT: u64 = 46;
 }
 
 // --- Duplicated Error enum from syscall.rs ---
@@ -123,7 +128,7 @@ fn is_syscall_allowed(syscall_nr: u64, mask: u64) -> bool {
 fn default_mask_allows_all() {
     let mask = u64::MAX;
 
-    // Every syscall 0-41 should be allowed.
+    // Every syscall 0-45 should be allowed.
     for nr in 0..nr::COUNT {
         assert!(
             is_syscall_allowed(nr, mask),
@@ -161,7 +166,7 @@ fn mask_zero_blocks_all_except_exit() {
     // EXIT is allowed.
     assert!(is_syscall_allowed(nr::EXIT, mask));
 
-    // Every other syscall (1-41) is blocked.
+    // Every other syscall (1-45) is blocked.
     for nr in 1..nr::COUNT {
         assert!(
             !is_syscall_allowed(nr, mask),
@@ -257,10 +262,14 @@ fn editor_mask_scenario() {
         nr::PROCESS_KILL,
         nr::PROCESS_SET_SYSCALL_FILTER,
         nr::THREAD_CREATE,
+        nr::THREAD_SUSPEND,
+        nr::THREAD_RESUME,
+        nr::THREAD_READ_STATE,
         nr::SCHEDULING_CONTEXT_CREATE,
         nr::SCHEDULING_CONTEXT_BORROW,
         nr::SCHEDULING_CONTEXT_RETURN,
         nr::SCHEDULING_CONTEXT_BIND,
+        nr::CLOCK_GET,
         nr::DEVICE_MAP,
         nr::INTERRUPT_REGISTER,
         nr::INTERRUPT_ACK,
@@ -401,7 +410,7 @@ fn mask_single_bit_per_syscall() {
 #[test]
 fn default_process_mask_is_u64_max() {
     // Process::new() initializes syscall_mask to u64::MAX.
-    // Verify that this means all 42 syscalls are allowed.
+    // Verify that this means all 46 syscalls are allowed.
     let mask = u64::MAX;
 
     for nr in 0u64..nr::COUNT {

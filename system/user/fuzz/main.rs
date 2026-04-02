@@ -128,7 +128,7 @@ fn assert_err_code(result: sys::SyscallResult<u64>, expected: sys::SyscallError,
 // Phase 1: Invalid syscall numbers
 // -----------------------------------------------------------------------
 fn phase_1_invalid_syscall_numbers() {
-    let bad_nrs: [u64; 8] = [42, 43, 100, 255, 1000, u64::MAX, u64::MAX - 1, 0x8000_0000];
+    let bad_nrs: [u64; 8] = [46, 47, 100, 255, 1000, u64::MAX, u64::MAX - 1, 0x8000_0000];
 
     for &nr in &bad_nrs {
         let ret = unsafe { raw_syscall0(nr) } as i64;
@@ -357,13 +357,13 @@ fn phase_3_bad_addresses() {
     }
 
     // device_map with RAM address (not device MMIO).
-    let ret = unsafe { raw_syscall2(39, 0x4000_0000, 0x1000) } as i64;
+    let ret = unsafe { raw_syscall2(43, 0x4000_0000, 0x1000) } as i64;
     if ret >= 0 {
         phase_fail(b"phase 3", b"device_map into RAM should fail");
     }
 
     // device_map with size=0.
-    let ret = unsafe { raw_syscall2(39, 0x0800_0000, 0) } as i64;
+    let ret = unsafe { raw_syscall2(43, 0x0800_0000, 0) } as i64;
     if ret >= 0 {
         phase_fail(b"phase 3", b"device_map with size=0 should fail");
     }
@@ -377,7 +377,7 @@ fn phase_3_bad_addresses() {
     let _ = ret; // Should fail.
 
     // scheduling_context_create with zero budget/period.
-    let ret = unsafe { raw_syscall2(35, 0, 0) } as i64;
+    let ret = unsafe { raw_syscall2(38, 0, 0) } as i64;
     let _ = ret; // May or may not fail — kernel decides.
 
     phase_ok(b"phase 3: bad address arguments");
