@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "kernel"
+name = "kernel-examples"
 version = "0.1.0"

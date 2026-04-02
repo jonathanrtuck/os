@@ -179,10 +179,12 @@ el1_start:
   //   x0  = preserved (TTBR0 L2 PA, needed for MMU setup below)
   //   x20 = preserved (TTBR1 L2 PA)
   //   x24 = preserved (DTB PA)
-  //   x25 = KASLR slide (0 = no KASLR, loop is skipped entirely)
+  //   x25 = KASLR slide (may be 0 — loop still runs to fill PIE values)
   //   x1-x5 = clobbered
   // ------------------------------------------------------------------
-  cbz  x25, .Lrela_done           // slide == 0 → nothing to relocate
+  // NOTE: The loop MUST run even when slide == 0. With --pie, the linker
+  // emits .quad values as 0 with R_AARCH64_RELATIVE relocations. The loop
+  // writes (r_addend + slide) to each target — filling in kernel VAs.
 
   // Process R_AARCH64_RELATIVE entries from .rela.dyn (PIE, allocated).
   // Each Rela entry is 24 bytes: r_offset[0:8], r_info[8:16], r_addend[16:24].

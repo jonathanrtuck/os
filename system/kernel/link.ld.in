@@ -51,12 +51,21 @@ SECTIONS
    * physical addresses before MMU enable, adding the KASLR slide to each
    * absolute kernel VA. Self-contained: no post-link tool needed.
    */
-  __rela_start = .;
   .rela.dyn : AT(ADDR(.rela.dyn) - KERNEL_VA_OFFSET) {
+    __rela_start = .;
     *(.rela.dyn .rela.dyn.*)
+    __rela_end = .;
   }
-  __rela_end = .;
   __rodata_end = .;
+
+  /* Discard PIE orphan sections — not needed at runtime. Without this,
+   * the linker inserts .eh_frame, .eh_frame_hdr, .dynsym, .dynstr, .hash,
+   * .gnu.hash, and .dynamic between .rodata and .services. They waste space
+   * and (historically) caused __rela_start to miss the actual .rela.dyn. */
+  /DISCARD/ : {
+    *(.eh_frame .eh_frame_hdr)
+    *(.dynamic .dynsym .dynstr .gnu.hash .hash)
+  }
 
   /* --- Service pack (RO, page-aligned) --- */
   . = ALIGN(@PAGE_SIZE@);
