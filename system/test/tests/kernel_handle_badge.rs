@@ -3,6 +3,10 @@
 //! Covers: set/get roundtrip, default badge, badge preserved through transfer,
 //! badge survives rights attenuation, badge on different handle types.
 
+mod event {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct EventId(pub u32);
+}
 #[path = "../../kernel/handle.rs"]
 mod handle;
 mod interrupt {

@@ -3,6 +3,11 @@
 //! Tests the VMO lifecycle: create, page tracking, snapshots, seal,
 //! and integration with the handle table.
 
+mod event {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct EventId(pub u32);
+}
+
 #[path = "../../kernel/handle.rs"]
 mod handle;
 mod interrupt {

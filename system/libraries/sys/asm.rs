@@ -39,21 +39,25 @@ pub mod nr {
     pub const VMO_OP_RANGE: u64 = 24;
     pub const VMO_SET_PAGER: u64 = 25;
     pub const PAGER_SUPPLY: u64 = 26;
-    // --- Process/thread lifecycle (27–31) ---
-    pub const PROCESS_CREATE: u64 = 27;
-    pub const PROCESS_START: u64 = 28;
-    pub const PROCESS_KILL: u64 = 29;
-    pub const PROCESS_SET_SYSCALL_FILTER: u64 = 30;
-    pub const THREAD_CREATE: u64 = 31;
-    // --- Scheduling (32–35) ---
-    pub const SCHEDULING_CONTEXT_CREATE: u64 = 32;
-    pub const SCHEDULING_CONTEXT_BORROW: u64 = 33;
-    pub const SCHEDULING_CONTEXT_RETURN: u64 = 34;
-    pub const SCHEDULING_CONTEXT_BIND: u64 = 35;
-    // --- Device layer (36–38) ---
-    pub const DEVICE_MAP: u64 = 36;
-    pub const INTERRUPT_REGISTER: u64 = 37;
-    pub const INTERRUPT_ACK: u64 = 38;
+    // --- Events (27–29) ---
+    pub const EVENT_CREATE: u64 = 27;
+    pub const EVENT_SIGNAL: u64 = 28;
+    pub const EVENT_RESET: u64 = 29;
+    // --- Process/thread lifecycle (30–34) ---
+    pub const PROCESS_CREATE: u64 = 30;
+    pub const PROCESS_START: u64 = 31;
+    pub const PROCESS_KILL: u64 = 32;
+    pub const PROCESS_SET_SYSCALL_FILTER: u64 = 33;
+    pub const THREAD_CREATE: u64 = 34;
+    // --- Scheduling (35–38) ---
+    pub const SCHEDULING_CONTEXT_CREATE: u64 = 35;
+    pub const SCHEDULING_CONTEXT_BORROW: u64 = 36;
+    pub const SCHEDULING_CONTEXT_RETURN: u64 = 37;
+    pub const SCHEDULING_CONTEXT_BIND: u64 = 38;
+    // --- Device layer (39–41) ---
+    pub const DEVICE_MAP: u64 = 39;
+    pub const INTERRUPT_REGISTER: u64 = 40;
+    pub const INTERRUPT_ACK: u64 = 41;
 }
 
 pub fn align_up(addr: usize, align: usize) -> usize {

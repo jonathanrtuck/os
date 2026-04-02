@@ -83,6 +83,7 @@ mod arch;
 mod channel;
 mod context;
 mod device_tree;
+mod event;
 mod executable;
 mod futex;
 mod handle;

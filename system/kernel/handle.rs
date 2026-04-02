@@ -26,8 +26,8 @@ extern crate alloc;
 use alloc::{boxed::Box, vec::Vec};
 
 use super::{
-    interrupt::InterruptId, process::ProcessId, scheduling_context::SchedulingContextId,
-    thread::ThreadId, timer::TimerId, vmo::VmoId,
+    event::EventId, interrupt::InterruptId, process::ProcessId,
+    scheduling_context::SchedulingContextId, thread::ThreadId, timer::TimerId, vmo::VmoId,
 };
 
 const BASE_SIZE: usize = 256;
@@ -49,6 +49,7 @@ pub struct Handle(pub u16);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HandleObject {
     Channel(ChannelId),
+    Event(EventId),
     Interrupt(InterruptId),
     Process(ProcessId),
     SchedulingContext(SchedulingContextId),

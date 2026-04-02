@@ -16,6 +16,10 @@
 //! The fix addresses the page table entry leak, not the VA consumption.
 
 // Include handle.rs directly — it has zero external dependencies.
+mod event {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct EventId(pub u32);
+}
 #[path = "../../kernel/handle.rs"]
 mod handle;
 mod interrupt {

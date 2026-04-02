@@ -42,6 +42,10 @@ mod vmo {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct VmoId(pub u32);
 }
+mod event {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct EventId(pub u32);
+}
 #[path = "../../kernel/handle.rs"]
 mod handle;
 #[path = "../../kernel/scheduling_context.rs"]

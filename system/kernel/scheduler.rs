@@ -221,6 +221,7 @@ fn categorize_handles(objects: Vec<HandleObject>, s: &mut State) -> HandleCatego
     for obj in objects {
         match obj {
             HandleObject::Channel(id) => categories.channels.push(id),
+            HandleObject::Event(id) => super::event::destroy(id),
             HandleObject::Interrupt(id) => categories.interrupts.push(id),
             HandleObject::Process(id) => categories.process_handles.push(id),
             HandleObject::SchedulingContext(id) => release_context_inner(s, id),

@@ -3,6 +3,10 @@
 //! Covers: 8 named rights, bitwise AND attenuation, per-right enforcement,
 //! ALL constant, NONE constant, and backward-compat semantics.
 
+mod event {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct EventId(pub u32);
+}
 #[path = "../../kernel/handle.rs"]
 mod handle;
 mod interrupt {

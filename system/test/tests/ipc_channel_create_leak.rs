@@ -9,6 +9,10 @@
 //! that handles are cleaned up on map_channel_page failure.
 
 // Include handle.rs directly — it has zero external dependencies.
+mod event {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct EventId(pub u32);
+}
 #[path = "../../kernel/handle.rs"]
 mod handle;
 mod interrupt {

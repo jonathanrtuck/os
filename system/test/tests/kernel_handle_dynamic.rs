@@ -3,6 +3,10 @@
 //! Covers: Handle(u16), overflow beyond 256, two-level lookup, insert/close/drain
 //! across base+overflow, capacity limits, insert_at with large indices.
 
+mod event {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct EventId(pub u32);
+}
 #[path = "../../kernel/handle.rs"]
 mod handle;
 mod interrupt {

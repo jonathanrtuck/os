@@ -87,7 +87,7 @@ use super::{
     thread::{ThreadId, WaitEntry},
     thread_exit, timer,
     timer::TimerId,
-    vmo, Context,
+    event, vmo, Context,
 };
 
 /// Syscall numbers. Grouped by abstraction layer, dense 0–36.
@@ -130,21 +130,25 @@ pub mod nr {
     pub const VMO_OP_RANGE: u64 = 24;
     pub const VMO_SET_PAGER: u64 = 25;
     pub const PAGER_SUPPLY: u64 = 26;
-    // --- Process/thread lifecycle (27–31) ---
-    pub const PROCESS_CREATE: u64 = 27;
-    pub const PROCESS_START: u64 = 28;
-    pub const PROCESS_KILL: u64 = 29;
-    pub const PROCESS_SET_SYSCALL_FILTER: u64 = 30;
-    pub const THREAD_CREATE: u64 = 31;
-    // --- Scheduling (32–35) ---
-    pub const SCHEDULING_CONTEXT_CREATE: u64 = 32;
-    pub const SCHEDULING_CONTEXT_BORROW: u64 = 33;
-    pub const SCHEDULING_CONTEXT_RETURN: u64 = 34;
-    pub const SCHEDULING_CONTEXT_BIND: u64 = 35;
-    // --- Device layer (36–38) ---
-    pub const DEVICE_MAP: u64 = 36;
-    pub const INTERRUPT_REGISTER: u64 = 37;
-    pub const INTERRUPT_ACK: u64 = 38;
+    // --- Events (27–29) ---
+    pub const EVENT_CREATE: u64 = 27;
+    pub const EVENT_SIGNAL: u64 = 28;
+    pub const EVENT_RESET: u64 = 29;
+    // --- Process/thread lifecycle (30–34) ---
+    pub const PROCESS_CREATE: u64 = 30;
+    pub const PROCESS_START: u64 = 31;
+    pub const PROCESS_KILL: u64 = 32;
+    pub const PROCESS_SET_SYSCALL_FILTER: u64 = 33;
+    pub const THREAD_CREATE: u64 = 34;
+    // --- Scheduling (35–38) ---
+    pub const SCHEDULING_CONTEXT_CREATE: u64 = 35;
+    pub const SCHEDULING_CONTEXT_BORROW: u64 = 36;
+    pub const SCHEDULING_CONTEXT_RETURN: u64 = 37;
+    pub const SCHEDULING_CONTEXT_BIND: u64 = 38;
+    // --- Device layer (39–41) ---
+    pub const DEVICE_MAP: u64 = 39;
+    pub const INTERRUPT_REGISTER: u64 = 40;
+    pub const INTERRUPT_ACK: u64 = 41;
 }
 
 /// Maximum DMA allocation order — matches page_allocator::MAX_ORDER.
@@ -512,6 +516,7 @@ fn sys_handle_close(handle_nr: u64) -> Result<u64, HandleError> {
     // Release kernel resources associated with the closed handle.
     match obj {
         HandleObject::Channel(id) => channel::close_endpoint(id),
+        HandleObject::Event(id) => event::destroy(id),
         HandleObject::Interrupt(id) => interrupt::destroy(id),
         HandleObject::Process(id) => process_exit::destroy(id),
         HandleObject::SchedulingContext(id) => scheduler::release_scheduling_context(id),
@@ -1453,6 +1458,60 @@ fn sys_vmo_seal(handle_nr: u64) -> Result<u64, Error> {
 
     Ok(0)
 }
+fn sys_event_create() -> Result<u64, Error> {
+    let event_id = event::create();
+
+    scheduler::current_process_do(|process| {
+        process
+            .handles
+            .insert(HandleObject::Event(event_id), Rights::ALL)
+            .map(|h| h.0 as u64)
+            .map_err(|_| {
+                event::destroy(event_id);
+                Error::OutOfMemory
+            })
+    })
+}
+fn sys_event_signal(handle_nr: u64) -> Result<u64, Error> {
+    if handle_nr > u16::MAX as u64 {
+        return Err(Error::InvalidArgument);
+    }
+
+    let event_id = scheduler::current_process_do(|process| {
+        let obj = process
+            .handles
+            .get(Handle(handle_nr as u16), Rights::SIGNAL)?;
+
+        match obj {
+            HandleObject::Event(id) => Ok(id),
+            _ => Err(HandleError::InvalidHandle),
+        }
+    })?;
+
+    event::signal(event_id);
+
+    Ok(0)
+}
+fn sys_event_reset(handle_nr: u64) -> Result<u64, Error> {
+    if handle_nr > u16::MAX as u64 {
+        return Err(Error::InvalidArgument);
+    }
+
+    let event_id = scheduler::current_process_do(|process| {
+        let obj = process
+            .handles
+            .get(Handle(handle_nr as u16), Rights::WRITE)?;
+
+        match obj {
+            HandleObject::Event(id) => Ok(id),
+            _ => Err(HandleError::InvalidHandle),
+        }
+    })?;
+
+    event::reset(event_id);
+
+    Ok(0)
+}
 fn sys_vmo_set_pager(vmo_handle_nr: u64, channel_handle_nr: u64) -> Result<u64, Error> {
     if vmo_handle_nr > u16::MAX as u64 || channel_handle_nr > u16::MAX as u64 {
         return Err(Error::InvalidArgument);
@@ -1597,6 +1656,7 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
     for entry in &stale {
         match entry.object {
             HandleObject::Channel(id) => channel::unregister_waiter(id),
+            HandleObject::Event(id) => event::unregister_waiter(id),
             HandleObject::Timer(id) => timer::unregister_waiter(id),
             HandleObject::Interrupt(id) => interrupt::unregister_waiter(id),
             HandleObject::Thread(id) => thread_exit::unregister_waiter(id),
@@ -1709,6 +1769,8 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
         [None; MAX_WAIT_HANDLES as usize];
     let mut process_ids: [Option<ProcessId>; MAX_WAIT_HANDLES as usize] =
         [None; MAX_WAIT_HANDLES as usize];
+    let mut event_ids: [Option<event::EventId>; MAX_WAIT_HANDLES as usize] =
+        [None; MAX_WAIT_HANDLES as usize];
 
     for entry in entries[..entry_count].iter().flatten() {
         let idx = if entry.user_index == TIMEOUT_SENTINEL {
@@ -1725,6 +1787,7 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
             }
             HandleObject::Thread(id) => thread_ids[idx.min(thread_ids.len() - 1)] = Some(id),
             HandleObject::Process(id) => process_ids[idx.min(process_ids.len() - 1)] = Some(id),
+            HandleObject::Event(id) => event_ids[idx.min(event_ids.len() - 1)] = Some(id),
             HandleObject::SchedulingContext(_) | HandleObject::Vmo(_) => {}
         }
     }
@@ -1747,6 +1810,9 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
     for &id in process_ids.iter().flatten() {
         process_exit::register_waiter(id, caller_id);
     }
+    for &id in event_ids.iter().flatten() {
+        event::register_waiter(id, caller_id);
+    }
 
     // Wait set already on the thread (populated in the closure above, before
     // waiter registration). If a signal arrives during the readiness check,
@@ -1760,6 +1826,7 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
             HandleObject::Process(p_id) => process_exit::check_exited(p_id),
             HandleObject::Thread(t_id) => thread_exit::check_exited(t_id),
             HandleObject::Timer(t_id) => timer::check_fired(t_id),
+            HandleObject::Event(e_id) => event::check_pending(e_id),
             _ => false,
         };
 
@@ -1772,6 +1839,7 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
             unregister_interrupts(&interrupt_ids);
             unregister_threads(&thread_ids);
             unregister_processes(&process_ids);
+            unregister_events(&event_ids);
 
             // Destroy internal timeout timer (not needed — a real handle fired).
             if let Some(tid) = timeout_timer {
@@ -1818,6 +1886,7 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
             unregister_interrupts(&interrupt_ids);
             unregister_threads(&thread_ids);
             unregister_processes(&process_ids);
+            unregister_events(&event_ids);
 
             // Destroy internal timeout timer — we woke before blocking.
             if let Some(tid) = timeout_timer {
@@ -1903,6 +1972,11 @@ fn unregister_threads(ids: &[Option<ThreadId>]) {
 fn unregister_timers(ids: &[Option<TimerId>]) {
     for &id in ids.iter().flatten() {
         timer::unregister_waiter(id);
+    }
+}
+fn unregister_events(ids: &[Option<event::EventId>]) {
+    for &id in ids.iter().flatten() {
+        event::unregister_waiter(id);
     }
 }
 /// Translate a user virtual address to a physical address using hardware AT.
@@ -2039,6 +2113,9 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
             dispatch_ok(ctx, result_to_u64!(sys_vmo_op_range(x0, x1, x2, x3)))
         }
         nr::VMO_SET_PAGER => dispatch_ok(ctx, result_to_u64!(sys_vmo_set_pager(x0, x1))),
+        nr::EVENT_CREATE => dispatch_ok(ctx, result_to_u64!(sys_event_create())),
+        nr::EVENT_SIGNAL => dispatch_ok(ctx, result_to_u64!(sys_event_signal(x0))),
+        nr::EVENT_RESET => dispatch_ok(ctx, result_to_u64!(sys_event_reset(x0))),
         nr::PAGER_SUPPLY => {
             let xbase = unsafe { core::ptr::addr_of!((*ctx).x) as *const u64 };
             let x2 = unsafe { xbase.add(2).read() };

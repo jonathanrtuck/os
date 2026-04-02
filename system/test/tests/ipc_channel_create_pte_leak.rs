@@ -11,6 +11,10 @@
 //! as handle_send (commit d9a32a2).
 
 // Include handle.rs directly — it has zero external dependencies.
+mod event {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct EventId(pub u32);
+}
 #[path = "../../kernel/handle.rs"]
 mod handle;
 mod interrupt {

@@ -19,6 +19,11 @@
 #[path = "../../kernel/paging.rs"]
 mod paging;
 
+mod event {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct EventId(pub u32);
+}
+
 #[path = "../../kernel/handle.rs"]
 mod handle;
 

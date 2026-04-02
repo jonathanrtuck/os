@@ -3,6 +3,10 @@
 //! Includes the kernel's handle.rs directly — it has zero external dependencies,
 //! making it fully testable on the host.
 
+mod event {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct EventId(pub u32);
+}
 #[path = "../../kernel/handle.rs"]
 mod handle;
 mod interrupt {
