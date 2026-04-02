@@ -1,0 +1,4 @@
+# Override the parent kernel's aarch64-unknown-none target.
+# Tests must compile for the host.
+[build]
+target = "aarch64-apple-darwin"

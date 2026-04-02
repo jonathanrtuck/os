@@ -23,10 +23,12 @@
 //!
 //! See: Stoica & Abdel-Wahab 1995, Linux kernel 6.6+ EEVDF.
 
-/// Default requested time slice: 4 ms.
-pub const DEFAULT_SLICE_NS: u64 = 4_000_000;
-/// Default weight (analogous to Linux nice 0 = 1024).
-pub const DEFAULT_WEIGHT: u32 = 1024;
+/// Default requested time slice (from system_config via paging).
+pub const DEFAULT_SLICE_NS: u64 = super::paging::DEFAULT_SLICE_NS;
+/// Default weight (from system_config via paging). u32 here; system_config
+/// stores u64 but the value always fits in u32. Used in u128 arithmetic
+/// throughout this module.
+pub const DEFAULT_WEIGHT: u32 = super::paging::DEFAULT_WEIGHT as u32;
 
 /// Per-thread EEVDF scheduling state.
 #[derive(Clone, Copy, Debug)]
@@ -51,6 +53,28 @@ impl SchedulingState {
         }
     }
 
+    /// Reconstruct vruntime from preserved vlag on a destination queue.
+    ///
+    /// `vruntime_dest = avg_dest − (vlag × DEFAULT_WEIGHT / weight)`
+    /// `eligible_at = vruntime_dest` (fresh deadline on destination)
+    ///
+    /// Inverses `compute_vlag`: given the vlag that was computed on the
+    /// source queue and the destination queue's avg_vruntime, produces a
+    /// vruntime that places the thread at the same relative fairness
+    /// position on the new queue.
+    pub fn apply_vlag(&self, vlag: i64, dest_avg_vruntime: u64) -> Self {
+        let avg = dest_avg_vruntime as i128;
+        let lag = vlag as i128;
+        let w = self.weight as i128;
+        let dw = DEFAULT_WEIGHT as i128;
+        let new_vrt = (avg - lag * dw / w).max(0) as u64;
+
+        Self {
+            vruntime: new_vrt,
+            eligible_at: new_vrt,
+            ..*self
+        }
+    }
     /// Charge `elapsed_ns` of CPU time, returning updated state.
     /// vruntime grows inversely with weight: elapsed * DEFAULT_WEIGHT / weight.
     /// Uses saturating arithmetic throughout to prevent overflow when vruntime
@@ -63,6 +87,28 @@ impl SchedulingState {
             eligible_at: self.eligible_at,
             ..*self
         }
+    }
+    /// Compute virtual lag relative to a queue's average vruntime.
+    ///
+    /// `vlag = weight × (avg_vruntime − vruntime) / DEFAULT_WEIGHT`
+    ///
+    /// Positive vlag: thread is underserved (eligible, should run soon).
+    /// Negative vlag: thread is overserved.
+    ///
+    /// Used when a thread migrates between per-core queues. The vlag is
+    /// computed on the source queue, preserved during transit, and applied
+    /// on the destination queue to reconstruct a vruntime that maintains
+    /// the thread's fairness position.
+    ///
+    /// See: Linux 6.6+ `se->vlag`, Stoica & Abdel-Wahab 1995 lag definition.
+    pub fn compute_vlag(&self, avg_vruntime: u64) -> i64 {
+        let avg = avg_vruntime as i128;
+        let vrt = self.vruntime as i128;
+        let w = self.weight as i128;
+        let dw = DEFAULT_WEIGHT as i128;
+
+        // Saturate to i64 range (defensive — would require ~292 years of drift)
+        (w * (avg - vrt) / dw).clamp(i64::MIN as i128, i64::MAX as i128) as i64
     }
     /// Is this thread eligible to run? Eligible when vruntime ≤ avg (lag ≥ 0).
     pub fn is_eligible(&self, avg_vruntime: u64) -> bool {
@@ -85,50 +131,6 @@ impl SchedulingState {
 
         self.eligible_at.saturating_add(slice_weighted)
     }
-
-    /// Compute virtual lag relative to a queue's average vruntime.
-    ///
-    /// `vlag = weight × (avg_vruntime − vruntime) / DEFAULT_WEIGHT`
-    ///
-    /// Positive vlag: thread is underserved (eligible, should run soon).
-    /// Negative vlag: thread is overserved.
-    ///
-    /// Used when a thread migrates between per-core queues. The vlag is
-    /// computed on the source queue, preserved during transit, and applied
-    /// on the destination queue to reconstruct a vruntime that maintains
-    /// the thread's fairness position.
-    ///
-    /// See: Linux 6.6+ `se->vlag`, Stoica & Abdel-Wahab 1995 lag definition.
-    pub fn compute_vlag(&self, avg_vruntime: u64) -> i64 {
-        let avg = avg_vruntime as i128;
-        let vrt = self.vruntime as i128;
-        let w = self.weight as i128;
-        let dw = DEFAULT_WEIGHT as i128;
-        // Saturate to i64 range (defensive — would require ~292 years of drift)
-        (w * (avg - vrt) / dw).clamp(i64::MIN as i128, i64::MAX as i128) as i64
-    }
-
-    /// Reconstruct vruntime from preserved vlag on a destination queue.
-    ///
-    /// `vruntime_dest = avg_dest − (vlag × DEFAULT_WEIGHT / weight)`
-    /// `eligible_at = vruntime_dest` (fresh deadline on destination)
-    ///
-    /// Inverses `compute_vlag`: given the vlag that was computed on the
-    /// source queue and the destination queue's avg_vruntime, produces a
-    /// vruntime that places the thread at the same relative fairness
-    /// position on the new queue.
-    pub fn apply_vlag(&self, vlag: i64, dest_avg_vruntime: u64) -> Self {
-        let avg = dest_avg_vruntime as i128;
-        let lag = vlag as i128;
-        let w = self.weight as i128;
-        let dw = DEFAULT_WEIGHT as i128;
-        let new_vrt = (avg - lag * dw / w).max(0) as u64;
-        Self {
-            vruntime: new_vrt,
-            eligible_at: new_vrt,
-            ..*self
-        }
-    }
 }
 
 /// Compute the average vruntime across all threads (used by test crate).
@@ -142,7 +144,6 @@ pub fn avg_vruntime(states: &[SchedulingState]) -> u64 {
 
     (sum / states.len() as u128) as u64
 }
-
 /// Select the next thread to run (used by test crate).
 ///
 /// `threads` is a slice of `(State, has_budget)` pairs. Returns the

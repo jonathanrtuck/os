@@ -21,10 +21,8 @@ use super::{
     channel, handle::ChannelId, memory, paging::PAGE_SIZE, scheduler, vmo::VmoId, Context,
 };
 
-/// Pager ring header size (write_head + read_head).
-const RING_HEADER_SIZE: usize = 16;
-/// Maximum entries in the pager ring (fits in one page after header).
 const RING_CAPACITY: usize = (PAGE_SIZE as usize - RING_HEADER_SIZE) / 8;
+const RING_HEADER_SIZE: usize = 16;
 
 /// Block the current (faulting) thread until the pager supplies the page.
 ///

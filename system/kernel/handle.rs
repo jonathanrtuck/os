@@ -30,21 +30,12 @@ use super::{
     scheduling_context::SchedulingContextId, thread::ThreadId, timer::TimerId, vmo::VmoId,
 };
 
-const BASE_SIZE: usize = 256;
-const PAGE_SIZE: usize = 256;
-/// Maximum handles per process. 4096 = 16 pages (base + 15 overflow).
-/// 4096 * 16 bytes/entry = 64 KiB worst case per process.
-pub const MAX_HANDLES: usize = 4096;
+const BASE_SIZE: usize = super::paging::HANDLE_TABLE_BASE_SIZE as usize;
+const OVERFLOW_PAGE_SIZE: usize = 256;
 
-// ---------------------------------------------------------------------------
-// ID and value types
-// ---------------------------------------------------------------------------
+pub const MAX_HANDLES: usize = super::paging::MAX_HANDLES as usize;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ChannelId(pub u32);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Handle(pub u16);
+type OverflowPage = Box<[Option<HandleEntry>; OVERFLOW_PAGE_SIZE]>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HandleObject {
@@ -58,46 +49,12 @@ pub enum HandleObject {
     Vmo(VmoId),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Rights(u32);
-
-impl Rights {
-    pub const READ: Self = Self(1 << 0);
-    pub const WRITE: Self = Self(1 << 1);
-    pub const SIGNAL: Self = Self(1 << 2);
-    pub const WAIT: Self = Self(1 << 3);
-    pub const MAP: Self = Self(1 << 4);
-    pub const TRANSFER: Self = Self(1 << 5);
-    pub const CREATE: Self = Self(1 << 6);
-    pub const KILL: Self = Self(1 << 7);
-    pub const APPEND: Self = Self(1 << 8);
-    pub const SEAL: Self = Self(1 << 9);
-    /// All defined rights. Bits 10-31 are reserved.
-    pub const ALL: Self = Self(0x3FF);
-    pub const NONE: Self = Self(0);
-    /// Backward-compat alias: READ | WRITE.
-    pub const READ_WRITE: Self = Self((1 << 0) | (1 << 1));
-
-    /// Reduce rights: result has only the bits present in both self and mask.
-    /// This is the core capability attenuation operation — rights can only be
-    /// removed, never added.
-    pub const fn attenuate(self, mask: Self) -> Self {
-        Self(self.0 & mask.0)
-    }
-    pub const fn contains(self, required: Self) -> bool {
-        self.0 & required.0 == required.0
-    }
-    /// Construct from a raw u32 (e.g., from a syscall argument). Masks to
-    /// defined bits only — undefined bits are silently dropped.
-    pub const fn from_raw(raw: u32) -> Self {
-        Self(raw & 0x3FF)
-    }
-    /// Combine two rights sets (bitwise OR).
-    pub const fn union(self, other: Self) -> Self {
-        Self(self.0 | other.0)
-    }
+#[derive(Clone, Copy)]
+struct HandleEntry {
+    object: HandleObject,
+    rights: Rights,
+    badge: u64,
 }
-
 #[repr(i64)]
 #[derive(Debug)]
 pub enum HandleError {
@@ -109,23 +66,20 @@ pub enum HandleError {
     SlotOccupied = -14,
 }
 
-// ---------------------------------------------------------------------------
-// Handle table (two-level)
-// ---------------------------------------------------------------------------
-
-type OverflowPage = Box<[Option<HandleEntry>; PAGE_SIZE]>;
-
-#[derive(Clone, Copy)]
-struct HandleEntry {
-    object: HandleObject,
-    rights: Rights,
-    badge: u64,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChannelId(pub u32);
+pub struct DrainHandles<'a> {
+    table: &'a mut HandleTable,
+    index: usize,
 }
-
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Handle(pub u16);
 pub struct HandleTable {
     base: [Option<HandleEntry>; BASE_SIZE],
     overflow: Vec<OverflowPage>,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rights(u32);
 
 impl HandleTable {
     pub const fn new() -> Self {
@@ -137,7 +91,7 @@ impl HandleTable {
 
     /// Total capacity: base + all allocated overflow pages.
     fn capacity(&self) -> usize {
-        BASE_SIZE + self.overflow.len() * PAGE_SIZE
+        BASE_SIZE + self.overflow.len() * OVERFLOW_PAGE_SIZE
     }
     /// Get a reference to the slot at `index`, or None if beyond allocated range.
     fn slot(&self, index: usize) -> Option<&Option<HandleEntry>> {
@@ -145,8 +99,8 @@ impl HandleTable {
             Some(&self.base[index])
         } else {
             let overflow_idx = index - BASE_SIZE;
-            let page = overflow_idx / PAGE_SIZE;
-            let offset = overflow_idx % PAGE_SIZE;
+            let page = overflow_idx / OVERFLOW_PAGE_SIZE;
+            let offset = overflow_idx % OVERFLOW_PAGE_SIZE;
 
             self.overflow.get(page).map(|p| &p[offset])
         }
@@ -157,8 +111,8 @@ impl HandleTable {
             Some(&mut self.base[index])
         } else {
             let overflow_idx = index - BASE_SIZE;
-            let page = overflow_idx / PAGE_SIZE;
-            let offset = overflow_idx % PAGE_SIZE;
+            let page = overflow_idx / OVERFLOW_PAGE_SIZE;
+            let offset = overflow_idx % OVERFLOW_PAGE_SIZE;
 
             self.overflow.get_mut(page).map(|p| &mut p[offset])
         }
@@ -183,7 +137,6 @@ impl HandleTable {
             index: 0,
         }
     }
-
     /// Look up a handle and verify it has the required rights.
     pub fn get(&self, handle: Handle, required: Rights) -> Result<HandleObject, HandleError> {
         let entry = self
@@ -249,7 +202,7 @@ impl HandleTable {
                         badge: 0,
                     });
 
-                    let index = BASE_SIZE + page_idx * PAGE_SIZE + offset;
+                    let index = BASE_SIZE + page_idx * OVERFLOW_PAGE_SIZE + offset;
 
                     return Ok(Handle(index as u16));
                 }
@@ -257,13 +210,13 @@ impl HandleTable {
         }
 
         // All existing pages full — allocate a new overflow page if within limit.
-        let new_capacity = self.capacity() + PAGE_SIZE;
+        let new_capacity = self.capacity() + OVERFLOW_PAGE_SIZE;
 
         if new_capacity > MAX_HANDLES {
             return Err(HandleError::TableFull);
         }
 
-        let mut page = Box::new([None; PAGE_SIZE]);
+        let mut page = Box::new([None; OVERFLOW_PAGE_SIZE]);
 
         page[0] = Some(HandleEntry {
             object,
@@ -271,7 +224,7 @@ impl HandleTable {
             badge: 0,
         });
 
-        let index = BASE_SIZE + self.overflow.len() * PAGE_SIZE;
+        let index = BASE_SIZE + self.overflow.len() * OVERFLOW_PAGE_SIZE;
 
         self.overflow.push(page);
 
@@ -291,14 +244,14 @@ impl HandleTable {
 
         // Ensure overflow pages exist up to the required index.
         if index >= BASE_SIZE {
-            let required_page = (index - BASE_SIZE) / PAGE_SIZE;
+            let required_page = (index - BASE_SIZE) / OVERFLOW_PAGE_SIZE;
 
             while self.overflow.len() <= required_page {
-                if self.capacity() + PAGE_SIZE > MAX_HANDLES {
+                if self.capacity() + OVERFLOW_PAGE_SIZE > MAX_HANDLES {
                     return Err(HandleError::TableFull);
                 }
 
-                self.overflow.push(Box::new([None; PAGE_SIZE]));
+                self.overflow.push(Box::new([None; OVERFLOW_PAGE_SIZE]));
             }
         }
 
@@ -347,15 +300,6 @@ impl HandleTable {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Drain iterator
-// ---------------------------------------------------------------------------
-
-pub struct DrainHandles<'a> {
-    table: &'a mut HandleTable,
-    index: usize,
-}
-
 impl Iterator for DrainHandles<'_> {
     type Item = (HandleObject, Rights, u64);
 
@@ -375,5 +319,40 @@ impl Iterator for DrainHandles<'_> {
         }
 
         None
+    }
+}
+
+impl Rights {
+    pub const ALL: Self = Self(0x3FF);
+    pub const APPEND: Self = Self(1 << 8);
+    pub const CREATE: Self = Self(1 << 6);
+    pub const KILL: Self = Self(1 << 7);
+    pub const MAP: Self = Self(1 << 4);
+    pub const NONE: Self = Self(0);
+    pub const READ_WRITE: Self = Self((1 << 0) | (1 << 1));
+    pub const READ: Self = Self(1 << 0);
+    pub const SEAL: Self = Self(1 << 9);
+    pub const SIGNAL: Self = Self(1 << 2);
+    pub const TRANSFER: Self = Self(1 << 5);
+    pub const WAIT: Self = Self(1 << 3);
+    pub const WRITE: Self = Self(1 << 1);
+
+    /// Reduce rights: result has only the bits present in both self and mask.
+    /// This is the core capability attenuation operation — rights can only be
+    /// removed, never added.
+    pub const fn attenuate(self, mask: Self) -> Self {
+        Self(self.0 & mask.0)
+    }
+    pub const fn contains(self, required: Self) -> bool {
+        self.0 & required.0 == required.0
+    }
+    /// Construct from a raw u32 (e.g., from a syscall argument). Masks to
+    /// defined bits only — undefined bits are silently dropped.
+    pub const fn from_raw(raw: u32) -> Self {
+        Self(raw & 0x3FF)
+    }
+    /// Combine two rights sets (bitwise OR).
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
     }
 }

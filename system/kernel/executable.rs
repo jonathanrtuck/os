@@ -27,10 +27,6 @@ const PF_W: u32 = 2;
 const PF_X: u32 = 1;
 const PT_LOAD: u32 = 1;
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
 #[derive(Debug)]
 pub enum Error {
     TooSmall,
@@ -49,7 +45,6 @@ pub struct Header {
     pub ph_count: u16,
     pub ph_ent_size: u16,
 }
-
 pub struct LoadSegment {
     pub vaddr: u64,
     pub file_offset: u64,
@@ -58,14 +53,9 @@ pub struct LoadSegment {
     pub flags: u32,
 }
 
-// ---------------------------------------------------------------------------
-// Binary helpers
-// ---------------------------------------------------------------------------
-
 fn read_u16_le(data: &[u8], offset: usize) -> u16 {
     u16::from_le_bytes([data[offset], data[offset + 1]])
 }
-
 fn read_u32_le(data: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes([
         data[offset],
@@ -74,7 +64,6 @@ fn read_u32_le(data: &[u8], offset: usize) -> u32 {
         data[offset + 3],
     ])
 }
-
 fn read_u64_le(data: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes([
         data[offset],
@@ -87,10 +76,6 @@ fn read_u64_le(data: &[u8], offset: usize) -> u64 {
         data[offset + 7],
     ])
 }
-
-// ---------------------------------------------------------------------------
-// Public API — parse → load → extract
-// ---------------------------------------------------------------------------
 
 /// Parse the ELF64 header from raw bytes.
 pub fn parse_header(data: &[u8]) -> Result<Header, Error> {
@@ -126,7 +111,6 @@ pub fn parse_header(data: &[u8]) -> Result<Header, Error> {
         ph_ent_size,
     })
 }
-
 /// Returns `Some(LoadSegment)` for PT_LOAD, `None` for other types.
 pub fn load_segment(
     data: &[u8],
@@ -164,21 +148,6 @@ pub fn load_segment(
         mem_size,
     }))
 }
-
-/// Extract the raw file data for a segment.
-pub fn segment_data<'a>(data: &'a [u8], seg: &LoadSegment) -> Result<&'a [u8], Error> {
-    let start = seg.file_offset as usize;
-    let end = start
-        .checked_add(seg.file_size as usize)
-        .ok_or(Error::SegmentOutOfBounds)?;
-
-    if end > data.len() {
-        return Err(Error::SegmentOutOfBounds);
-    }
-
-    Ok(&data[start..end])
-}
-
 /// Map ELF segment flags to page table attributes.
 ///
 /// Priority: X > W > RO. A segment with both W and X gets RX (W^X enforcement).
@@ -192,4 +161,17 @@ pub fn segment_attrs(flags: u32) -> PageAttrs {
     } else {
         PageAttrs::user_ro()
     }
+}
+/// Extract the raw file data for a segment.
+pub fn segment_data<'a>(data: &'a [u8], seg: &LoadSegment) -> Result<&'a [u8], Error> {
+    let start = seg.file_offset as usize;
+    let end = start
+        .checked_add(seg.file_size as usize)
+        .ok_or(Error::SegmentOutOfBounds)?;
+
+    if end > data.len() {
+        return Err(Error::SegmentOutOfBounds);
+    }
+
+    Ok(&data[start..end])
 }

@@ -28,7 +28,7 @@ mod paging {
     #![allow(dead_code)]
     include!(env!("SYSTEM_CONFIG"));
 
-    pub const RAM_SIZE_MAX: u64 = 256 * 1024 * 1024;
+    // RAM_SIZE_MAX is provided by system_config.
 
     pub fn ram_end() -> u64 {
         // Stub: not used by buddy allocator tests (validation is #[cfg(not(test))]).

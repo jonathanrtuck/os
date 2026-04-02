@@ -13,6 +13,8 @@
 //! Also includes a "buggy" single-queue model to verify the tests
 //! distinguish per-core from global queue behavior.
 
+#[path = "../../kernel/paging.rs"]
+mod paging;
 #[path = "../../kernel/scheduling_algorithm.rs"]
 mod scheduling_algorithm;
 

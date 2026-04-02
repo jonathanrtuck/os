@@ -25,7 +25,7 @@ use std::{
 /// the values for linker script generation and linker flags.
 mod system_config {
     #![allow(dead_code)]
-    include!("system_config.rs");
+    include!("kernel/system_config.rs");
 }
 
 /// Service pack format constants (SSOT). Used to write the pack header.
@@ -97,7 +97,7 @@ fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let rustc = env::var("RUSTC").unwrap();
 
-    let config_path = manifest_dir.join("system_config.rs");
+    let config_path = manifest_dir.join("kernel/system_config.rs");
     let config_path_str = config_path.to_str().unwrap();
 
     // Every child rustc process inherits these, so include!(env!("SYSTEM_CONFIG"))

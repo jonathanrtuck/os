@@ -14,6 +14,8 @@
 //! - Linux 6.6+ EEVDF: vlag preservation
 //! - Stoica & Abdel-Wahab 1995: EEVDF fairness bounds
 
+#[path = "../../kernel/paging.rs"]
+mod paging;
 #[path = "../../kernel/scheduling_algorithm.rs"]
 mod scheduling_algorithm;
 

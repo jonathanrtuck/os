@@ -65,43 +65,6 @@ impl Context {
             fpsr: 0,
         }
     }
-
-    /// Program counter (ELR_EL1 on aarch64).
-    #[inline(always)]
-    pub fn pc(&self) -> u64 {
-        self.elr
-    }
-
-    /// Set the program counter.
-    #[inline(always)]
-    pub fn set_pc(&mut self, pc: u64) {
-        self.elr = pc;
-    }
-
-    /// Kernel stack pointer (SP_EL1 on aarch64).
-    #[inline(always)]
-    pub fn sp(&self) -> u64 {
-        self.sp
-    }
-
-    /// Set the kernel stack pointer.
-    #[inline(always)]
-    pub fn set_sp(&mut self, sp: u64) {
-        self.sp = sp;
-    }
-
-    /// User stack pointer (SP_EL0 on aarch64).
-    #[inline(always)]
-    pub fn user_sp(&self) -> u64 {
-        self.sp_el0
-    }
-
-    /// Set the user stack pointer.
-    #[inline(always)]
-    pub fn set_user_sp(&mut self, sp: u64) {
-        self.sp_el0 = sp;
-    }
-
     /// Read argument register n (x0-x5 on aarch64).
     ///
     /// Panics if n >= 6.
@@ -111,7 +74,11 @@ impl Context {
 
         self.x[n]
     }
-
+    /// Program counter (ELR_EL1 on aarch64).
+    #[inline(always)]
+    pub fn pc(&self) -> u64 {
+        self.elr
+    }
     /// Set argument register n (x0-x5 on aarch64).
     ///
     /// Panics if n >= 6.
@@ -121,7 +88,16 @@ impl Context {
 
         self.x[n] = val;
     }
-
+    /// Set the program counter.
+    #[inline(always)]
+    pub fn set_pc(&mut self, pc: u64) {
+        self.elr = pc;
+    }
+    /// Set the kernel stack pointer.
+    #[inline(always)]
+    pub fn set_sp(&mut self, sp: u64) {
+        self.sp = sp;
+    }
     /// Configure for user-mode execution (EL0t on aarch64).
     ///
     /// Clears the exception level bits in SPSR to EL0t (0x0).
@@ -131,16 +107,29 @@ impl Context {
         // Clear bits [3:0] (M field) — EL0t = 0b0000.
         self.spsr &= !0xF;
     }
-
-    /// User TLS pointer (TPIDR_EL0 on aarch64).
+    /// Set the user stack pointer.
     #[inline(always)]
-    pub fn user_tls(&self) -> u64 {
-        self.tpidr_el0
+    pub fn set_user_sp(&mut self, sp: u64) {
+        self.sp_el0 = sp;
     }
-
     /// Set the user TLS pointer.
     #[inline(always)]
     pub fn set_user_tls(&mut self, tls: u64) {
         self.tpidr_el0 = tls;
+    }
+    /// Kernel stack pointer (SP_EL1 on aarch64).
+    #[inline(always)]
+    pub fn sp(&self) -> u64 {
+        self.sp
+    }
+    /// User stack pointer (SP_EL0 on aarch64).
+    #[inline(always)]
+    pub fn user_sp(&self) -> u64 {
+        self.sp_el0
+    }
+    /// User TLS pointer (TPIDR_EL0 on aarch64).
+    #[inline(always)]
+    pub fn user_tls(&self) -> u64 {
+        self.tpidr_el0
     }
 }

@@ -73,7 +73,7 @@ impl SlabCache {
     /// cache (same size class), and must not have been freed already.
     /// The caller is responsible for ensuring no aliases to this memory
     /// remain. Writing a FreeNode header is sound because the object is
-    /// at least 64 bytes (minimum size class ≥ size_of::<FreeNode>())
+    /// at least 64 bytes (minimum size class ≥ `size_of::<FreeNode>()`)
     /// and was originally carved from a page-aligned slab.
     unsafe fn free(&mut self, ptr: *mut u8) {
         // SAFETY: Caller guarantees `ptr` was returned by a prior `alloc()`

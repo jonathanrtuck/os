@@ -10,13 +10,10 @@
 //! Uses HVC as the conduit (QEMU virt default). PSCI function IDs follow
 //! the ARM SMCCC / PSCI specification.
 
-/// PSCI CPU_ON (SMC64 variant): function ID 0xC400_0003.
-const PSCI_CPU_ON: u64 = 0xC400_0003;
-/// PSCI SYSTEM_OFF: function ID 0x8400_0008.
-const PSCI_SYSTEM_OFF: u64 = 0x8400_0008;
-/// PSCI return codes.
-const PSCI_SUCCESS: i64 = 0;
 const PSCI_ALREADY_ON: i64 = -4;
+const PSCI_CPU_ON: u64 = 0xC400_0003;
+const PSCI_SUCCESS: i64 = 0;
+const PSCI_SYSTEM_OFF: u64 = 0x8400_0008;
 
 /// Boot a secondary core.
 ///
@@ -49,7 +46,6 @@ pub fn cpu_on(target_cpu: u64, entry_point: u64, context_id: u64) -> Result<(), 
         err => Err(err),
     }
 }
-
 /// Power off the entire system via PSCI SYSTEM_OFF.
 ///
 /// Does not return on success. Falls through to a spin loop on failure.

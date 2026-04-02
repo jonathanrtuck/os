@@ -11,47 +11,30 @@
 //! | x0..x5   | in        | Arguments (syscall-specific)       |
 //! | x0       | out       | Return value: ≥0 success, <0 error |
 //!
-//! # Syscalls (dense 0–36, grouped by abstraction layer)
+//! # Syscalls (46 total, grouped by abstraction layer)
 //!
-//! | Nr | Name                       | Args                                      | Returns                      |
-//! |----|----------------------------|-------------------------------------------|------------------------------|
-//! | 0  | exit                       | —                                         | does not return              |
-//! | 1  | write                      | x0=buf_ptr, x1=len                        | bytes written                |
-//! | 2  | yield                      | —                                         | 0                            |
-//! | 3  | handle_close               | x0=handle                                 | 0                            |
-//! | 4  | handle_send                | x0=target, x1=source, x2=rights_mask      | 0                            |
-//! | 5  | handle_set_badge           | x0=handle, x1=badge                       | 0                            |
-//! | 6  | handle_get_badge           | x0=handle                                 | badge                        |
-//! | 7  | channel_create             | —                                         | handle_a \| (handle_b << 16) |
-//! | 8  | channel_signal             | x0=handle                                 | 0                            |
-//! | 9  | wait                       | x0=handles_ptr, x1=count, x2=timeout_ns   | ready index (may block)      |
-//! | 10 | futex_wait                 | x0=addr, x1=expected                      | 0 (may block)                |
-//! | 11 | futex_wake                 | x0=addr, x1=count                         | threads woken                |
-//! | 12 | timer_create               | x0=timeout_ns                             | handle                       |
-//! | 13 | memory_alloc               | x0=page_count                             | user VA                      |
-//! | 14 | memory_free                | x0=va, x1=page_count                      | 0                            |
-//! | 15 | vmo_create                 | x0=size_pages, x1=flags, x2=type_tag      | handle                       |
-//! | 16 | vmo_map                    | x0=handle, x1=flags, x2=target (0=self)   | user VA                      |
-//! | 17 | vmo_unmap                  | x0=va, x1=size_pages                      | 0                            |
-//! | 18 | vmo_read                   | x0=handle, x1=offset, x2=buf_ptr, x3=len  | bytes read                   |
-//! | 19 | vmo_write                  | x0=handle, x1=offset, x2=buf_ptr, x3=len  | bytes written                |
-//! | 20 | vmo_get_info               | x0=handle, x1=info_ptr                    | 0                            |
-//! | 21 | vmo_snapshot               | x0=handle                                 | generation                   |
-//! | 22 | vmo_restore                | x0=handle, x1=generation                  | 0                            |
-//! | 23 | vmo_seal                   | x0=handle                                 | 0                            |
-//! | 24 | vmo_op_range               | x0=handle, x1=op, x2=offset, x3=count     | op-specific                  |
-//! | 25 | process_create             | x0=elf_ptr, x1=elf_len                    | handle                       |
-//! | 26 | process_start              | x0=handle                                 | 0                            |
-//! | 27 | process_kill               | x0=handle                                 | 0                            |
-//! | 28 | process_set_syscall_filter | x0=handle, x1=mask (u64)                  | 0                            |
-//! | 29 | thread_create              | x0=entry_va, x1=stack_top                 | handle                       |
-//! | 30 | scheduling_context_create  | x0=budget_ns, x1=period_ns                | handle                       |
-//! | 31 | scheduling_context_borrow  | x0=handle                                 | 0                            |
-//! | 32 | scheduling_context_return  | —                                         | 0                            |
-//! | 33 | scheduling_context_bind    | x0=handle                                 | 0                            |
-//! | 34 | device_map                 | x0=phys_addr, x1=size                     | user VA                      |
-//! | 35 | interrupt_register         | x0=irq_nr                                 | handle                       |
-//! | 36 | interrupt_ack              | x0=handle                                 | 0                            |
+//! See SYSCALLS.md for the full reference. Summary:
+//!
+//! | Nr    | Name                       | Args                                      | Returns                      |
+//! |-------|----------------------------|-------------------------------------------|------------------------------|
+//! | 0     | exit                       | —                                         | does not return              |
+//! | 1     | write                      | x0=buf_ptr, x1=len                        | bytes written                |
+//! | 2     | yield                      | —                                         | 0                            |
+//! | 3     | handle_close               | x0=handle                                 | 0                            |
+//! | 4     | handle_send                | x0=target, x1=source, x2=rights_mask      | 0                            |
+//! | 5–6   | handle_set/get_badge       | x0=handle, x1=badge                       | 0 / badge                    |
+//! | 7–8   | channel_create/signal      | x0=handle (signal only)                   | packed handles / 0           |
+//! | 9     | wait                       | x0=handles_ptr, x1=count, x2=timeout_ns   | ready index (may block)      |
+//! | 10–11 | futex_wait/wake            | x0=addr, x1=expected or count             | 0 / threads woken            |
+//! | 12–13 | timer_create, clock_get    | x0=timeout_ns / —                         | handle / nanoseconds         |
+//! | 14–15 | memory_alloc/free          | x0=page_count or va, x1=page_count        | user VA / 0                  |
+//! | 16–27 | vmo_*                      | (see SYSCALLS.md)                         | varies                       |
+//! | 28–30 | event_create/signal/reset  | x0=handle (signal/reset)                  | handle / 0                   |
+//! | 31–34 | process_*                  | (see SYSCALLS.md)                         | handle / 0                   |
+//! | 35–38 | thread_*                   | (see SYSCALLS.md)                         | handle / 0 / state           |
+//! | 39–42 | scheduling_context_*       | x0=budget/handle, x1=period               | handle / 0                   |
+//! | 43    | device_map                 | x0=phys_addr, x1=size                     | user VA                      |
+//! | 44–45 | interrupt_register/ack     | x0=irq or handle                          | handle / 0                   |
 //!
 //! # Error codes
 //!
@@ -112,44 +95,43 @@ pub mod nr {
     // --- Userspace sync (10–11) ---
     pub const FUTEX_WAIT: u64 = 10;
     pub const FUTEX_WAKE: u64 = 11;
-    // --- Time (12) ---
+    // --- Time (12–13) ---
     pub const TIMER_CREATE: u64 = 12;
-    // --- Heap memory (13–14) ---
-    pub const MEMORY_ALLOC: u64 = 13;
-    pub const MEMORY_FREE: u64 = 14;
-    // --- Virtual Memory Objects (15–24) ---
-    pub const VMO_CREATE: u64 = 15;
-    pub const VMO_MAP: u64 = 16;
-    pub const VMO_UNMAP: u64 = 17;
-    pub const VMO_READ: u64 = 18;
-    pub const VMO_WRITE: u64 = 19;
-    pub const VMO_GET_INFO: u64 = 20;
-    pub const VMO_SNAPSHOT: u64 = 21;
-    pub const VMO_RESTORE: u64 = 22;
-    pub const VMO_SEAL: u64 = 23;
-    pub const VMO_OP_RANGE: u64 = 24;
-    pub const VMO_SET_PAGER: u64 = 25;
-    pub const PAGER_SUPPLY: u64 = 26;
-    // --- Events (27–29) ---
-    pub const EVENT_CREATE: u64 = 27;
-    pub const EVENT_SIGNAL: u64 = 28;
-    pub const EVENT_RESET: u64 = 29;
-    // --- Process/thread lifecycle (30–34) ---
-    pub const PROCESS_CREATE: u64 = 30;
-    pub const PROCESS_START: u64 = 31;
-    pub const PROCESS_KILL: u64 = 32;
-    pub const PROCESS_SET_SYSCALL_FILTER: u64 = 33;
-    pub const THREAD_CREATE: u64 = 34;
-    pub const THREAD_SUSPEND: u64 = 35;
-    pub const THREAD_RESUME: u64 = 36;
-    pub const THREAD_READ_STATE: u64 = 37;
-    // --- Scheduling (38–41) ---
-    pub const SCHEDULING_CONTEXT_CREATE: u64 = 38;
-    pub const SCHEDULING_CONTEXT_BORROW: u64 = 39;
-    pub const SCHEDULING_CONTEXT_RETURN: u64 = 40;
-    pub const SCHEDULING_CONTEXT_BIND: u64 = 41;
-    // --- Time (42) ---
-    pub const CLOCK_GET: u64 = 42;
+    pub const CLOCK_GET: u64 = 13;
+    // --- Heap memory (14–15) ---
+    pub const MEMORY_ALLOC: u64 = 14;
+    pub const MEMORY_FREE: u64 = 15;
+    // --- Virtual Memory Objects (16–27) ---
+    pub const VMO_CREATE: u64 = 16;
+    pub const VMO_MAP: u64 = 17;
+    pub const VMO_UNMAP: u64 = 18;
+    pub const VMO_READ: u64 = 19;
+    pub const VMO_WRITE: u64 = 20;
+    pub const VMO_GET_INFO: u64 = 21;
+    pub const VMO_SNAPSHOT: u64 = 22;
+    pub const VMO_RESTORE: u64 = 23;
+    pub const VMO_SEAL: u64 = 24;
+    pub const VMO_OP_RANGE: u64 = 25;
+    pub const VMO_SET_PAGER: u64 = 26;
+    pub const PAGER_SUPPLY: u64 = 27;
+    // --- Events (28–30) ---
+    pub const EVENT_CREATE: u64 = 28;
+    pub const EVENT_SIGNAL: u64 = 29;
+    pub const EVENT_RESET: u64 = 30;
+    // --- Process/thread lifecycle (31–38) ---
+    pub const PROCESS_CREATE: u64 = 31;
+    pub const PROCESS_START: u64 = 32;
+    pub const PROCESS_KILL: u64 = 33;
+    pub const PROCESS_SET_SYSCALL_FILTER: u64 = 34;
+    pub const THREAD_CREATE: u64 = 35;
+    pub const THREAD_SUSPEND: u64 = 36;
+    pub const THREAD_RESUME: u64 = 37;
+    pub const THREAD_READ_STATE: u64 = 38;
+    // --- Scheduling (39–42) ---
+    pub const SCHEDULING_CONTEXT_CREATE: u64 = 39;
+    pub const SCHEDULING_CONTEXT_BORROW: u64 = 40;
+    pub const SCHEDULING_CONTEXT_RETURN: u64 = 41;
+    pub const SCHEDULING_CONTEXT_BIND: u64 = 42;
     // --- Device layer (43–45) ---
     pub const DEVICE_MAP: u64 = 43;
     pub const INTERRUPT_REGISTER: u64 = 44;
@@ -162,11 +144,16 @@ const MAX_DMA_ORDER: u64 = (paging::RAM_SIZE_MAX / paging::PAGE_SIZE).ilog2() as
 /// Maximum ELF size for process_create (4 MiB).
 /// Increased from 2 MiB to accommodate real HarfBuzz text shaping in core.
 const MAX_ELF_SIZE: u64 = 4 * 1024 * 1024;
-/// Maximum number of handles in a single `wait` call.
-const MAX_WAIT_HANDLES: u64 = 16;
+/// Maximum number of handles in a single `wait` call (from system_config via paging).
+const MAX_WAIT_HANDLES: u64 = paging::MAX_WAIT_HANDLES;
 const MAX_WRITE_LEN: u64 = 4096;
+const VMO_MAP_READ: u64 = 1 << 0;
+const VMO_MAP_WRITE: u64 = 1 << 1;
+const VMO_OP_COMMIT: u64 = 0;
+const VMO_OP_DECOMMIT: u64 = 1;
+const VMO_OP_LOOKUP: u64 = 2;
 
-/// Raw WouldBlock error code as u64 (for direct x[0] patching in wake path).
+/// Raw WouldBlock error code as u64 (for direct `x[0]` patching in wake path).
 pub const WOULD_BLOCK_RAW: u64 = Error::WouldBlock as i64 as u64;
 
 /// Convert a syscall Result to the ABI return value.
@@ -196,12 +183,6 @@ pub enum Error {
     SyscallBlocked = -15,
 }
 
-const VMO_MAP_READ: u64 = 1 << 0;
-const VMO_MAP_WRITE: u64 = 1 << 1;
-const VMO_OP_COMMIT: u64 = 0;
-const VMO_OP_DECOMMIT: u64 = 1;
-const VMO_OP_LOOKUP: u64 = 2;
-
 impl From<HandleError> for u64 {
     fn from(e: HandleError) -> u64 {
         (e as i64) as u64
@@ -218,7 +199,7 @@ impl From<HandleError> for Error {
     }
 }
 
-/// Write a syscall result to ctx.x[0] via raw pointer (no reference creation).
+/// Write a syscall result to `ctx.x[0]` via raw pointer (no reference creation).
 ///
 /// Accepts a pre-converted u64 value (Ok value or error code). Avoids creating
 /// `&mut *ctx` which would alias with the scheduler lock's `&mut State`.
@@ -317,7 +298,6 @@ fn sys_channel_create() -> Result<u64, Error> {
                         return Err(HandleError::InvalidHandle);
                     }
                 };
-
                 let va_a = match process.address_space.map_channel_page(pages[0].as_u64()) {
                     Some(va) => va,
                     None => {
@@ -383,6 +363,9 @@ fn sys_channel_signal(handle_nr: u64) -> Result<u64, HandleError> {
 
     Ok(0)
 }
+fn sys_clock_get() -> Result<u64, Error> {
+    Ok(timer::counter_to_ns(timer::counter()))
+}
 fn sys_device_map(pa: u64, size: u64) -> Result<u64, Error> {
     if size == 0 {
         return Err(Error::InvalidArgument);
@@ -401,6 +384,60 @@ fn sys_device_map(pa: u64, size: u64) -> Result<u64, Error> {
             .map_device_mmio(pa, size)
             .ok_or(Error::InvalidArgument)
     })
+}
+fn sys_event_create() -> Result<u64, Error> {
+    let event_id = event::create();
+
+    scheduler::current_process_do(|process| {
+        process
+            .handles
+            .insert(HandleObject::Event(event_id), Rights::ALL)
+            .map(|h| h.0 as u64)
+            .map_err(|_| {
+                event::destroy(event_id);
+                Error::OutOfMemory
+            })
+    })
+}
+fn sys_event_reset(handle_nr: u64) -> Result<u64, Error> {
+    if handle_nr > u16::MAX as u64 {
+        return Err(Error::InvalidArgument);
+    }
+
+    let event_id = scheduler::current_process_do(|process| {
+        let obj = process
+            .handles
+            .get(Handle(handle_nr as u16), Rights::WRITE)?;
+
+        match obj {
+            HandleObject::Event(id) => Ok(id),
+            _ => Err(HandleError::InvalidHandle),
+        }
+    })?;
+
+    event::reset(event_id);
+
+    Ok(0)
+}
+fn sys_event_signal(handle_nr: u64) -> Result<u64, Error> {
+    if handle_nr > u16::MAX as u64 {
+        return Err(Error::InvalidArgument);
+    }
+
+    let event_id = scheduler::current_process_do(|process| {
+        let obj = process
+            .handles
+            .get(Handle(handle_nr as u16), Rights::SIGNAL)?;
+
+        match obj {
+            HandleObject::Event(id) => Ok(id),
+            _ => Err(HandleError::InvalidHandle),
+        }
+    })?;
+
+    event::signal(event_id);
+
+    Ok(0)
 }
 // dma_alloc and dma_free REMOVED — replaced by VMO syscalls (30-39).
 // Userspace sys library provides the same API via VMO-backed implementation.
@@ -574,12 +611,14 @@ fn sys_handle_send(
                 Ok(_) => return Err(Error::InvalidArgument),
                 Err(_) => return Err(Error::InvalidArgument),
             };
+
             // Verify the source handle has TRANSFER right before moving it.
             // Without this check, any handle could be delegated to another process.
             process
                 .handles
                 .get_entry(source_handle, Rights::TRANSFER)
                 .map_err(|_| Error::InvalidArgument)?;
+
             // Now close (move out). Can't fail — we just verified it exists.
             // close returns (object, rights, badge).
             let (source_obj, source_rights, source_badge) =
@@ -616,6 +655,7 @@ fn sys_handle_send(
                 None => {
                     // Second map failed — unmap the first page.
                     target.address_space.unmap_channel_page(va_a);
+
                     return Err(Error::OutOfMemory);
                 }
             };
@@ -628,6 +668,7 @@ fn sys_handle_send(
                 // Handle insert failed — unmap both pages.
                 target.address_space.unmap_channel_page(va_a);
                 target.address_space.unmap_channel_page(va_b);
+
                 return Err(Error::InvalidArgument);
             }
         } else {
@@ -711,7 +752,6 @@ fn sys_pager_supply(vmo_handle_nr: u64, offset_pages: u64, page_count: u64) -> R
             _ => Err(HandleError::InvalidHandle),
         }
     })?;
-
     // Validate range.
     let size = vmo::size_pages(vmo_id).ok_or(Error::InvalidArgument)?;
 
@@ -1018,6 +1058,83 @@ fn sys_thread_create(entry_va: u64, stack_top: u64) -> Result<u64, Error> {
 
     Ok(handle.0 as u64)
 }
+fn sys_thread_read_state(handle_nr: u64, buf_va: u64) -> Result<u64, Error> {
+    if handle_nr > u16::MAX as u64 {
+        return Err(Error::InvalidArgument);
+    }
+
+    let ctx_size = core::mem::size_of::<Context>() as u64;
+
+    // Validate output buffer.
+    if buf_va >= USER_VA_END || buf_va + ctx_size > USER_VA_END {
+        return Err(Error::BadAddress);
+    }
+
+    let thread_id = scheduler::current_process_do(|process| {
+        let obj = process
+            .handles
+            .get(Handle(handle_nr as u16), Rights::READ)?;
+
+        match obj {
+            HandleObject::Thread(id) => Ok(id),
+            _ => Err(HandleError::InvalidHandle),
+        }
+    })?;
+
+    // SAFETY: buf_va validated as user VA in range. Thread must be suspended.
+    let ok = unsafe { scheduler::read_thread_state(thread_id, buf_va as *mut u8) };
+
+    if ok {
+        Ok(ctx_size)
+    } else {
+        Err(Error::InvalidArgument) // Thread not suspended
+    }
+}
+fn sys_thread_resume(handle_nr: u64) -> Result<u64, Error> {
+    if handle_nr > u16::MAX as u64 {
+        return Err(Error::InvalidArgument);
+    }
+
+    let thread_id = scheduler::current_process_do(|process| {
+        let obj = process
+            .handles
+            .get(Handle(handle_nr as u16), Rights::WRITE)?;
+
+        match obj {
+            HandleObject::Thread(id) => Ok(id),
+            _ => Err(HandleError::InvalidHandle),
+        }
+    })?;
+
+    if scheduler::resume_thread(thread_id) {
+        Ok(0)
+    } else {
+        Err(Error::InvalidArgument) // Not in suspended list
+    }
+}
+fn sys_thread_suspend(handle_nr: u64) -> Result<u64, Error> {
+    if handle_nr > u16::MAX as u64 {
+        return Err(Error::InvalidArgument);
+    }
+
+    let thread_id = scheduler::current_process_do(|process| {
+        let obj = process
+            .handles
+            .get(Handle(handle_nr as u16), Rights::WRITE)?;
+
+        match obj {
+            HandleObject::Thread(id) => Ok(id),
+            _ => Err(HandleError::InvalidHandle),
+        }
+    })?;
+
+    if scheduler::suspend_thread(thread_id) {
+        Ok(0)
+    } else {
+        // Thread is running or not found — can't suspend right now.
+        Err(Error::InvalidArgument)
+    }
+}
 fn sys_timer_create(timeout_ns: u64) -> Result<u64, HandleError> {
     let timer_id = timer::create(timeout_ns).ok_or(HandleError::TableFull)?;
 
@@ -1168,14 +1285,11 @@ fn sys_vmo_map(handle_nr: u64, map_flags: u64, target_handle: u64) -> Result<u64
     // Also resolve target process if cross-process mapping requested.
     let (vmo_id, size_pages, target_pid) = scheduler::current_process_do(|process| {
         let obj = process.handles.get(Handle(handle_nr as u16), required)?;
-
         let vmo_id = match obj {
             HandleObject::Vmo(id) => id,
             _ => return Err(HandleError::InvalidHandle),
         };
-
         let size = vmo::size_pages(vmo_id).ok_or(HandleError::InvalidHandle)?;
-
         // Resolve target: 0 = self, otherwise a Process handle in the caller's table.
         let target = if target_handle == 0 {
             None // Map into self
@@ -1183,6 +1297,7 @@ fn sys_vmo_map(handle_nr: u64, map_flags: u64, target_handle: u64) -> Result<u64
             if target_handle > u16::MAX as u64 {
                 return Err(HandleError::InvalidHandle);
             }
+
             let target_obj = process
                 .handles
                 .get(Handle(target_handle as u16), Rights::NONE)?;
@@ -1257,7 +1372,6 @@ fn sys_vmo_op_range(
     } else {
         Rights::WRITE
     };
-
     let vmo_id = scheduler::current_process_do(|process| {
         let obj = process.handles.get(Handle(handle_nr as u16), required)?;
 
@@ -1287,6 +1401,7 @@ fn sys_vmo_op_range(
             if page_count == 0 {
                 return Err(Error::InvalidArgument);
             }
+
             // Eagerly allocate and commit pages in the range.
             let size = vmo::size_pages(vmo_id).ok_or(Error::InvalidArgument)?;
 
@@ -1306,7 +1421,6 @@ fn sys_vmo_op_range(
                 if vmo.is_sealed() {
                     return Err(Error::PermissionDenied);
                 }
-
                 if vmo.lookup_page(page_idx).is_some() {
                     continue; // Already committed
                 }
@@ -1462,140 +1576,6 @@ fn sys_vmo_seal(handle_nr: u64) -> Result<u64, Error> {
     }
 
     Ok(0)
-}
-fn sys_event_create() -> Result<u64, Error> {
-    let event_id = event::create();
-
-    scheduler::current_process_do(|process| {
-        process
-            .handles
-            .insert(HandleObject::Event(event_id), Rights::ALL)
-            .map(|h| h.0 as u64)
-            .map_err(|_| {
-                event::destroy(event_id);
-                Error::OutOfMemory
-            })
-    })
-}
-fn sys_event_signal(handle_nr: u64) -> Result<u64, Error> {
-    if handle_nr > u16::MAX as u64 {
-        return Err(Error::InvalidArgument);
-    }
-
-    let event_id = scheduler::current_process_do(|process| {
-        let obj = process
-            .handles
-            .get(Handle(handle_nr as u16), Rights::SIGNAL)?;
-
-        match obj {
-            HandleObject::Event(id) => Ok(id),
-            _ => Err(HandleError::InvalidHandle),
-        }
-    })?;
-
-    event::signal(event_id);
-
-    Ok(0)
-}
-fn sys_event_reset(handle_nr: u64) -> Result<u64, Error> {
-    if handle_nr > u16::MAX as u64 {
-        return Err(Error::InvalidArgument);
-    }
-
-    let event_id = scheduler::current_process_do(|process| {
-        let obj = process
-            .handles
-            .get(Handle(handle_nr as u16), Rights::WRITE)?;
-
-        match obj {
-            HandleObject::Event(id) => Ok(id),
-            _ => Err(HandleError::InvalidHandle),
-        }
-    })?;
-
-    event::reset(event_id);
-
-    Ok(0)
-}
-fn sys_thread_suspend(handle_nr: u64) -> Result<u64, Error> {
-    if handle_nr > u16::MAX as u64 {
-        return Err(Error::InvalidArgument);
-    }
-
-    let thread_id = scheduler::current_process_do(|process| {
-        let obj = process
-            .handles
-            .get(Handle(handle_nr as u16), Rights::WRITE)?;
-
-        match obj {
-            HandleObject::Thread(id) => Ok(id),
-            _ => Err(HandleError::InvalidHandle),
-        }
-    })?;
-
-    if scheduler::suspend_thread(thread_id) {
-        Ok(0)
-    } else {
-        // Thread is running or not found — can't suspend right now.
-        Err(Error::InvalidArgument)
-    }
-}
-fn sys_thread_resume(handle_nr: u64) -> Result<u64, Error> {
-    if handle_nr > u16::MAX as u64 {
-        return Err(Error::InvalidArgument);
-    }
-
-    let thread_id = scheduler::current_process_do(|process| {
-        let obj = process
-            .handles
-            .get(Handle(handle_nr as u16), Rights::WRITE)?;
-
-        match obj {
-            HandleObject::Thread(id) => Ok(id),
-            _ => Err(HandleError::InvalidHandle),
-        }
-    })?;
-
-    if scheduler::resume_thread(thread_id) {
-        Ok(0)
-    } else {
-        Err(Error::InvalidArgument) // Not in suspended list
-    }
-}
-fn sys_thread_read_state(handle_nr: u64, buf_va: u64) -> Result<u64, Error> {
-    if handle_nr > u16::MAX as u64 {
-        return Err(Error::InvalidArgument);
-    }
-
-    let ctx_size = core::mem::size_of::<Context>() as u64;
-
-    // Validate output buffer.
-    if buf_va >= USER_VA_END || buf_va + ctx_size > USER_VA_END {
-        return Err(Error::BadAddress);
-    }
-
-    let thread_id = scheduler::current_process_do(|process| {
-        let obj = process
-            .handles
-            .get(Handle(handle_nr as u16), Rights::READ)?;
-
-        match obj {
-            HandleObject::Thread(id) => Ok(id),
-            _ => Err(HandleError::InvalidHandle),
-        }
-    })?;
-
-    // SAFETY: buf_va validated as user VA in range. Thread must be suspended.
-    let ok = unsafe { scheduler::read_thread_state(thread_id, buf_va as *mut u8) };
-
-    if ok {
-        Ok(ctx_size)
-    } else {
-        Err(Error::InvalidArgument) // Thread not suspended
-    }
-}
-fn sys_clock_get() -> Result<u64, Error> {
-    Ok(timer::counter_to_ns(timer::counter()))
 }
 fn sys_vmo_set_pager(vmo_handle_nr: u64, channel_handle_nr: u64) -> Result<u64, Error> {
     if vmo_handle_nr > u16::MAX as u64 || channel_handle_nr > u16::MAX as u64 {
@@ -2027,6 +2007,11 @@ fn unregister_channels(ids: &[Option<ChannelId>]) {
         channel::unregister_waiter(id);
     }
 }
+fn unregister_events(ids: &[Option<event::EventId>]) {
+    for &id in ids.iter().flatten() {
+        event::unregister_waiter(id);
+    }
+}
 /// Unregister interrupt waiters after `sys_wait` returns (any path).
 ///
 /// Safe to call even if the waiter was already cleared by the fire path.
@@ -2057,11 +2042,6 @@ fn unregister_threads(ids: &[Option<ThreadId>]) {
 fn unregister_timers(ids: &[Option<TimerId>]) {
     for &id in ids.iter().flatten() {
         timer::unregister_waiter(id);
-    }
-}
-fn unregister_events(ids: &[Option<event::EventId>]) {
-    for &id in ids.iter().flatten() {
-        event::unregister_waiter(id);
     }
 }
 /// Translate a user virtual address to a physical address using hardware AT.
@@ -2167,11 +2147,13 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
         nr::VMO_CREATE => {
             let xbase = unsafe { core::ptr::addr_of!((*ctx).x) as *const u64 };
             let x2 = unsafe { xbase.add(2).read() };
+
             dispatch_ok(ctx, result_to_u64!(sys_vmo_create(x0, x1, x2)))
         }
         nr::VMO_MAP => {
             let xbase = unsafe { core::ptr::addr_of!((*ctx).x) as *const u64 };
             let x2 = unsafe { xbase.add(2).read() };
+
             dispatch_ok(ctx, result_to_u64!(sys_vmo_map(x0, x1, x2)))
         }
         nr::VMO_UNMAP => dispatch_ok(ctx, result_to_u64!(sys_vmo_unmap(x0, x1))),
@@ -2179,12 +2161,14 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
             let xbase = unsafe { core::ptr::addr_of!((*ctx).x) as *const u64 };
             let x2 = unsafe { xbase.add(2).read() };
             let x3 = unsafe { xbase.add(3).read() };
+
             dispatch_ok(ctx, result_to_u64!(sys_vmo_read(x0, x1, x2, x3)))
         }
         nr::VMO_WRITE => {
             let xbase = unsafe { core::ptr::addr_of!((*ctx).x) as *const u64 };
             let x2 = unsafe { xbase.add(2).read() };
             let x3 = unsafe { xbase.add(3).read() };
+
             dispatch_ok(ctx, result_to_u64!(sys_vmo_write(x0, x1, x2, x3)))
         }
         nr::VMO_GET_INFO => dispatch_ok(ctx, result_to_u64!(sys_vmo_get_info(x0, x1))),
@@ -2195,6 +2179,7 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
             let xbase = unsafe { core::ptr::addr_of!((*ctx).x) as *const u64 };
             let x2 = unsafe { xbase.add(2).read() };
             let x3 = unsafe { xbase.add(3).read() };
+
             dispatch_ok(ctx, result_to_u64!(sys_vmo_op_range(x0, x1, x2, x3)))
         }
         nr::VMO_SET_PAGER => dispatch_ok(ctx, result_to_u64!(sys_vmo_set_pager(x0, x1))),

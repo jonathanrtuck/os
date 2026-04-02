@@ -12,11 +12,8 @@
 //!
 //! Pure data + logic — no locks, no hardware access. Fully host-testable.
 
-/// Maximum period: 1 s. Prevents starvation from overly long periods.
 pub const MAX_PERIOD_NS: u64 = 1_000_000_000;
-/// Minimum budget: 100 µs. Prevents pathologically small budgets.
 pub const MIN_BUDGET_NS: u64 = 100_000;
-/// Minimum period: 1 ms.
 pub const MIN_PERIOD_NS: u64 = 1_000_000;
 
 /// A scheduling context: budget + period + runtime state.

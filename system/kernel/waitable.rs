@@ -113,6 +113,7 @@ impl<Id: WaitableId> WaitableRegistry<Id> {
         let entry = self.entries.get_mut(id.index())?.as_mut()?;
 
         entry.ready = true;
+
         entry.waiter.take()
     }
     /// Register a thread as the waiter for `id`.

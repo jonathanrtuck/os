@@ -39,72 +39,8 @@ use alloc::{
 use super::sync::IrqMutex;
 use super::{handle::ChannelId, memory::Pa, process::ProcessId};
 
-// =========================================================================
-// Public types
-// =========================================================================
-
-/// Identifies a VMO in the global VMO table.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct VmoId(pub u32);
-
-/// Creation flags for `vmo_create`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct VmoFlags(u32);
-
-impl VmoFlags {
-    /// Physically contiguous pages (eager allocation via buddy allocator).
-    pub const CONTIGUOUS: Self = Self(1 << 0);
-
-    pub const fn bits(self) -> u32 {
-        self.0
-    }
-    pub const fn contains(self, flag: Self) -> bool {
-        self.0 & flag.0 == flag.0
-    }
-    pub const fn empty() -> Self {
-        Self(0)
-    }
-    pub const fn from_bits(bits: u32) -> Self {
-        Self(bits)
-    }
-}
-
-/// Info returned by `vmo_get_info`.
-pub const VMO_FLAG_CONTIGUOUS: u64 = 1 << 0;
-pub const VMO_FLAG_SEALED: u64 = 1 << 1;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(C)]
-pub struct VmoInfo {
-    pub size_pages: u64,
-    pub flags: u64,
-    pub type_tag: u64,
-    pub generation: u64,
-    pub committed_pages: u64,
-    /// Number of retained snapshots. Novel: no other microkernel exposes
-    /// snapshot depth, enabling consumers to make informed snapshot policy
-    /// decisions (e.g., prune before taking another).
-    pub snapshot_count: u64,
-}
-
-// =========================================================================
-// VmoMapping — tracks where a VMO is mapped (for seal/restore invalidation)
-// =========================================================================
-
-/// Tracks a single mapping of a VMO into a process's address space.
-///
-/// Used by `seal()` to invalidate writable PTEs and by `restore()` to
-/// invalidate stale PTEs across all processes that have mapped this VMO.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct VmoMapping {
-    pub process_id: ProcessId,
-    pub va_base: u64,
-    pub page_count: u64,
-}
-
-// =========================================================================
-// Snapshot
-// =========================================================================
+/// Default maximum snapshot depth (undo ring size).
+const DEFAULT_MAX_SNAPSHOTS: usize = 64;
 
 /// A COW snapshot of a VMO's page list at a specific generation.
 struct VmoSnapshot {
@@ -113,13 +49,6 @@ struct VmoSnapshot {
     /// current generation have refcount > 1.
     pages: BTreeMap<u64, (Pa, u32)>,
 }
-
-// =========================================================================
-// Vmo — the core type
-// =========================================================================
-
-/// Default maximum snapshot depth (undo ring size).
-const DEFAULT_MAX_SNAPSHOTS: usize = 64;
 
 /// A Virtual Memory Object.
 ///
@@ -154,6 +83,40 @@ pub struct Vmo {
     /// Page offsets with pending pager requests (deduplication — avoids
     /// sending duplicate fault messages for the same page).
     pending_faults: BTreeSet<u64>,
+}
+/// Creation flags for `vmo_create`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VmoFlags(u32);
+/// Identifies a VMO in the global VMO table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VmoId(pub u32);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct VmoInfo {
+    pub size_pages: u64,
+    pub flags: u64,
+    pub type_tag: u64,
+    pub generation: u64,
+    pub committed_pages: u64,
+    /// Number of retained snapshots. Novel: no other microkernel exposes
+    /// snapshot depth, enabling consumers to make informed snapshot policy
+    /// decisions (e.g., prune before taking another).
+    pub snapshot_count: u64,
+}
+/// Tracks a single mapping of a VMO into a process's address space.
+///
+/// Used by `seal()` to invalidate writable PTEs and by `restore()` to
+/// invalidate stale PTEs across all processes that have mapped this VMO.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VmoMapping {
+    pub process_id: ProcessId,
+    pub va_base: u64,
+    pub page_count: u64,
+}
+/// Global VMO table. In the kernel, wrapped in IrqMutex.
+/// Here exposed directly for testing.
+pub struct VmoTable {
+    vmos: Vec<Option<Vmo>>,
 }
 
 impl Vmo {
@@ -270,6 +233,7 @@ impl Vmo {
                         }
                     }
                 }
+
                 None // Old page still referenced by snapshots
             }
             None => None, // No old page (was uncommitted)
@@ -496,15 +460,27 @@ impl Vmo {
     }
 }
 
-// =========================================================================
-// VmoTable — global storage (analogous to channel::State)
-// =========================================================================
+impl VmoFlags {
+    /// Physically contiguous pages (eager allocation via buddy allocator).
+    pub const CONTIGUOUS: Self = Self(1 << 0);
 
-/// Global VMO table. In the kernel, wrapped in IrqMutex.
-/// Here exposed directly for testing.
-pub struct VmoTable {
-    vmos: Vec<Option<Vmo>>,
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+    pub const fn contains(self, flag: Self) -> bool {
+        self.0 & flag.0 == flag.0
+    }
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+    pub const fn from_bits(bits: u32) -> Self {
+        Self(bits)
+    }
 }
+
+/// Info returned by `vmo_get_info`.
+pub const VMO_FLAG_CONTIGUOUS: u64 = 1 << 0;
+pub const VMO_FLAG_SEALED: u64 = 1 << 1;
 
 impl VmoTable {
     pub const fn new() -> Self {
@@ -558,10 +534,6 @@ impl VmoTable {
     }
 }
 
-// =========================================================================
-// Global state (kernel-only, not compiled in test)
-// =========================================================================
-
 #[cfg(not(test))]
 pub static STATE: IrqMutex<VmoTable> = IrqMutex::new(VmoTable::new_const());
 
@@ -572,10 +544,6 @@ impl VmoTable {
         Self { vmos: Vec::new() }
     }
 }
-
-// =========================================================================
-// Public module API (called from syscall.rs, scheduler.rs)
-// =========================================================================
 
 /// Record a mapping of a VMO into a process's address space.
 /// Called by `sys_vmo_map` after the address space mapping succeeds.
@@ -645,16 +613,16 @@ pub fn read(id: VmoId, offset: u64, buf: &mut [u8]) -> Option<u64> {
     let state = STATE.lock();
     let vmo = state.get(id)?;
     let page_size = super::paging::PAGE_SIZE;
-
     let vmo_size_bytes = vmo.size_pages() * page_size;
+
     if offset >= vmo_size_bytes {
         return Some(0);
     }
 
     let available = (vmo_size_bytes - offset) as usize;
     let to_read = buf.len().min(available);
-
     let mut bytes_done = 0usize;
+
     while bytes_done < to_read {
         let current_offset = offset + bytes_done as u64;
         let page_idx = current_offset / page_size;
@@ -667,6 +635,7 @@ pub fn read(id: VmoId, offset: u64, buf: &mut [u8]) -> Option<u64> {
             // a valid kernel VA. page_off + chunk <= PAGE_SIZE.
             unsafe {
                 let src = (super::memory::phys_to_virt(pa) as *const u8).add(page_off);
+
                 core::ptr::copy_nonoverlapping(src, buf[bytes_done..].as_mut_ptr(), chunk);
             }
         } else {
@@ -695,6 +664,7 @@ pub fn restore(id: VmoId, generation: u64) -> Option<(Vec<Pa>, Vec<VmoMapping>)>
     let vmo = state.get_mut(id)?;
     let mappings = vmo.mappings().to_vec();
     let freed = vmo.restore(generation)?;
+
     Some((freed, mappings))
 }
 /// Seal a VMO and return all active mappings that need PTE invalidation.
@@ -738,6 +708,7 @@ pub fn write(id: VmoId, offset: u64, data: &[u8], append_only: bool) -> Option<u
     }
 
     let vmo_size_bytes = vmo.size_pages() * page_size;
+
     if offset >= vmo_size_bytes {
         return Some(0);
     }
@@ -746,6 +717,7 @@ pub fn write(id: VmoId, offset: u64, data: &[u8], append_only: bool) -> Option<u
     // The frontier is the byte after the last committed page's end.
     if append_only {
         let committed_frontier = vmo.committed_pages() * page_size;
+
         if offset < committed_frontier {
             return None; // Would overwrite existing data
         }
@@ -753,27 +725,30 @@ pub fn write(id: VmoId, offset: u64, data: &[u8], append_only: bool) -> Option<u
 
     let available = (vmo_size_bytes - offset) as usize;
     let to_write = data.len().min(available);
-
     let mut bytes_done = 0usize;
+
     while bytes_done < to_write {
         let current_offset = offset + bytes_done as u64;
         let page_idx = current_offset / page_size;
         let page_off = (current_offset % page_size) as usize;
         let chunk = (page_size as usize - page_off).min(to_write - bytes_done);
-
         // Ensure the page is committed (allocate if needed).
         let pa = if let Some((existing_pa, refcount)) = vmo.lookup_page(page_idx) {
             if refcount > 1 {
                 // COW: allocate, copy, replace.
                 let new_pa = super::page_allocator::alloc_frame()?;
+
                 unsafe {
                     let src = super::memory::phys_to_virt(existing_pa) as *const u8;
                     let dst = super::memory::phys_to_virt(new_pa) as *mut u8;
+
                     core::ptr::copy_nonoverlapping(src, dst, page_size as usize);
                 }
+
                 if let Some(freed) = vmo.cow_replace_page(page_idx, new_pa) {
                     super::page_allocator::free_frame(freed);
                 }
+
                 new_pa
             } else {
                 existing_pa
@@ -781,8 +756,10 @@ pub fn write(id: VmoId, offset: u64, data: &[u8], append_only: bool) -> Option<u
         } else {
             // Uncommitted — allocate and commit.
             let new_pa = super::page_allocator::alloc_frame()?;
+
             // alloc_frame returns zeroed memory.
             vmo.commit_page(page_idx, new_pa);
+
             new_pa
         };
 
@@ -790,6 +767,7 @@ pub fn write(id: VmoId, offset: u64, data: &[u8], append_only: bool) -> Option<u
         // SAFETY: pa is a valid frame, phys_to_virt valid, page_off+chunk <= PAGE_SIZE.
         unsafe {
             let dst = (super::memory::phys_to_virt(pa) as *mut u8).add(page_off);
+
             core::ptr::copy_nonoverlapping(data[bytes_done..].as_ptr(), dst, chunk);
         }
 

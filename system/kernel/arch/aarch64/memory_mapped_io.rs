@@ -45,7 +45,6 @@ pub fn read32(addr: usize) -> u32 {
 
     val
 }
-
 #[inline(always)]
 pub fn write8(addr: usize, val: u8) {
     // SAFETY: STRB to an MMIO address. Inline asm guarantees a plain
@@ -60,7 +59,6 @@ pub fn write8(addr: usize, val: u8) {
         );
     }
 }
-
 #[inline(always)]
 pub fn write32(addr: usize, val: u32) {
     debug_assert!(

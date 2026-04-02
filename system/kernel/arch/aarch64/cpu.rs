@@ -14,20 +14,17 @@ pub fn dsb_ish() {
         core::arch::asm!("dsb ish", options(nostack));
     }
 }
-
-/// Wait For Interrupt — halt the core until an IRQ or FIQ arrives.
-///
-/// Used in idle loops. WFI (not WFE) because IPIs (SGI via GICv3)
-/// wake WFI but not WFE.
+/// Read ELR_EL1 (Exception Link Register).
 #[inline(always)]
-pub fn wait_for_interrupt() {
-    // SAFETY: WFI is a hint instruction with no memory side effects.
-    // `nomem` is correct — it's purely a power management hint.
-    unsafe {
-        core::arch::asm!("wfi", options(nostack, nomem));
-    }
-}
+pub fn read_elr() -> u64 {
+    let val: u64;
 
+    unsafe {
+        core::arch::asm!("mrs {}, elr_el1", out(reg) val, options(nostack, nomem));
+    }
+
+    val
+}
 /// Read ESR_EL1 (Exception Syndrome Register).
 #[inline(always)]
 pub fn read_esr() -> u64 {
@@ -41,7 +38,6 @@ pub fn read_esr() -> u64 {
 
     val
 }
-
 /// Read FAR_EL1 (Fault Address Register).
 #[inline(always)]
 pub fn read_far() -> u64 {
@@ -53,19 +49,6 @@ pub fn read_far() -> u64 {
 
     val
 }
-
-/// Read ELR_EL1 (Exception Link Register).
-#[inline(always)]
-pub fn read_elr() -> u64 {
-    let val: u64;
-
-    unsafe {
-        core::arch::asm!("mrs {}, elr_el1", out(reg) val, options(nostack, nomem));
-    }
-
-    val
-}
-
 /// Read SP (current stack pointer) for diagnostics.
 #[inline(always)]
 pub fn read_sp() -> u64 {
@@ -77,7 +60,6 @@ pub fn read_sp() -> u64 {
 
     val
 }
-
 /// Read TPIDR_EL1 (current thread pointer) for diagnostics.
 #[inline(always)]
 pub fn read_tpidr() -> u64 {
@@ -90,4 +72,16 @@ pub fn read_tpidr() -> u64 {
     }
 
     val
+}
+/// Wait For Interrupt — halt the core until an IRQ or FIQ arrives.
+///
+/// Used in idle loops. WFI (not WFE) because IPIs (SGI via GICv3)
+/// wake WFI but not WFE.
+#[inline(always)]
+pub fn wait_for_interrupt() {
+    // SAFETY: WFI is a hint instruction with no memory side effects.
+    // `nomem` is correct — it's purely a power management hint.
+    unsafe {
+        core::arch::asm!("wfi", options(nostack, nomem));
+    }
 }

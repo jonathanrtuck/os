@@ -40,7 +40,6 @@ impl PacKeys {
             apga: [prng.next_u64(), prng.next_u64()],
         }
     }
-
     /// Zero keys — used when PAC is not available.
     pub fn zero() -> Self {
         Self {
@@ -53,6 +52,24 @@ impl PacKeys {
     }
 }
 
+/// Check if Branch Target Identification (FEAT_BTI) is available.
+///
+/// Reads `ID_AA64PFR1_EL1` and checks BT field (bits \[3:0\]).
+pub fn bti_supported() -> bool {
+    let pfr1: u64;
+
+    // SAFETY: Reading an identification register. Read-only.
+    unsafe {
+        core::arch::asm!(
+            "mrs {}, id_aa64pfr1_el1",
+            out(reg) pfr1,
+            options(nostack),
+        );
+    }
+
+    // BT field: bits [3:0]. 0b0001 = BTI supported.
+    (pfr1 & 0xF) >= 1
+}
 /// Check if Pointer Authentication (FEAT_PAuth) is available.
 ///
 /// Reads `ID_AA64ISAR1_EL1` and checks APA/API fields.
@@ -73,28 +90,9 @@ pub fn pac_supported() -> bool {
     // Either non-zero means some form of PAC is supported.
     let apa = (isar1 >> 4) & 0xF;
     let api = (isar1 >> 8) & 0xF;
+
     apa > 0 || api > 0
 }
-
-/// Check if Branch Target Identification (FEAT_BTI) is available.
-///
-/// Reads `ID_AA64PFR1_EL1` and checks BT field (bits [3:0]).
-pub fn bti_supported() -> bool {
-    let pfr1: u64;
-
-    // SAFETY: Reading an identification register. Read-only.
-    unsafe {
-        core::arch::asm!(
-            "mrs {}, id_aa64pfr1_el1",
-            out(reg) pfr1,
-            options(nostack),
-        );
-    }
-
-    // BT field: bits [3:0]. 0b0001 = BTI supported.
-    (pfr1 & 0xF) >= 1
-}
-
 /// Load PAC keys into the EL1 key registers.
 ///
 /// Called during context switch to set the current process's PAC keys.

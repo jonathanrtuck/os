@@ -87,16 +87,6 @@ pub fn alloc() -> (Asid, u64) {
 pub fn current_generation() -> u64 {
     STATE.lock().generation
 }
-/// Reset allocator to initial state (used by test crate for isolation).
-#[allow(dead_code)]
-pub fn reset() {
-    let mut s = STATE.lock();
-
-    s.bitmap = [0; 4];
-    s.generation = 0;
-    s.next_hint = 1;
-}
-
 /// Return an ASID to the pool for reuse.
 pub fn free(asid: Asid) {
     if asid.0 == 0 {
@@ -108,4 +98,13 @@ pub fn free(asid: Asid) {
     let bit = asid.0 % 64;
 
     s.bitmap[word] &= !(1u64 << bit);
+}
+/// Reset allocator to initial state (used by test crate for isolation).
+#[allow(dead_code)]
+pub fn reset() {
+    let mut s = STATE.lock();
+
+    s.bitmap = [0; 4];
+    s.generation = 0;
+    s.next_hint = 1;
 }

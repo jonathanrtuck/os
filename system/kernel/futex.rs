@@ -34,7 +34,7 @@ use alloc::vec::Vec;
 
 use super::{sync::IrqMutex, thread::ThreadId};
 
-const BUCKET_COUNT: usize = 64;
+const BUCKET_COUNT: usize = super::paging::FUTEX_BUCKET_COUNT as usize;
 
 struct Waiter {
     thread_id: ThreadId,

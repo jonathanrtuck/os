@@ -39,27 +39,12 @@ use super::{
 /// Distinguished ID marker for idle threads: `core_id | IDLE_THREAD_ID_MARKER`.
 const IDLE_THREAD_ID_MARKER: u64 = 0xFF00;
 
-pub const KERNEL_STACK_SIZE: usize = 16 * 1024;
+pub const KERNEL_STACK_SIZE: usize = super::paging::KERNEL_STACK_SIZE as usize;
 /// Sentinel user_index for internal timeout timer entries in the wait set.
 /// Not a valid user handle index (max handles = 16, index fits in 0..15).
 pub(crate) const TIMEOUT_SENTINEL: u8 = 0xFF;
 
-// ---------------------------------------------------------------------------
-// ThreadId
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ThreadId(pub u64);
-
-impl super::waitable::WaitableId for ThreadId {
-    fn index(self) -> usize {
-        self.0 as usize
-    }
-}
-
-// ---------------------------------------------------------------------------
-// ThreadState
-// ---------------------------------------------------------------------------
+const _: () = assert!(core::mem::offset_of!(Thread, context) == 0);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThreadState {
@@ -68,11 +53,6 @@ pub enum ThreadState {
     Blocked,
     Exited,
 }
-
-// ---------------------------------------------------------------------------
-// TrustLevel
-// ---------------------------------------------------------------------------
-
 /// Process privilege / trust classification.
 ///
 /// Maps to the three-layer architecture: kernel (EL1), OS service (EL0
@@ -82,21 +62,6 @@ pub enum TrustLevel {
     Kernel,
     Untrusted,
 }
-
-// ---------------------------------------------------------------------------
-// WaitEntry
-// ---------------------------------------------------------------------------
-
-/// An entry in a thread's wait set — one handle being waited on.
-#[derive(Clone, Copy)]
-pub(crate) struct WaitEntry {
-    pub(crate) object: HandleObject,
-    pub(crate) user_index: u8,
-}
-
-// ---------------------------------------------------------------------------
-// Scheduling
-// ---------------------------------------------------------------------------
 
 /// Scheduling-related fields grouped together.
 pub(crate) struct Scheduling {
@@ -114,23 +79,6 @@ pub(crate) struct Scheduling {
     /// when the thread is activated. Default 0 for newly created threads.
     pub(crate) last_core: u32,
 }
-
-impl Scheduling {
-    pub(crate) const fn new() -> Self {
-        Self {
-            eevdf: SchedulingState::new(),
-            context_id: None,
-            saved_context_id: None,
-            last_started: 0,
-            last_core: 0,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Thread
-// ---------------------------------------------------------------------------
-
 /// A kernel thread.
 ///
 /// `context` MUST be the first field — `TPIDR_EL1` points at the start of
@@ -174,10 +122,26 @@ pub struct Thread {
     /// cleared by `wake_pager_waiters` when the page is supplied.
     pub(crate) pager_wait: Option<(super::vmo::VmoId, u64)>,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ThreadId(pub u64);
+/// An entry in a thread's wait set — one handle being waited on.
+#[derive(Clone, Copy)]
+pub(crate) struct WaitEntry {
+    pub(crate) object: HandleObject,
+    pub(crate) user_index: u8,
+}
 
-const _: () = assert!(core::mem::offset_of!(Thread, context) == 0);
-
-// --- Constructors ---
+impl Scheduling {
+    pub(crate) const fn new() -> Self {
+        Self {
+            eevdf: SchedulingState::new(),
+            context_id: None,
+            saved_context_id: None,
+            last_started: 0,
+            last_core: 0,
+        }
+    }
+}
 
 impl Thread {
     /// Common field initialization for all thread constructors.
@@ -224,7 +188,6 @@ impl Thread {
             TrustLevel::Kernel,
         ))
     }
-
     /// User thread — runs at EL0 in a process's address space.
     ///
     /// Returns `None` if the kernel stack cannot be allocated (OOM).
@@ -242,6 +205,7 @@ impl Thread {
         thread.context.set_sp(kernel_stack_top);
         thread.context.set_user_sp(user_stack_top);
         thread.context.set_user_mode();
+
         thread.stack_alloc_pa = alloc_pa;
         thread.stack_alloc_order = alloc_order;
         thread.process_id = Some(process_id);
@@ -250,7 +214,6 @@ impl Thread {
         Some(Box::new(thread))
     }
 }
-
 // --- State transitions ---
 //
 // Valid transitions:
@@ -266,39 +229,33 @@ impl Thread {
 
         self.state = ThreadState::Running;
     }
-
     /// Running → Blocked (waiting on a resource).
     pub(crate) fn block(&mut self) {
         debug_assert_eq!(self.state, ThreadState::Running);
 
         self.state = ThreadState::Blocked;
     }
-
     /// Running → Ready (preempted by scheduler). No-op if not Running.
     pub(crate) fn deschedule(&mut self) {
         if self.state == ThreadState::Running {
             self.state = ThreadState::Ready;
         }
     }
-
     /// Any → Exited (process exit or fault).
     pub(crate) fn mark_exited(&mut self) {
         self.state = ThreadState::Exited;
     }
-
     /// Blocked → Ready (resource available). Returns true if was blocked.
     pub(crate) fn wake(&mut self) -> bool {
         if self.state == ThreadState::Blocked {
             self.state = ThreadState::Ready;
+
             true
         } else {
             false
         }
     }
 }
-
-// --- Query methods ---
-
 impl Thread {
     /// Resolve a handle-based wake against this thread's wait set.
     ///
@@ -344,33 +301,25 @@ impl Thread {
 
         result
     }
-
     /// Return a raw pointer to this thread's Context (at offset 0).
     /// Used by the scheduler to set TPIDR_EL1 and for context switch.
     pub(crate) fn context_ptr(&self) -> *const Context {
         &self.context as *const Context
     }
-
     pub(crate) fn id(&self) -> ThreadId {
         self.id
     }
-
     pub(crate) fn is_exited(&self) -> bool {
         self.state == ThreadState::Exited
     }
-
     /// Idle threads have distinguished IDs: `core_id | IDLE_THREAD_ID_MARKER`.
     pub(crate) fn is_idle(&self) -> bool {
         self.id.0 & IDLE_THREAD_ID_MARKER == IDLE_THREAD_ID_MARKER
     }
-
     pub(crate) fn is_ready(&self) -> bool {
         self.state == ThreadState::Ready
     }
 }
-
-// --- Drop + Send/Sync ---
-
 impl Drop for Thread {
     fn drop(&mut self) {
         if self.stack_alloc_pa != 0 {
@@ -387,14 +336,12 @@ impl Drop for Thread {
         }
     }
 }
-
 // SAFETY: Thread owns all its data (Context is embedded at offset 0, stack is
 // tracked by physical address). Threads are transferred between cores only
 // through the IrqMutex<State> in scheduler.rs, which serializes all access.
 // No raw pointers to external mutable state are stored — context_ptr() returns
 // a derived pointer on demand, not a stored one.
 unsafe impl Send for Thread {}
-
 // SAFETY: Thread is never accessed concurrently. All access goes through
 // IrqMutex<State> in scheduler.rs, which provides exclusive (&mut) access.
 // Sync is required because IrqMutex<State> (which is Sync) contains
@@ -403,9 +350,11 @@ unsafe impl Send for Thread {}
 // is needed for the static IrqMutex.
 unsafe impl Sync for Thread {}
 
-// ---------------------------------------------------------------------------
-// Stack allocation
-// ---------------------------------------------------------------------------
+impl super::waitable::WaitableId for ThreadId {
+    fn index(self) -> usize {
+        self.0 as usize
+    }
+}
 
 /// Allocate a stack from the page allocator with a guard page at the bottom.
 ///
@@ -430,7 +379,6 @@ fn alloc_guarded_stack(min_stack_bytes: usize) -> Option<(u64, u64, usize)> {
 
     Some((stack_top, pa.as_u64(), order))
 }
-
 /// Smallest buddy allocator order that provides at least `pages` contiguous pages.
 fn order_for_pages(pages: usize) -> usize {
     pages.next_power_of_two().trailing_zeros() as usize

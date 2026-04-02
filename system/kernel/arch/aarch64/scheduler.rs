@@ -19,7 +19,6 @@ pub unsafe fn set_current_thread(ctx_ptr: usize) {
         options(nostack),
     );
 }
-
 /// Switch the user address space (TTBR0_EL1) with TLB invalidation.
 ///
 /// Invalidates the old ASID's TLB entries, then writes the new TTBR0

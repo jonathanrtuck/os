@@ -1,6 +1,6 @@
 //! AArch64 per-core identity.
 
-/// Read the current core's MPIDR affinity (bits [7:0]).
+/// Read the current core's MPIDR affinity (bits \[7:0\]).
 #[inline(always)]
 pub fn core_id() -> u32 {
     let mpidr: u64;

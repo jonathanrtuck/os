@@ -1,0 +1,8 @@
+[package]
+name = "kernel-test"
+version = "0.1.0"
+edition = "2021"
+
+# Host-side unit tests for kernel modules. Separate crate because the kernel
+# targets aarch64-unknown-none; tests must compile for the host.
+# Run with `cargo test -- --test-threads=1` from this directory.

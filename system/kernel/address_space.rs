@@ -46,68 +46,8 @@ pub enum FaultResult {
     Unhandled,
 }
 
-/// Per-process DMA page budget: half of RAM pages.
-/// Generous to support GPU render target + depth/stencil surface.
-/// Derived from RAM geometry so resolution changes never require kernel updates.
 const DEFAULT_DMA_PAGE_LIMIT: u64 = paging::RAM_SIZE_MAX / paging::PAGE_SIZE / 2;
-/// Per-process heap page budget: quarter of RAM pages.
 const DEFAULT_HEAP_PAGE_LIMIT: u64 = paging::RAM_SIZE_MAX / paging::PAGE_SIZE / 4;
-
-// ---------------------------------------------------------------------------
-// PageAttrs — page table attribute builder
-// ---------------------------------------------------------------------------
-
-pub struct PageAttrs(u64);
-
-impl PageAttrs {
-    /// Device MMIO: Device-nGnRE (ATTRIDX1), RW, not executable.
-    ///
-    /// No SH_INNER — shareability for device memory is determined by MAIR,
-    /// not page table attributes (ARMv8 ARM D5.5).
-    pub fn user_device_rw() -> Self {
-        Self(ATTRIDX1 | AF | AP_EL0 | NG | PXN | UXN)
-    }
-    /// User read-only data: readable, not writable, not executable.
-    pub fn user_ro() -> Self {
-        Self(ATTRIDX0 | AF | SH_INNER | AP_EL0 | AP_RO | NG | PXN | UXN)
-    }
-    /// User data: readable + writable, not executable.
-    pub fn user_rw() -> Self {
-        Self(ATTRIDX0 | AF | SH_INNER | AP_EL0 | NG | PXN | UXN)
-    }
-    /// User code: readable + executable, not writable.
-    pub fn user_rx() -> Self {
-        Self(ATTRIDX0 | AF | SH_INNER | AP_EL0 | AP_RO | NG | PXN)
-    }
-    /// User code: execute-only, not readable or writable (ARMv8.2+).
-    ///
-    /// The page can be fetched as instructions but EL0 load/store will fault.
-    /// Prevents code disclosure attacks (e.g., AnC cache side channel) that
-    /// read code pages to leak ASLR layout. AP_EL0 is NOT set, so EL0 has
-    /// no data access; UXN is NOT set, so instruction fetch is allowed.
-    pub fn user_xo() -> Self {
-        Self(ATTRIDX0 | AF | SH_INNER | AP_RO | NG | PXN)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// DmaAllocation / HeapAllocation — per-process allocation records
-// ---------------------------------------------------------------------------
-
-pub(crate) struct DmaAllocation {
-    va: u64,
-    pa: Pa,
-    order: u8,
-}
-
-pub(crate) struct HeapAllocation {
-    va: u64,
-    page_count: u64,
-}
-
-// ---------------------------------------------------------------------------
-// AddressSpace
-// ---------------------------------------------------------------------------
 
 pub struct AddressSpace {
     root_pa: Pa,
@@ -138,6 +78,17 @@ pub struct AddressSpace {
     heap_pages_limit: u64,
     /// Set by free_all() to prevent double-free in Drop.
     freed: bool,
+}
+pub struct PageAttrs(u64);
+
+pub(crate) struct DmaAllocation {
+    va: u64,
+    pa: Pa,
+    order: u8,
+}
+pub(crate) struct HeapAllocation {
+    va: u64,
+    page_count: u64,
 }
 
 impl AddressSpace {
@@ -853,9 +804,36 @@ impl Drop for AddressSpace {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Page table walker
-// ---------------------------------------------------------------------------
+impl PageAttrs {
+    /// Device MMIO: Device-nGnRE (ATTRIDX1), RW, not executable.
+    ///
+    /// No SH_INNER — shareability for device memory is determined by MAIR,
+    /// not page table attributes (ARMv8 ARM D5.5).
+    pub fn user_device_rw() -> Self {
+        Self(ATTRIDX1 | AF | AP_EL0 | NG | PXN | UXN)
+    }
+    /// User read-only data: readable, not writable, not executable.
+    pub fn user_ro() -> Self {
+        Self(ATTRIDX0 | AF | SH_INNER | AP_EL0 | AP_RO | NG | PXN | UXN)
+    }
+    /// User data: readable + writable, not executable.
+    pub fn user_rw() -> Self {
+        Self(ATTRIDX0 | AF | SH_INNER | AP_EL0 | NG | PXN | UXN)
+    }
+    /// User code: readable + executable, not writable.
+    pub fn user_rx() -> Self {
+        Self(ATTRIDX0 | AF | SH_INNER | AP_EL0 | AP_RO | NG | PXN)
+    }
+    /// User code: execute-only, not readable or writable (ARMv8.2+).
+    ///
+    /// The page can be fetched as instructions but EL0 load/store will fault.
+    /// Prevents code disclosure attacks (e.g., AnC cache side channel) that
+    /// read code pages to leak ASLR layout. AP_EL0 is NOT set, so EL0 has
+    /// no data access; UXN is NOT set, so instruction fetch is allowed.
+    pub fn user_xo() -> Self {
+        Self(ATTRIDX0 | AF | SH_INNER | AP_RO | NG | PXN)
+    }
+}
 
 /// Walk a table entry; if invalid, allocate a new table and install it.
 /// Returns the VA of the next-level table, or `None` on OOM.

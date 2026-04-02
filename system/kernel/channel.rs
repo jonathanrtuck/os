@@ -52,7 +52,7 @@ use super::{
 };
 
 struct Channel {
-    /// Two shared pages: [0] = ep0→ep1 direction, [1] = ep1→ep0 direction.
+    /// Two shared pages: \[0\] = ep0→ep1 direction, \[1\] = ep1→ep0 direction.
     pages: [memory::Pa; 2],
     pending_signal: [bool; 2],
     waiter: [Option<ThreadId>; 2],

@@ -20,10 +20,6 @@ use super::{
     serial,
 };
 
-// ---------------------------------------------------------------------------
-// Per-core metrics
-// ---------------------------------------------------------------------------
-
 pub struct CoreMetrics {
     pub context_switches: AtomicU64,
     pub syscalls: AtomicU64,
@@ -41,47 +37,14 @@ static METRICS: [CoreMetrics; MAX_CORES] = {
         timer_ticks: AtomicU64::new(0),
         lock_spins: AtomicU64::new(0),
     };
+
     [INIT; MAX_CORES]
 };
-
-// ---------------------------------------------------------------------------
-// Increment helpers
-// ---------------------------------------------------------------------------
 
 #[inline(always)]
 fn current() -> &'static CoreMetrics {
     &METRICS[per_core::core_id() as usize]
 }
-
-#[inline(always)]
-pub fn inc_context_switches() {
-    current().context_switches.fetch_add(1, Ordering::Relaxed);
-}
-
-#[inline(always)]
-pub fn inc_lock_spins() {
-    current().lock_spins.fetch_add(1, Ordering::Relaxed);
-}
-
-#[inline(always)]
-pub fn inc_page_faults() {
-    current().page_faults.fetch_add(1, Ordering::Relaxed);
-}
-
-#[inline(always)]
-pub fn inc_syscalls() {
-    current().syscalls.fetch_add(1, Ordering::Relaxed);
-}
-
-#[inline(always)]
-pub fn inc_timer_ticks() {
-    current().timer_ticks.fetch_add(1, Ordering::Relaxed);
-}
-
-// ---------------------------------------------------------------------------
-// Panic-safe dump
-// ---------------------------------------------------------------------------
-
 /// Panic-safe decimal u64 printer — bypasses the UART lock.
 fn panic_put_u64(mut n: u64) {
     if n == 0 {
@@ -104,6 +67,26 @@ fn panic_put_u64(mut n: u64) {
     }
 }
 
+#[inline(always)]
+pub fn inc_context_switches() {
+    current().context_switches.fetch_add(1, Ordering::Relaxed);
+}
+#[inline(always)]
+pub fn inc_lock_spins() {
+    current().lock_spins.fetch_add(1, Ordering::Relaxed);
+}
+#[inline(always)]
+pub fn inc_page_faults() {
+    current().page_faults.fetch_add(1, Ordering::Relaxed);
+}
+#[inline(always)]
+pub fn inc_syscalls() {
+    current().syscalls.fetch_add(1, Ordering::Relaxed);
+}
+#[inline(always)]
+pub fn inc_timer_ticks() {
+    current().timer_ticks.fetch_add(1, Ordering::Relaxed);
+}
 /// Print all counters for all online cores. Uses panic-safe serial output
 /// (bypasses UART lock). Safe to call from the panic handler.
 pub fn panic_dump() {

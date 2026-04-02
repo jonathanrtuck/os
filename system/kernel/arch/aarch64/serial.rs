@@ -16,24 +16,9 @@ use crate::{
     sync::IrqMutex,
 };
 
-const TXFF: u32 = 1 << 5;
-/// UART physical address (PL011 on QEMU virt).
-const UART0_PA: usize = 0x0900_0000;
-
-/// UART data register VA. Includes KASLR slide so it's correct after boot.
-#[inline(always)]
-fn uart0_dr() -> usize {
-    UART0_PA + KERNEL_VA_OFFSET + memory::kaslr_slide()
-}
-
-/// UART flag register VA.
-#[inline(always)]
-fn uart0_fr() -> usize {
-    UART0_PA + 0x18 + KERNEL_VA_OFFSET + memory::kaslr_slide()
-}
-/// Maximum iterations to wait for UART TXFF to clear. If the FIFO is
-/// stuck, we write anyway (lossy output > dead kernel).
 const TX_TIMEOUT: u32 = 1_000_000;
+const TXFF: u32 = 1 << 5;
+const UART0_PA: usize = 0x0900_0000;
 
 static LOCK: IrqMutex<()> = IrqMutex::new(());
 
@@ -59,6 +44,16 @@ fn raw_puts(s: &str) {
 
         raw_putc(byte);
     }
+}
+/// UART data register VA. Includes KASLR slide so it's correct after boot.
+#[inline(always)]
+fn uart0_dr() -> usize {
+    UART0_PA + KERNEL_VA_OFFSET + memory::kaslr_slide()
+}
+/// UART flag register VA.
+#[inline(always)]
+fn uart0_fr() -> usize {
+    UART0_PA + 0x18 + KERNEL_VA_OFFSET + memory::kaslr_slide()
 }
 
 /// Panic-safe put_hex — bypasses the lock.

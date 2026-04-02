@@ -14,10 +14,6 @@
 
 use alloc::vec::Vec;
 
-// ---------------------------------------------------------------------------
-// Backing — what fills a VMA's pages
-// ---------------------------------------------------------------------------
-
 /// What backs a VMA's pages.
 #[derive(Clone)]
 pub enum Backing {
@@ -33,10 +29,6 @@ pub enum Backing {
     },
 }
 
-// ---------------------------------------------------------------------------
-// Vma — a contiguous virtual address region
-// ---------------------------------------------------------------------------
-
 /// Describes a contiguous region of virtual address space.
 #[derive(Clone)]
 pub struct Vma {
@@ -46,11 +38,6 @@ pub struct Vma {
     pub executable: bool,
     pub backing: Backing,
 }
-
-// ---------------------------------------------------------------------------
-// VmaList — sorted collection of VMAs
-// ---------------------------------------------------------------------------
-
 /// Sorted list of VMAs. No overlaps allowed.
 pub struct VmaList {
     vmas: Vec<Vma>,

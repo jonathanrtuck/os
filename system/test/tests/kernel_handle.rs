@@ -7,6 +7,8 @@ mod event {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct EventId(pub u32);
 }
+#[path = "../../kernel/paging.rs"]
+mod paging;
 #[path = "../../kernel/handle.rs"]
 mod handle;
 mod interrupt {

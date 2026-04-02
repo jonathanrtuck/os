@@ -5,7 +5,7 @@ fn main() {
     let config_path = std::path::Path::new(&manifest_dir)
         .parent()
         .unwrap()
-        .join("system_config.rs");
+        .join("kernel/system_config.rs");
 
     println!("cargo:rustc-env=SYSTEM_CONFIG={}", config_path.display());
     println!("cargo:rerun-if-changed={}", config_path.display());

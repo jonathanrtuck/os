@@ -10,14 +10,15 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-/// Maximum number of CPU cores supported.
-pub const MAX_CORES: usize = 8;
+/// Maximum number of CPU cores supported (from system_config via paging).
+pub const MAX_CORES: usize = super::paging::MAX_CORES as usize;
 
 static PERCPU: [PerCpu; MAX_CORES] = {
     #[allow(clippy::declare_interior_mutable_const)]
     const INIT: PerCpu = PerCpu {
         online: AtomicBool::new(false),
     };
+
     [INIT; MAX_CORES]
 };
 

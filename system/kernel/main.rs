@@ -117,18 +117,13 @@ mod timer;
 mod vmo;
 mod waitable;
 
-/// Pseudo device ID for the PL031 RTC in the device manifest.
-/// Not a virtio device — uses a distinct ID range (200+) so init can
-/// differentiate it from virtio devices (IDs 1–26).
 const DEVICE_ID_PL031_RTC: u32 = 200;
-/// SGI 0 is used as the inter-processor interrupt (IPI) for cross-core wakeup.
 const SGI_IPI: u32 = 0;
-/// Virtio MMIO constants for device probe.
+const VIRTIO_IRQ_BASE: u32 = 48; // SPI 16 = GIC IRQ 48
 const VIRTIO_MAGIC: u32 = 0x7472_6976;
 const VIRTIO_MMIO_BASE_PA: u64 = 0x0A00_0000;
-const VIRTIO_MMIO_STRIDE: u64 = 0x200;
 const VIRTIO_MMIO_COUNT: usize = 32;
-const VIRTIO_IRQ_BASE: u32 = 48; // SPI 16 = GIC IRQ 48
+const VIRTIO_MMIO_STRIDE: u64 = 0x200;
 
 /// Init ELF — the only process the kernel spawns directly.
 /// Init is the proto-OS-service that spawns all other processes.
@@ -162,65 +157,6 @@ extern "C" {
 /// and per-process PRNG derivation. None until seeded.
 static KERNEL_PRNG: sync::IrqMutex<Option<random::Prng>> = sync::IrqMutex::new(None);
 
-/// Initialize the kernel PRNG from available entropy sources.
-///
-/// Probes for hardware RNG (RNDR via FEAT_RNG), mixes in timer counter
-/// jitter, and seals the entropy pool once ≥256 bits are accumulated.
-/// Called once during boot, before any processes are spawned.
-fn init_prng() {
-    let mut pool = random::EntropyPool::new();
-
-    // Source 1: Hardware RNG (RNDR) — strongest source, if available.
-    if arch::entropy::has_hardware_rng() {
-        // Draw 4 × 64 bits = 256 bits from hardware RNG.
-        let mut hw_count = 0u32;
-        for _ in 0..8 {
-            if let Some(val) = arch::entropy::hardware_random() {
-                pool.add_entropy(&val.to_le_bytes(), 64);
-                hw_count += 1;
-            }
-        }
-        serial::puts("  🎲 entropy - rndr: ");
-        serial::put_u32(hw_count * 64);
-        serial::puts(" bits\n");
-    } else {
-        serial::puts("  🎲 entropy - rndr: not available\n");
-    }
-
-    // Source 2: CPU jitter entropy — execution time variation from cache,
-    // TLB, and pipeline nondeterminism. Each sample produces 8 bytes of
-    // jitter data; we conservatively credit 4 bits per sample.
-    // 64 samples × 4 bits = 256 bits — enough to seed even without RNDR.
-    let mut scratch = [0u8; 64];
-    for _ in 0..64 {
-        let jitter = arch::entropy::collect_jitter(&mut scratch);
-        pool.add_entropy(&jitter, 4);
-    }
-
-    // Seal the pool.
-    match pool.try_seal() {
-        Ok(prng) => {
-            let mut guard = KERNEL_PRNG.lock();
-            *guard = Some(prng);
-            serial::puts("  🔐 prng - seeded (chacha20 + fast key erasure)\n");
-        }
-        Err(_pool) => {
-            // On systems without RNDR and limited interrupts, we may not
-            // have enough entropy at this point. The PRNG will remain None;
-            // ASLR will use deterministic layout as fallback.
-            serial::puts("  ⚠️  prng - insufficient entropy, aslr disabled\n");
-        }
-    }
-}
-
-/// Fork a new PRNG from the kernel PRNG for per-process use.
-///
-/// Returns None if the kernel PRNG is not seeded.
-pub fn fork_prng() -> Option<random::Prng> {
-    let mut guard = KERNEL_PRNG.lock();
-    guard.as_mut().map(|prng| prng.fork())
-}
-
 /// Info discovered about a virtio-mmio device.
 struct VirtioDeviceInfo {
     pa: u64,
@@ -244,13 +180,11 @@ fn boot_secondaries() {
     let entry_pa = unsafe { core::ptr::read_volatile(&SECONDARY_ENTRY_PA) };
 
     per_core::init_core(0);
-
     // Ensure page tables and stacks are visible to secondary cores before
     // they start executing.
     // Ensure all prior stores (page tables, stacks) are visible to the
     // inner-shareable domain before secondary cores begin executing.
     arch::cpu::dsb_ish();
-
     serial::puts("  🧵 smp - booting secondaries via psci\n");
 
     let mut expected_online = 1u32; // Core 0 is already online.
@@ -323,6 +257,63 @@ fn find_and_parse_dtb(firmware_pa: u64) -> Option<device_tree::DeviceTable> {
     }
 
     None
+}
+/// Initialize the kernel PRNG from available entropy sources.
+///
+/// Probes for hardware RNG (RNDR via FEAT_RNG), mixes in timer counter
+/// jitter, and seals the entropy pool once ≥256 bits are accumulated.
+/// Called once during boot, before any processes are spawned.
+fn init_prng() {
+    let mut pool = random::EntropyPool::new();
+
+    // Source 1: Hardware RNG (RNDR) — strongest source, if available.
+    if arch::entropy::has_hardware_rng() {
+        // Draw 4 × 64 bits = 256 bits from hardware RNG.
+        let mut hw_count = 0u32;
+
+        for _ in 0..8 {
+            if let Some(val) = arch::entropy::hardware_random() {
+                pool.add_entropy(&val.to_le_bytes(), 64);
+
+                hw_count += 1;
+            }
+        }
+
+        serial::puts("  🎲 entropy - rndr: ");
+        serial::put_u32(hw_count * 64);
+        serial::puts(" bits\n");
+    } else {
+        serial::puts("  🎲 entropy - rndr: not available\n");
+    }
+
+    // Source 2: CPU jitter entropy — execution time variation from cache,
+    // TLB, and pipeline nondeterminism. Each sample produces 8 bytes of
+    // jitter data; we conservatively credit 4 bits per sample.
+    // 64 samples × 4 bits = 256 bits — enough to seed even without RNDR.
+    let mut scratch = [0u8; 64];
+
+    for _ in 0..64 {
+        let jitter = arch::entropy::collect_jitter(&mut scratch);
+
+        pool.add_entropy(&jitter, 4);
+    }
+
+    // Seal the pool.
+    match pool.try_seal() {
+        Ok(prng) => {
+            let mut guard = KERNEL_PRNG.lock();
+
+            *guard = Some(prng);
+
+            serial::puts("  🔐 prng - seeded (chacha20 + fast key erasure)\n");
+        }
+        Err(_pool) => {
+            // On systems without RNDR and limited interrupts, we may not
+            // have enough entropy at this point. The PRNG will remain None;
+            // ASLR will use deterministic layout as fallback.
+            serial::puts("  ⚠️  prng - insufficient entropy, aslr disabled\n");
+        }
+    }
 }
 /// Probe virtio-mmio devices from the DTB.
 fn probe_from_dtb(
@@ -575,6 +566,15 @@ fn write_device_manifest(
     }
 }
 
+/// Fork a new PRNG from the kernel PRNG for per-process use.
+///
+/// Returns None if the kernel PRNG is not seeded.
+pub fn fork_prng() -> Option<random::Prng> {
+    let mut guard = KERNEL_PRNG.lock();
+
+    guard.as_mut().map(|prng| prng.fork())
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn irq_handler(ctx: *mut Context) -> *const Context {
     use interrupt_controller::InterruptController;
@@ -630,6 +630,7 @@ pub extern "C" fn irq_handler(ctx: *mut Context) -> *const Context {
         serial::panic_puts(" core=");
         serial::panic_put_u32(per_core::core_id());
         serial::panic_puts("\n");
+
         panic!("irq_handler: stack canary corrupt");
     }
 
@@ -676,8 +677,10 @@ pub extern "C" fn kernel_fault_handler(
             if PANIC_GATE.load(core::sync::atomic::Ordering::Acquire) == 0 {
                 break;
             }
+
             core::hint::spin_loop();
         }
+
         // Reclaim the gate for our output.
         PANIC_GATE.store(my_core, core::sync::atomic::Ordering::Release);
     }
@@ -825,7 +828,6 @@ pub extern "C" fn kernel_main(dtb_pa: u64, kaslr_slide: u64) -> ! {
     } else {
         paging::RAM_END_MAX as usize
     };
-
     let ram_mib = (ram_end - paging::RAM_START as usize) / (1024 * 1024);
 
     serial::puts("  💾 memory - ");
@@ -936,7 +938,6 @@ pub extern "C" fn kernel_main(dtb_pa: u64, kaslr_slide: u64) -> ! {
     // Spawn init (suspended) — the only process the kernel creates directly.
     // Microkernel pattern: kernel provides mechanism, init provides policy.
     let (init_pid, _) = process::create_from_user_elf(INIT_ELF).expect("failed to create init");
-
     // Map the service pack into init's address space (read-only).
     // Init reads ELFs from this region at boot instead of compiled-in statics.
     // SAFETY: _services_start/_services_end are linker-defined symbols; taking
@@ -944,9 +945,11 @@ pub extern "C" fn kernel_main(dtb_pa: u64, kaslr_slide: u64) -> ! {
     let pack_start_kva = unsafe { &_services_start as *const u8 as u64 };
     let pack_end_kva = unsafe { &_services_end as *const u8 as u64 };
     let pack_size = pack_end_kva - pack_start_kva;
+
     if pack_size > 0 {
         let pack_pa = pack_start_kva - (memory::KERNEL_VA_OFFSET + memory::kaslr_slide()) as u64;
         let page_count = (pack_size + paging::PAGE_SIZE - 1) / paging::PAGE_SIZE;
+
         scheduler::with_process(init_pid, |process| {
             assert!(
                 process.address_space.map_fixed_readonly(
@@ -958,6 +961,7 @@ pub extern "C" fn kernel_main(dtb_pa: u64, kaslr_slide: u64) -> ! {
             );
         })
         .expect("init process not found for pack mapping");
+
         serial::puts("  📦 services - pack mapped into init\n");
     }
 
@@ -1077,7 +1081,6 @@ pub extern "C" fn user_fault_handler(ctx: *mut Context) -> *const Context {
     let esr = arch::cpu::read_esr();
     let far = arch::cpu::read_far();
     let elr = arch::cpu::read_elr();
-
     let ec = (esr >> 26) & 0x3F;
     let fsc = esr & 0x3F; // DFSC (data abort) or IFSC (instruction abort)
 
@@ -1155,8 +1158,10 @@ fn panic(info: &PanicInfo) -> ! {
             if PANIC_GATE.load(core::sync::atomic::Ordering::Acquire) == 0 {
                 break;
             }
+
             core::hint::spin_loop();
         }
+
         PANIC_GATE.store(my_core, core::sync::atomic::Ordering::Release);
     }
 

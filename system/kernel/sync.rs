@@ -23,14 +23,41 @@ use core::{
 
 use super::{arch::interrupts, metrics};
 
-// ---------------------------------------------------------------------------
-// IrqMutex — the lock
-// ---------------------------------------------------------------------------
-
+pub struct IrqGuard<'a, T> {
+    lock: &'a IrqMutex<T>,
+    saved: interrupts::IrqState,
+}
 pub struct IrqMutex<T> {
     next_ticket: AtomicU32,
     now_serving: AtomicU32,
     data: UnsafeCell<T>,
+}
+
+impl<T> Drop for IrqGuard<'_, T> {
+    fn drop(&mut self) {
+        // Release the spinlock, then restore IRQ state.
+        self.lock.now_serving.fetch_add(1, Ordering::Release);
+
+        // Restore saved IRQ state. The arch implementation ensures the
+        // compiler cannot reorder memory accesses past this restoration.
+        interrupts::restore(self.saved);
+    }
+}
+impl<T> Deref for IrqGuard<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        // SAFETY: Guard existence guarantees exclusive access (ticket spinlock
+        // + IRQ masking).
+        unsafe { &*self.lock.data.get() }
+    }
+}
+impl<T> DerefMut for IrqGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        // SAFETY: Same as Deref — exclusive access guaranteed by ticket
+        // spinlock + IRQ masking.
+        unsafe { &mut *self.lock.data.get() }
+    }
 }
 
 impl<T> IrqMutex<T> {
@@ -57,46 +84,7 @@ impl<T> IrqMutex<T> {
         IrqGuard { lock: self, saved }
     }
 }
-
 // SAFETY: IrqMutex provides mutual exclusion via ticket spinlock (multi-core
 // safe) with IRQ masking (prevents interrupt-time reentry). Only one execution
 // context can hold the guard at a time.
 unsafe impl<T> Sync for IrqMutex<T> {}
-
-// ---------------------------------------------------------------------------
-// IrqGuard — RAII lock guard
-// ---------------------------------------------------------------------------
-
-pub struct IrqGuard<'a, T> {
-    lock: &'a IrqMutex<T>,
-    saved: interrupts::IrqState,
-}
-
-impl<T> Drop for IrqGuard<'_, T> {
-    fn drop(&mut self) {
-        // Release the spinlock, then restore IRQ state.
-        self.lock.now_serving.fetch_add(1, Ordering::Release);
-
-        // Restore saved IRQ state. The arch implementation ensures the
-        // compiler cannot reorder memory accesses past this restoration.
-        interrupts::restore(self.saved);
-    }
-}
-
-impl<T> Deref for IrqGuard<'_, T> {
-    type Target = T;
-
-    fn deref(&self) -> &T {
-        // SAFETY: Guard existence guarantees exclusive access (ticket spinlock
-        // + IRQ masking).
-        unsafe { &*self.lock.data.get() }
-    }
-}
-
-impl<T> DerefMut for IrqGuard<'_, T> {
-    fn deref_mut(&mut self) -> &mut T {
-        // SAFETY: Same as Deref — exclusive access guaranteed by ticket
-        // spinlock + IRQ masking.
-        unsafe { &mut *self.lock.data.get() }
-    }
-}

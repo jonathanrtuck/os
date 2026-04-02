@@ -2,6 +2,8 @@
 //!
 //! Includes the kernel's scheduling_algorithm.rs directly — pure logic, no hardware deps.
 
+#[path = "../../kernel/paging.rs"]
+mod paging;
 #[path = "../../kernel/scheduling_algorithm.rs"]
 mod scheduling_algorithm;
 

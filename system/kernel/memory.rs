@@ -25,11 +25,11 @@ use super::{
 
 const BLOCK_32MB: u64 = 32 * 1024 * 1024;
 
-pub const HEAP_SIZE: usize = 16 * 1024 * 1024;
-/// Link-time kernel VA offset (const — used in static initializers).
-/// The actual runtime offset is `KERNEL_VA_OFFSET + kaslr_slide()`.
+pub const HEAP_SIZE: usize = super::paging::HEAP_SIZE as usize;
 pub const KERNEL_VA_OFFSET: usize = super::paging::KERNEL_VA_OFFSET as usize;
 
+/// Empty L2 table for kernel threads' TTBR0 (no user mappings).
+static EMPTY_L2: SyncPageTable = SyncPageTable::new();
 /// KASLR slide — random offset added to all kernel VA computations.
 ///
 /// Set once in kernel_main from the value generated in boot.S. Defaults to 0
@@ -38,22 +38,12 @@ pub const KERNEL_VA_OFFSET: usize = super::paging::KERNEL_VA_OFFSET as usize;
 ///
 /// Atomic because secondary cores read it during SMP boot.
 static KASLR_SLIDE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
-
-/// Read the KASLR slide. Returns 0 if KASLR is not active.
-#[inline(always)]
-pub fn kaslr_slide() -> usize {
-    KASLR_SLIDE.load(core::sync::atomic::Ordering::Relaxed)
-}
-
-/// Set the KASLR slide. Called once from early boot before kernel_main.
+/// Lock for kernel TTBR1 page table modifications (break-block, guard pages).
 ///
-/// # Safety
-///
-/// Must be called exactly once, before any code that uses `phys_to_virt`
-/// or `virt_to_phys`. The slide must be 32 MiB-aligned.
-pub unsafe fn set_kaslr_slide(slide: usize) {
-    KASLR_SLIDE.store(slide, core::sync::atomic::Ordering::Release);
-}
+/// Lock ordering: KERNEL_PT_LOCK → page allocator lock (never the reverse).
+static KERNEL_PT_LOCK: IrqMutex<()> = IrqMutex::new(());
+/// L3 page table for the kernel's 32MB block (16KB pages, W^X).
+static TT1_L3_KERN: SyncPageTable = SyncPageTable::new();
 
 extern "C" {
     static __text_start: u8;
@@ -65,9 +55,8 @@ extern "C" {
     static boot_tt1_l2: u8;
 }
 
-// ---------------------------------------------------------------------------
-// Pa — physical address newtype
-// ---------------------------------------------------------------------------
+/// Wrapper for page tables in statics. Written once during init, read-only after.
+struct SyncPageTable(UnsafeCell<PageTable>);
 
 /// Physical address newtype. Prevents accidental PA/VA mixups at compile time.
 ///
@@ -77,6 +66,10 @@ extern "C" {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
 pub struct Pa(pub usize);
+#[repr(align(16384))]
+struct PageTable {
+    entries: [u64; 2048],
+}
 
 impl Pa {
     pub const fn as_u64(self) -> u64 {
@@ -84,23 +77,11 @@ impl Pa {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Page table types (internal)
-// ---------------------------------------------------------------------------
-
-#[repr(align(16384))]
-struct PageTable {
-    entries: [u64; 2048],
-}
-
 impl PageTable {
     const fn new() -> Self {
         Self { entries: [0; 2048] }
     }
 }
-
-/// Wrapper for page tables in statics. Written once during init, read-only after.
-struct SyncPageTable(UnsafeCell<PageTable>);
 
 impl SyncPageTable {
     const fn new() -> Self {
@@ -116,50 +97,6 @@ impl SyncPageTable {
 // read-only after. No concurrent access is possible.
 unsafe impl Sync for SyncPageTable {}
 
-// ---------------------------------------------------------------------------
-// Statics
-// ---------------------------------------------------------------------------
-
-/// Empty L2 table for kernel threads' TTBR0 (no user mappings).
-static EMPTY_L2: SyncPageTable = SyncPageTable::new();
-/// Lock for kernel TTBR1 page table modifications (break-block, guard pages).
-///
-/// Lock ordering: KERNEL_PT_LOCK → page allocator lock (never the reverse).
-static KERNEL_PT_LOCK: IrqMutex<()> = IrqMutex::new(());
-/// L3 page table for the kernel's 32MB block (16KB pages, W^X).
-static TT1_L3_KERN: SyncPageTable = SyncPageTable::new();
-
-// ---------------------------------------------------------------------------
-// Address translation
-// ---------------------------------------------------------------------------
-
-#[inline(always)]
-pub fn phys_to_virt(pa: Pa) -> usize {
-    pa.0.wrapping_add(KERNEL_VA_OFFSET)
-        .wrapping_add(kaslr_slide())
-}
-
-#[inline(always)]
-pub fn virt_to_phys(va: usize) -> Pa {
-    Pa(va
-        .wrapping_sub(KERNEL_VA_OFFSET)
-        .wrapping_sub(kaslr_slide()))
-}
-
-/// Physical address of the empty L0 table (for kernel threads' TTBR0).
-pub fn empty_ttbr0() -> u64 {
-    virt_to_phys(EMPTY_L2.get() as usize).as_u64()
-}
-
-// ---------------------------------------------------------------------------
-// Initialization
-// ---------------------------------------------------------------------------
-
-/// Broadcast TLB invalidation across all cores.
-fn tlb_invalidate_all() {
-    super::arch::mmu::tlbi_all();
-}
-
 /// Compute the TTBR1 L2 index for a physical address.
 ///
 /// The KASLR slide shifts which L2 entries map the RAM region in TTBR1.
@@ -169,7 +106,60 @@ fn tlb_invalidate_all() {
 fn kernel_l2_index(pa: u64) -> usize {
     (((pa + kaslr_slide() as u64) >> 25) & 0x7FF) as usize
 }
+/// Broadcast TLB invalidation across all cores.
+fn tlb_invalidate_all() {
+    super::arch::mmu::tlbi_all();
+}
 
+/// Re-map a kernel guard page as normal memory (restore its L3 entry).
+///
+/// Called before freeing stack frames back to the buddy allocator, since
+/// `free_frames` writes a FreeBlock header at the start of the block.
+pub fn clear_kernel_guard_page(va: usize) {
+    assert!(va >= KERNEL_VA_OFFSET, "not a kernel VA");
+    assert!(va & (PAGE_SIZE as usize - 1) == 0, "VA not page-aligned");
+
+    let _lock = KERNEL_PT_LOCK.lock();
+    let pa = virt_to_phys(va).0 as u64;
+    let l2_idx = kernel_l2_index(pa);
+    // SAFETY: boot_tt1_l2 is a page-aligned L2 table defined in boot.S.
+    // Cast to *mut u64 is valid because page table entries are 8-byte u64s.
+    // KERNEL_PT_LOCK is held, ensuring exclusive access.
+    let l2_table = unsafe { &boot_tt1_l2 as *const u8 as *mut u64 };
+    // SAFETY: l2_idx is masked to 0..2047, within the 2048-entry L2 table.
+    let l2_entry = unsafe { l2_table.add(l2_idx).read_volatile() };
+
+    // Must already be broken into L3 (set_kernel_guard_page did that).
+    assert!(
+        l2_entry & 0b11 == 0b11,
+        "clear_kernel_guard_page: L2 entry is not a table descriptor"
+    );
+
+    let l3_pa = l2_entry & PA_MASK;
+    let l3_table = phys_to_virt(Pa(l3_pa as usize)) as *mut u64;
+    let l3_idx = ((pa >> 14) & 0x7FF) as usize;
+    // Read attributes from a neighbor entry to match the original block's
+    // mapping. This preserves boot.S attributes regardless of what they are.
+    // The neighbor is guaranteed to be a valid mapped entry: guard pages are
+    // only set on stack bases, and the adjacent page is always a usable
+    // stack page.
+    let neighbor_idx = if l3_idx > 0 { l3_idx - 1 } else { l3_idx + 1 };
+    // SAFETY: neighbor_idx is in 0..511 (l3_idx is in 0..511, and the
+    // adjustment stays in range). l3_table is a valid L3 page table.
+    let neighbor = unsafe { l3_table.add(neighbor_idx).read_volatile() };
+    let attrs = neighbor & !PA_MASK;
+
+    // SAFETY: Restoring a valid L3 entry for a page the buddy allocator owns.
+    unsafe {
+        l3_table.add(l3_idx).write_volatile((pa & PA_MASK) | attrs);
+    }
+
+    tlb_invalidate_all();
+}
+/// Physical address of the empty L0 table (for kernel threads' TTBR0).
+pub fn empty_ttbr0() -> u64 {
+    virt_to_phys(EMPTY_L2.get() as usize).as_u64()
+}
 /// Refine TTBR1 with 16KB pages for the kernel's 32MB block.
 ///
 /// boot.S created coarse 32MB-block tables. This replaces the kernel's
@@ -231,11 +221,25 @@ pub fn init() {
     // L3 table descriptor. Local-core only (secondary cores not started yet).
     super::arch::mmu::tlbi_all_local();
 }
-
-// ---------------------------------------------------------------------------
-// Kernel guard pages
-// ---------------------------------------------------------------------------
-
+/// Read the KASLR slide. Returns 0 if KASLR is not active.
+#[inline(always)]
+pub fn kaslr_slide() -> usize {
+    KASLR_SLIDE.load(core::sync::atomic::Ordering::Relaxed)
+}
+#[inline(always)]
+pub fn phys_to_virt(pa: Pa) -> usize {
+    pa.0.wrapping_add(KERNEL_VA_OFFSET)
+        .wrapping_add(kaslr_slide())
+}
+/// Set the KASLR slide. Called once from early boot before kernel_main.
+///
+/// # Safety
+///
+/// Must be called exactly once, before any code that uses `phys_to_virt`
+/// or `virt_to_phys`. The slide must be 32 MiB-aligned.
+pub unsafe fn set_kaslr_slide(slide: usize) {
+    KASLR_SLIDE.store(slide, core::sync::atomic::Ordering::Release);
+}
 /// Set a kernel VA page as a guard page (unmap from TTBR1).
 ///
 /// If the containing 32MB block hasn't been refined to L3 pages yet,
@@ -322,49 +326,9 @@ pub fn try_set_kernel_guard_page(va: usize) -> bool {
 
     true
 }
-
-/// Re-map a kernel guard page as normal memory (restore its L3 entry).
-///
-/// Called before freeing stack frames back to the buddy allocator, since
-/// `free_frames` writes a FreeBlock header at the start of the block.
-pub fn clear_kernel_guard_page(va: usize) {
-    assert!(va >= KERNEL_VA_OFFSET, "not a kernel VA");
-    assert!(va & (PAGE_SIZE as usize - 1) == 0, "VA not page-aligned");
-
-    let _lock = KERNEL_PT_LOCK.lock();
-    let pa = virt_to_phys(va).0 as u64;
-    let l2_idx = kernel_l2_index(pa);
-    // SAFETY: boot_tt1_l2 is a page-aligned L2 table defined in boot.S.
-    // Cast to *mut u64 is valid because page table entries are 8-byte u64s.
-    // KERNEL_PT_LOCK is held, ensuring exclusive access.
-    let l2_table = unsafe { &boot_tt1_l2 as *const u8 as *mut u64 };
-    // SAFETY: l2_idx is masked to 0..2047, within the 2048-entry L2 table.
-    let l2_entry = unsafe { l2_table.add(l2_idx).read_volatile() };
-
-    // Must already be broken into L3 (set_kernel_guard_page did that).
-    assert!(
-        l2_entry & 0b11 == 0b11,
-        "clear_kernel_guard_page: L2 entry is not a table descriptor"
-    );
-
-    let l3_pa = l2_entry & PA_MASK;
-    let l3_table = phys_to_virt(Pa(l3_pa as usize)) as *mut u64;
-    let l3_idx = ((pa >> 14) & 0x7FF) as usize;
-    // Read attributes from a neighbor entry to match the original block's
-    // mapping. This preserves boot.S attributes regardless of what they are.
-    // The neighbor is guaranteed to be a valid mapped entry: guard pages are
-    // only set on stack bases, and the adjacent page is always a usable
-    // stack page.
-    let neighbor_idx = if l3_idx > 0 { l3_idx - 1 } else { l3_idx + 1 };
-    // SAFETY: neighbor_idx is in 0..511 (l3_idx is in 0..511, and the
-    // adjustment stays in range). l3_table is a valid L3 page table.
-    let neighbor = unsafe { l3_table.add(neighbor_idx).read_volatile() };
-    let attrs = neighbor & !PA_MASK;
-
-    // SAFETY: Restoring a valid L3 entry for a page the buddy allocator owns.
-    unsafe {
-        l3_table.add(l3_idx).write_volatile((pa & PA_MASK) | attrs);
-    }
-
-    tlb_invalidate_all();
+#[inline(always)]
+pub fn virt_to_phys(va: usize) -> Pa {
+    Pa(va
+        .wrapping_sub(KERNEL_VA_OFFSET)
+        .wrapping_sub(kaslr_slide()))
 }

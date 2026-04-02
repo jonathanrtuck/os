@@ -32,7 +32,6 @@ pub fn mask_all() -> IrqState {
 
     IrqState(saved_daif)
 }
-
 /// Restore a previously saved interrupt state.
 ///
 /// SAFETY contract: `saved` must be a value returned by `mask_all()`.

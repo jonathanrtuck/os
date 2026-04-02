@@ -51,6 +51,7 @@ struct State {
     /// OOM fault injection: if Some(n), alloc returns None after n successes.
     fail_after: Option<usize>,
 }
+
 // SAFETY: FreeBlock pointers are only accessed under STATE lock.
 unsafe impl Send for State {}
 

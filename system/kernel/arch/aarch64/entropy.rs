@@ -15,31 +15,38 @@
 //!   (Apple Silicon) this gives ~42ns resolution — sufficient for jitter
 //!   extraction.
 //!
-//! Detection: Probe `ID_AA64ISAR0_EL1` bits [63:60] at boot. Value
+//! Detection: Probe `ID_AA64ISAR0_EL1` bits \[63:60\] at boot. Value
 //! 0b0001 = FEAT_RNG supported.
 
-/// Check if hardware RNG (FEAT_RNG) is available.
+/// Collect jitter entropy by measuring execution time variation.
 ///
-/// Reads `ID_AA64ISAR0_EL1` and checks RNDR field (bits [63:60]).
-/// Value 0b0001 indicates RNDR/RNDRRS support.
-pub fn has_hardware_rng() -> bool {
-    let isar0: u64;
+/// Performs a fixed workload (memory reads + arithmetic) and measures the
+/// elapsed timer ticks. The low bits of the elapsed count carry entropy
+/// from cache state, branch predictor state, and pipeline effects — these
+/// are genuinely nondeterministic even in a VM.
+///
+/// Based on the jitterentropy technique (Stephan Mueller, 2014). Each call
+/// returns 8 bytes of raw jitter data; the caller should credit ~4-8 bits
+/// of entropy per call (conservative estimate for a 24 MHz counter).
+pub fn collect_jitter(scratch: &mut [u8; 64]) -> [u8; 8] {
+    let start = timing_counter();
+    // Workload: memory access pattern that creates variable cache/TLB latency.
+    // The scratch buffer creates real memory traffic; each iteration depends
+    // on the previous value to prevent optimization.
+    let mut acc: u64 = start;
 
-    // SAFETY: Reading an identification register. This is a read-only
-    // system register that describes the CPU's feature set. No `nomem` —
-    // system register reads have implicit ordering requirements.
-    unsafe {
-        core::arch::asm!(
-            "mrs {}, id_aa64isar0_el1",
-            out(reg) isar0,
-            options(nostack),
-        );
+    for i in 0..64 {
+        scratch[i] = scratch[i].wrapping_add(acc as u8);
+        acc = acc
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(scratch[i] as u64);
     }
 
-    // RNDR field: bits [63:60]. 0b0001 = FEAT_RNG supported.
-    ((isar0 >> 60) & 0xF) >= 1
-}
+    let end = timing_counter();
+    let delta = end.wrapping_sub(start) ^ acc;
 
+    delta.to_le_bytes()
+}
 /// Read 64 bits from the hardware RNG (RNDR instruction).
 ///
 /// Returns `Some(value)` on success, `None` if the hardware entropy pool
@@ -73,7 +80,6 @@ pub fn hardware_random() -> Option<u64> {
         None
     }
 }
-
 /// Read 64 bits from the hardware RNG with reseed guarantee (RNDRRS).
 ///
 /// Like `hardware_random()` but guarantees the hardware RNG has been
@@ -103,37 +109,27 @@ pub fn hardware_random_reseeded() -> Option<u64> {
         None
     }
 }
-
-/// Collect jitter entropy by measuring execution time variation.
+/// Check if hardware RNG (FEAT_RNG) is available.
 ///
-/// Performs a fixed workload (memory reads + arithmetic) and measures the
-/// elapsed timer ticks. The low bits of the elapsed count carry entropy
-/// from cache state, branch predictor state, and pipeline effects — these
-/// are genuinely nondeterministic even in a VM.
-///
-/// Based on the jitterentropy technique (Stephan Mueller, 2014). Each call
-/// returns 8 bytes of raw jitter data; the caller should credit ~4-8 bits
-/// of entropy per call (conservative estimate for a 24 MHz counter).
-pub fn collect_jitter(scratch: &mut [u8; 64]) -> [u8; 8] {
-    let start = timing_counter();
+/// Reads `ID_AA64ISAR0_EL1` and checks RNDR field (bits \[63:60\]).
+/// Value 0b0001 indicates RNDR/RNDRRS support.
+pub fn has_hardware_rng() -> bool {
+    let isar0: u64;
 
-    // Workload: memory access pattern that creates variable cache/TLB latency.
-    // The scratch buffer creates real memory traffic; each iteration depends
-    // on the previous value to prevent optimization.
-    let mut acc: u64 = start;
-    for i in 0..64 {
-        scratch[i] = scratch[i].wrapping_add(acc as u8);
-        acc = acc
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(scratch[i] as u64);
+    // SAFETY: Reading an identification register. This is a read-only
+    // system register that describes the CPU's feature set. No `nomem` —
+    // system register reads have implicit ordering requirements.
+    unsafe {
+        core::arch::asm!(
+            "mrs {}, id_aa64isar0_el1",
+            out(reg) isar0,
+            options(nostack),
+        );
     }
 
-    let end = timing_counter();
-    let delta = end.wrapping_sub(start) ^ acc;
-
-    delta.to_le_bytes()
+    // RNDR field: bits [63:60]. 0b0001 = FEAT_RNG supported.
+    ((isar0 >> 60) & 0xF) >= 1
 }
-
 /// Read the generic timer counter (CNTVCT_EL0).
 ///
 /// Returns the current value of the virtual count register. Used for

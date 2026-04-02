@@ -33,119 +33,7 @@
 
 // No `use` needed — this module is self-contained with no dependencies.
 
-/// ChaCha20 quarter round on independent values (RFC 8439 §2.1).
-///
-/// The fundamental operation: 4 additions, 4 XORs, 4 rotations on a
-/// 4-word state. Exposed for direct testing against RFC test vectors.
-pub fn quarter_round(a: &mut u32, b: &mut u32, c: &mut u32, d: &mut u32) {
-    *a = a.wrapping_add(*b);
-    *d ^= *a;
-    *d = d.rotate_left(16);
-
-    *c = c.wrapping_add(*d);
-    *b ^= *c;
-    *b = b.rotate_left(12);
-
-    *a = a.wrapping_add(*b);
-    *d ^= *a;
-    *d = d.rotate_left(8);
-
-    *c = c.wrapping_add(*d);
-    *b ^= *c;
-    *b = b.rotate_left(7);
-}
-
-/// Quarter round on a 16-word state array by index.
-///
-/// Rust's borrow checker can't prove disjoint `&mut state[i]` references,
-/// so the inner loop operates on copies and writes back.
-#[inline(always)]
-fn qr(s: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize) {
-    s[a] = s[a].wrapping_add(s[b]);
-    s[d] ^= s[a];
-    s[d] = s[d].rotate_left(16);
-
-    s[c] = s[c].wrapping_add(s[d]);
-    s[b] ^= s[c];
-    s[b] = s[b].rotate_left(12);
-
-    s[a] = s[a].wrapping_add(s[b]);
-    s[d] ^= s[a];
-    s[d] = s[d].rotate_left(8);
-
-    s[c] = s[c].wrapping_add(s[d]);
-    s[b] ^= s[c];
-    s[b] = s[b].rotate_left(7);
-}
-
-/// ChaCha20 block function (RFC 8439 §2.3).
-///
-/// Produces 64 bytes of pseudorandom output from a 256-bit key, 32-bit
-/// counter, and 96-bit nonce. Pure function — no side effects, no state.
-pub fn chacha20_block(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u8; 64] {
-    // Initial state: "expand 32-byte k" constant + key + counter + nonce.
-    let mut state: [u32; 16] = [
-        0x6170_7865,
-        0x3320_646e,
-        0x7962_2d32,
-        0x6b20_6574,
-        u32::from_le_bytes([key[0], key[1], key[2], key[3]]),
-        u32::from_le_bytes([key[4], key[5], key[6], key[7]]),
-        u32::from_le_bytes([key[8], key[9], key[10], key[11]]),
-        u32::from_le_bytes([key[12], key[13], key[14], key[15]]),
-        u32::from_le_bytes([key[16], key[17], key[18], key[19]]),
-        u32::from_le_bytes([key[20], key[21], key[22], key[23]]),
-        u32::from_le_bytes([key[24], key[25], key[26], key[27]]),
-        u32::from_le_bytes([key[28], key[29], key[30], key[31]]),
-        counter,
-        u32::from_le_bytes([nonce[0], nonce[1], nonce[2], nonce[3]]),
-        u32::from_le_bytes([nonce[4], nonce[5], nonce[6], nonce[7]]),
-        u32::from_le_bytes([nonce[8], nonce[9], nonce[10], nonce[11]]),
-    ];
-
-    // Save initial state for final addition.
-    let initial = state;
-
-    // 20 rounds (10 column rounds + 10 diagonal rounds).
-    for _ in 0..10 {
-        // Column rounds.
-        qr(&mut state, 0, 4, 8, 12);
-        qr(&mut state, 1, 5, 9, 13);
-        qr(&mut state, 2, 6, 10, 14);
-        qr(&mut state, 3, 7, 11, 15);
-        // Diagonal rounds.
-        qr(&mut state, 0, 5, 10, 15);
-        qr(&mut state, 1, 6, 11, 12);
-        qr(&mut state, 2, 7, 8, 13);
-        qr(&mut state, 3, 4, 9, 14);
-    }
-
-    // Add initial state (mod 2^32).
-    for i in 0..16 {
-        state[i] = state[i].wrapping_add(initial[i]);
-    }
-
-    // Serialize to little-endian bytes.
-    let mut output = [0u8; 64];
-    for i in 0..16 {
-        let bytes = state[i].to_le_bytes();
-        output[i * 4] = bytes[0];
-        output[i * 4 + 1] = bytes[1];
-        output[i * 4 + 2] = bytes[2];
-        output[i * 4 + 3] = bytes[3];
-    }
-
-    output
-}
-
-// =========================================================================
-// Type-state PRNG
-// =========================================================================
-
-/// Minimum entropy (bits) required to seal the pool into a usable PRNG.
 const MIN_ENTROPY_BITS: u32 = 256;
-
-/// Output buffer size: one ChaCha20 block minus the 32-byte key.
 const OUTPUT_BUF_SIZE: usize = 32;
 
 /// Entropy accumulation pool.
@@ -164,6 +52,22 @@ pub struct EntropyPool {
     mix_counter: u32,
     /// Credited entropy bits (capped, never inflated).
     entropy_bits: u32,
+}
+/// Cryptographically secure PRNG with fast key erasure.
+///
+/// Created by `EntropyPool::try_seal()` after accumulating ≥256 bits of
+/// entropy. All generation methods advance the internal state irreversibly
+/// (forward secrecy via fast key erasure).
+#[derive(Debug)]
+pub struct Prng {
+    /// Current ChaCha20 key (256 bits). Overwritten after each block generation.
+    key: [u8; 32],
+    /// Block counter. Incremented after each generation.
+    counter: u64,
+    /// Output buffer (32 bytes — second half of a ChaCha20 block).
+    buf: [u8; OUTPUT_BUF_SIZE],
+    /// Current position in the output buffer.
+    buf_pos: usize,
 }
 
 impl EntropyPool {
@@ -239,23 +143,6 @@ impl EntropyPool {
     }
 }
 
-/// Cryptographically secure PRNG with fast key erasure.
-///
-/// Created by `EntropyPool::try_seal()` after accumulating ≥256 bits of
-/// entropy. All generation methods advance the internal state irreversibly
-/// (forward secrecy via fast key erasure).
-#[derive(Debug)]
-pub struct Prng {
-    /// Current ChaCha20 key (256 bits). Overwritten after each block generation.
-    key: [u8; 32],
-    /// Block counter. Incremented after each generation.
-    counter: u64,
-    /// Output buffer (32 bytes — second half of a ChaCha20 block).
-    buf: [u8; OUTPUT_BUF_SIZE],
-    /// Current position in the output buffer.
-    buf_pos: usize,
-}
-
 impl Prng {
     /// Refill the output buffer using ChaCha20 + fast key erasure.
     ///
@@ -283,17 +170,56 @@ impl Prng {
             0,
             0,
         ];
-
         let block = chacha20_block(&self.key, counter_lo, &nonce);
 
         // Fast key erasure: first 32 bytes become the new key.
         self.key.copy_from_slice(&block[..32]);
         // Remaining 32 bytes are output.
         self.buf.copy_from_slice(&block[32..64]);
+
         self.buf_pos = 0;
         self.counter = self.counter.wrapping_add(1);
     }
 
+    /// Fill a byte slice with pseudorandom data.
+    pub fn fill_bytes(&mut self, buf: &mut [u8]) {
+        let mut offset = 0;
+
+        while offset < buf.len() {
+            if self.buf_pos >= OUTPUT_BUF_SIZE {
+                self.refill();
+            }
+
+            let available = OUTPUT_BUF_SIZE - self.buf_pos;
+            let needed = buf.len() - offset;
+            let copy_len = available.min(needed);
+
+            buf[offset..offset + copy_len]
+                .copy_from_slice(&self.buf[self.buf_pos..self.buf_pos + copy_len]);
+
+            self.buf_pos += copy_len;
+            offset += copy_len;
+        }
+    }
+    /// Derive a new independent PRNG (for per-process seeds).
+    ///
+    /// The child PRNG has a unique key derived from the parent's state.
+    /// The parent's state advances (fast key erasure), so parent and child
+    /// produce independent streams. Multiple forks from the same parent
+    /// produce distinct children because each fork advances the parent.
+    pub fn fork(&mut self) -> Prng {
+        // Generate 32 bytes for the child's key.
+        let mut child_key = [0u8; 32];
+
+        self.fill_bytes(&mut child_key);
+
+        Prng {
+            key: child_key,
+            counter: 0,
+            buf: [0u8; OUTPUT_BUF_SIZE],
+            buf_pos: OUTPUT_BUF_SIZE,
+        }
+    }
     /// Generate a pseudorandom u64.
     pub fn next_u64(&mut self) -> u64 {
         // Need 8 bytes. If buffer doesn't have enough, refill.
@@ -311,45 +237,114 @@ impl Prng {
             self.buf[self.buf_pos + 6],
             self.buf[self.buf_pos + 7],
         ]);
+
         self.buf_pos += 8;
+
         val
     }
+}
 
-    /// Fill a byte slice with pseudorandom data.
-    pub fn fill_bytes(&mut self, buf: &mut [u8]) {
-        let mut offset = 0;
-        while offset < buf.len() {
-            if self.buf_pos >= OUTPUT_BUF_SIZE {
-                self.refill();
-            }
+/// Quarter round on a 16-word state array by index.
+///
+/// Rust's borrow checker can't prove disjoint `&mut state[i]` references,
+/// so the inner loop operates on copies and writes back.
+#[inline(always)]
+fn qr(s: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize) {
+    s[a] = s[a].wrapping_add(s[b]);
+    s[d] ^= s[a];
+    s[d] = s[d].rotate_left(16);
 
-            let available = OUTPUT_BUF_SIZE - self.buf_pos;
-            let needed = buf.len() - offset;
-            let copy_len = available.min(needed);
+    s[c] = s[c].wrapping_add(s[d]);
+    s[b] ^= s[c];
+    s[b] = s[b].rotate_left(12);
 
-            buf[offset..offset + copy_len]
-                .copy_from_slice(&self.buf[self.buf_pos..self.buf_pos + copy_len]);
-            self.buf_pos += copy_len;
-            offset += copy_len;
-        }
+    s[a] = s[a].wrapping_add(s[b]);
+    s[d] ^= s[a];
+    s[d] = s[d].rotate_left(8);
+
+    s[c] = s[c].wrapping_add(s[d]);
+    s[b] ^= s[c];
+    s[b] = s[b].rotate_left(7);
+}
+
+/// ChaCha20 block function (RFC 8439 §2.3).
+///
+/// Produces 64 bytes of pseudorandom output from a 256-bit key, 32-bit
+/// counter, and 96-bit nonce. Pure function — no side effects, no state.
+pub fn chacha20_block(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u8; 64] {
+    // Initial state: "expand 32-byte k" constant + key + counter + nonce.
+    let mut state: [u32; 16] = [
+        0x6170_7865,
+        0x3320_646e,
+        0x7962_2d32,
+        0x6b20_6574,
+        u32::from_le_bytes([key[0], key[1], key[2], key[3]]),
+        u32::from_le_bytes([key[4], key[5], key[6], key[7]]),
+        u32::from_le_bytes([key[8], key[9], key[10], key[11]]),
+        u32::from_le_bytes([key[12], key[13], key[14], key[15]]),
+        u32::from_le_bytes([key[16], key[17], key[18], key[19]]),
+        u32::from_le_bytes([key[20], key[21], key[22], key[23]]),
+        u32::from_le_bytes([key[24], key[25], key[26], key[27]]),
+        u32::from_le_bytes([key[28], key[29], key[30], key[31]]),
+        counter,
+        u32::from_le_bytes([nonce[0], nonce[1], nonce[2], nonce[3]]),
+        u32::from_le_bytes([nonce[4], nonce[5], nonce[6], nonce[7]]),
+        u32::from_le_bytes([nonce[8], nonce[9], nonce[10], nonce[11]]),
+    ];
+    // Save initial state for final addition.
+    let initial = state;
+
+    // 20 rounds (10 column rounds + 10 diagonal rounds).
+    for _ in 0..10 {
+        // Column rounds.
+        qr(&mut state, 0, 4, 8, 12);
+        qr(&mut state, 1, 5, 9, 13);
+        qr(&mut state, 2, 6, 10, 14);
+        qr(&mut state, 3, 7, 11, 15);
+        // Diagonal rounds.
+        qr(&mut state, 0, 5, 10, 15);
+        qr(&mut state, 1, 6, 11, 12);
+        qr(&mut state, 2, 7, 8, 13);
+        qr(&mut state, 3, 4, 9, 14);
     }
 
-    /// Derive a new independent PRNG (for per-process seeds).
-    ///
-    /// The child PRNG has a unique key derived from the parent's state.
-    /// The parent's state advances (fast key erasure), so parent and child
-    /// produce independent streams. Multiple forks from the same parent
-    /// produce distinct children because each fork advances the parent.
-    pub fn fork(&mut self) -> Prng {
-        // Generate 32 bytes for the child's key.
-        let mut child_key = [0u8; 32];
-        self.fill_bytes(&mut child_key);
-
-        Prng {
-            key: child_key,
-            counter: 0,
-            buf: [0u8; OUTPUT_BUF_SIZE],
-            buf_pos: OUTPUT_BUF_SIZE,
-        }
+    // Add initial state (mod 2^32).
+    for i in 0..16 {
+        state[i] = state[i].wrapping_add(initial[i]);
     }
+
+    // Serialize to little-endian bytes.
+    let mut output = [0u8; 64];
+
+    for i in 0..16 {
+        let bytes = state[i].to_le_bytes();
+
+        output[i * 4] = bytes[0];
+        output[i * 4 + 1] = bytes[1];
+        output[i * 4 + 2] = bytes[2];
+        output[i * 4 + 3] = bytes[3];
+    }
+
+    output
+}
+/// ChaCha20 quarter round on independent values (RFC 8439 §2.1).
+///
+/// The fundamental operation: 4 additions, 4 XORs, 4 rotations on a
+/// 4-word state. Exposed for direct testing against RFC test vectors.
+pub fn quarter_round(a: &mut u32, b: &mut u32, c: &mut u32, d: &mut u32) {
+    *a = a.wrapping_add(*b);
+    *d ^= *a;
+    *d = d.rotate_left(16);
+
+    *c = c.wrapping_add(*d);
+    *b ^= *c;
+    *b = b.rotate_left(12);
+
+    *a = a.wrapping_add(*b);
+    *d ^= *a;
+    *d = d.rotate_left(8);
+
+    *c = c.wrapping_add(*d);
+    *b ^= *c;
+    *b = b.rotate_left(7);
 }

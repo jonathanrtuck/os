@@ -64,6 +64,7 @@ impl Process {
         }
     }
 }
+
 impl super::waitable::WaitableId for ProcessId {
     fn index(self) -> usize {
         self.0 as usize
@@ -106,6 +107,36 @@ fn copy_segment_page(file_data: &[u8], file_size: u64, seg_offset: u64, pa: memo
         unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len()) };
     }
 }
+/// Set up the user stack VMA and eagerly map the top page.
+///
+/// Uses the ASLR layout's stack_top for the stack position. The stack
+/// grows downward from stack_top, with a guard page below.
+fn setup_stack(addr_space: &mut AddressSpace, layout: &AslrLayout) -> Result<(), &'static str> {
+    let stack_pages = 4u64; // USER_STACK_PAGES
+    let stack_size = stack_pages * PAGE_SIZE;
+    let stack_va = layout.stack_top - stack_size;
+
+    addr_space.vmas.insert(Vma {
+        start: stack_va,
+        end: layout.stack_top,
+        writable: true,
+        executable: false,
+        backing: Backing::Anonymous,
+    });
+
+    // Eagerly map the top page of the stack.
+    let top_stack_va = layout.stack_top - PAGE_SIZE;
+    let pa = page_allocator::alloc_frame().ok_or("out of frames for user stack")?;
+
+    if !addr_space.map_page(top_stack_va, pa.as_u64(), &PageAttrs::user_rw()) {
+        page_allocator::free_frame(pa);
+
+        return Err("out of page table frames for user stack");
+    }
+
+    Ok(())
+}
+
 /// Create a process from a user-provided ELF buffer, with a suspended thread.
 ///
 /// Eagerly maps ALL segment pages (the ELF data is temporary and can't be
@@ -114,7 +145,6 @@ fn copy_segment_page(file_data: &[u8], file_size: u64, seg_offset: u64, pa: memo
 pub fn create_from_user_elf(elf_bytes: &[u8]) -> Result<(ProcessId, ThreadId), &'static str> {
     let header = executable::parse_header(elf_bytes).map_err(|_| "bad ELF header")?;
     let (asid, _generation) = address_space_id::alloc();
-
     // Per-process ASLR layout. Fork a PRNG for this process's address space
     // randomization. Falls back to deterministic layout if the kernel PRNG
     // is not seeded (e.g., very early boot or no entropy sources).
@@ -122,7 +152,6 @@ pub fn create_from_user_elf(elf_bytes: &[u8]) -> Result<(ProcessId, ThreadId), &
         Some(mut prng) => AslrLayout::randomize(&mut prng),
         None => AslrLayout::deterministic(),
     };
-
     let mut addr_space = match AddressSpace::new(asid, &layout) {
         Some(a) => Box::new(a),
         None => {
@@ -176,7 +205,6 @@ pub fn create_from_user_elf(elf_bytes: &[u8]) -> Result<(ProcessId, ThreadId), &
         Some(mut prng) => super::arch::security::PacKeys::generate(&mut prng),
         None => super::arch::security::PacKeys::zero(),
     };
-
     let process_id = scheduler::create_process(addr_space, pac_keys);
     let thread_id =
         match scheduler::spawn_user_suspended(process_id, header.entry, layout.stack_top) {
@@ -192,33 +220,4 @@ pub fn create_from_user_elf(elf_bytes: &[u8]) -> Result<(ProcessId, ThreadId), &
         };
 
     Ok((process_id, thread_id))
-}
-/// Set up the user stack VMA and eagerly map the top page.
-///
-/// Uses the ASLR layout's stack_top for the stack position. The stack
-/// grows downward from stack_top, with a guard page below.
-fn setup_stack(addr_space: &mut AddressSpace, layout: &AslrLayout) -> Result<(), &'static str> {
-    let stack_pages = 4u64; // USER_STACK_PAGES
-    let stack_size = stack_pages * PAGE_SIZE;
-    let stack_va = layout.stack_top - stack_size;
-
-    addr_space.vmas.insert(Vma {
-        start: stack_va,
-        end: layout.stack_top,
-        writable: true,
-        executable: false,
-        backing: Backing::Anonymous,
-    });
-
-    // Eagerly map the top page of the stack.
-    let top_stack_va = layout.stack_top - PAGE_SIZE;
-    let pa = page_allocator::alloc_frame().ok_or("out of frames for user stack")?;
-
-    if !addr_space.map_page(top_stack_va, pa.as_u64(), &PageAttrs::user_rw()) {
-        page_allocator::free_frame(pa);
-
-        return Err("out of page table frames for user stack");
-    }
-
-    Ok(())
 }

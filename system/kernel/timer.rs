@@ -43,8 +43,8 @@ use super::{
     waitable::{WaitableId, WaitableRegistry},
 };
 
-/// Maximum concurrent timer objects across all processes.
-const MAX_TIMERS: usize = 32;
+/// Maximum concurrent timer objects across all processes (from system_config via paging).
+const MAX_TIMERS: usize = super::paging::MAX_TIMERS as usize;
 
 /// Virtual timer PPI interrupt ID (27). Physical timer PPI (30) is reserved
 /// by the hypervisor under HVF.
@@ -77,6 +77,23 @@ impl WaitableId for TimerId {
     }
 }
 
+/// Return the cached earliest timer object deadline, or None if no timers.
+/// Lock-free: reads an atomic that is updated on timer create/destroy/expire.
+fn earliest_timer_deadline() -> Option<u64> {
+    let cached = EARLIEST_DEADLINE.load(Ordering::Acquire);
+
+    if cached == 0 {
+        None
+    } else {
+        Some(cached)
+    }
+}
+/// Program the hardware timer with the given number of counter ticks.
+///
+/// Writing TVAL also clears the timer condition (de-asserts the interrupt).
+fn program_tval(tval: u64) {
+    super::arch::timer::program_tval(tval);
+}
 /// Recompute and cache the earliest timer deadline from the TIMERS table.
 /// Must be called with the TIMERS lock held (not public).
 fn update_earliest_deadline_locked(table: &TimerTable) {
@@ -103,71 +120,6 @@ fn update_earliest_deadline_locked(table: &TimerTable) {
     }
 
     EARLIEST_DEADLINE.store(earliest, Ordering::Release);
-}
-
-/// Return the cached earliest timer object deadline, or None if no timers.
-/// Lock-free: reads an atomic that is updated on timer create/destroy/expire.
-fn earliest_timer_deadline() -> Option<u64> {
-    let cached = EARLIEST_DEADLINE.load(Ordering::Acquire);
-
-    if cached == 0 {
-        None
-    } else {
-        Some(cached)
-    }
-}
-
-/// Program the hardware timer with the given number of counter ticks.
-///
-/// Writing TVAL also clears the timer condition (de-asserts the interrupt).
-fn program_tval(tval: u64) {
-    super::arch::timer::program_tval(tval);
-}
-
-/// Reprogram the hardware timer for the earliest deadline across all sources.
-///
-/// Sources:
-/// 1. Timer objects: scanned from the global TIMERS table.
-/// 2. Scheduler deadline: quantum expiry or context replenishment (passed by caller).
-///
-/// The scheduler deadline is passed as a parameter because this function is
-/// called from `schedule_inner` (which holds the scheduler lock — we can't
-/// re-acquire it). When called from `timer::create`, pass `None` for the
-/// scheduler deadline — `schedule_inner` will reprogram with full info on
-/// the next schedule.
-///
-/// If the minimum deadline is in the past, sets CNTV_TVAL to 1 (fire immediately).
-/// If no deadlines exist, programs the maximum interval (u32::MAX ticks ≈ 68s).
-pub fn reprogram_next_deadline(scheduler_deadline_ticks: Option<u64>) {
-    let now = counter();
-    // Source 1: earliest timer object deadline.
-    let timer_deadline = earliest_timer_deadline();
-    // Collect all deadline sources and find the minimum.
-    let mut earliest: Option<u64> = timer_deadline;
-
-    if let Some(sched) = scheduler_deadline_ticks {
-        earliest = Some(earliest.map_or(sched, |e| e.min(sched)));
-    }
-
-    match earliest {
-        None => {
-            // No deadlines — program a very long interval. u32::MAX ticks
-            // ≈ 68 seconds at 62.5 MHz. The core will be woken by IPI or
-            // device IRQ if work arrives before this expires.
-            program_tval(u32::MAX as u64);
-        }
-        Some(deadline) if deadline <= now => {
-            // Deadline already passed — fire immediately.
-            program_tval(1);
-        }
-        Some(deadline) => {
-            let delta = deadline - now;
-            // Cap to u32::MAX (CNTV_TVAL is 32-bit).
-            let tval = delta.min(u32::MAX as u64);
-
-            program_tval(tval);
-        }
-    }
 }
 
 /// Check all timers for expiry. Called from the timer IRQ handler.
@@ -258,6 +210,7 @@ pub fn create(timeout_ns: u64) -> Option<TimerId> {
         now // Already expired — will fire on next check.
     } else {
         let delta = (timeout_ns as u128 * freq as u128 / 1_000_000_000) as u64;
+
         now.saturating_add(delta)
     };
     let result = {
@@ -310,7 +263,9 @@ pub fn create(timeout_ns: u64) -> Option<TimerId> {
 pub fn destroy(id: TimerId) {
     let waiter = {
         let mut table = TIMERS.lock();
+
         table.slots[id.0 as usize] = None;
+
         update_earliest_deadline_locked(&table);
         table.waiters.destroy(id)
     };
@@ -360,6 +315,51 @@ pub fn init() {
 /// between registration and blocking, the wake is delivered correctly.
 pub fn register_waiter(id: TimerId, thread: ThreadId) {
     TIMERS.lock().waiters.register_waiter(id, thread);
+}
+/// Reprogram the hardware timer for the earliest deadline across all sources.
+///
+/// Sources:
+/// 1. Timer objects: scanned from the global TIMERS table.
+/// 2. Scheduler deadline: quantum expiry or context replenishment (passed by caller).
+///
+/// The scheduler deadline is passed as a parameter because this function is
+/// called from `schedule_inner` (which holds the scheduler lock — we can't
+/// re-acquire it). When called from `timer::create`, pass `None` for the
+/// scheduler deadline — `schedule_inner` will reprogram with full info on
+/// the next schedule.
+///
+/// If the minimum deadline is in the past, sets CNTV_TVAL to 1 (fire immediately).
+/// If no deadlines exist, programs the maximum interval (u32::MAX ticks ≈ 68s).
+pub fn reprogram_next_deadline(scheduler_deadline_ticks: Option<u64>) {
+    let now = counter();
+    // Source 1: earliest timer object deadline.
+    let timer_deadline = earliest_timer_deadline();
+    // Collect all deadline sources and find the minimum.
+    let mut earliest: Option<u64> = timer_deadline;
+
+    if let Some(sched) = scheduler_deadline_ticks {
+        earliest = Some(earliest.map_or(sched, |e| e.min(sched)));
+    }
+
+    match earliest {
+        None => {
+            // No deadlines — program a very long interval. u32::MAX ticks
+            // ≈ 68 seconds at 62.5 MHz. The core will be woken by IPI or
+            // device IRQ if work arrives before this expires.
+            program_tval(u32::MAX as u64);
+        }
+        Some(deadline) if deadline <= now => {
+            // Deadline already passed — fire immediately.
+            program_tval(1);
+        }
+        Some(deadline) => {
+            let delta = deadline - now;
+            // Cap to u32::MAX (CNTV_TVAL is 32-bit).
+            let tval = delta.min(u32::MAX as u64);
+
+            program_tval(tval);
+        }
+    }
 }
 /// Unregister a thread from a timer (cleanup when `wait` returns).
 ///

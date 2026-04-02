@@ -40,8 +40,8 @@ use super::{
     waitable::{WaitableId, WaitableRegistry},
 };
 
-/// Maximum concurrent registered interrupts across all processes.
-const MAX_INTERRUPTS: usize = 32;
+/// Maximum concurrent registered interrupts across all processes (from system_config via paging).
+const MAX_INTERRUPTS: usize = super::paging::MAX_INTERRUPTS as usize;
 
 static TABLE: IrqMutex<InterruptTable> = IrqMutex::new(InterruptTable {
     slots: [const { None }; MAX_INTERRUPTS],
@@ -92,6 +92,7 @@ pub fn destroy(id: InterruptId) {
         let mut table = TABLE.lock();
         let irq = table.slots[id.0 as usize].take();
         let waiter = table.waiters.destroy(id);
+
         (irq, waiter)
     };
 
