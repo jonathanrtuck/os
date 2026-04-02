@@ -40,6 +40,7 @@ pub extern "C" fn _start() -> ! {
     // --- Step 1: Create a VMO (1 page = 16 KiB) ---
     let type_tag = 0x4558414D; // "EXAM" as a content type tag
     let vmo = unwrap_or_exit(vmo_create(1, 0, type_tag), b"vmo_create");
+
     print(b"Created VMO: handle ");
     print_u64(vmo as u64);
     print(b", type_tag ");
@@ -49,6 +50,7 @@ pub extern "C" fn _start() -> ! {
     // --- Step 2: Write data via handle (no mapping needed) ---
     let message = b"Hello from VMO handle write!";
     let written = unwrap_or_exit(vmo_write(vmo, 0, message), b"vmo_write");
+
     print(b"Wrote ");
     print_u64(written);
     print(b" bytes via handle\n");
@@ -56,6 +58,7 @@ pub extern "C" fn _start() -> ! {
     // --- Step 3: Read back via handle ---
     let mut buf = [0u8; 64];
     let read = unwrap_or_exit(vmo_read(vmo, 0, &mut buf[..message.len()]), b"vmo_read");
+
     print(b"Read ");
     print_u64(read);
     print(b" bytes via handle: \"");
@@ -64,18 +67,21 @@ pub extern "C" fn _start() -> ! {
 
     // --- Step 4: Map the VMO into our address space ---
     let mapped = unwrap_or_exit(vmo_map(vmo, MAP_READ | MAP_WRITE), b"vmo_map");
+
     print(b"Mapped VMO at ");
     print_hex(mapped as u64);
     print(b"\n");
 
     // Read the data we wrote earlier — it's visible through the mapping.
     let mapped_slice = unsafe { core::slice::from_raw_parts(mapped, message.len()) };
+
     print(b"Read via mapping: \"");
     print(mapped_slice);
     print(b"\"\n");
 
     // Write new data through the mapping.
     let new_msg = b"Written via direct memory!";
+
     // SAFETY: mapped points to a valid RW page from vmo_map.
     unsafe {
         core::ptr::copy_nonoverlapping(new_msg.as_ptr(), mapped, new_msg.len());
@@ -84,14 +90,15 @@ pub extern "C" fn _start() -> ! {
     // Verify by reading back through the handle.
     let mut verify = [0u8; 64];
     let n = unwrap_or_exit(vmo_read(vmo, 0, &mut verify[..new_msg.len()]), b"vmo_read");
+
     print(b"Verified via handle: \"");
     print(&verify[..n as usize]);
     print(b"\"\n");
 
     // --- Cleanup ---
     unwrap_or_exit(handle_close(vmo), b"handle_close");
+
     print(b"\nVMO closed. Done.\n");
 
     exit()
 }
-

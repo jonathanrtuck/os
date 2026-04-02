@@ -52,49 +52,59 @@ pub mod nr {
 #[inline(always)]
 pub unsafe fn syscall0(nr: u64) -> u64 {
     let ret: u64;
+
     // SAFETY: svc #0 traps to the kernel. x8 = syscall number, result in x0.
     // `nostack` is correct: SVC doesn't touch the user stack.
     asm!("svc #0", in("x8") nr, lateout("x0") ret, options(nostack));
+
     ret
 }
 
 #[inline(always)]
 pub unsafe fn syscall1(nr: u64, a0: u64) -> u64 {
     let ret: u64;
+
     // SAFETY: Same as syscall0, with one argument in x0.
     asm!("svc #0", in("x0") a0, in("x8") nr, lateout("x0") ret, options(nostack));
+
     ret
 }
 
 #[inline(always)]
 pub unsafe fn syscall2(nr: u64, a0: u64, a1: u64) -> u64 {
     let ret: u64;
+
     // SAFETY: Same as syscall0, with arguments in x0, x1.
     asm!("svc #0", in("x0") a0, in("x1") a1, in("x8") nr, lateout("x0") ret, options(nostack));
+
     ret
 }
 
 #[inline(always)]
 pub unsafe fn syscall3(nr: u64, a0: u64, a1: u64, a2: u64) -> u64 {
     let ret: u64;
+
     // SAFETY: Same as syscall0, with arguments in x0, x1, x2.
     asm!(
         "svc #0",
         in("x0") a0, in("x1") a1, in("x2") a2, in("x8") nr,
         lateout("x0") ret, options(nostack),
     );
+
     ret
 }
 
 #[inline(always)]
 pub unsafe fn syscall4(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> u64 {
     let ret: u64;
+
     // SAFETY: Same as syscall0, with arguments in x0, x1, x2, x3.
     asm!(
         "svc #0",
         in("x0") a0, in("x1") a1, in("x2") a2, in("x3") a3, in("x8") nr,
         lateout("x0") ret, options(nostack),
     );
+
     ret
 }
 
@@ -106,6 +116,7 @@ pub unsafe fn syscall4(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> u64 {
 pub fn exit() -> ! {
     // SAFETY: EXIT (0) is always valid and never returns.
     unsafe { syscall0(nr::EXIT) };
+
     loop {}
 }
 
@@ -125,28 +136,37 @@ pub fn print(s: &[u8]) {
 pub fn print_u64(mut n: u64) {
     let mut buf = [0u8; 20];
     let mut i = buf.len();
+
     if n == 0 {
         print(b"0");
+
         return;
     }
+
     while n > 0 {
         i -= 1;
         buf[i] = b'0' + (n % 10) as u8;
         n /= 10;
     }
+
     print(&buf[i..]);
 }
 
 /// Print a u64 as hexadecimal with 0x prefix.
 pub fn print_hex(n: u64) {
     const HEX: &[u8] = b"0123456789abcdef";
+
     print(b"0x");
+
     let mut buf = [0u8; 16];
+
     for i in 0..16 {
         buf[i] = HEX[((n >> (60 - i * 4)) & 0xf) as usize];
     }
+
     // Skip leading zeros.
     let start = buf.iter().position(|&b| b != b'0').unwrap_or(15);
+
     print(&buf[start..]);
 }
 
@@ -166,6 +186,7 @@ pub fn clock_get() -> u64 {
 pub fn memory_alloc(page_count: u64) -> Result<*mut u8, i64> {
     // SAFETY: MEMORY_ALLOC maps pages in the heap region.
     let ret = unsafe { syscall1(nr::MEMORY_ALLOC, page_count) } as i64;
+
     if ret < 0 {
         Err(ret)
     } else {
@@ -177,6 +198,7 @@ pub fn memory_alloc(page_count: u64) -> Result<*mut u8, i64> {
 pub fn memory_free(va: *mut u8, page_count: u64) -> Result<(), i64> {
     // SAFETY: va must be a page-aligned address previously returned by memory_alloc.
     let ret = unsafe { syscall2(nr::MEMORY_FREE, va as u64, page_count) } as i64;
+
     if ret < 0 {
         Err(ret)
     } else {
@@ -189,6 +211,7 @@ pub fn memory_free(va: *mut u8, page_count: u64) -> Result<(), i64> {
 pub fn channel_create() -> Result<(u16, u16), i64> {
     // SAFETY: CHANNEL_CREATE allocates kernel objects, no preconditions.
     let ret = unsafe { syscall0(nr::CHANNEL_CREATE) } as i64;
+
     if ret < 0 {
         Err(ret)
     } else {
@@ -201,6 +224,7 @@ pub fn channel_create() -> Result<(u16, u16), i64> {
 pub fn channel_signal(handle: u16) -> Result<(), i64> {
     // SAFETY: handle must be a valid channel handle with SIGNAL right.
     let ret = unsafe { syscall1(nr::CHANNEL_SIGNAL, handle as u64) } as i64;
+
     if ret < 0 {
         Err(ret)
     } else {
@@ -220,6 +244,7 @@ pub fn wait(handles: &[u16], timeout_ns: u64) -> Result<u64, i64> {
             timeout_ns,
         )
     } as i64;
+
     if ret < 0 {
         Err(ret)
     } else {
@@ -231,6 +256,7 @@ pub fn wait(handles: &[u16], timeout_ns: u64) -> Result<u64, i64> {
 pub fn handle_close(handle: u16) -> Result<(), i64> {
     // SAFETY: handle must be a valid handle index.
     let ret = unsafe { syscall1(nr::HANDLE_CLOSE, handle as u64) } as i64;
+
     if ret < 0 {
         Err(ret)
     } else {
@@ -242,6 +268,7 @@ pub fn handle_close(handle: u16) -> Result<(), i64> {
 pub fn thread_create(entry: extern "C" fn() -> !, stack_top: u64) -> Result<u16, i64> {
     // SAFETY: entry must be a valid code address; stack_top must be 16-byte aligned.
     let ret = unsafe { syscall2(nr::THREAD_CREATE, entry as u64, stack_top) } as i64;
+
     if ret < 0 {
         Err(ret)
     } else {
@@ -253,6 +280,7 @@ pub fn thread_create(entry: extern "C" fn() -> !, stack_top: u64) -> Result<u16,
 pub fn futex_wait(addr: &core::sync::atomic::AtomicU32, expected: u32) -> Result<(), i64> {
     // SAFETY: addr is a valid, aligned reference to an AtomicU32 in user memory.
     let ret = unsafe { syscall2(nr::FUTEX_WAIT, addr as *const _ as u64, expected as u64) } as i64;
+
     if ret < 0 {
         Err(ret)
     } else {
@@ -264,6 +292,7 @@ pub fn futex_wait(addr: &core::sync::atomic::AtomicU32, expected: u32) -> Result
 pub fn futex_wake(addr: &core::sync::atomic::AtomicU32, count: u32) -> Result<u64, i64> {
     // SAFETY: addr is a valid, aligned reference to an AtomicU32 in user memory.
     let ret = unsafe { syscall2(nr::FUTEX_WAKE, addr as *const _ as u64, count as u64) } as i64;
+
     if ret < 0 {
         Err(ret)
     } else {
@@ -275,6 +304,7 @@ pub fn futex_wake(addr: &core::sync::atomic::AtomicU32, count: u32) -> Result<u6
 pub fn vmo_create(size_pages: u64, flags: u64, type_tag: u64) -> Result<u16, i64> {
     // SAFETY: vmo_create allocates kernel objects, no memory preconditions.
     let ret = unsafe { syscall3(nr::VMO_CREATE, size_pages, flags, type_tag) } as i64;
+
     if ret < 0 {
         Err(ret)
     } else {
@@ -286,6 +316,7 @@ pub fn vmo_create(size_pages: u64, flags: u64, type_tag: u64) -> Result<u16, i64
 pub fn vmo_map(handle: u16, flags: u64) -> Result<*mut u8, i64> {
     // SAFETY: handle must be a valid VMO handle with MAP right.
     let ret = unsafe { syscall3(nr::VMO_MAP, handle as u64, flags, 0) } as i64;
+
     if ret < 0 {
         Err(ret)
     } else {
@@ -305,6 +336,7 @@ pub fn vmo_read(handle: u16, offset: u64, buf: &mut [u8]) -> Result<u64, i64> {
             buf.len() as u64,
         )
     } as i64;
+
     if ret < 0 {
         Err(ret)
     } else {
@@ -324,6 +356,7 @@ pub fn vmo_write(handle: u16, offset: u64, buf: &[u8]) -> Result<u64, i64> {
             buf.len() as u64,
         )
     } as i64;
+
     if ret < 0 {
         Err(ret)
     } else {
@@ -335,6 +368,7 @@ pub fn vmo_write(handle: u16, offset: u64, buf: &[u8]) -> Result<u64, i64> {
 pub fn timer_create(timeout_ns: u64) -> Result<u16, i64> {
     // SAFETY: timer_create allocates a kernel timer object.
     let ret = unsafe { syscall1(nr::TIMER_CREATE, timeout_ns) } as i64;
+
     if ret < 0 {
         Err(ret)
     } else {
@@ -346,6 +380,7 @@ pub fn timer_create(timeout_ns: u64) -> Result<u16, i64> {
 pub fn event_create() -> Result<u16, i64> {
     // SAFETY: event_create allocates a kernel event object.
     let ret = unsafe { syscall0(nr::EVENT_CREATE) } as i64;
+
     if ret < 0 {
         Err(ret)
     } else {
@@ -357,6 +392,7 @@ pub fn event_create() -> Result<u16, i64> {
 pub fn event_signal(handle: u16) -> Result<(), i64> {
     // SAFETY: handle must be a valid event handle with SIGNAL right.
     let ret = unsafe { syscall1(nr::EVENT_SIGNAL, handle as u64) } as i64;
+
     if ret < 0 {
         Err(ret)
     } else {
@@ -390,11 +426,14 @@ pub fn unwrap_or_exit<T>(result: Result<T, i64>, name: &[u8]) -> T {
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     print(b"\nPANIC: ");
+
     if let Some(loc) = info.location() {
         print(loc.file().as_bytes());
         print(b":");
         print_u64(loc.line() as u64);
     }
+
     print(b"\n");
+
     exit()
 }

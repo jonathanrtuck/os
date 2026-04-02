@@ -6,12 +6,12 @@ with inline assembly syscall wrappers.
 
 ## Examples
 
-| Example      | Demonstrates                                                    |
-| ------------ | --------------------------------------------------------------- |
-| `hello`      | Serial output, clock read, clean exit                           |
-| `channels`   | Channel IPC: create, shared memory write, signal, wait          |
-| `threads`    | Thread creation, stack allocation, futex synchronization        |
-| `vmo`        | Virtual memory objects: create, map, handle read/write          |
+| Example    | Demonstrates                                             |
+| ---------- | -------------------------------------------------------- |
+| `hello`    | Serial output, clock read, clean exit                    |
+| `channels` | Channel IPC: create, shared memory write, signal, wait   |
+| `threads`  | Thread creation, stack allocation, futex synchronization |
+| `vmo`      | Virtual memory objects: create, map, handle read/write   |
 
 ## Build
 
@@ -53,7 +53,7 @@ See `../SYSCALLS.md` for the complete 46-syscall reference.
 
 ## Architecture
 
-```
+```text
 examples/
 ├── .cargo/config.toml   # Target and linker flags
 ├── Cargo.toml            # Package with multiple [[bin]] targets

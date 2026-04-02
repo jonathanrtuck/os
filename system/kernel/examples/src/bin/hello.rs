@@ -26,12 +26,13 @@ pub extern "C" fn _start() -> ! {
 
     // Read the monotonic clock to prove syscalls work bidirectionally.
     let ns = clock_get();
+
     print(b"Boot time: ");
     print_u64(ns / 1_000_000);
     print(b" ms (");
     print_hex(ns);
     print(b" ns)\n");
-
     print(b"\nGoodbye.\n");
+
     exit()
 }

@@ -34,9 +34,11 @@ extern "C" fn child_entry() -> ! {
     // Simulate some work.
     let start = clock_get();
     let mut sum: u64 = 0;
+
     for i in 0..100_000u64 {
         sum = sum.wrapping_add(i);
     }
+
     let elapsed = clock_get() - start;
 
     print(b"  [child] Computed sum = ");
@@ -47,9 +49,11 @@ extern "C" fn child_entry() -> ! {
 
     // Signal the parent via futex: store 1, then wake.
     FUTEX.store(1, Ordering::Release);
+
     let _ = futex_wake(&FUTEX, 1);
 
     print(b"  [child] Signaled parent. Exiting.\n");
+
     exit()
 }
 
@@ -66,19 +70,24 @@ pub extern "C" fn _start() -> ! {
     assert!(stack_top & 0xF == 0, "stack not aligned");
 
     print(b"[parent] Allocated child stack: ");
+
     kernel_examples::print_hex(stack_base as u64);
+
     print(b" .. ");
+
     kernel_examples::print_hex(stack_top);
+
     print(b"\n");
 
     // Spawn the child thread.
     let child = unwrap_or_exit(thread_create(child_entry, stack_top), b"thread_create");
+
     print(b"[parent] Spawned child thread (handle ");
     print_u64(child as u64);
     print(b")\n");
-
     // Wait for the child to signal via futex.
     print(b"[parent] Waiting for child...\n");
+
     while FUTEX.load(Ordering::Acquire) == 0 {
         // futex_wait blocks if the value is still 0.
         let _ = futex_wait(&FUTEX, 0);
@@ -90,4 +99,3 @@ pub extern "C" fn _start() -> ! {
 
     exit()
 }
-
