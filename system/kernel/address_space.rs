@@ -79,6 +79,15 @@ impl PageAttrs {
     pub fn user_rx() -> Self {
         Self(ATTRIDX0 | AF | SH_INNER | AP_EL0 | AP_RO | NG | PXN)
     }
+    /// User code: execute-only, not readable or writable (ARMv8.2+).
+    ///
+    /// The page can be fetched as instructions but EL0 load/store will fault.
+    /// Prevents code disclosure attacks (e.g., AnC cache side channel) that
+    /// read code pages to leak ASLR layout. AP_EL0 is NOT set, so EL0 has
+    /// no data access; UXN is NOT set, so instruction fetch is allowed.
+    pub fn user_xo() -> Self {
+        Self(ATTRIDX0 | AF | SH_INNER | AP_RO | NG | PXN)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -134,8 +143,11 @@ pub struct AddressSpace {
 impl AddressSpace {
     /// Create a new empty address space with its own L2 root table and ASID.
     ///
+    /// If `layout` is provided, the bump allocator bases are randomized per
+    /// the ASLR layout. Otherwise, fixed bases are used (deterministic fallback).
+    ///
     /// Returns `None` if the L2 page table cannot be allocated (OOM).
-    pub fn new(asid: Asid) -> Option<Self> {
+    pub fn new(asid: Asid, layout: &super::aslr::AslrLayout) -> Option<Self> {
         let root_pa = page_allocator::alloc_frame()?;
 
         Some(Self {
@@ -143,14 +155,14 @@ impl AddressSpace {
             asid,
             owned_frames: Vec::new(),
             vmas: VmaList::new(),
-            next_dma_va: paging::DMA_BUFFER_BASE,
+            next_dma_va: layout.dma_base,
             dma_allocations: Vec::new(),
             dma_pages_allocated: 0,
             dma_pages_limit: DEFAULT_DMA_PAGE_LIMIT,
-            next_device_va: paging::DEVICE_MMIO_BASE,
-            next_channel_shm_va: paging::CHANNEL_SHM_BASE,
-            next_shared_va: paging::SHARED_MEMORY_BASE,
-            next_heap_va: paging::HEAP_BASE,
+            next_device_va: layout.device_base,
+            next_channel_shm_va: layout.channel_shm_base,
+            next_shared_va: layout.shared_base,
+            next_heap_va: layout.heap_base,
             heap_allocations: Vec::new(),
             heap_pages_allocated: 0,
             heap_pages_limit: DEFAULT_HEAP_PAGE_LIMIT,

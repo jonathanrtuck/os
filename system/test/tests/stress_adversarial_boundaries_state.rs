@@ -86,6 +86,13 @@ mod address_space {
                 executable: false,
             }
         }
+        pub fn user_xo() -> Self {
+            Self {
+                el0: false,
+                writable: false,
+                executable: true,
+            }
+        }
     }
 }
 

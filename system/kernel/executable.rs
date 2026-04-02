@@ -184,7 +184,9 @@ pub fn segment_data<'a>(data: &'a [u8], seg: &LoadSegment) -> Result<&'a [u8], E
 /// Priority: X > W > RO. A segment with both W and X gets RX (W^X enforcement).
 pub fn segment_attrs(flags: u32) -> PageAttrs {
     if flags & PF_X != 0 {
-        PageAttrs::user_rx()
+        // Execute-only: prevents code disclosure (ASLR hardening).
+        // EL0 can fetch instructions but not read code as data.
+        PageAttrs::user_xo()
     } else if flags & PF_W != 0 {
         PageAttrs::user_rw()
     } else {

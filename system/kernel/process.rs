@@ -15,12 +15,14 @@ use alloc::boxed::Box;
 
 use super::{
     address_space::{AddressSpace, PageAttrs},
-    address_space_id, executable,
+    address_space_id,
+    aslr::AslrLayout,
+    executable,
     handle::HandleTable,
     memory,
     memory_region::{Backing, Vma},
     page_allocator,
-    paging::{PAGE_SIZE, USER_STACK_TOP, USER_STACK_VA},
+    paging::PAGE_SIZE,
     scheduler,
     thread::ThreadId,
 };
@@ -40,13 +42,17 @@ pub struct Process {
     /// Defaults to u64::MAX (all syscalls allowed). Set before process_start
     /// via the PROCESS_SET_SYSCALL_FILTER syscall.
     pub(crate) syscall_mask: u64,
+    /// Per-process PAC keys. Loaded into key registers on context switch.
+    /// All threads in a process share the same keys (same address space
+    /// → same code → same pointer authentication domain).
+    pub(crate) pac_keys: super::arch::security::PacKeys,
 }
 /// Unique process identifier. Index into the scheduler's process table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProcessId(pub u32);
 
 impl Process {
-    pub fn new(address_space: Box<AddressSpace>) -> Self {
+    pub fn new(address_space: Box<AddressSpace>, pac_keys: super::arch::security::PacKeys) -> Self {
         Self {
             address_space,
             handles: HandleTable::new(),
@@ -54,6 +60,7 @@ impl Process {
             started: false,
             killed: false,
             syscall_mask: u64::MAX,
+            pac_keys,
         }
     }
 }
@@ -107,7 +114,16 @@ fn copy_segment_page(file_data: &[u8], file_size: u64, seg_offset: u64, pa: memo
 pub fn create_from_user_elf(elf_bytes: &[u8]) -> Result<(ProcessId, ThreadId), &'static str> {
     let header = executable::parse_header(elf_bytes).map_err(|_| "bad ELF header")?;
     let (asid, _generation) = address_space_id::alloc();
-    let mut addr_space = match AddressSpace::new(asid) {
+
+    // Per-process ASLR layout. Fork a PRNG for this process's address space
+    // randomization. Falls back to deterministic layout if the kernel PRNG
+    // is not seeded (e.g., very early boot or no entropy sources).
+    let layout = match super::fork_prng() {
+        Some(mut prng) => AslrLayout::randomize(&mut prng),
+        None => AslrLayout::deterministic(),
+    };
+
+    let mut addr_space = match AddressSpace::new(asid, &layout) {
         Some(a) => Box::new(a),
         None => {
             address_space_id::free(asid);
@@ -153,11 +169,17 @@ pub fn create_from_user_elf(elf_bytes: &[u8]) -> Result<(ProcessId, ThreadId), &
         }
     }
 
-    setup_stack(&mut addr_space)?;
+    setup_stack(&mut addr_space, &layout)?;
 
-    let process_id = scheduler::create_process(addr_space);
-    let thread_id = match scheduler::spawn_user_suspended(process_id, header.entry, USER_STACK_TOP)
-    {
+    // Generate per-process PAC keys for pointer authentication.
+    let pac_keys = match super::fork_prng() {
+        Some(mut prng) => super::arch::security::PacKeys::generate(&mut prng),
+        None => super::arch::security::PacKeys::zero(),
+    };
+
+    let process_id = scheduler::create_process(addr_space, pac_keys);
+    let thread_id =
+        match scheduler::spawn_user_suspended(process_id, header.entry, layout.stack_top) {
         Some(tid) => tid,
         None => {
             // Clean up the orphaned process slot. The process has no threads
@@ -172,16 +194,24 @@ pub fn create_from_user_elf(elf_bytes: &[u8]) -> Result<(ProcessId, ThreadId), &
     Ok((process_id, thread_id))
 }
 /// Set up the user stack VMA and eagerly map the top page.
-fn setup_stack(addr_space: &mut AddressSpace) -> Result<(), &'static str> {
+///
+/// Uses the ASLR layout's stack_top for the stack position. The stack
+/// grows downward from stack_top, with a guard page below.
+fn setup_stack(addr_space: &mut AddressSpace, layout: &AslrLayout) -> Result<(), &'static str> {
+    let stack_pages = 4u64; // USER_STACK_PAGES
+    let stack_size = stack_pages * PAGE_SIZE;
+    let stack_va = layout.stack_top - stack_size;
+
     addr_space.vmas.insert(Vma {
-        start: USER_STACK_VA,
-        end: USER_STACK_TOP,
+        start: stack_va,
+        end: layout.stack_top,
         writable: true,
         executable: false,
         backing: Backing::Anonymous,
     });
 
-    let top_stack_va = USER_STACK_TOP - PAGE_SIZE;
+    // Eagerly map the top page of the stack.
+    let top_stack_va = layout.stack_top - PAGE_SIZE;
     let pa = page_allocator::alloc_frame().ok_or("out of frames for user stack")?;
 
     if !addr_space.map_page(top_stack_va, pa.as_u64(), &PageAttrs::user_rw()) {

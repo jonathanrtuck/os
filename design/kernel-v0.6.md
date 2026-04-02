@@ -632,31 +632,19 @@ Expose a proper monotonic clock to userspace. Currently `sys::counter()` returns
 
 ---
 
-### Phase 4: Security Hardening
+### Phase 4: Security Hardening — COMPLETE (except KASLR)
 
-**4a. User ASLR:**
+**4a. Kernel PRNG — COMPLETE.** ChaCha20 with fast key erasure (Bernstein 2017). Novel: type-state seeding (`EntropyPool → Prng`) enforced at compile time — no production kernel does this. Entropy from RNDR (if FEAT_RNG available) + CPU jitter extraction (memory-access timing variation). Per-CPU instances, `fork()` for per-process seed derivation. 28 tests including RFC 8439 test vectors and statistical quality checks. Zero unsafe in the PRNG core.
 
-- Kernel PRNG (ChaCha20, ~50 lines, seeded from architectural counter + DTB entropy)
-- Per-process randomized bases for code, heap, stack, SHM regions
-- Bump allocators already support arbitrary starting points — decouple from `*_BASE` constants
+**4b. User ASLR — COMPLETE.** Per-process randomized bases for heap, DMA, device MMIO, and stack. Per-process PRNG fork ensures layout isolation between processes. Channel SHM and shared memory remain fixed (userspace addresses them directly — full ASLR requires a bootstrap protocol, deferred). ~14 bits entropy for heap/DMA/stack. 9 tests. Deterministic fallback when PRNG unavailable.
 
-**4b. Stack canaries:**
+**4c. PAC + BTI (replaces original stack canaries plan) — COMPLETE.** Per-process PAC keys (5 × 128-bit: APIA/APDA/APIB/APDB/APG) generated from PRNG, stored in Process struct, loaded on context switch alongside TTBR0 swap. `arch::security` module with feature detection (`pac_supported()`, `bti_supported()`). Raw system register encodings for key writes. PAC is strictly superior to stack canaries on ARM64.
 
-- `-Z stack-protector=all` compiler flag
-- Per-thread random canary in TLS slot
-- ~20 lines of kernel code
+**4d. COW kernel mechanics — SUBSUMED by Phase 3b** (pager interface). COW is now userspace policy.
 
-**4c. KASLR:**
+**4e. Execute-only user code pages — COMPLETE.** New `PageAttrs::user_xo()` maps code segments as execute-only (AP=RO, no AP_EL0, UXN=0). EL0 can fetch instructions but load/store on code pages faults. Prevents code disclosure attacks that leak ASLR layout. ~5 lines.
 
-- Randomize `KERNEL_VA_BASE` at boot
-- Requires boot.S modification + RNG before MMU enable
-- Well-understood (Linux, Zircon do this)
-
-**4d. COW kernel mechanics (§9.9) — may be subsumed by Phase 3b:**
-
-- If pager interface is implemented, COW becomes userspace policy
-- If pager interface is NOT in scope, implement kernel-side COW fault handling
-- Decision depends on Phase 3b design discussion outcome
+**KASLR — DEFERRED.** Requires boot.S assembly (RNDR before MMU enable), position-independent kernel compilation, early-boot relocation. Highest-risk item. All other hardening layers are in place.
 
 ---
 

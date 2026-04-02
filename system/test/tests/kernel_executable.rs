@@ -19,6 +19,9 @@ mod address_space {
         pub fn user_rx() -> Self {
             Self(2)
         }
+        pub fn user_xo() -> Self {
+            Self(3)
+        }
     }
 }
 #[path = "../../kernel/executable.rs"]
@@ -199,7 +202,7 @@ fn parse_valid_header() {
 fn segment_attrs_executable() {
     let a = executable::segment_attrs(5); // PF_R | PF_X
 
-    assert!(matches!(a, address_space::PageAttrs(2))); // user_rx
+    assert!(matches!(a, address_space::PageAttrs(3))); // user_xo (execute-only)
 }
 #[test]
 fn segment_attrs_readonly() {
@@ -215,10 +218,10 @@ fn segment_attrs_writable() {
 }
 #[test]
 fn segment_attrs_wx_prefers_x() {
-    // W^X enforcement: both W and X → RX
+    // W^X enforcement: both W and X → XO (execute-only)
     let a = executable::segment_attrs(7); // PF_R | PF_W | PF_X
 
-    assert!(matches!(a, address_space::PageAttrs(2))); // user_rx
+    assert!(matches!(a, address_space::PageAttrs(3))); // user_xo
 }
 #[test]
 fn load_segment_file_size_exceeds_mem_size() {

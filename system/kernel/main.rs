@@ -80,6 +80,7 @@ core::arch::global_asm!(include_str!("arch/aarch64/exception.S"));
 mod address_space;
 mod address_space_id;
 mod arch;
+mod aslr;
 mod channel;
 mod context;
 mod device_tree;
@@ -101,6 +102,7 @@ mod per_core;
 mod power;
 mod process;
 mod process_exit;
+mod random;
 mod scheduler;
 mod scheduling_algorithm;
 mod scheduling_context;
@@ -151,6 +153,72 @@ extern "C" {
     static _services_start: u8;
     /// End of the service pack section (linker script symbol).
     static _services_end: u8;
+}
+
+/// Global kernel PRNG, protected by IrqMutex.
+///
+/// Initialized during boot by `init_prng()`. Used for ASLR seeds, PAC keys,
+/// and per-process PRNG derivation. None until seeded.
+static KERNEL_PRNG: sync::IrqMutex<Option<random::Prng>> =
+    sync::IrqMutex::new(None);
+
+/// Initialize the kernel PRNG from available entropy sources.
+///
+/// Probes for hardware RNG (RNDR via FEAT_RNG), mixes in timer counter
+/// jitter, and seals the entropy pool once ≥256 bits are accumulated.
+/// Called once during boot, before any processes are spawned.
+fn init_prng() {
+    let mut pool = random::EntropyPool::new();
+
+    // Source 1: Hardware RNG (RNDR) — strongest source, if available.
+    if arch::entropy::has_hardware_rng() {
+        // Draw 4 × 64 bits = 256 bits from hardware RNG.
+        let mut hw_count = 0u32;
+        for _ in 0..8 {
+            if let Some(val) = arch::entropy::hardware_random() {
+                pool.add_entropy(&val.to_le_bytes(), 64);
+                hw_count += 1;
+            }
+        }
+        serial::puts("  🎲 entropy - rndr: ");
+        serial::put_u32(hw_count * 64);
+        serial::puts(" bits\n");
+    } else {
+        serial::puts("  🎲 entropy - rndr: not available\n");
+    }
+
+    // Source 2: CPU jitter entropy — execution time variation from cache,
+    // TLB, and pipeline nondeterminism. Each sample produces 8 bytes of
+    // jitter data; we conservatively credit 4 bits per sample.
+    // 64 samples × 4 bits = 256 bits — enough to seed even without RNDR.
+    let mut scratch = [0u8; 64];
+    for _ in 0..64 {
+        let jitter = arch::entropy::collect_jitter(&mut scratch);
+        pool.add_entropy(&jitter, 4);
+    }
+
+    // Seal the pool.
+    match pool.try_seal() {
+        Ok(prng) => {
+            let mut guard = KERNEL_PRNG.lock();
+            *guard = Some(prng);
+            serial::puts("  🔐 prng - seeded (chacha20 + fast key erasure)\n");
+        }
+        Err(_pool) => {
+            // On systems without RNDR and limited interrupts, we may not
+            // have enough entropy at this point. The PRNG will remain None;
+            // ASLR will use deterministic layout as fallback.
+            serial::puts("  ⚠️  prng - insufficient entropy, aslr disabled\n");
+        }
+    }
+}
+
+/// Fork a new PRNG from the kernel PRNG for per-process use.
+///
+/// Returns None if the kernel PRNG is not seeded.
+pub fn fork_prng() -> Option<random::Prng> {
+    let mut guard = KERNEL_PRNG.lock();
+    guard.as_mut().map(|prng| prng.fork())
 }
 
 /// Info discovered about a virtio-mmio device.
@@ -806,6 +874,10 @@ pub extern "C" fn kernel_main(dtb_pa: u64) -> ! {
     } else {
         serial::puts("  ⚡ interrupts - gic v3 (hardcoded)\n");
     }
+
+    // Initialize kernel PRNG. Seed from hardware RNG (RNDR) if available,
+    // then mix in timer counter for additional entropy.
+    init_prng();
 
     scheduler::init();
     serial::puts("  📋 scheduler - eevdf + scheduling contexts\n");

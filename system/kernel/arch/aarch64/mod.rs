@@ -10,6 +10,7 @@
 
 pub mod context;
 pub mod cpu;
+pub mod entropy;
 pub mod interrupt_controller;
 pub mod interrupts;
 pub mod memory_mapped_io;
@@ -17,5 +18,6 @@ pub mod mmu;
 pub mod per_core;
 pub mod power;
 pub mod scheduler;
+pub mod security;
 pub mod serial;
 pub mod timer;

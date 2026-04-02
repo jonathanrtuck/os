@@ -8,8 +8,19 @@
 
 - **Phase 1 (Arch Abstraction): COMPLETE.** 14 files under `kernel/arch/aarch64/`, zero asm outside arch, clean `#[cfg(target_arch)]` boundary. Settled interface: MMU, Context, interrupts, timer, serial, power.
 - **Phase 2 (Capability Model): COMPLETE.** Rights attenuation (8 named rights, monotonic AND on transfer, per-syscall enforcement). Dynamic handle table (two-level: 256 base + overflow pages, 4096 cap, Handle u16). Badges (u64 per-handle, set/get syscalls, preserved through transfer). 30 syscalls. 2,425 tests pass.
-- **Phase 3 (Core Primitives): IN PROGRESS.** Phase 3a (VMOs) complete. Phases 3b–3e (pager, signals, thread inspection, clock) need design discussions.
-  - **Phase 3a (VMOs): COMPLETE.** 10 new syscalls (30-39). Novel design: versioned (COW snapshots with bounded ring), sealed (immutable freeze with PTE invalidation), content-typed (u64 tag), lazy-backed (demand-paged). Mapping tracking for seal/restore PTE invalidation across processes. Cross-process vmo_map replaces memory_share. VMO_OP_LOOKUP for DMA PA retrieval. `snapshot_count` in VmoInfo (unique — no other microkernel exposes snapshot depth). **Removed:** `dma_alloc`/`dma_free`/`memory_share` kernel syscalls — sys library provides same API via VMOs. 2,462 tests pass.
+- **Phase 3 (Core Primitives): COMPLETE.** VMOs, pager interface, signals/events, thread inspection, clock.
+  - **Phase 3a (VMOs): COMPLETE.** 10 new syscalls (30-39). Novel design: versioned (COW snapshots with bounded ring), sealed (immutable freeze with PTE invalidation), content-typed (u64 tag), lazy-backed (demand-paged). Mapping tracking for seal/restore PTE invalidation across processes. Cross-process vmo_map replaces memory_share. VMO_OP_LOOKUP for DMA PA retrieval. `snapshot_count` in VmoInfo (unique — no other microkernel exposes snapshot depth). **Removed:** `dma_alloc`/`dma_free`/`memory_share` kernel syscalls — sys library provides same API via VMOs.
+  - **Phase 3b (Pager interface): COMPLETE.** VMO-level pagers via channel, fault dedup, exception priority chain.
+  - **Phase 3c (Signals/events): COMPLETE.** Event objects with signal bitmask.
+  - **Phase 3d (Thread inspection): COMPLETE.** Read thread state for debugging.
+  - **Phase 3e (Clock): COMPLETE.** Monotonic clock syscall.
+- **Phase 4 (Security Hardening): COMPLETE (KASLR deferred).**
+  - **4a: Kernel PRNG — COMPLETE.** ChaCha20 + fast key erasure. Novel: type-state seeding (`EntropyPool → Prng`) — compile-time enforcement that no production kernel has. RNDR + CPU jitter entropy. Per-process PRNG fork. 28 tests + RFC 8439 vectors.
+  - **4b: User ASLR — COMPLETE.** Per-process randomized heap/DMA/device/stack bases (~14 bits each). Channel SHM/shared memory fixed (userspace dependency). 9 tests.
+  - **4c: PAC + BTI — COMPLETE.** Per-process PAC keys (5 × 128-bit), loaded on context switch. Replaces stack canaries (strictly superior on ARM64). Feature detection via `arch::security`.
+  - **4d: COW — SUBSUMED** by Phase 3b pager interface.
+  - **4e: Execute-only code pages — COMPLETE.** `PageAttrs::user_xo()` prevents code disclosure.
+  - **KASLR — DEFERRED.** Requires boot.S changes; all other layers done.
 
 **v0.5 Rich Text: COMPLETE** (2026-03-30). Piece table library (512 pieces, 32 styles, operation coalescing). Style palette with semantic a11y roles. Rich-editor process for text/rich documents. Content-type-aware edit protocol — document, layout engine, and presenter all dispatch on text/rich vs text/plain. Style shortcuts (Cmd+B/I, Cmd+1/2). Underline and strikethrough decorations.
 

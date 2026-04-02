@@ -483,7 +483,7 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
         new_thread.activate();
         new_thread.scheduling.last_started = now;
 
-        swap_ttbr0(&old_thread, &new_thread);
+        swap_ttbr0(&old_thread, &new_thread, &s.processes);
 
         metrics::inc_context_switches();
 
@@ -515,7 +515,7 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
 
         let idle_ctx = idle.context_ptr();
 
-        swap_ttbr0(&old_thread, &idle);
+        swap_ttbr0(&old_thread, &idle, &s.processes);
 
         metrics::inc_context_switches();
 
@@ -674,7 +674,7 @@ fn set_wake_pending_inner(s: &mut State, id: ThreadId) {
 /// on all cores, which could cause transient performance issues and
 /// interact badly with speculative execution.
 #[inline(never)]
-fn swap_ttbr0(old: &Thread, new: &Thread) {
+fn swap_ttbr0(old: &Thread, new: &Thread, processes: &[Option<Process>]) {
     let old_ttbr0 = ttbr0_for(old);
     let new_ttbr0 = ttbr0_for(new);
 
@@ -687,6 +687,15 @@ fn swap_ttbr0(old: &Thread, new: &Thread) {
         // and page table root switch.
         unsafe {
             super::arch::scheduler::switch_address_space(old_asid, new_ttbr0);
+        }
+
+        // Load per-process PAC keys for the new address space.
+        // Only on address space change — threads within the same process
+        // share keys, so intra-process context switches skip this.
+        if let Some(new_pid) = new.process_id {
+            if let Some(Some(process)) = processes.get(new_pid.0 as usize) {
+                super::arch::security::set_pac_keys(&process.pac_keys);
+            }
         }
     }
 }
@@ -960,13 +969,16 @@ pub fn close_handle_categories(h: HandleCategories) {
 /// The process starts with an empty handle table. No threads yet — call
 /// `spawn_user` to add the initial thread.
 #[inline(never)]
-pub fn create_process(addr_space: Box<super::address_space::AddressSpace>) -> ProcessId {
+pub fn create_process(
+    addr_space: Box<super::address_space::AddressSpace>,
+    pac_keys: super::arch::security::PacKeys,
+) -> ProcessId {
     let mut s = STATE.lock();
     let id = s.next_process_id;
 
     s.next_process_id += 1;
 
-    let process = Process::new(addr_space);
+    let process = Process::new(addr_space, pac_keys);
 
     s.processes.push(Some(process));
 
