@@ -10,37 +10,59 @@
 //! - SyscallBlocked error code value
 //! - Out-of-range syscall numbers bypass the filter
 
-// --- Duplicated constants from syscall.rs ---
+// --- Must match kernel/syscall.rs::nr exactly (dense 0–36) ---
 
 mod nr {
+    // Runtime basics (0–2)
     pub const EXIT: u64 = 0;
     pub const WRITE: u64 = 1;
     pub const YIELD: u64 = 2;
+    // Capability layer (3–6)
     pub const HANDLE_CLOSE: u64 = 3;
-    pub const CHANNEL_SIGNAL: u64 = 4;
-    pub const CHANNEL_CREATE: u64 = 5;
-    pub const SCHEDULING_CONTEXT_CREATE: u64 = 6;
-    pub const SCHEDULING_CONTEXT_BORROW: u64 = 7;
-    pub const SCHEDULING_CONTEXT_RETURN: u64 = 8;
-    pub const SCHEDULING_CONTEXT_BIND: u64 = 9;
+    pub const HANDLE_SEND: u64 = 4;
+    pub const HANDLE_SET_BADGE: u64 = 5;
+    pub const HANDLE_GET_BADGE: u64 = 6;
+    // IPC (7–8)
+    pub const CHANNEL_CREATE: u64 = 7;
+    pub const CHANNEL_SIGNAL: u64 = 8;
+    // Event loop (9)
+    pub const WAIT: u64 = 9;
+    // Userspace sync (10–11)
     pub const FUTEX_WAIT: u64 = 10;
     pub const FUTEX_WAKE: u64 = 11;
-    pub const WAIT: u64 = 12;
-    pub const TIMER_CREATE: u64 = 13;
-    pub const INTERRUPT_REGISTER: u64 = 14;
-    pub const INTERRUPT_ACK: u64 = 15;
-    pub const DEVICE_MAP: u64 = 16;
-    pub const DMA_ALLOC: u64 = 17;
-    pub const DMA_FREE: u64 = 18;
-    pub const THREAD_CREATE: u64 = 19;
-    pub const PROCESS_CREATE: u64 = 20;
-    pub const PROCESS_START: u64 = 21;
-    pub const HANDLE_SEND: u64 = 22;
-    pub const PROCESS_KILL: u64 = 23;
-    pub const MEMORY_SHARE: u64 = 24;
-    pub const MEMORY_ALLOC: u64 = 25;
-    pub const MEMORY_FREE: u64 = 26;
-    pub const PROCESS_SET_SYSCALL_FILTER: u64 = 27;
+    // Time (12)
+    pub const TIMER_CREATE: u64 = 12;
+    // Heap memory (13–14)
+    pub const MEMORY_ALLOC: u64 = 13;
+    pub const MEMORY_FREE: u64 = 14;
+    // VMO (15–24)
+    pub const VMO_CREATE: u64 = 15;
+    pub const VMO_MAP: u64 = 16;
+    pub const VMO_UNMAP: u64 = 17;
+    pub const VMO_READ: u64 = 18;
+    pub const VMO_WRITE: u64 = 19;
+    pub const VMO_GET_INFO: u64 = 20;
+    pub const VMO_SNAPSHOT: u64 = 21;
+    pub const VMO_RESTORE: u64 = 22;
+    pub const VMO_SEAL: u64 = 23;
+    pub const VMO_OP_RANGE: u64 = 24;
+    // Process/thread lifecycle (25–29)
+    pub const PROCESS_CREATE: u64 = 25;
+    pub const PROCESS_START: u64 = 26;
+    pub const PROCESS_KILL: u64 = 27;
+    pub const PROCESS_SET_SYSCALL_FILTER: u64 = 28;
+    pub const THREAD_CREATE: u64 = 29;
+    // Scheduling (30–33)
+    pub const SCHEDULING_CONTEXT_CREATE: u64 = 30;
+    pub const SCHEDULING_CONTEXT_BORROW: u64 = 31;
+    pub const SCHEDULING_CONTEXT_RETURN: u64 = 32;
+    pub const SCHEDULING_CONTEXT_BIND: u64 = 33;
+    // Device layer (34–36)
+    pub const DEVICE_MAP: u64 = 34;
+    pub const INTERRUPT_REGISTER: u64 = 35;
+    pub const INTERRUPT_ACK: u64 = 36;
+    /// Total syscall count (for iteration bounds).
+    pub const COUNT: u64 = 37;
 }
 
 // --- Duplicated Error enum from syscall.rs ---
@@ -73,17 +95,17 @@ enum SyscallError {
 /// Duplicate of the filter check in dispatch().
 ///
 /// Returns true if the syscall is allowed, false if blocked.
-/// EXIT is always allowed. Syscall numbers >= 32 are always allowed
+/// EXIT is always allowed. Syscall numbers >= 64 are always allowed
 /// (they'll hit UnknownSyscall in the match arm, not the filter).
-fn is_syscall_allowed(syscall_nr: u64, mask: u32) -> bool {
+fn is_syscall_allowed(syscall_nr: u64, mask: u64) -> bool {
     if syscall_nr == nr::EXIT {
         return true;
     }
-    if syscall_nr >= 32 {
+    if syscall_nr >= 64 {
         return true;
     }
 
-    mask & (1u32 << syscall_nr as u32) != 0
+    mask & (1u64 << syscall_nr) != 0
 }
 
 // ==========================================================================
@@ -92,10 +114,10 @@ fn is_syscall_allowed(syscall_nr: u64, mask: u32) -> bool {
 
 #[test]
 fn default_mask_allows_all() {
-    let mask = u32::MAX;
+    let mask = u64::MAX;
 
-    // Every syscall 0-27 should be allowed.
-    for nr in 0..=27 {
+    // Every syscall 0-36 should be allowed.
+    for nr in 0..nr::COUNT {
         assert!(
             is_syscall_allowed(nr, mask),
             "syscall {} should be allowed with default mask",
@@ -116,7 +138,7 @@ fn exit_always_allowed_with_zero_mask() {
 #[test]
 fn exit_always_allowed_with_arbitrary_mask() {
     // Mask that explicitly has bit 0 clear.
-    assert!(is_syscall_allowed(nr::EXIT, 0xFFFF_FFFE));
+    assert!(is_syscall_allowed(nr::EXIT, 0xFFFF_FFFF_FFFF_FFFE));
     assert!(is_syscall_allowed(nr::EXIT, 0));
     assert!(is_syscall_allowed(nr::EXIT, 42));
 }
@@ -127,13 +149,13 @@ fn exit_always_allowed_with_arbitrary_mask() {
 
 #[test]
 fn mask_zero_blocks_all_except_exit() {
-    let mask = 0u32;
+    let mask = 0u64;
 
     // EXIT is allowed.
     assert!(is_syscall_allowed(nr::EXIT, mask));
 
-    // Every other syscall (1-27) is blocked.
-    for nr in 1..=27 {
+    // Every other syscall (1-36) is blocked.
+    for nr in 1..nr::COUNT {
         assert!(
             !is_syscall_allowed(nr, mask),
             "syscall {} should be blocked with mask=0",
@@ -149,7 +171,7 @@ fn mask_zero_blocks_all_except_exit() {
 #[test]
 fn specific_mask_allows_only_set_bits() {
     // Allow only WRITE (1) and YIELD (2).
-    let mask = (1u32 << nr::WRITE) | (1u32 << nr::YIELD);
+    let mask = (1u64 << nr::WRITE) | (1u64 << nr::YIELD);
 
     assert!(is_syscall_allowed(nr::EXIT, mask)); // EXIT always allowed
     assert!(is_syscall_allowed(nr::WRITE, mask));
@@ -166,18 +188,18 @@ fn specific_mask_allows_only_set_bits() {
 
 #[test]
 fn editor_mask_scenario() {
-    // HARDENING.md recommends: EXIT, WRITE, YIELD, HANDLE_CLOSE,
+    // Minimal editor sandbox: EXIT, WRITE, YIELD, HANDLE_CLOSE,
     // CHANNEL_SIGNAL, WAIT, FUTEX_WAIT, FUTEX_WAKE, MEMORY_ALLOC, MEMORY_FREE.
-    let editor_mask = (1u32 << nr::EXIT)
-        | (1u32 << nr::WRITE)
-        | (1u32 << nr::YIELD)
-        | (1u32 << nr::HANDLE_CLOSE)
-        | (1u32 << nr::CHANNEL_SIGNAL)
-        | (1u32 << nr::WAIT)
-        | (1u32 << nr::FUTEX_WAIT)
-        | (1u32 << nr::FUTEX_WAKE)
-        | (1u32 << nr::MEMORY_ALLOC)
-        | (1u32 << nr::MEMORY_FREE);
+    let editor_mask = (1u64 << nr::EXIT)
+        | (1u64 << nr::WRITE)
+        | (1u64 << nr::YIELD)
+        | (1u64 << nr::HANDLE_CLOSE)
+        | (1u64 << nr::CHANNEL_SIGNAL)
+        | (1u64 << nr::WAIT)
+        | (1u64 << nr::FUTEX_WAIT)
+        | (1u64 << nr::FUTEX_WAKE)
+        | (1u64 << nr::MEMORY_ALLOC)
+        | (1u64 << nr::MEMORY_FREE);
 
     // Allowed syscalls.
     let allowed = [
@@ -201,25 +223,35 @@ fn editor_mask_scenario() {
         );
     }
 
-    // Blocked syscalls (the dangerous 17).
+    // Everything else should be blocked.
     let blocked = [
+        nr::HANDLE_SEND,
+        nr::HANDLE_SET_BADGE,
+        nr::HANDLE_GET_BADGE,
         nr::CHANNEL_CREATE,
+        nr::TIMER_CREATE,
+        nr::VMO_CREATE,
+        nr::VMO_MAP,
+        nr::VMO_UNMAP,
+        nr::VMO_READ,
+        nr::VMO_WRITE,
+        nr::VMO_GET_INFO,
+        nr::VMO_SNAPSHOT,
+        nr::VMO_RESTORE,
+        nr::VMO_SEAL,
+        nr::VMO_OP_RANGE,
+        nr::PROCESS_CREATE,
+        nr::PROCESS_START,
+        nr::PROCESS_KILL,
+        nr::PROCESS_SET_SYSCALL_FILTER,
+        nr::THREAD_CREATE,
         nr::SCHEDULING_CONTEXT_CREATE,
         nr::SCHEDULING_CONTEXT_BORROW,
         nr::SCHEDULING_CONTEXT_RETURN,
         nr::SCHEDULING_CONTEXT_BIND,
-        nr::TIMER_CREATE,
+        nr::DEVICE_MAP,
         nr::INTERRUPT_REGISTER,
         nr::INTERRUPT_ACK,
-        nr::DEVICE_MAP,
-        nr::DMA_ALLOC,
-        nr::DMA_FREE,
-        nr::THREAD_CREATE,
-        nr::PROCESS_CREATE,
-        nr::PROCESS_START,
-        nr::HANDLE_SEND,
-        nr::PROCESS_KILL,
-        nr::MEMORY_SHARE,
     ];
 
     for &nr in &blocked {
@@ -240,10 +272,10 @@ fn mask_set_only_before_start() {
     // Simulates the started check in sys_process_set_syscall_filter.
     struct FakeProcess {
         started: bool,
-        syscall_mask: u32,
+        syscall_mask: u64,
     }
 
-    fn set_filter(target: &mut FakeProcess, mask: u32) -> Result<u64, Error> {
+    fn set_filter(target: &mut FakeProcess, mask: u64) -> Result<u64, Error> {
         if target.started {
             return Err(Error::InvalidArgument);
         }
@@ -255,7 +287,7 @@ fn mask_set_only_before_start() {
 
     let mut p = FakeProcess {
         started: false,
-        syscall_mask: u32::MAX,
+        syscall_mask: u64::MAX,
     };
 
     // Before start: succeeds.
@@ -274,10 +306,10 @@ fn mask_set_only_before_start() {
 
 #[test]
 fn syscall_nr_out_of_range_not_filtered() {
-    // Syscall numbers >= 32 should bypass the filter (returns true),
+    // Syscall numbers >= 64 should bypass the filter (returns true),
     // even with mask=0. They'll hit UnknownSyscall in the match arm.
-    assert!(is_syscall_allowed(32, 0));
     assert!(is_syscall_allowed(64, 0));
+    assert!(is_syscall_allowed(100, 0));
     assert!(is_syscall_allowed(u64::MAX, 0));
 }
 
@@ -314,8 +346,8 @@ fn userspace_syscall_blocked_matches_kernel() {
 // ==========================================================================
 
 #[test]
-fn process_set_syscall_filter_is_nr_27() {
-    assert_eq!(nr::PROCESS_SET_SYSCALL_FILTER, 27);
+fn process_set_syscall_filter_is_nr_28() {
+    assert_eq!(nr::PROCESS_SET_SYSCALL_FILTER, 28);
 }
 
 // ==========================================================================
@@ -324,7 +356,7 @@ fn process_set_syscall_filter_is_nr_27() {
 
 #[test]
 fn mask_bit_31_allows_syscall_31() {
-    let mask = 1u32 << 31;
+    let mask = 1u64 << 31;
 
     assert!(is_syscall_allowed(31, mask));
     // But not 30 (bit 30 is clear).
@@ -334,14 +366,14 @@ fn mask_bit_31_allows_syscall_31() {
 #[test]
 fn mask_single_bit_per_syscall() {
     // Verify that each syscall maps to exactly one bit.
-    for nr in 0u64..28 {
-        let mask = 1u32 << nr as u32;
+    for nr in 0u64..nr::COUNT {
+        let mask = 1u64 << nr;
 
         // This syscall is allowed (plus EXIT which is always allowed).
         assert!(is_syscall_allowed(nr, mask));
 
         // Other non-EXIT syscalls are not allowed.
-        for other in 1u64..28 {
+        for other in 1u64..nr::COUNT {
             if other != nr {
                 assert!(
                     !is_syscall_allowed(other, mask),
@@ -355,15 +387,15 @@ fn mask_single_bit_per_syscall() {
 }
 
 #[test]
-fn default_process_mask_is_u32_max() {
-    // Process::new() initializes syscall_mask to u32::MAX.
-    // Verify that this means all 28 syscalls are allowed.
-    let mask = u32::MAX;
+fn default_process_mask_is_u64_max() {
+    // Process::new() initializes syscall_mask to u64::MAX.
+    // Verify that this means all 37 syscalls are allowed.
+    let mask = u64::MAX;
 
-    for nr in 0u64..28 {
+    for nr in 0u64..nr::COUNT {
         assert!(
-            mask & (1u32 << nr as u32) != 0,
-            "bit {} should be set in u32::MAX",
+            mask & (1u64 << nr) != 0,
+            "bit {} should be set in u64::MAX",
             nr
         );
     }

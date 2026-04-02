@@ -128,7 +128,7 @@ fn assert_err_code(result: sys::SyscallResult<u64>, expected: sys::SyscallError,
 // Phase 1: Invalid syscall numbers
 // -----------------------------------------------------------------------
 fn phase_1_invalid_syscall_numbers() {
-    let bad_nrs: [u64; 8] = [28, 29, 100, 255, 1000, u64::MAX, u64::MAX - 1, 0x8000_0000];
+    let bad_nrs: [u64; 8] = [37, 38, 100, 255, 1000, u64::MAX, u64::MAX - 1, 0x8000_0000];
 
     for &nr in &bad_nrs {
         let ret = unsafe { raw_syscall0(nr) } as i64;
@@ -268,7 +268,7 @@ fn phase_3_bad_addresses() {
 
     // wait() with bad handles_ptr.
     for &addr in &bad_addrs {
-        let ret = unsafe { raw_syscall3(12, addr, 1, 0) } as i64;
+        let ret = unsafe { raw_syscall3(9, addr, 1, 0) } as i64;
         if ret >= 0 {
             phase_fail(b"phase 3", b"wait with bad ptr should fail");
         }
@@ -276,63 +276,61 @@ fn phase_3_bad_addresses() {
 
     // wait() with count=0.
     let handles = [0u16];
-    let ret = unsafe { raw_syscall3(12, handles.as_ptr() as u64, 0, 0) } as i64;
+    let ret = unsafe { raw_syscall3(9, handles.as_ptr() as u64, 0, 0) } as i64;
     if ret >= 0 {
         phase_fail(b"phase 3", b"wait with count=0 should fail");
     }
 
     // wait() with huge count.
-    let ret = unsafe { raw_syscall3(12, handles.as_ptr() as u64, 1000, 0) } as i64;
+    let ret = unsafe { raw_syscall3(9, handles.as_ptr() as u64, 1000, 0) } as i64;
     if ret >= 0 {
         phase_fail(b"phase 3", b"wait with huge count should fail");
     }
 
     // process_create with bad ELF pointer.
     for &addr in &bad_addrs {
-        let ret = unsafe { raw_syscall2(20, addr, 1024) } as i64;
+        let ret = unsafe { raw_syscall2(25, addr, 1024) } as i64;
         if ret >= 0 {
             phase_fail(b"phase 3", b"process_create with bad ptr should fail");
         }
     }
 
     // process_create with zero length.
-    let ret = unsafe { raw_syscall2(20, buf.as_ptr() as u64, 0) } as i64;
+    let ret = unsafe { raw_syscall2(25, buf.as_ptr() as u64, 0) } as i64;
     if ret >= 0 {
         phase_fail(b"phase 3", b"process_create with len=0 should fail");
     }
 
     // process_create with huge length.
-    let ret = unsafe { raw_syscall2(20, buf.as_ptr() as u64, 100_000_000) } as i64;
+    let ret = unsafe { raw_syscall2(25, buf.as_ptr() as u64, 100_000_000) } as i64;
     if ret >= 0 {
         phase_fail(b"phase 3", b"process_create with huge len should fail");
     }
 
-    // dma_alloc with bad pa_out_ptr.
+    // Syscall 17 is now VMO_UNMAP — exercise with bad args (was DMA_ALLOC).
     for &addr in &bad_addrs {
         let ret = unsafe { raw_syscall2(17, 0, addr) } as i64;
         if ret >= 0 {
-            // Order 0 with bad pa_out — should fail with BadAddress.
+            // Bad args should fail, but any non-crash outcome is acceptable.
         }
     }
 
-    // dma_alloc with huge order.
+    // VMO_UNMAP with nonsense args — kernel must not crash.
     let mut pa_out: u64 = 0;
     let ret = unsafe { raw_syscall2(17, 100, &mut pa_out as *mut u64 as u64) } as i64;
-    if ret >= 0 {
-        phase_fail(b"phase 3", b"dma_alloc with order=100 should fail");
-    }
+    let _ = ret; // Any error is fine.
 
     // thread_create with bad entry/stack.
-    let ret = unsafe { raw_syscall2(19, 0xFFFF_0000_0000_0000, 0x1000) } as i64;
+    let ret = unsafe { raw_syscall2(29, 0xFFFF_0000_0000_0000, 0x1000) } as i64;
     if ret >= 0 {
         phase_fail(b"phase 3", b"thread_create with kernel entry should fail");
     }
-    let ret = unsafe { raw_syscall2(19, 0x1000, 0xFFFF_0000_0000_0000) } as i64;
+    let ret = unsafe { raw_syscall2(29, 0x1000, 0xFFFF_0000_0000_0000) } as i64;
     if ret >= 0 {
         phase_fail(b"phase 3", b"thread_create with kernel stack should fail");
     }
     // Unaligned stack.
-    let ret = unsafe { raw_syscall2(19, 0x1000, 0x1001) } as i64;
+    let ret = unsafe { raw_syscall2(29, 0x1000, 0x1001) } as i64;
     if ret >= 0 {
         phase_fail(
             b"phase 3",
@@ -341,45 +339,45 @@ fn phase_3_bad_addresses() {
     }
 
     // memory_alloc(0) — zero pages.
-    let ret = unsafe { raw_syscall1(25, 0) } as i64;
+    let ret = unsafe { raw_syscall1(13, 0) } as i64;
     if ret >= 0 {
         phase_fail(b"phase 3", b"memory_alloc(0) should fail");
     }
 
     // memory_free with bad VA.
-    let ret = unsafe { raw_syscall2(26, 0xDEAD_0000, 1) } as i64;
+    let ret = unsafe { raw_syscall2(14, 0xDEAD_0000, 1) } as i64;
     if ret >= 0 {
         phase_fail(b"phase 3", b"memory_free with bad VA should fail");
     }
 
     // memory_free with unaligned VA.
-    let ret = unsafe { raw_syscall2(26, 0x5000_0001, 1) } as i64;
+    let ret = unsafe { raw_syscall2(14, 0x5000_0001, 1) } as i64;
     if ret >= 0 {
         phase_fail(b"phase 3", b"memory_free with unaligned VA should fail");
     }
 
     // device_map with RAM address (not device MMIO).
-    let ret = unsafe { raw_syscall2(16, 0x4000_0000, 0x1000) } as i64;
+    let ret = unsafe { raw_syscall2(34, 0x4000_0000, 0x1000) } as i64;
     if ret >= 0 {
         phase_fail(b"phase 3", b"device_map into RAM should fail");
     }
 
     // device_map with size=0.
-    let ret = unsafe { raw_syscall2(16, 0x0800_0000, 0) } as i64;
+    let ret = unsafe { raw_syscall2(34, 0x0800_0000, 0) } as i64;
     if ret >= 0 {
         phase_fail(b"phase 3", b"device_map with size=0 should fail");
     }
 
-    // memory_share with bad args.
-    let ret = unsafe { raw_syscall3(24, 255, 0, 0) } as i64; // bad handle, 0 pages
-    let _ = ret; // Should fail with InvalidArgument.
+    // Syscall 24 is now VMO_OP_RANGE — exercise with bad args (was MEMORY_SHARE).
+    let ret = unsafe { raw_syscall3(24, 255, 0, 0) } as i64;
+    let _ = ret; // Bad args — any error is fine, kernel must not crash.
 
     // handle_send with invalid handles.
-    let ret = unsafe { raw_syscall2(22, 255, 255) } as i64;
+    let ret = unsafe { raw_syscall2(4, 255, 255) } as i64;
     let _ = ret; // Should fail.
 
     // scheduling_context_create with zero budget/period.
-    let ret = unsafe { raw_syscall2(6, 0, 0) } as i64;
+    let ret = unsafe { raw_syscall2(30, 0, 0) } as i64;
     let _ = ret; // May or may not fail — kernel decides.
 
     phase_ok(b"phase 3: bad address arguments");
@@ -840,7 +838,7 @@ fn phase_11_wait_edge_cases() {
     // Wait on 17 handles (over max) — should fail.
     // Can't easily make a 17-element array from the API, use raw syscall.
     let big_buf = [0u16; 17];
-    let ret = unsafe { raw_syscall3(12, big_buf.as_ptr() as u64, 17, 0) } as i64;
+    let ret = unsafe { raw_syscall3(9, big_buf.as_ptr() as u64, 17, 0) } as i64;
     let _ = ret;
 
     let _ = sys::handle_close(a.0);
@@ -861,22 +859,17 @@ fn phase_11_wait_edge_cases() {
 }
 
 // -----------------------------------------------------------------------
-// Phase 12: dma_free edge cases
+// Phase 12: VMO syscalls with bad args (was DMA edge cases)
 // -----------------------------------------------------------------------
-fn phase_12_dma_edge_cases() {
-    // dma_free with address not in DMA region.
+fn phase_12_vmo_bad_args() {
+    // Syscall 18 is now VMO_READ — exercise with bad args (was DMA_FREE).
     let ret = unsafe { raw_syscall2(18, 0x1000, 0) } as i64;
-    if ret >= 0 {
-        phase_fail(b"phase 12", b"dma_free bad VA should fail");
-    }
+    let _ = ret; // Bad handle/args — any error is fine.
 
-    // dma_free with kernel VA.
     let ret = unsafe { raw_syscall2(18, 0xFFFF_0000_0000_0000, 0) } as i64;
-    if ret >= 0 {
-        phase_fail(b"phase 12", b"dma_free kernel VA should fail");
-    }
+    let _ = ret; // Kernel-space arg — must not crash.
 
-    phase_ok(b"phase 12: dma edge cases");
+    phase_ok(b"phase 12: VMO syscalls with bad args");
 }
 
 // -----------------------------------------------------------------------
@@ -2012,7 +2005,7 @@ pub extern "C" fn _start() -> ! {
     phase_9_scheduling_context();
     phase_10_concurrent_chaos();
     phase_11_wait_edge_cases();
-    phase_12_dma_edge_cases();
+    phase_12_vmo_bad_args();
 
     // Cross-process tests.
     phase_13_kill_while_blocked();

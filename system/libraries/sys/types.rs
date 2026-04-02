@@ -33,6 +33,11 @@ pub struct ThreadHandle(pub u16);
 #[repr(transparent)]
 pub struct TimerHandle(pub u16);
 
+/// Handle to a Virtual Memory Object.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct VmoHandle(pub u16);
+
 /// Heap usage statistics.
 #[derive(Clone, Copy, Debug)]
 pub struct HeapStats {

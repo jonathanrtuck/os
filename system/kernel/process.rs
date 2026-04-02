@@ -37,9 +37,9 @@ pub struct Process {
     /// last running thread is rescheduled away.
     pub(crate) killed: bool,
     /// Per-process syscall filter bitmask. Bit N set = syscall N allowed.
-    /// Defaults to u32::MAX (all syscalls allowed). Set before process_start
+    /// Defaults to u64::MAX (all syscalls allowed). Set before process_start
     /// via the PROCESS_SET_SYSCALL_FILTER syscall.
-    pub(crate) syscall_mask: u32,
+    pub(crate) syscall_mask: u64,
 }
 /// Unique process identifier. Index into the scheduler's process table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,7 +53,7 @@ impl Process {
             thread_count: 0,
             started: false,
             killed: false,
-            syscall_mask: u32::MAX,
+            syscall_mask: u64::MAX,
         }
     }
 }

@@ -32,9 +32,9 @@ extern crate alloc;
 
 use alloc::{collections::BTreeMap, vec::Vec};
 
-use super::memory::Pa;
 #[cfg(not(test))]
 use super::sync::IrqMutex;
+use super::{memory::Pa, process::ProcessId};
 
 // =========================================================================
 // Public types
@@ -78,6 +78,25 @@ pub struct VmoInfo {
     pub type_tag: u64,
     pub generation: u64,
     pub committed_pages: u64,
+    /// Number of retained snapshots. Novel: no other microkernel exposes
+    /// snapshot depth, enabling consumers to make informed snapshot policy
+    /// decisions (e.g., prune before taking another).
+    pub snapshot_count: u64,
+}
+
+// =========================================================================
+// VmoMapping — tracks where a VMO is mapped (for seal/restore invalidation)
+// =========================================================================
+
+/// Tracks a single mapping of a VMO into a process's address space.
+///
+/// Used by `seal()` to invalidate writable PTEs and by `restore()` to
+/// invalidate stale PTEs across all processes that have mapped this VMO.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VmoMapping {
+    pub process_id: ProcessId,
+    pub va_base: u64,
+    pub page_count: u64,
 }
 
 // =========================================================================
@@ -123,6 +142,9 @@ pub struct Vmo {
     max_snapshots: usize,
     /// True after seal(). All mutating operations rejected.
     sealed: bool,
+    /// Active mappings (process, VA range) for seal/restore PTE invalidation
+    /// and cleanup on Drop.
+    mappings: Vec<VmoMapping>,
 }
 
 impl Vmo {
@@ -137,6 +159,7 @@ impl Vmo {
             snapshots: Vec::new(),
             max_snapshots: DEFAULT_MAX_SNAPSHOTS,
             sealed: false,
+            mappings: Vec::new(),
         }
     }
 
@@ -184,6 +207,10 @@ impl Vmo {
         }
     }
 
+    /// Record a new mapping of this VMO into a process's address space.
+    pub fn add_mapping(&mut self, mapping: VmoMapping) {
+        self.mappings.push(mapping);
+    }
     /// Commit a page at the given offset. Unconditional — does not check
     /// seal or bounds beyond size_pages. Used by the fault handler after
     /// external validation.
@@ -228,6 +255,32 @@ impl Vmo {
             None => None, // No old page (was uncommitted)
         }
     }
+    /// Decommit a single page. Returns:
+    /// - `Some(Some(pa))`: page was committed, refcount hit 0 — caller should free
+    /// - `Some(None)`: page was uncommitted (no-op) or shared with snapshot (not freed)
+    /// - `None`: VMO is sealed or offset out of bounds — rejected
+    pub fn decommit_page(&mut self, offset: u64) -> Option<Option<Pa>> {
+        if self.sealed || offset >= self.size_pages {
+            return None;
+        }
+
+        match self.pages.remove(&offset) {
+            None => Some(None),              // Not committed — no-op
+            Some((pa, 1)) => Some(Some(pa)), // Sole reference — free it
+            Some((pa, _rc)) => {
+                // Shared with snapshots — decrement their refcounts, don't free.
+                for snap in &mut self.snapshots {
+                    if let Some(entry) = snap.pages.get_mut(&offset) {
+                        if entry.0 == pa && entry.1 > 1 {
+                            entry.1 -= 1;
+                        }
+                    }
+                }
+
+                Some(None) // Snapshot still holds the page
+            }
+        }
+    }
     pub fn generation(&self) -> u64 {
         self.generation
     }
@@ -248,6 +301,7 @@ impl Vmo {
             type_tag: self.type_tag,
             generation: self.generation,
             committed_pages: self.committed_pages(),
+            snapshot_count: self.snapshots.len() as u64,
         }
     }
     pub fn is_contiguous(&self) -> bool {
@@ -261,12 +315,30 @@ impl Vmo {
     pub fn lookup_page(&self, offset: u64) -> Option<(Pa, u32)> {
         self.pages.get(&offset).copied()
     }
+    /// Return the active mappings list (for seal/restore PTE invalidation).
+    pub fn mappings(&self) -> &[VmoMapping] {
+        &self.mappings
+    }
     pub fn max_snapshots(&self) -> usize {
         self.max_snapshots
     }
     /// Check if a page needs COW (refcount > 1).
     pub fn page_needs_cow(&self, offset: u64) -> bool {
         self.pages.get(&offset).map_or(false, |&(_, rc)| rc > 1)
+    }
+    /// Remove a mapping by process and VA. Returns true if found and removed.
+    pub fn remove_mapping(&mut self, process_id: ProcessId, va_base: u64) -> bool {
+        if let Some(idx) = self
+            .mappings
+            .iter()
+            .position(|m| m.process_id == process_id && m.va_base == va_base)
+        {
+            self.mappings.swap_remove(idx);
+
+            true
+        } else {
+            false
+        }
     }
     /// Restore the VMO to a previous snapshot generation.
     /// Returns a list of Pa values whose refcount hit 0 (caller should free).
@@ -309,6 +381,16 @@ impl Vmo {
     /// Seal the VMO. Irreversible.
     pub fn seal(&mut self) {
         self.sealed = true;
+    }
+    /// Seal the VMO and return a copy of all active mappings.
+    ///
+    /// The caller must invalidate PTEs for all returned mappings so that
+    /// already-faulted writable pages re-fault through the sealed-aware
+    /// fault handler (which maps them RO).
+    pub fn seal_and_get_mappings(&mut self) -> Vec<VmoMapping> {
+        self.sealed = true;
+
+        self.mappings.clone()
     }
     pub fn size_pages(&self) -> u64 {
         self.size_pages
@@ -452,10 +534,25 @@ impl VmoTable {
 // Public module API (called from syscall.rs, scheduler.rs)
 // =========================================================================
 
+/// Record a mapping of a VMO into a process's address space.
+/// Called by `sys_vmo_map` after the address space mapping succeeds.
+#[cfg(not(test))]
+pub fn add_mapping(id: VmoId, mapping: VmoMapping) {
+    if let Some(vmo) = STATE.lock().get_mut(id) {
+        vmo.add_mapping(mapping);
+    }
+}
 /// Create a new VMO. Returns `(VmoId, VmoFlags)` on success, None if size is 0.
 #[cfg(not(test))]
 pub fn create(size_pages: u64, flags: VmoFlags, type_tag: u64) -> Option<VmoId> {
     STATE.lock().create(size_pages, flags, type_tag)
+}
+/// Decommit a single page from a VMO.
+/// Returns Some(Some(pa)) if the page should be freed, Some(None) if
+/// not freed (shared or was uncommitted), None if sealed/OOB/not found.
+#[cfg(not(test))]
+pub fn decommit_page(id: VmoId, offset: u64) -> Option<Option<Pa>> {
+    STATE.lock().get_mut(id)?.decommit_page(offset)
 }
 /// Destroy a VMO and return all physical pages to free.
 /// Called from handle_close and close_handle_categories.
@@ -467,6 +564,15 @@ pub fn destroy(id: VmoId) -> Vec<Pa> {
 #[cfg(not(test))]
 pub fn get_info(id: VmoId) -> Option<VmoInfo> {
     STATE.lock().get(id).map(|v| v.info())
+}
+/// Get the active mappings for a VMO (for PTE invalidation after decommit).
+#[cfg(not(test))]
+pub fn get_mappings(id: VmoId) -> Vec<VmoMapping> {
+    STATE
+        .lock()
+        .get(id)
+        .map(|v| v.mappings().to_vec())
+        .unwrap_or_default()
 }
 /// Read from a VMO into a kernel buffer. Returns bytes read.
 ///
@@ -511,10 +617,40 @@ pub fn read(id: VmoId, offset: u64, buf: &mut [u8]) -> Option<u64> {
 
     Some(bytes_done as u64)
 }
+/// Remove a mapping record. Called by `sys_vmo_unmap`.
+#[cfg(not(test))]
+pub fn remove_mapping(id: VmoId, process_id: ProcessId, va_base: u64) {
+    if let Some(vmo) = STATE.lock().get_mut(id) {
+        vmo.remove_mapping(process_id, va_base);
+    }
+}
+/// Restore a VMO to a previous snapshot generation.
+/// Returns (freed_pages, mappings_to_invalidate) on success.
+/// None if generation not found, VMO sealed, or VMO doesn't exist.
+#[cfg(not(test))]
+pub fn restore(id: VmoId, generation: u64) -> Option<(Vec<Pa>, Vec<VmoMapping>)> {
+    let mut state = STATE.lock();
+    let vmo = state.get_mut(id)?;
+    let mappings = vmo.mappings().to_vec();
+    let freed = vmo.restore(generation)?;
+    Some((freed, mappings))
+}
+/// Seal a VMO and return all active mappings that need PTE invalidation.
+/// None if VMO doesn't exist.
+#[cfg(not(test))]
+pub fn seal(id: VmoId) -> Option<Vec<VmoMapping>> {
+    STATE.lock().get_mut(id).map(|v| v.seal_and_get_mappings())
+}
 /// Get the size of a VMO in pages.
 #[cfg(not(test))]
 pub fn size_pages(id: VmoId) -> Option<u64> {
     STATE.lock().get(id).map(|v| v.size_pages())
+}
+/// Create a COW snapshot of a VMO. Returns the new generation number.
+/// None if sealed, contiguous, or VMO doesn't exist.
+#[cfg(not(test))]
+pub fn snapshot(id: VmoId) -> Option<u64> {
+    STATE.lock().get_mut(id)?.snapshot()
 }
 /// Write to a VMO from a kernel buffer. Returns bytes written.
 ///

@@ -2,37 +2,56 @@
 
 use crate::{SyscallError, SyscallResult};
 
+/// Syscall numbers — must match kernel/syscall.rs::nr exactly.
 pub mod nr {
+    // --- Runtime basics (0–2) ---
     pub const EXIT: u64 = 0;
     pub const WRITE: u64 = 1;
     pub const YIELD: u64 = 2;
+    // --- Capability layer (3–6) ---
     pub const HANDLE_CLOSE: u64 = 3;
-    pub const CHANNEL_SIGNAL: u64 = 4;
-    pub const CHANNEL_CREATE: u64 = 5;
-    pub const SCHEDULING_CONTEXT_CREATE: u64 = 6;
-    pub const SCHEDULING_CONTEXT_BORROW: u64 = 7;
-    pub const SCHEDULING_CONTEXT_RETURN: u64 = 8;
-    pub const SCHEDULING_CONTEXT_BIND: u64 = 9;
+    pub const HANDLE_SEND: u64 = 4;
+    pub const HANDLE_SET_BADGE: u64 = 5;
+    pub const HANDLE_GET_BADGE: u64 = 6;
+    // --- IPC (7–8) ---
+    pub const CHANNEL_CREATE: u64 = 7;
+    pub const CHANNEL_SIGNAL: u64 = 8;
+    // --- Event loop (9) ---
+    pub const WAIT: u64 = 9;
+    // --- Userspace sync (10–11) ---
     pub const FUTEX_WAIT: u64 = 10;
     pub const FUTEX_WAKE: u64 = 11;
-    pub const WAIT: u64 = 12;
-    pub const TIMER_CREATE: u64 = 13;
-    pub const INTERRUPT_REGISTER: u64 = 14;
-    pub const INTERRUPT_ACK: u64 = 15;
-    pub const DEVICE_MAP: u64 = 16;
-    pub const DMA_ALLOC: u64 = 17;
-    pub const DMA_FREE: u64 = 18;
-    pub const THREAD_CREATE: u64 = 19;
-    pub const PROCESS_CREATE: u64 = 20;
-    pub const PROCESS_START: u64 = 21;
-    pub const HANDLE_SEND: u64 = 22;
-    pub const PROCESS_KILL: u64 = 23;
-    pub const MEMORY_SHARE: u64 = 24;
-    pub const MEMORY_ALLOC: u64 = 25;
-    pub const MEMORY_FREE: u64 = 26;
-    pub const PROCESS_SET_SYSCALL_FILTER: u64 = 27;
-    pub const HANDLE_SET_BADGE: u64 = 28;
-    pub const HANDLE_GET_BADGE: u64 = 29;
+    // --- Time (12) ---
+    pub const TIMER_CREATE: u64 = 12;
+    // --- Heap memory (13–14) ---
+    pub const MEMORY_ALLOC: u64 = 13;
+    pub const MEMORY_FREE: u64 = 14;
+    // --- Virtual Memory Objects (15–24) ---
+    pub const VMO_CREATE: u64 = 15;
+    pub const VMO_MAP: u64 = 16;
+    pub const VMO_UNMAP: u64 = 17;
+    pub const VMO_READ: u64 = 18;
+    pub const VMO_WRITE: u64 = 19;
+    pub const VMO_GET_INFO: u64 = 20;
+    pub const VMO_SNAPSHOT: u64 = 21;
+    pub const VMO_RESTORE: u64 = 22;
+    pub const VMO_SEAL: u64 = 23;
+    pub const VMO_OP_RANGE: u64 = 24;
+    // --- Process/thread lifecycle (25–29) ---
+    pub const PROCESS_CREATE: u64 = 25;
+    pub const PROCESS_START: u64 = 26;
+    pub const PROCESS_KILL: u64 = 27;
+    pub const PROCESS_SET_SYSCALL_FILTER: u64 = 28;
+    pub const THREAD_CREATE: u64 = 29;
+    // --- Scheduling (30–33) ---
+    pub const SCHEDULING_CONTEXT_CREATE: u64 = 30;
+    pub const SCHEDULING_CONTEXT_BORROW: u64 = 31;
+    pub const SCHEDULING_CONTEXT_RETURN: u64 = 32;
+    pub const SCHEDULING_CONTEXT_BIND: u64 = 33;
+    // --- Device layer (34–36) ---
+    pub const DEVICE_MAP: u64 = 34;
+    pub const INTERRUPT_REGISTER: u64 = 35;
+    pub const INTERRUPT_ACK: u64 = 36;
 }
 
 pub fn align_up(addr: usize, align: usize) -> usize {

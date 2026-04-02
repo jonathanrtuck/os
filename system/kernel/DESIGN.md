@@ -376,7 +376,7 @@ The OS service adjusts contexts dynamically as document state changes. The kerne
 - **Device discovery:** Parse DTB (device tree blob) at boot to enumerate devices. **Done** (§8.6). DTB parser discovers ~40 devices; GIC and virtio-mmio addresses initialized from DTB data.
 - **MMIO mapping:** `device_map(pa, size)` syscall (#16) maps a device's MMIO region into the calling process's address space with Device-nGnRE memory attributes (MAIR index 1). Returns the user VA. VA is bump-allocated from a dedicated region (`DEVICE_MMIO_BASE` at 512 MiB, up to `DEVICE_MMIO_END` at 1 GiB). Validates that the PA is outside RAM (device space only). Zero overhead for register access — the driver reads/writes device memory directly.
 - **Interrupt forwarding:** `interrupt_register(irq)` syscall (#14) enables the IRQ in the GIC and returns a waitable handle (`HandleObject::Interrupt`). When the IRQ fires, the kernel's IRQ handler masks it at the GIC distributor, marks the handle pending, and wakes the driver thread. `interrupt_ack(handle)` syscall (#15) clears pending and re-enables the IRQ. One context switch per interrupt.
-- **DMA buffers:** `dma_alloc(order, pa_out_ptr)` syscall (#17) allocates 2^order contiguous pages from the buddy allocator, maps them into the caller's DMA VA region (`DMA_BUFFER_BASE` at 256 MiB, up to `DMA_BUFFER_END` at 512 MiB), writes the PA to a user-provided pointer, and returns the user VA. `dma_free(va, order)` syscall (#18) unmaps and frees. Per-process DMA allocation tracking; all DMA buffers freed on process exit. Order 0–4 (16 KiB – 256 KiB).
+- **DMA buffers:** ~~`dma_alloc`/`dma_free` syscalls removed~~ — replaced by VMOs. The `sys` library provides the same `dma_alloc`/`dma_free` API signatures backed by `vmo_create(CONTIGUOUS)` + `vmo_map` + `vmo_op_range(LOOKUP)` for PA retrieval. Per-process tracking via VMO handle table; cleanup on process exit via VMO Drop.
 
 **Edge-triggered semantics:** Interrupt handles differ from timer handles (which are level-triggered/permanent). Each `pending` flag is set on IRQ fire and consumed by `interrupt_ack`. Missing an ack just means pending stays true on the next `wait` check.
 
@@ -481,24 +481,11 @@ Phase 8 (COW mechanics) ← blocked on filesystem design
 
 ---
 
-### 9.1 DMA Buffer Allocation (Phase 1) — Done
+### 9.1 DMA Buffer Allocation (Phase 1) — Superseded by VMOs
 
-**Goal:** Expose physically contiguous allocation to userspace. Virtio drivers need DMA-capable buffers for descriptor rings and data.
+**Original goal:** Expose physically contiguous allocation to userspace for virtio drivers.
 
-**Syscalls:**
-
-| Nr  | Syscall   | Args                    | Returns |
-| --- | --------- | ----------------------- | ------- |
-| 17  | dma_alloc | x0=order, x1=pa_out_ptr | user VA |
-| 18  | dma_free  | x0=user_va, x1=order    | 0       |
-
-`dma_alloc` allocates 2^order contiguous pages (order 0–4, 16 KiB – 256 KiB), maps into the caller's address space with normal memory attributes, writes the PA to the user-provided pointer (for programming device DMA registers). Returns the user VA. `dma_free` unmaps and frees.
-
-**VA region:** `DMA_BUFFER_BASE` (256 MiB) to `DMA_BUFFER_END` (512 MiB). Bump-allocated per process.
-
-**Implementation:** `address_space.rs` (`DmaAllocation`, `next_dma_va`, `map_dma_buffer`, `unmap_dma_buffer`, `unmap_page_inner`), `paging.rs` (`DMA_BUFFER_BASE`, `DMA_BUFFER_END`), `syscall.rs` (`sys_dma_alloc`, `sys_dma_free`, `is_user_page_writable`, `OutOfMemory` error), `sys` (`dma_alloc`, `dma_free`). `free_all()` drains DMA allocations on process exit.
-
-**Depends on:** Nothing. Buddy allocator already supports `alloc_frames(order)`.
+**Superseded:** `dma_alloc`/`dma_free` kernel syscalls removed. The `sys` library provides the same API backed by `vmo_create(CONTIGUOUS)` + `vmo_map` + `vmo_op_range(LOOKUP)`. DMA buffers are now VMOs — they get all VMO features (handle-based lifecycle, cross-process sharing, Drop cleanup) for free.
 
 ---
 
@@ -618,7 +605,7 @@ Terminates all threads in the target process. Runs full cleanup. Process handle 
 
 **Goal:** Move virtio-blk and virtio-console from in-kernel to userspace drivers. Validates the entire microkernel driver model.
 
-**Approach:** Each driver becomes a separate ELF binary (now in `system/services/drivers/`). At boot, kernel probes virtio-mmio slots (minimal MMIO reads for magic/version/device_id), spawns the appropriate driver process, writes device info (MMIO PA, IRQ) to a channel shared page, and starts the driver. Each driver: `device_map` for MMIO, `dma_alloc` for virtqueue buffers. In-kernel `virtio/` module removed entirely. Shared `virtio` rlib (in `system/libraries/`) provides userspace virtio transport and split virtqueue implementation.
+**Approach:** Each driver becomes a separate ELF binary (now in `system/services/drivers/`). At boot, kernel probes virtio-mmio slots (minimal MMIO reads for magic/version/device_id), spawns the appropriate driver process, writes device info (MMIO PA, IRQ) to a channel shared page, and starts the driver. Each driver: `device_map` for MMIO, `dma_alloc` (now VMO-backed) for virtqueue buffers. In-kernel `virtio/` module removed entirely. Shared `virtio` rlib (in `system/libraries/`) provides userspace virtio transport and split virtqueue implementation.
 
 **Implementation notes:**
 
@@ -628,23 +615,19 @@ Terminates all threads in the target process. Runs full cleanup. Process handle 
 - Console driver not exercised yet (QEMU virt doesn't add a virtio-console by default; only blk device present).
 - Drivers use polling (spin-loop) for completion, matching the previous in-kernel behavior. Interrupt-driven I/O is a straightforward enhancement via `interrupt_register` + `wait` + `interrupt_ack`.
 
-**Validation:** `cargo run --release` boots, virtio-blk driver reads sector 0 and prints "HELLO VIRTIO BLK" — same functionality as the former in-kernel driver, entirely through syscalls (`device_map`, `dma_alloc`, `dma_free`, `write`, `channel_signal`, `exit`). Init/echo IPC unaffected.
+**Validation:** `cargo run --release` boots, virtio-blk driver reads sector 0 and prints "HELLO VIRTIO BLK" — same functionality as the former in-kernel driver, entirely through syscalls (`device_map`, `vmo_create`, `vmo_map`, `write`, `channel_signal`, `exit`). Init/echo IPC unaffected.
 
 **Depends on:** Phases 1 (DMA), 3 (process create), 4 (handle transfer).
 
 ---
 
-### 9.8 Memory Sharing (Phase 7) ✅
+### 9.8 Memory Sharing (Phase 7) — Superseded by VMOs
 
-**Goal:** Allow processes to share physical memory. Foundation for the display pipeline (framebuffer sharing) and future document memory model.
+**Original goal:** Allow processes to share physical memory for the display pipeline.
 
-**Approach:** `memory_share(target_handle, pa, page_count)` syscall (#24) maps a contiguous physical range into a target process's shared memory region (`SHARED_MEMORY_BASE` at 3 GiB, up to 4 GiB). Target must be suspended (not yet started). Returns the VA in the target's address space. Used by init to share the DMA-allocated framebuffer with the compositor.
+**Superseded:** `memory_share` kernel syscall removed. The `sys` library provides the same API backed by cross-process `vmo_map(handle, flags, target_process)`. Init creates a contiguous VMO, maps it locally, then maps it into target processes via VMO cross-process mapping. Handle-based sharing replaces PA-based sharing.
 
-**Per-process channel SHM bump allocator:** Each process tracks its own `next_channel_shm_va` (initialized to `CHANNEL_SHM_BASE`). When a channel endpoint is sent via `handle_send` or created via `channel_create`, the shared page is mapped at the next sequential VA. This ensures the first channel a process receives is always at `CHANNEL_SHM_BASE` (0x4000_0000), regardless of global channel indices.
-
-**Implementation:** `syscall.rs` (sys_memory_share), `address_space.rs` (map_channel_page bump allocator, map_shared_range for memory_share), `paging.rs` (SHARED_MEMORY_BASE/END, CHANNEL_SHM_END constants), `sys` library (memory_share wrapper).
-
-**Depends on:** Phase 2a.
+**Per-process channel SHM bump allocator:** (Unchanged.) Each process tracks `next_channel_shm_va`. Channel shared pages are mapped at sequential VAs starting from `CHANNEL_SHM_BASE`.
 
 ---
 
@@ -656,8 +639,8 @@ Terminates all threads in the target process. Runs full cleanup. Process handle 
 
 | Nr  | Syscall      | Args                 | Returns |
 | --- | ------------ | -------------------- | ------- |
-| 25  | memory_alloc | x0=page_count        | user VA |
-| 26  | memory_free  | x0=va, x1=page_count | 0       |
+| 13  | memory_alloc | x0=page_count        | user VA |
+| 14  | memory_free  | x0=va, x1=page_count | 0       |
 
 `memory_alloc` creates an anonymous VMA and bump-allocates VA from the heap region. Pages are NOT eagerly mapped — they are demand-paged on first touch via the existing fault handler (anonymous backing, zero-filled). `memory_free` removes the VMA, walks the page table to find and free any demand-paged physical frames, and invalidates TLB.
 
@@ -685,35 +668,49 @@ Terminates all threads in the target process. Runs full cleanup. Process handle 
 
 ### Syscall Number Map (complete)
 
-| Nr  | Syscall                   | Status      |
-| --- | ------------------------- | ----------- |
-| 0   | exit                      | Implemented |
-| 1   | write                     | Implemented |
-| 2   | yield                     | Implemented |
-| 3   | handle_close              | Implemented |
-| 4   | channel_signal            | Implemented |
-| 5   | channel_create            | Implemented |
-| 6   | scheduling_context_create | Implemented |
-| 7   | scheduling_context_borrow | Implemented |
-| 8   | scheduling_context_return | Implemented |
-| 9   | scheduling_context_bind   | Implemented |
-| 10  | futex_wait                | Implemented |
-| 11  | futex_wake                | Implemented |
-| 12  | wait                      | Implemented |
-| 13  | timer_create              | Implemented |
-| 14  | interrupt_register        | Implemented |
-| 15  | interrupt_ack             | Implemented |
-| 16  | device_map                | Implemented |
-| 17  | dma_alloc                 | Implemented |
-| 18  | dma_free                  | Implemented |
-| 19  | thread_create             | Implemented |
-| 20  | process_create            | Implemented |
-| 21  | process_start             | Implemented |
-| 22  | handle_send               | Implemented |
-| 23  | process_kill              | Implemented |
-| 24  | memory_share              | Implemented |
-| 25  | memory_alloc              | Implemented |
-| 26  | memory_free               | Implemented |
+Grouped by abstraction layer, dense 0–36. Pre-v1.0: renumber freely on add/remove. At v1.0: freeze.
+
+| Nr  | Syscall                    | Group          |
+| --- | -------------------------- | -------------- |
+| 0   | exit                       | Runtime        |
+| 1   | write                      | Runtime        |
+| 2   | yield                      | Runtime        |
+| 3   | handle_close               | Capability     |
+| 4   | handle_send                | Capability     |
+| 5   | handle_set_badge           | Capability     |
+| 6   | handle_get_badge           | Capability     |
+| 7   | channel_create             | IPC            |
+| 8   | channel_signal             | IPC            |
+| 9   | wait                       | Event loop     |
+| 10  | futex_wait                 | Sync           |
+| 11  | futex_wake                 | Sync           |
+| 12  | timer_create               | Time           |
+| 13  | memory_alloc               | Heap           |
+| 14  | memory_free                | Heap           |
+| 15  | vmo_create                 | VMO            |
+| 16  | vmo_map                    | VMO            |
+| 17  | vmo_unmap                  | VMO            |
+| 18  | vmo_read                   | VMO            |
+| 19  | vmo_write                  | VMO            |
+| 20  | vmo_get_info               | VMO            |
+| 21  | vmo_snapshot               | VMO            |
+| 22  | vmo_restore                | VMO            |
+| 23  | vmo_seal                   | VMO            |
+| 24  | vmo_op_range               | VMO            |
+| 25  | process_create             | Process/thread |
+| 26  | process_start              | Process/thread |
+| 27  | process_kill               | Process/thread |
+| 28  | process_set_syscall_filter | Process/thread |
+| 29  | thread_create              | Process/thread |
+| 30  | scheduling_context_create  | Scheduling     |
+| 31  | scheduling_context_borrow  | Scheduling     |
+| 32  | scheduling_context_return  | Scheduling     |
+| 33  | scheduling_context_bind    | Scheduling     |
+| 34  | device_map                 | Device         |
+| 35  | interrupt_register         | Device         |
+| 36  | interrupt_ack              | Device         |
+
+`dma_alloc`, `dma_free`, and `memory_share` have been removed from the kernel. The `sys` library provides the same API signatures backed by VMOs internally (contiguous VMO + cross-process `vmo_map` + `vmo_op_range(LOOKUP)` for PA retrieval). Syscall filter mask widened from u32 to u64 to cover the full table.
 
 ---
 
@@ -1419,7 +1416,7 @@ Architectural concerns that don't affect current milestones but will need kernel
 - **Sandboxed by default:** All services start with zero capabilities; init grants exactly what's needed. The decoder sandbox pattern (PNG decoder: RO file store, RW content region, nothing else) already works this way _informally_. Formalizing it means the kernel rejects syscalls on handles a process doesn't hold.
 - **Per-document permissions:** Documents carry access metadata; the document service enforces read/write/execute. Orthogonal to process capabilities.
 
-**Kernel implications:** Handle creation, channel setup, and `memory_share` syscalls would need to carry and enforce capability metadata. This is a deep interface change — easier to design in before v0.11 than retrofit after.
+**Kernel implications:** Handle creation, channel setup, and VMO cross-process mapping would need to carry and enforce capability metadata. This is a deep interface change — easier to design in before v0.11 than retrofit after.
 
 **When to resolve:** Before v0.11 planning. Candidate for design decision #18 during v0.7's design decisions milestone.
 

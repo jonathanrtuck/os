@@ -1,16 +1,3 @@
-// AUDIT: 2026-03-11 — 13 unsafe blocks verified, 6-category checklist applied.
-// Fix 5 (aliasing UB with split borrows) re-verified sound: dispatch, sys_futex_wait,
-// sys_wait, and dispatch_ok all use core::ptr::addr_of!/addr_of_mut! to read/write
-// Context fields without creating &mut references that would alias the scheduler lock.
-// User pointer validation verified for all 27 syscall handlers: every user-provided
-// pointer is bounds-checked (< USER_VA_END), overflow-checked (checked_add), alignment-
-// checked where required, and page-accessibility-verified via AT S1E0R/S1E0W hardware
-// translation before dereference. No privilege escalation vectors found: device_map
-// rejects RAM overlap, memory_share rejects non-RAM PAs, DMA order is capped, ELF size
-// is capped. Error codes correctly propagated via result_to_u64! macro. No TOCTOU:
-// validation and dereference occur within the same syscall context with TTBR0 stable.
-// No bugs found.
-
 //! Syscall dispatcher and handlers.
 //!
 //! # ABI (aarch64, EL0 → EL1)
@@ -18,64 +5,72 @@
 //! Invoke with `svc #0`. The kernel saves/restores the full register context
 //! across the call, so all registers except x0 are preserved.
 //!
-//! | Register | Direction | Role                                   |
-//! |----------|-----------|----------------------------------------|
-//! | x8       | in        | Syscall number (see `nr` module)       |
-//! | x0..x5   | in        | Arguments (syscall-specific)           |
-//! | x0       | out       | Return value: ≥0 success, <0 error     |
+//! | Register | Direction | Role                               |
+//! |----------|-----------|------------------------------------|
+//! | x8       | in        | Syscall number (see `nr` module)   |
+//! | x0..x5   | in        | Arguments (syscall-specific)       |
+//! | x0       | out       | Return value: ≥0 success, <0 error |
 //!
-//! # Syscalls
+//! # Syscalls (dense 0–36, grouped by abstraction layer)
 //!
-//! | Nr | Name                      | Args                                               | Returns                      |
-//! |----|---------------------------|----------------------------------------------------|------------------------------|
-//! | 0  | exit                      | —                                                  | does not return              |
-//! | 1  | write                     | x0=buf_ptr, x1=len                                 | bytes written                |
-//! | 2  | yield                     | —                                                  | 0                            |
-//! | 3  | handle_close              | x0=handle                                          | 0                            |
-//! | 4  | channel_signal            | x0=handle                                          | 0                            |
-//! | 5  | channel_create            | —                                                  | handle_a \| (handle_b << 16) |
-//! | 6  | scheduling_context_create | x0=budget_ns, x1=period_ns                         | handle                       |
-//! | 7  | scheduling_context_borrow | x0=handle                                          | 0                            |
-//! | 8  | scheduling_context_return | —                                                  | 0                            |
-//! | 9  | scheduling_context_bind   | x0=handle                                          | 0                            |
-//! | 10 | futex_wait                | x0=addr, x1=expected                               | 0 (may block)                |
-//! | 11 | futex_wake                | x0=addr, x1=count                                  | threads woken                |
-//! | 12 | wait                      | x0=handles_ptr, x1=count, x2=timeout_ns            | ready index (may block)      |
-//! | 13 | timer_create              | x0=timeout_ns                                      | handle                       |
-//! | 14 | interrupt_register        | x0=irq_nr                                          | handle                       |
-//! | 15 | interrupt_ack             | x0=handle                                          | 0                            |
-//! | 16 | device_map                | x0=phys_addr, x1=size                              | user VA                      |
-//! | 17 | dma_alloc                 | x0=order, x1=pa_out_ptr                            | user VA                      |
-//! | 18 | dma_free                  | x0=user_va, x1=order                               | 0                            |
-//! | 19 | thread_create             | x0=entry_va, x1=stack_top                          | handle                       |
-//! | 20 | process_create            | x0=elf_ptr, x1=elf_len                             | handle                       |
-//! | 21 | process_start             | x0=handle                                          | 0                            |
-//! | 22 | handle_send               | x0=target_handle, x1=source_handle, x2=rights_mask | 0                            |
-//! | 23 | process_kill              | x0=handle                                          | 0                            |
-//! | 24 | memory_share              | x0=target_handle, x1=pa, x2=page_count, x3=flags   | target VA                    |
-//! | 25 | memory_alloc              | x0=page_count                                      | user VA                      |
-//! | 26 | memory_free               | x0=va, x1=page_count                               | 0                            |
-//! | 27 | process_set_syscall_filter | x0=handle, x1=mask                                | 0                            |
-//! | 28 | handle_set_badge          | x0=handle, x1=badge                                | 0                            |
-//! | 29 | handle_get_badge          | x0=handle                                          | badge                        |
+//! | Nr | Name                       | Args                                      | Returns                      |
+//! |----|----------------------------|-------------------------------------------|------------------------------|
+//! | 0  | exit                       | —                                         | does not return              |
+//! | 1  | write                      | x0=buf_ptr, x1=len                        | bytes written                |
+//! | 2  | yield                      | —                                         | 0                            |
+//! | 3  | handle_close               | x0=handle                                 | 0                            |
+//! | 4  | handle_send                | x0=target, x1=source, x2=rights_mask      | 0                            |
+//! | 5  | handle_set_badge           | x0=handle, x1=badge                       | 0                            |
+//! | 6  | handle_get_badge           | x0=handle                                 | badge                        |
+//! | 7  | channel_create             | —                                         | handle_a \| (handle_b << 16) |
+//! | 8  | channel_signal             | x0=handle                                 | 0                            |
+//! | 9  | wait                       | x0=handles_ptr, x1=count, x2=timeout_ns   | ready index (may block)      |
+//! | 10 | futex_wait                 | x0=addr, x1=expected                      | 0 (may block)                |
+//! | 11 | futex_wake                 | x0=addr, x1=count                         | threads woken                |
+//! | 12 | timer_create               | x0=timeout_ns                             | handle                       |
+//! | 13 | memory_alloc               | x0=page_count                             | user VA                      |
+//! | 14 | memory_free                | x0=va, x1=page_count                      | 0                            |
+//! | 15 | vmo_create                 | x0=size_pages, x1=flags, x2=type_tag      | handle                       |
+//! | 16 | vmo_map                    | x0=handle, x1=flags, x2=target (0=self)   | user VA                      |
+//! | 17 | vmo_unmap                  | x0=va, x1=size_pages                      | 0                            |
+//! | 18 | vmo_read                   | x0=handle, x1=offset, x2=buf_ptr, x3=len  | bytes read                   |
+//! | 19 | vmo_write                  | x0=handle, x1=offset, x2=buf_ptr, x3=len  | bytes written                |
+//! | 20 | vmo_get_info               | x0=handle, x1=info_ptr                    | 0                            |
+//! | 21 | vmo_snapshot               | x0=handle                                 | generation                   |
+//! | 22 | vmo_restore                | x0=handle, x1=generation                  | 0                            |
+//! | 23 | vmo_seal                   | x0=handle                                 | 0                            |
+//! | 24 | vmo_op_range               | x0=handle, x1=op, x2=offset, x3=count     | op-specific                  |
+//! | 25 | process_create             | x0=elf_ptr, x1=elf_len                    | handle                       |
+//! | 26 | process_start              | x0=handle                                 | 0                            |
+//! | 27 | process_kill               | x0=handle                                 | 0                            |
+//! | 28 | process_set_syscall_filter | x0=handle, x1=mask (u64)                  | 0                            |
+//! | 29 | thread_create              | x0=entry_va, x1=stack_top                 | handle                       |
+//! | 30 | scheduling_context_create  | x0=budget_ns, x1=period_ns                | handle                       |
+//! | 31 | scheduling_context_borrow  | x0=handle                                 | 0                            |
+//! | 32 | scheduling_context_return  | —                                         | 0                            |
+//! | 33 | scheduling_context_bind    | x0=handle                                 | 0                            |
+//! | 34 | device_map                 | x0=phys_addr, x1=size                     | user VA                      |
+//! | 35 | interrupt_register         | x0=irq_nr                                 | handle                       |
+//! | 36 | interrupt_ack              | x0=handle                                 | 0                            |
 //!
 //! # Error codes
 //!
-//! | Code | Name                | Source        |
-//! |------|---------------------|---------------|
-//! | -1   | UnknownSyscall      | `Error`       |
-//! | -2   | BadAddress          | `Error`       |
-//! | -3   | BadLength           | `Error`       |
-//! | -4   | InvalidArgument     | `Error`       |
-//! | -5   | AlreadyBorrowing    | `Error`       |
-//! | -6   | NotBorrowing        | `Error`       |
-//! | -7   | AlreadyBound        | `Error`       |
-//! | -8   | WouldBlock          | `Error`       |
-//! | -9   | OutOfMemory         | `Error`       |
-//! | -10  | InvalidHandle       | `HandleError` |
-//! | -12  | InsufficientRights  | `HandleError` |
-//! | -13  | TableFull           | `HandleError` |
-//! | -15  | SyscallBlocked      | `Error`       |
+//! | Code | Name               | Source        |
+//! |------|--------------------|---------------|
+//! | -1   | UnknownSyscall     | `Error`       |
+//! | -2   | BadAddress         | `Error`       |
+//! | -3   | BadLength          | `Error`       |
+//! | -4   | InvalidArgument    | `Error`       |
+//! | -5   | AlreadyBorrowing   | `Error`       |
+//! | -6   | NotBorrowing       | `Error`       |
+//! | -7   | AlreadyBound       | `Error`       |
+//! | -8   | WouldBlock         | `Error`       |
+//! | -9   | OutOfMemory        | `Error`       |
+//! | -10  | PermissionDenied   | `Error`       |
+//! | -11  | InvalidHandle      | `HandleError` |
+//! | -12  | InsufficientRights | `HandleError` |
+//! | -13  | TableFull          | `HandleError` |
+//! | -15  | SyscallBlocked     | `Error`       |
 
 use alloc::vec::Vec;
 
@@ -95,43 +90,59 @@ use super::{
     vmo, Context,
 };
 
+/// Syscall numbers. Grouped by abstraction layer, dense 0–36.
+///
+/// Pre-v1.0: renumber freely when syscalls are added or removed.
+/// At v1.0: freeze. Numbering tells the kernel's conceptual story.
 pub mod nr {
+    // --- Runtime basics (0–2) ---
     pub const EXIT: u64 = 0;
     pub const WRITE: u64 = 1;
     pub const YIELD: u64 = 2;
+    // --- Capability layer (3–6) ---
     pub const HANDLE_CLOSE: u64 = 3;
-    pub const CHANNEL_SIGNAL: u64 = 4;
-    pub const SCHEDULING_CONTEXT_CREATE: u64 = 6;
-    pub const SCHEDULING_CONTEXT_BORROW: u64 = 7;
-    pub const SCHEDULING_CONTEXT_RETURN: u64 = 8;
-    pub const SCHEDULING_CONTEXT_BIND: u64 = 9;
+    pub const HANDLE_SEND: u64 = 4;
+    pub const HANDLE_SET_BADGE: u64 = 5;
+    pub const HANDLE_GET_BADGE: u64 = 6;
+    // --- IPC (7–8) ---
+    pub const CHANNEL_CREATE: u64 = 7;
+    pub const CHANNEL_SIGNAL: u64 = 8;
+    // --- Event loop (9) ---
+    pub const WAIT: u64 = 9;
+    // --- Userspace sync (10–11) ---
     pub const FUTEX_WAIT: u64 = 10;
     pub const FUTEX_WAKE: u64 = 11;
-    pub const WAIT: u64 = 12;
-    pub const TIMER_CREATE: u64 = 13;
-    pub const INTERRUPT_REGISTER: u64 = 14;
-    pub const INTERRUPT_ACK: u64 = 15;
-    pub const DEVICE_MAP: u64 = 16;
-    pub const DMA_ALLOC: u64 = 17;
-    pub const DMA_FREE: u64 = 18;
-    pub const THREAD_CREATE: u64 = 19;
-    pub const PROCESS_CREATE: u64 = 20;
-    pub const CHANNEL_CREATE: u64 = 5;
-    pub const PROCESS_START: u64 = 21;
-    pub const HANDLE_SEND: u64 = 22;
-    pub const PROCESS_KILL: u64 = 23;
-    pub const MEMORY_SHARE: u64 = 24;
-    pub const MEMORY_ALLOC: u64 = 25;
-    pub const MEMORY_FREE: u64 = 26;
-    pub const PROCESS_SET_SYSCALL_FILTER: u64 = 27;
-    pub const HANDLE_SET_BADGE: u64 = 28;
-    pub const HANDLE_GET_BADGE: u64 = 29;
-    pub const VMO_CREATE: u64 = 30;
-    pub const VMO_MAP: u64 = 31;
-    pub const VMO_UNMAP: u64 = 32;
-    pub const VMO_READ: u64 = 33;
-    pub const VMO_WRITE: u64 = 34;
-    pub const VMO_GET_INFO: u64 = 35;
+    // --- Time (12) ---
+    pub const TIMER_CREATE: u64 = 12;
+    // --- Heap memory (13–14) ---
+    pub const MEMORY_ALLOC: u64 = 13;
+    pub const MEMORY_FREE: u64 = 14;
+    // --- Virtual Memory Objects (15–24) ---
+    pub const VMO_CREATE: u64 = 15;
+    pub const VMO_MAP: u64 = 16;
+    pub const VMO_UNMAP: u64 = 17;
+    pub const VMO_READ: u64 = 18;
+    pub const VMO_WRITE: u64 = 19;
+    pub const VMO_GET_INFO: u64 = 20;
+    pub const VMO_SNAPSHOT: u64 = 21;
+    pub const VMO_RESTORE: u64 = 22;
+    pub const VMO_SEAL: u64 = 23;
+    pub const VMO_OP_RANGE: u64 = 24;
+    // --- Process/thread lifecycle (25–29) ---
+    pub const PROCESS_CREATE: u64 = 25;
+    pub const PROCESS_START: u64 = 26;
+    pub const PROCESS_KILL: u64 = 27;
+    pub const PROCESS_SET_SYSCALL_FILTER: u64 = 28;
+    pub const THREAD_CREATE: u64 = 29;
+    // --- Scheduling (30–33) ---
+    pub const SCHEDULING_CONTEXT_CREATE: u64 = 30;
+    pub const SCHEDULING_CONTEXT_BORROW: u64 = 31;
+    pub const SCHEDULING_CONTEXT_RETURN: u64 = 32;
+    pub const SCHEDULING_CONTEXT_BIND: u64 = 33;
+    // --- Device layer (34–36) ---
+    pub const DEVICE_MAP: u64 = 34;
+    pub const INTERRUPT_REGISTER: u64 = 35;
+    pub const INTERRUPT_ACK: u64 = 36;
 }
 
 /// Maximum DMA allocation order — matches page_allocator::MAX_ORDER.
@@ -169,11 +180,16 @@ pub enum Error {
     AlreadyBound = -7,
     WouldBlock = -8,
     OutOfMemory = -9,
+    /// VMO is sealed or operation requires a right the handle lacks.
+    PermissionDenied = -10,
     SyscallBlocked = -15,
 }
 
 const VMO_MAP_READ: u64 = 1 << 0;
 const VMO_MAP_WRITE: u64 = 1 << 1;
+const VMO_OP_COMMIT: u64 = 0;
+const VMO_OP_DECOMMIT: u64 = 1;
+const VMO_OP_LOOKUP: u64 = 2;
 
 impl From<HandleError> for u64 {
     fn from(e: HandleError) -> u64 {
@@ -375,58 +391,8 @@ fn sys_device_map(pa: u64, size: u64) -> Result<u64, Error> {
             .ok_or(Error::InvalidArgument)
     })
 }
-fn sys_dma_alloc(order: u64, pa_out_ptr: u64) -> Result<u64, Error> {
-    if order > MAX_DMA_ORDER {
-        return Err(Error::InvalidArgument);
-    }
-    // Validate pa_out_ptr: in user space, 8-byte aligned, writable.
-    if pa_out_ptr >= USER_VA_END || pa_out_ptr & 7 != 0 {
-        return Err(Error::BadAddress);
-    }
-    if !is_user_page_writable(pa_out_ptr) {
-        return Err(Error::BadAddress);
-    }
-
-    // Allocate physically contiguous frames from the buddy allocator.
-    let pa = page_allocator::alloc_frames(order as usize).ok_or(Error::OutOfMemory)?;
-    // Map into the calling process's DMA VA region.
-    let va = scheduler::current_process_do(|process| {
-        process.address_space.map_dma_buffer(pa, order as usize)
-    });
-    let va = match va {
-        Some(va) => va,
-        None => {
-            // DMA VA space full — free the frames we just allocated.
-            page_allocator::free_frames(pa, order as usize);
-
-            return Err(Error::OutOfMemory);
-        }
-    };
-
-    // Write the PA to user memory so the driver can program DMA registers.
-    // SAFETY: pa_out_ptr validated above (user VA, aligned, writable page).
-    unsafe {
-        core::ptr::write_volatile(pa_out_ptr as *mut u64, pa.as_u64());
-    }
-
-    Ok(va)
-}
-fn sys_dma_free(va: u64, _order: u64) -> Result<u64, Error> {
-    // Validate VA is in the DMA region.
-    if !(paging::DMA_BUFFER_BASE..paging::DMA_BUFFER_END).contains(&va) {
-        return Err(Error::InvalidArgument);
-    }
-
-    // Unmap and retrieve the stored PA + order.
-    let (pa, order) =
-        scheduler::current_process_do(|process| process.address_space.unmap_dma_buffer(va))
-            .ok_or(Error::InvalidArgument)?;
-
-    // Free the physically contiguous frames.
-    page_allocator::free_frames(pa, order);
-
-    Ok(0)
-}
+// dma_alloc and dma_free REMOVED — replaced by VMO syscalls (30-39).
+// Userspace sys library provides the same API via VMO-backed implementation.
 fn sys_exit(ctx: *mut Context) -> *const Context {
     scheduler::exit_current_from_syscall(ctx)
 }
@@ -717,65 +683,8 @@ fn sys_memory_free(va: u64, _page_count: u64) -> Result<u64, Error> {
 
     Ok(0)
 }
-/// Map physical pages from the caller into a target process's shared memory region.
-///
-/// The target process must not have been started yet. Pages are mapped without
-/// ownership transfer — the caller (or original allocator) retains responsibility
-/// for the physical frames. PA must be page-aligned and within RAM bounds.
-///
-/// Flags bit 0: read_only — map pages without write permission (hardware-enforced).
-fn sys_memory_share(
-    target_handle_nr: u64,
-    pa: u64,
-    page_count: u64,
-    flags: u64,
-) -> Result<u64, Error> {
-    if target_handle_nr > u16::MAX as u64 {
-        return Err(Error::InvalidArgument);
-    }
-
-    const MAX_SHARE_PAGES: u64 = paging::RAM_SIZE_MAX / paging::PAGE_SIZE / 2;
-
-    if page_count == 0 || page_count > MAX_SHARE_PAGES {
-        return Err(Error::InvalidArgument);
-    }
-    if pa & (paging::PAGE_SIZE - 1) != 0 {
-        return Err(Error::BadAddress);
-    }
-
-    let end_pa = pa
-        .checked_add(page_count * paging::PAGE_SIZE)
-        .ok_or(Error::BadAddress)?;
-
-    if pa < paging::RAM_START || end_pa > paging::ram_end() {
-        return Err(Error::BadAddress);
-    }
-
-    let target_pid = scheduler::current_process_do(|process| {
-        match process
-            .handles
-            .get(Handle(target_handle_nr as u16), Rights::MAP)
-        {
-            Ok(HandleObject::Process(id)) => Ok(id),
-            Ok(_) => Err(Error::InvalidArgument),
-            Err(_) => Err(Error::InvalidArgument),
-        }
-    })?;
-
-    let read_only = flags & 1 != 0;
-
-    scheduler::with_process(target_pid, |target| {
-        if target.started {
-            return Err(Error::InvalidArgument);
-        }
-
-        target
-            .address_space
-            .map_shared_region(memory::Pa(pa as usize), page_count, read_only)
-            .ok_or(Error::OutOfMemory)
-    })
-    .unwrap_or(Err(Error::InvalidArgument))
-}
+// memory_share REMOVED — replaced by VMO cross-process mapping (vmo_map with target handle).
+// Userspace sys library provides the same API via VMO-backed implementation.
 fn sys_process_create(elf_ptr: u64, elf_len: u64) -> Result<u64, Error> {
     // Validate length.
     if elf_len == 0 || elf_len > MAX_ELF_SIZE {
@@ -948,7 +857,7 @@ fn sys_process_set_syscall_filter(handle_nr: u64, mask: u64) -> Result<u64, Erro
             return Err(Error::InvalidArgument);
         }
 
-        target.syscall_mask = mask as u32;
+        target.syscall_mask = mask;
 
         Ok(0)
     })
@@ -1191,7 +1100,7 @@ fn sys_vmo_get_info(handle_nr: u64, info_va: u64) -> Result<u64, Error> {
 
     Ok(0)
 }
-fn sys_vmo_map(handle_nr: u64, map_flags: u64) -> Result<u64, Error> {
+fn sys_vmo_map(handle_nr: u64, map_flags: u64, target_handle: u64) -> Result<u64, Error> {
     if handle_nr > u16::MAX as u64 {
         return Err(Error::InvalidArgument);
     }
@@ -1214,26 +1123,202 @@ fn sys_vmo_map(handle_nr: u64, map_flags: u64) -> Result<u64, Error> {
     }
 
     // Look up the VMO handle and get its ID + size.
-    let (vmo_id, size_pages) = scheduler::current_process_do(|process| {
+    // Also resolve target process if cross-process mapping requested.
+    let (vmo_id, size_pages, target_pid) = scheduler::current_process_do(|process| {
+        let obj = process.handles.get(Handle(handle_nr as u16), required)?;
+
+        let vmo_id = match obj {
+            HandleObject::Vmo(id) => id,
+            _ => return Err(HandleError::InvalidHandle),
+        };
+
+        let size = vmo::size_pages(vmo_id).ok_or(HandleError::InvalidHandle)?;
+
+        // Resolve target: 0 = self, otherwise a Process handle in the caller's table.
+        let target = if target_handle == 0 {
+            None // Map into self
+        } else {
+            if target_handle > u16::MAX as u64 {
+                return Err(HandleError::InvalidHandle);
+            }
+            let target_obj = process
+                .handles
+                .get(Handle(target_handle as u16), Rights::NONE)?;
+
+            match target_obj {
+                HandleObject::Process(pid) => Some(pid),
+                _ => return Err(HandleError::InvalidHandle),
+            }
+        };
+
+        Ok((vmo_id, size, target))
+    })?;
+
+    // Map into the target (or self) address space.
+    match target_pid {
+        None => {
+            // Map into self.
+            scheduler::current_process_with_pid_do(|pid, process| {
+                let va = process
+                    .address_space
+                    .map_vmo(vmo_id, size_pages, writable)
+                    .ok_or(Error::OutOfMemory)?;
+
+                vmo::add_mapping(
+                    vmo_id,
+                    vmo::VmoMapping {
+                        process_id: pid,
+                        va_base: va,
+                        page_count: size_pages,
+                    },
+                );
+
+                Ok(va)
+            })
+        }
+        Some(target) => {
+            // Cross-process: map VMO into the target process's address space.
+            scheduler::with_process(target, |process| {
+                let va = process
+                    .address_space
+                    .map_vmo(vmo_id, size_pages, writable)
+                    .ok_or(Error::OutOfMemory)?;
+
+                vmo::add_mapping(
+                    vmo_id,
+                    vmo::VmoMapping {
+                        process_id: target,
+                        va_base: va,
+                        page_count: size_pages,
+                    },
+                );
+
+                Ok(va)
+            })
+            .unwrap_or(Err(Error::InvalidArgument))
+        }
+    }
+}
+fn sys_vmo_op_range(
+    handle_nr: u64,
+    op: u64,
+    offset_pages: u64,
+    page_count: u64,
+) -> Result<u64, Error> {
+    if handle_nr > u16::MAX as u64 {
+        return Err(Error::InvalidArgument);
+    }
+
+    // LOOKUP only needs MAP right; COMMIT/DECOMMIT need WRITE.
+    let required = if op == VMO_OP_LOOKUP {
+        Rights::MAP
+    } else {
+        Rights::WRITE
+    };
+
+    let vmo_id = scheduler::current_process_do(|process| {
         let obj = process.handles.get(Handle(handle_nr as u16), required)?;
 
         match obj {
-            HandleObject::Vmo(id) => {
-                let size = vmo::size_pages(id).ok_or(HandleError::InvalidHandle)?;
-
-                Ok((id, size))
-            }
+            HandleObject::Vmo(id) => Ok(id),
             _ => Err(HandleError::InvalidHandle),
         }
     })?;
 
-    // Map into the caller's address space.
-    scheduler::current_process_do(|process| {
-        process
-            .address_space
-            .map_vmo(vmo_id, size_pages, writable)
-            .ok_or(Error::OutOfMemory)
-    })
+    match op {
+        VMO_OP_LOOKUP => {
+            // Return the base PA of a contiguous VMO. Non-contiguous → error.
+            let state = vmo::STATE.lock();
+            let vmo_obj = state.get(vmo_id).ok_or(Error::InvalidArgument)?;
+
+            if !vmo_obj.is_contiguous() {
+                return Err(Error::InvalidArgument);
+            }
+
+            // The base PA is the PA of page 0.
+            match vmo_obj.lookup_page(0) {
+                Some((pa, _)) => Ok(pa.as_u64() as u64),
+                None => Err(Error::InvalidArgument), // Not committed (shouldn't happen for contiguous)
+            }
+        }
+        VMO_OP_COMMIT => {
+            if page_count == 0 {
+                return Err(Error::InvalidArgument);
+            }
+            // Eagerly allocate and commit pages in the range.
+            let size = vmo::size_pages(vmo_id).ok_or(Error::InvalidArgument)?;
+
+            if offset_pages >= size || offset_pages + page_count > size {
+                return Err(Error::InvalidArgument);
+            }
+
+            let mut committed = 0u64;
+
+            for page_idx in offset_pages..offset_pages + page_count {
+                // Check if already committed via get_info pattern.
+                // We need to check page-by-page. Use the VMO table directly
+                // through the module API.
+                let mut state = vmo::STATE.lock();
+                let vmo = state.get_mut(vmo_id).ok_or(Error::InvalidArgument)?;
+
+                if vmo.is_sealed() {
+                    return Err(Error::PermissionDenied);
+                }
+
+                if vmo.lookup_page(page_idx).is_some() {
+                    continue; // Already committed
+                }
+
+                // Allocate and commit.
+                let pa = super::page_allocator::alloc_frame().ok_or(Error::OutOfMemory)?;
+
+                vmo.commit_page(page_idx, pa);
+
+                committed += 1;
+            }
+
+            Ok(committed)
+        }
+        VMO_OP_DECOMMIT => {
+            if page_count == 0 {
+                return Err(Error::InvalidArgument);
+            }
+
+            let size = vmo::size_pages(vmo_id).ok_or(Error::InvalidArgument)?;
+
+            if offset_pages >= size || offset_pages + page_count > size {
+                return Err(Error::InvalidArgument);
+            }
+
+            let mut freed_count = 0u64;
+
+            for page_idx in offset_pages..offset_pages + page_count {
+                match vmo::decommit_page(vmo_id, page_idx) {
+                    Some(Some(pa)) => {
+                        super::page_allocator::free_frame(pa);
+                        freed_count += 1;
+                    }
+                    Some(None) => {} // Not committed or shared — skip
+                    None => return Err(Error::PermissionDenied), // Sealed
+                }
+            }
+
+            // Invalidate PTEs for active mappings so decommitted pages re-fault
+            // to zeros.
+            let mappings = vmo::get_mappings(vmo_id);
+
+            for mapping in &mappings {
+                scheduler::with_process(mapping.process_id, |process| {
+                    process
+                        .address_space
+                        .invalidate_vmo_pages(mapping.va_base, mapping.page_count);
+                });
+            }
+
+            Ok(freed_count)
+        }
+        _ => Err(Error::InvalidArgument),
+    }
 }
 fn sys_vmo_read(handle_nr: u64, offset: u64, buf_va: u64, len: u64) -> Result<u64, Error> {
     if handle_nr > u16::MAX as u64 || len == 0 {
@@ -1269,15 +1354,111 @@ fn sys_vmo_read(handle_nr: u64, offset: u64, buf_va: u64, len: u64) -> Result<u6
 
     vmo::read(vmo_id, offset, user_buf).ok_or(Error::InvalidArgument)
 }
+fn sys_vmo_restore(handle_nr: u64, generation: u64) -> Result<u64, Error> {
+    if handle_nr > u16::MAX as u64 {
+        return Err(Error::InvalidArgument);
+    }
+
+    // Restore requires WRITE right (replaces VMO's page list).
+    let vmo_id = scheduler::current_process_do(|process| {
+        let obj = process
+            .handles
+            .get(Handle(handle_nr as u16), Rights::WRITE)?;
+
+        match obj {
+            HandleObject::Vmo(id) => Ok(id),
+            _ => Err(HandleError::InvalidHandle),
+        }
+    })?;
+
+    let (freed, mappings) = vmo::restore(vmo_id, generation).ok_or(Error::InvalidArgument)?;
+
+    // Free physical pages that are no longer referenced.
+    for pa in freed {
+        super::page_allocator::free_frame(pa);
+    }
+
+    // Invalidate PTEs for all active mappings so they re-fault to restored data.
+    for mapping in &mappings {
+        scheduler::with_process(mapping.process_id, |process| {
+            process
+                .address_space
+                .invalidate_vmo_pages(mapping.va_base, mapping.page_count);
+        });
+    }
+
+    Ok(0)
+}
+fn sys_vmo_seal(handle_nr: u64) -> Result<u64, Error> {
+    if handle_nr > u16::MAX as u64 {
+        return Err(Error::InvalidArgument);
+    }
+
+    // Seal requires the SEAL right.
+    let vmo_id = scheduler::current_process_do(|process| {
+        let obj = process
+            .handles
+            .get(Handle(handle_nr as u16), Rights::SEAL)?;
+
+        match obj {
+            HandleObject::Vmo(id) => Ok(id),
+            _ => Err(HandleError::InvalidHandle),
+        }
+    })?;
+    let mappings = vmo::seal(vmo_id).ok_or(Error::InvalidArgument)?;
+
+    // Invalidate writable PTEs for all active mappings. The sealed-aware
+    // fault handler will re-map them as RO. Permission faults (write to
+    // the now-RO page) go straight to process termination — the exception
+    // handler only dispatches translation faults to handle_fault.
+    for mapping in &mappings {
+        scheduler::with_process(mapping.process_id, |process| {
+            process
+                .address_space
+                .invalidate_vmo_pages(mapping.va_base, mapping.page_count);
+        });
+    }
+
+    Ok(0)
+}
+fn sys_vmo_snapshot(handle_nr: u64) -> Result<u64, Error> {
+    if handle_nr > u16::MAX as u64 {
+        return Err(Error::InvalidArgument);
+    }
+
+    // Snapshot requires WRITE right (mutates VMO state: generation counter,
+    // refcounts, snapshot ring).
+    let vmo_id = scheduler::current_process_do(|process| {
+        let obj = process
+            .handles
+            .get(Handle(handle_nr as u16), Rights::WRITE)?;
+
+        match obj {
+            HandleObject::Vmo(id) => Ok(id),
+            _ => Err(HandleError::InvalidHandle),
+        }
+    })?;
+
+    vmo::snapshot(vmo_id).ok_or(Error::PermissionDenied) // Sealed or contiguous
+}
 fn sys_vmo_unmap(va: u64, size_pages: u64) -> Result<u64, Error> {
     if size_pages == 0 || va >= USER_VA_END {
         return Err(Error::InvalidArgument);
     }
 
+    // Look up the VmoId from the VMA before unmapping (needed for mapping tracker).
+    let vmo_id = scheduler::current_process_do(|process| process.address_space.vmo_id_at(va));
     let ok =
         scheduler::current_process_do(|process| process.address_space.unmap_vmo(va, size_pages));
 
     if ok {
+        // Remove the mapping record from the VMO.
+        if let Some(id) = vmo_id {
+            let pid = scheduler::current_process_with_pid_do(|pid, _| pid);
+
+            vmo::remove_mapping(id, pid, va);
+        }
+
         Ok(0)
     } else {
         Err(Error::InvalidArgument)
@@ -1702,8 +1883,7 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
     // Syscall numbers >= 32 skip the filter (future-proofing — they fall
     // through to the UnknownSyscall arm naturally).
     if syscall_nr != nr::EXIT && syscall_nr < 32 {
-        let allowed =
-            scheduler::current_process_do(|p| p.syscall_mask & (1u32 << syscall_nr as u32) != 0);
+        let allowed = scheduler::current_process_do(|p| p.syscall_mask & (1u64 << syscall_nr) != 0);
 
         if !allowed {
             return dispatch_ok(
@@ -1741,8 +1921,7 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
         nr::INTERRUPT_REGISTER => dispatch_ok(ctx, result_to_u64!(sys_interrupt_register(x0))),
         nr::INTERRUPT_ACK => dispatch_ok(ctx, result_to_u64!(sys_interrupt_ack(x0))),
         nr::DEVICE_MAP => dispatch_ok(ctx, result_to_u64!(sys_device_map(x0, x1))),
-        nr::DMA_ALLOC => dispatch_ok(ctx, result_to_u64!(sys_dma_alloc(x0, x1))),
-        nr::DMA_FREE => dispatch_ok(ctx, result_to_u64!(sys_dma_free(x0, x1))),
+        // 17 (DMA_ALLOC), 18 (DMA_FREE) removed — VMO syscalls replace them.
         nr::THREAD_CREATE => dispatch_ok(ctx, result_to_u64!(sys_thread_create(x0, x1))),
         nr::PROCESS_CREATE => dispatch_ok(ctx, result_to_u64!(sys_process_create(x0, x1))),
         nr::PROCESS_START => dispatch_ok(ctx, result_to_u64!(sys_process_start(x0))),
@@ -1755,15 +1934,7 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
             dispatch_ok(ctx, result_to_u64!(sys_handle_send(x0, x1, x2)))
         }
         nr::PROCESS_KILL => dispatch_ok(ctx, result_to_u64!(sys_process_kill(x0))),
-        nr::MEMORY_SHARE => {
-            // SAFETY: ctx is valid, x[2]/x[3] are within [u64; 31] bounds. addr_of!
-            // avoids creating a reference (same aliasing UB prevention as above).
-            let xbase = unsafe { core::ptr::addr_of!((*ctx).x) as *const u64 };
-            let x2 = unsafe { xbase.add(2).read() };
-            let x3 = unsafe { xbase.add(3).read() };
-
-            dispatch_ok(ctx, result_to_u64!(sys_memory_share(x0, x1, x2, x3)))
-        }
+        // 24 (MEMORY_SHARE) removed — VMO cross-process mapping replaces it.
         nr::MEMORY_ALLOC => dispatch_ok(ctx, result_to_u64!(sys_memory_alloc(x0))),
         nr::MEMORY_FREE => dispatch_ok(ctx, result_to_u64!(sys_memory_free(x0, x1))),
         nr::PROCESS_SET_SYSCALL_FILTER => {
@@ -1776,7 +1947,11 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
             let x2 = unsafe { xbase.add(2).read() };
             dispatch_ok(ctx, result_to_u64!(sys_vmo_create(x0, x1, x2)))
         }
-        nr::VMO_MAP => dispatch_ok(ctx, result_to_u64!(sys_vmo_map(x0, x1))),
+        nr::VMO_MAP => {
+            let xbase = unsafe { core::ptr::addr_of!((*ctx).x) as *const u64 };
+            let x2 = unsafe { xbase.add(2).read() };
+            dispatch_ok(ctx, result_to_u64!(sys_vmo_map(x0, x1, x2)))
+        }
         nr::VMO_UNMAP => dispatch_ok(ctx, result_to_u64!(sys_vmo_unmap(x0, x1))),
         nr::VMO_READ => {
             let xbase = unsafe { core::ptr::addr_of!((*ctx).x) as *const u64 };
@@ -1791,6 +1966,15 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
             dispatch_ok(ctx, result_to_u64!(sys_vmo_write(x0, x1, x2, x3)))
         }
         nr::VMO_GET_INFO => dispatch_ok(ctx, result_to_u64!(sys_vmo_get_info(x0, x1))),
+        nr::VMO_SNAPSHOT => dispatch_ok(ctx, result_to_u64!(sys_vmo_snapshot(x0))),
+        nr::VMO_RESTORE => dispatch_ok(ctx, result_to_u64!(sys_vmo_restore(x0, x1))),
+        nr::VMO_SEAL => dispatch_ok(ctx, result_to_u64!(sys_vmo_seal(x0))),
+        nr::VMO_OP_RANGE => {
+            let xbase = unsafe { core::ptr::addr_of!((*ctx).x) as *const u64 };
+            let x2 = unsafe { xbase.add(2).read() };
+            let x3 = unsafe { xbase.add(3).read() };
+            dispatch_ok(ctx, result_to_u64!(sys_vmo_op_range(x0, x1, x2, x3)))
+        }
 
         _ => dispatch_ok(
             ctx,

@@ -948,49 +948,6 @@ pub fn create_process(addr_space: Box<super::address_space::AddressSpace>) -> Pr
 
     ProcessId(id)
 }
-/// Remove an orphaned process that has no threads.
-///
-/// Called on error paths where `create_process` succeeded but thread
-/// creation failed. The process's `Box<AddressSpace>` is dropped, which
-/// triggers its `Drop` impl (invalidate TLB + free all frames + free ASID).
-///
-/// # Panics
-///
-/// Debug-asserts that the process has zero threads. Removing a process
-/// with live threads would leak those threads.
-#[inline(never)]
-pub fn remove_empty_process(pid: ProcessId) {
-    let mut s = STATE.lock();
-
-    if let Some(slot) = s.processes.get_mut(pid.0 as usize) {
-        if let Some(process) = slot.as_ref() {
-            debug_assert_eq!(
-                process.thread_count, 0,
-                "remove_empty_process: process has live threads"
-            );
-        }
-        // Take and drop the process — AddressSpace::drop handles cleanup.
-        *slot = None;
-    }
-}
-/// Access the current thread's process via closure. Acquires the scheduler
-/// lock for the duration. Panics if the current thread has no process
-/// (kernel threads).
-#[inline(never)]
-pub fn current_process_do<R>(f: impl FnOnce(&mut Process) -> R) -> R {
-    let mut s = STATE.lock();
-    let core = per_core::core_id() as usize;
-    let pid = s.cores[core]
-        .current
-        .as_ref()
-        .expect("no current thread")
-        .process_id
-        .expect("kernel thread has no process")
-        .0 as usize;
-    let process = s.processes[pid].as_mut().expect("process not found");
-
-    f(process)
-}
 /// Create a new scheduling context. Returns the SchedulingContextId.
 ///
 /// The context starts with ref_count=1 (the handle inserted by the caller).
@@ -1027,6 +984,43 @@ pub fn create_scheduling_context(budget: u64, period: u64) -> Option<SchedulingC
     };
 
     Some(id)
+}
+/// Access the current thread's process via closure. Acquires the scheduler
+/// lock for the duration. Panics if the current thread has no process
+/// (kernel threads).
+#[inline(never)]
+pub fn current_process_do<R>(f: impl FnOnce(&mut Process) -> R) -> R {
+    let mut s = STATE.lock();
+    let core = per_core::core_id() as usize;
+    let pid = s.cores[core]
+        .current
+        .as_ref()
+        .expect("no current thread")
+        .process_id
+        .expect("kernel thread has no process")
+        .0 as usize;
+    let process = s.processes[pid].as_mut().expect("process not found");
+
+    f(process)
+}
+/// Access the current thread's process AND its ProcessId via closure.
+/// Single lock acquisition for operations that need both (e.g., VMO mapping
+/// which must record the ProcessId in the VMO's mapping tracker).
+#[inline(never)]
+pub fn current_process_with_pid_do<R>(f: impl FnOnce(ProcessId, &mut Process) -> R) -> R {
+    let mut s = STATE.lock();
+    let core = per_core::core_id() as usize;
+    let pid = s.cores[core]
+        .current
+        .as_ref()
+        .expect("no current thread")
+        .process_id
+        .expect("kernel thread has no process");
+    let process = s.processes[pid.0 as usize]
+        .as_mut()
+        .expect("process not found");
+
+    f(pid, process)
 }
 /// Access both the current thread and its process via closure.
 ///
@@ -1405,6 +1399,32 @@ pub fn release_scheduling_context(ctx_id: SchedulingContextId) {
     let mut s = STATE.lock();
 
     release_context_inner(&mut s, ctx_id);
+}
+/// Remove an orphaned process that has no threads.
+///
+/// Called on error paths where `create_process` succeeded but thread
+/// creation failed. The process's `Box<AddressSpace>` is dropped, which
+/// triggers its `Drop` impl (invalidate TLB + free all frames + free ASID).
+///
+/// # Panics
+///
+/// Debug-asserts that the process has zero threads. Removing a process
+/// with live threads would leak those threads.
+#[inline(never)]
+pub fn remove_empty_process(pid: ProcessId) {
+    let mut s = STATE.lock();
+
+    if let Some(slot) = s.processes.get_mut(pid.0 as usize) {
+        if let Some(process) = slot.as_ref() {
+            debug_assert_eq!(
+                process.thread_count, 0,
+                "remove_empty_process: process has live threads"
+            );
+        }
+
+        // Take and drop the process — AddressSpace::drop handles cleanup.
+        *slot = None;
+    }
 }
 /// Return a borrowed scheduling context, restoring the saved one.
 ///

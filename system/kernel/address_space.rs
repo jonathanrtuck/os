@@ -171,6 +171,12 @@ impl AddressSpace {
     ///
     /// For write faults on pages with refcount > 1 (shared with snapshots),
     /// performs COW: allocate new page, copy content, replace in VMO.
+    ///
+    /// **Sealed VMOs:** Always mapped RO regardless of VMA writable flag.
+    /// Write attempts hit a permission fault (not a translation fault),
+    /// which the exception handler handles by killing the process. This is
+    /// safe because `user_fault_handler` only dispatches translation faults
+    /// to `handle_fault` — permission faults go straight to terminate.
     fn handle_fault_vmo(
         &mut self,
         page_va: u64,
@@ -187,10 +193,12 @@ impl AddressSpace {
             Some(v) => v,
             None => return false, // VMO was destroyed — kill process
         };
-
+        // Sealed VMOs are effectively read-only. The VMA may still say
+        // writable (mapping was created before seal), but we force RO.
+        let effective_writable = writable && !vmo.is_sealed();
         // Check if the page is already committed.
         let pa = if let Some((existing_pa, refcount)) = vmo.lookup_page(page_offset) {
-            if writable && refcount > 1 {
+            if effective_writable && refcount > 1 {
                 // COW: page is shared with a snapshot. Allocate a new page,
                 // copy the content, and replace in the VMO.
                 let new_pa = match page_allocator::alloc_frame() {
@@ -220,18 +228,21 @@ impl AddressSpace {
             }
         } else {
             // Uncommitted: allocate, zero-fill, commit to VMO.
+            // Sealed VMOs still demand-page zero frames (internal bookkeeping,
+            // not a user-visible mutation — committed_pages may increase).
             let new_pa = match page_allocator::alloc_frame() {
                 Some(pa) => pa,
                 None => return false,
             };
+
             // alloc_frame returns zeroed memory.
             vmo.commit_page(page_offset, new_pa);
+
             new_pa
         };
-
         // VMO owns the frame — do NOT add to owned_frames.
-        // Map with appropriate permissions.
-        let attrs = if writable {
+        // Map with appropriate permissions (RO if sealed).
+        let attrs = if effective_writable {
             PageAttrs::user_rw()
         } else {
             PageAttrs::user_ro()
@@ -417,6 +428,17 @@ impl AddressSpace {
         // ASID. The ASID was allocated by the address_space_id module and is valid.
         // Barriers ensure the invalidation completes before we free pages.
         super::arch::mmu::tlbi_asid(self.asid.0 as u64);
+    }
+    /// Invalidate all PTEs for a VMO-backed mapping without removing the VMA.
+    ///
+    /// Used by `vmo_seal` and `vmo_restore` to force already-faulted pages to
+    /// re-fault through the (now sealed-aware / restored-data-aware) fault handler.
+    /// The VMA stays in place — only the page table entries are cleared.
+    pub fn invalidate_vmo_pages(&mut self, va: u64, page_count: u64) {
+        for i in 0..page_count {
+            self.unmap_page_inner(va + i * PAGE_SIZE);
+        }
+        self.invalidate_tlb();
     }
     /// Map a channel shared page into this address space.
     ///
@@ -743,6 +765,15 @@ impl AddressSpace {
         self.invalidate_tlb();
 
         true
+    }
+    /// Look up the VmoId backing a given VA, if any.
+    pub fn vmo_id_at(&self, va: u64) -> Option<super::vmo::VmoId> {
+        let vma = self.vmas.lookup(va)?;
+
+        match &vma.backing {
+            Backing::Vmo { vmo_id, .. } => Some(*vmo_id),
+            _ => None,
+        }
     }
 }
 
