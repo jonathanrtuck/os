@@ -94,6 +94,7 @@ mod memory_mapped_io;
 mod memory_region;
 mod metrics;
 mod page_allocator;
+mod pager;
 mod paging;
 mod per_core;
 mod power;
@@ -1000,15 +1001,34 @@ pub extern "C" fn user_fault_handler(ctx: *mut Context) -> *const Context {
     if (ec == 0x24 || ec == 0x20) && is_translation_fault {
         metrics::inc_page_faults();
 
-        let handled =
+        let result =
             scheduler::current_process_do(|process| process.address_space.handle_fault(far));
 
-        if handled {
-            // Page mapped successfully — return to the faulting instruction.
-            // The CPU will re-execute it and find the page present.
-            return ctx;
+        match result {
+            address_space::FaultResult::Handled => {
+                // Page mapped successfully — return to the faulting instruction.
+                return ctx;
+            }
+            address_space::FaultResult::NeedsPager {
+                vmo_id,
+                page_offset,
+                channel_id,
+                is_new_request,
+            } => {
+                // Forward fault to userspace pager. Write fault offset to
+                // pager ring, signal the pager channel, block this thread.
+                if is_new_request {
+                    pager::dispatch_fault(channel_id, page_offset);
+                }
+
+                return pager::block_for_pager(ctx, vmo_id, page_offset);
+            }
+            address_space::FaultResult::Unhandled => {
+                // Fall through to diagnostic + terminate.
+            }
         }
     }
+    // Future extension point (phase 3d): dispatch to process exception handler here.
 
     // Unresolvable fault — log and terminate.
     serial::panic_puts("user fault: EC=0x");

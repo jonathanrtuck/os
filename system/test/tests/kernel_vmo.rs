@@ -589,3 +589,76 @@ fn seal_returns_writable_mappings() {
     // Both mappings returned (all need invalidation — caller decides which are writable)
     assert_eq!(mappings.len(), 2);
 }
+
+// =========================================================================
+// Pager (Phase 3b)
+// =========================================================================
+
+use handle::ChannelId;
+
+#[test]
+fn vmo_initially_has_no_pager() {
+    let mut table = VmoTable::new();
+    let id = table.create(4, VmoFlags::empty(), 0).unwrap();
+    assert!(!table.get(id).unwrap().has_pager());
+}
+
+#[test]
+fn set_pager_attaches_channel() {
+    let mut table = VmoTable::new();
+    let id = table.create(4, VmoFlags::empty(), 0).unwrap();
+    let ch = ChannelId(42);
+    table.get_mut(id).unwrap().set_pager(ch);
+    assert!(table.get(id).unwrap().has_pager());
+    assert_eq!(table.get(id).unwrap().pager_channel(), Some(ch));
+}
+
+#[test]
+fn set_pager_on_sealed_vmo_fails() {
+    let mut table = VmoTable::new();
+    let id = table.create(4, VmoFlags::empty(), 0).unwrap();
+    table.get_mut(id).unwrap().seal();
+    // Sealed VMOs reject pager attachment (immutable).
+    assert!(!table.get_mut(id).unwrap().set_pager(ChannelId(1)));
+}
+
+#[test]
+fn pending_faults_tracking() {
+    let mut table = VmoTable::new();
+    let id = table.create(4, VmoFlags::empty(), 0).unwrap();
+    let vmo = table.get_mut(id).unwrap();
+    vmo.set_pager(ChannelId(1));
+
+    // First fault on page 2 — should be new (not already pending).
+    assert!(vmo.add_pending_fault(2));
+    // Second fault on page 2 — already pending, deduplicated.
+    assert!(!vmo.add_pending_fault(2));
+    // Different page — new.
+    assert!(vmo.add_pending_fault(5));
+
+    // Supply page 2 — clears pending.
+    vmo.clear_pending_fault(2);
+    // Now page 2 can be re-requested.
+    assert!(vmo.add_pending_fault(2));
+}
+
+#[test]
+fn needs_pager_for_uncommitted_page() {
+    let mut table = VmoTable::new();
+    let id = table.create(4, VmoFlags::empty(), 0).unwrap();
+    let vmo = table.get_mut(id).unwrap();
+
+    // No pager → uncommitted page should NOT need pager.
+    assert!(!vmo.needs_pager_for(0));
+
+    // Attach pager → uncommitted page needs pager.
+    vmo.set_pager(ChannelId(1));
+    assert!(vmo.needs_pager_for(0));
+
+    // Commit page 0 → no longer needs pager (already committed).
+    vmo.commit_page(0, Pa(0x1000));
+    assert!(!vmo.needs_pager_for(0));
+
+    // Uncommitted page 1 still needs pager.
+    assert!(vmo.needs_pager_for(1));
+}

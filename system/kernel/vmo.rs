@@ -30,11 +30,14 @@
 
 extern crate alloc;
 
-use alloc::{collections::BTreeMap, vec::Vec};
+use alloc::{
+    collections::{BTreeMap, BTreeSet},
+    vec::Vec,
+};
 
 #[cfg(not(test))]
 use super::sync::IrqMutex;
-use super::{memory::Pa, process::ProcessId};
+use super::{handle::ChannelId, memory::Pa, process::ProcessId};
 
 // =========================================================================
 // Public types
@@ -145,6 +148,12 @@ pub struct Vmo {
     /// Active mappings (process, VA range) for seal/restore PTE invalidation
     /// and cleanup on Drop.
     mappings: Vec<VmoMapping>,
+    /// Optional pager channel. When a fault occurs on an uncommitted page,
+    /// the kernel sends a fault offset to this channel instead of zero-filling.
+    pager: Option<ChannelId>,
+    /// Page offsets with pending pager requests (deduplication — avoids
+    /// sending duplicate fault messages for the same page).
+    pending_faults: BTreeSet<u64>,
 }
 
 impl Vmo {
@@ -160,6 +169,8 @@ impl Vmo {
             max_snapshots: DEFAULT_MAX_SNAPSHOTS,
             sealed: false,
             mappings: Vec::new(),
+            pager: None,
+            pending_faults: BTreeSet::new(),
         }
     }
 
@@ -210,6 +221,15 @@ impl Vmo {
     /// Record a new mapping of this VMO into a process's address space.
     pub fn add_mapping(&mut self, mapping: VmoMapping) {
         self.mappings.push(mapping);
+    }
+    /// Record a pending fault for deduplication. Returns true if this is a
+    /// new request (caller should send to pager), false if already pending.
+    pub fn add_pending_fault(&mut self, page_offset: u64) -> bool {
+        self.pending_faults.insert(page_offset)
+    }
+    /// Clear a pending fault (page was supplied by pager).
+    pub fn clear_pending_fault(&mut self, page_offset: u64) {
+        self.pending_faults.remove(&page_offset);
     }
     /// Commit a page at the given offset. Unconditional — does not check
     /// seal or bounds beyond size_pages. Used by the fault handler after
@@ -284,6 +304,10 @@ impl Vmo {
     pub fn generation(&self) -> u64 {
         self.generation
     }
+    /// Check if this VMO has a pager attached.
+    pub fn has_pager(&self) -> bool {
+        self.pager.is_some()
+    }
     /// Return structured info for the `vmo_get_info` syscall.
     pub fn info(&self) -> VmoInfo {
         let mut flags = 0u64;
@@ -322,9 +346,18 @@ impl Vmo {
     pub fn max_snapshots(&self) -> usize {
         self.max_snapshots
     }
+    /// Check if a page needs to be supplied by the pager.
+    /// True if: pager exists AND page is uncommitted AND offset is in bounds.
+    pub fn needs_pager_for(&self, offset: u64) -> bool {
+        self.pager.is_some() && offset < self.size_pages && self.lookup_page(offset).is_none()
+    }
     /// Check if a page needs COW (refcount > 1).
     pub fn page_needs_cow(&self, offset: u64) -> bool {
         self.pages.get(&offset).map_or(false, |&(_, rc)| rc > 1)
+    }
+    /// Return the pager channel, if set.
+    pub fn pager_channel(&self) -> Option<ChannelId> {
+        self.pager
     }
     /// Remove a mapping by process and VA. Returns true if found and removed.
     pub fn remove_mapping(&mut self, process_id: ProcessId, va_base: u64) -> bool {
@@ -391,6 +424,16 @@ impl Vmo {
         self.sealed = true;
 
         self.mappings.clone()
+    }
+    /// Attach a pager channel. Returns false if VMO is sealed (rejected).
+    pub fn set_pager(&mut self, channel: ChannelId) -> bool {
+        if self.sealed {
+            return false;
+        }
+
+        self.pager = Some(channel);
+
+        true
     }
     pub fn size_pages(&self) -> u64 {
         self.size_pages
@@ -542,6 +585,25 @@ pub fn add_mapping(id: VmoId, mapping: VmoMapping) {
         vmo.add_mapping(mapping);
     }
 }
+/// Clear pending faults for a page range (called by pager_supply).
+/// Returns the number of pending faults cleared.
+#[cfg(not(test))]
+pub fn clear_pending_faults(id: VmoId, offset: u64, count: u64) -> u64 {
+    let mut state = STATE.lock();
+    let vmo = match state.get_mut(id) {
+        Some(v) => v,
+        None => return 0,
+    };
+    let mut cleared = 0u64;
+
+    for page in offset..offset + count {
+        if vmo.pending_faults.remove(&page) {
+            cleared += 1;
+        }
+    }
+
+    cleared
+}
 /// Create a new VMO. Returns `(VmoId, VmoFlags)` on success, None if size is 0.
 #[cfg(not(test))]
 pub fn create(size_pages: u64, flags: VmoFlags, type_tag: u64) -> Option<VmoId> {
@@ -640,6 +702,15 @@ pub fn restore(id: VmoId, generation: u64) -> Option<(Vec<Pa>, Vec<VmoMapping>)>
 #[cfg(not(test))]
 pub fn seal(id: VmoId) -> Option<Vec<VmoMapping>> {
     STATE.lock().get_mut(id).map(|v| v.seal_and_get_mappings())
+}
+/// Attach a pager channel to a VMO. Returns false if sealed or not found.
+#[cfg(not(test))]
+pub fn set_pager(id: VmoId, channel: super::handle::ChannelId) -> bool {
+    STATE
+        .lock()
+        .get_mut(id)
+        .map(|v| v.set_pager(channel))
+        .unwrap_or(false)
 }
 /// Get the size of a VMO in pages.
 #[cfg(not(test))]

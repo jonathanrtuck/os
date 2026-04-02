@@ -799,6 +799,29 @@ pub fn bind_scheduling_context(ctx_id: SchedulingContextId) -> bool {
 
     true
 }
+/// Block the current thread waiting for a userspace pager to supply a page.
+///
+/// The thread transitions to Blocked with `pager_wait` set to
+/// `(vmo_id, page_offset)`. When `pager_supply` commits that page,
+/// `wake_pager_waiters` scans the blocked list and wakes matching threads.
+///
+/// Called from `user_fault_handler` (not a syscall path), so the Context
+/// pointer comes from the exception frame.
+pub fn block_current_for_pager(
+    ctx: *mut Context,
+    vmo_id: super::vmo::VmoId,
+    page_offset: u64,
+) -> *const Context {
+    let mut s = STATE.lock();
+    let core = per_core::core_id() as usize;
+    let thread = s.cores[core].current.as_mut().expect("no current thread");
+
+    thread.pager_wait = Some((vmo_id, page_offset));
+
+    thread.block();
+
+    schedule_inner(&mut s, ctx, core)
+}
 /// Block the current thread and reschedule, unless a wake is already pending.
 ///
 /// Used by both `futex_wait` and `wait` syscalls. The sequence is:
@@ -1681,6 +1704,46 @@ pub fn try_wake_for_handle(id: ThreadId, reason: HandleObject) -> bool {
     let mut s = STATE.lock();
 
     try_wake_impl(&mut s, id, Some(&reason))
+}
+/// Wake all threads blocked on pager faults for the given VMO page range.
+///
+/// Called by `pager_supply` after pages have been committed. Threads are
+/// woken and will re-enter the fault handler, finding committed pages.
+pub fn wake_pager_waiters(vmo_id: super::vmo::VmoId, offset: u64, count: u64) {
+    let mut s = STATE.lock();
+    let range_end = offset + count;
+
+    // Collect indices of blocked threads that match.
+    let mut to_wake = Vec::new();
+
+    for (i, thread) in s.blocked.iter().enumerate() {
+        if let Some((wait_vmo, wait_page)) = thread.pager_wait {
+            if wait_vmo == vmo_id && wait_page >= offset && wait_page < range_end {
+                to_wake.push(i);
+            }
+        }
+    }
+
+    // Wake in reverse order (swap_remove from back to front preserves indices).
+    for &idx in to_wake.iter().rev() {
+        let mut thread = s.blocked.swap_remove(idx);
+
+        thread.pager_wait = None;
+
+        if thread.wake() {
+            // Mark eligible and enqueue — same pattern as try_wake_impl.
+            thread.scheduling.eevdf = thread.scheduling.eevdf.mark_eligible();
+            s.queue.ready.push(thread);
+        } else {
+            // Thread state wasn't Blocked (shouldn't happen, but defensive).
+            s.blocked.push(thread);
+        }
+    }
+
+    // IPI an idle core so it picks up newly-ready threads.
+    if !to_wake.is_empty() {
+        ipi_kick_idle_core(&mut s, per_core::core_id() as usize);
+    }
 }
 /// Access a process by ProcessId. Acquires the scheduler lock.
 ///

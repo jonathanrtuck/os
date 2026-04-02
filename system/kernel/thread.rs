@@ -164,6 +164,10 @@ pub struct Thread {
     /// Cleaned up on the next `wait` call (deferred cleanup for the
     /// Blocked path, where sys_wait can't run cleanup code).
     pub(crate) timeout_timer: Option<super::timer::TimerId>,
+    /// If Some, this thread is blocked waiting for a pager to supply a page.
+    /// Contains (VmoId, page_offset). Set by `block_current_for_pager`,
+    /// cleared by `wake_pager_waiters` when the page is supplied.
+    pub(crate) pager_wait: Option<(super::vmo::VmoId, u64)>,
 }
 
 const _: () = assert!(core::mem::offset_of!(Thread, context) == 0);
@@ -194,6 +198,7 @@ impl Thread {
             wait_set: Vec::new(),
             stale_waiters: Vec::new(),
             timeout_timer: None,
+            pager_wait: None,
         }
     }
 

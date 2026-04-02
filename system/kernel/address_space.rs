@@ -28,6 +28,24 @@ use super::{
     },
 };
 
+/// Result of a page fault handling attempt.
+pub enum FaultResult {
+    /// Page was successfully mapped. Return to faulting instruction.
+    Handled,
+    /// Page belongs to a pager-backed VMO. The caller must send a fault
+    /// message to the pager channel and block the faulting thread.
+    NeedsPager {
+        vmo_id: super::vmo::VmoId,
+        page_offset: u64,
+        channel_id: super::handle::ChannelId,
+        /// True if this is a new request (not already pending). If false,
+        /// the caller should just block without sending a duplicate message.
+        is_new_request: bool,
+    },
+    /// Fault address not covered by any VMA. Kill the process.
+    Unhandled,
+}
+
 /// Per-process DMA page budget: half of RAM pages.
 /// Generous to support GPU render target + depth/stencil surface.
 /// Derived from RAM geometry so resolution changes never require kernel updates.
@@ -157,6 +175,7 @@ impl AddressSpace {
 
         if !self.map_page(page_va, pa.as_u64(), &attrs) {
             page_allocator::free_frame(Pa(pa.0));
+
             return false;
         }
 
@@ -184,14 +203,13 @@ impl AddressSpace {
         vmo_id: super::vmo::VmoId,
         mapping_offset: u64,
         writable: bool,
-    ) -> bool {
+    ) -> FaultResult {
         let page_offset = (page_va - vma.start) / PAGE_SIZE + mapping_offset;
-
         // Access the global VMO table.
         let mut vmo_state = super::vmo::STATE.lock();
         let vmo = match vmo_state.get_mut(vmo_id) {
             Some(v) => v,
-            None => return false, // VMO was destroyed — kill process
+            None => return FaultResult::Unhandled, // VMO was destroyed — kill process
         };
         // Sealed VMOs are effectively read-only. The VMA may still say
         // writable (mapping was created before seal), but we force RO.
@@ -203,21 +221,26 @@ impl AddressSpace {
                 // copy the content, and replace in the VMO.
                 let new_pa = match page_allocator::alloc_frame() {
                     Some(pa) => pa,
-                    None => return false,
+                    None => return FaultResult::Unhandled,
                 };
+
                 // Copy content from old page to new page.
                 // SAFETY: Both PAs are valid allocated frames. phys_to_virt
                 // produces valid kernel VAs. PAGE_SIZE bytes is the full frame.
                 unsafe {
                     let src = memory::phys_to_virt(existing_pa) as *const u8;
                     let dst = memory::phys_to_virt(new_pa) as *mut u8;
+
                     core::ptr::copy_nonoverlapping(src, dst, PAGE_SIZE as usize);
                 }
+
                 // Replace in VMO: decrements old page's refcount in snapshots.
                 if let Some(freed_pa) = vmo.cow_replace_page(page_offset, new_pa) {
                     // Old page's refcount hit 0 — free it.
                     drop(vmo_state); // Release lock before freeing.
+
                     page_allocator::free_frame(freed_pa);
+
                     // Re-acquire to get the PA for mapping — but we already have new_pa.
                     new_pa
                 } else {
@@ -226,13 +249,28 @@ impl AddressSpace {
             } else {
                 existing_pa
             }
+        } else if let Some(channel_id) = vmo.pager_channel() {
+            // Uncommitted + pager exists → forward fault to userspace pager.
+            // Record pending fault (deduplication: true = new, false = already pending).
+            let is_new = vmo.add_pending_fault(page_offset);
+
+            // Release VMO lock BEFORE blocking — holding it would deadlock
+            // any other thread accessing VMOs while the pager runs.
+            drop(vmo_state);
+
+            return FaultResult::NeedsPager {
+                vmo_id,
+                page_offset,
+                channel_id,
+                is_new_request: is_new,
+            };
         } else {
-            // Uncommitted: allocate, zero-fill, commit to VMO.
+            // Uncommitted, no pager: allocate, zero-fill, commit to VMO.
             // Sealed VMOs still demand-page zero frames (internal bookkeeping,
             // not a user-visible mutation — committed_pages may increase).
             let new_pa = match page_allocator::alloc_frame() {
                 Some(pa) => pa,
-                None => return false,
+                None => return FaultResult::Unhandled,
             };
 
             // alloc_frame returns zeroed memory.
@@ -249,11 +287,12 @@ impl AddressSpace {
         };
 
         if !self.map_inner(page_va, pa.as_u64(), &attrs) {
-            return false;
+            return FaultResult::Unhandled;
         }
 
         self.tlbi_page(page_va);
-        true
+
+        FaultResult::Handled
     }
     fn l2_idx(va: u64) -> usize {
         ((va >> 25) & 0x7FF) as usize
@@ -404,17 +443,25 @@ impl AddressSpace {
 
         self.freed = true;
     }
-    /// Handle a page fault at `va`. Returns true if the fault was resolved
-    /// (page mapped), false if `va` is not covered by any VMA (kill process).
-    pub fn handle_fault(&mut self, va: u64) -> bool {
+    /// Handle a page fault at `va`.
+    ///
+    /// Returns `Handled` if the page was mapped, `NeedsPager` if the fault
+    /// should be forwarded to a userspace pager, or `Unhandled` to kill.
+    pub fn handle_fault(&mut self, va: u64) -> FaultResult {
         let page_va = va & !(PAGE_SIZE - 1);
         let vma = match self.vmas.lookup(page_va) {
             Some(v) => v.clone(),
-            None => return false,
+            None => return FaultResult::Unhandled,
         };
 
         match &vma.backing {
-            Backing::Anonymous => self.handle_fault_anonymous(page_va, &vma),
+            Backing::Anonymous => {
+                if self.handle_fault_anonymous(page_va, &vma) {
+                    FaultResult::Handled
+                } else {
+                    FaultResult::Unhandled
+                }
+            }
             Backing::Vmo {
                 vmo_id,
                 offset,

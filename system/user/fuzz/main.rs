@@ -128,7 +128,7 @@ fn assert_err_code(result: sys::SyscallResult<u64>, expected: sys::SyscallError,
 // Phase 1: Invalid syscall numbers
 // -----------------------------------------------------------------------
 fn phase_1_invalid_syscall_numbers() {
-    let bad_nrs: [u64; 8] = [37, 38, 100, 255, 1000, u64::MAX, u64::MAX - 1, 0x8000_0000];
+    let bad_nrs: [u64; 8] = [39, 40, 100, 255, 1000, u64::MAX, u64::MAX - 1, 0x8000_0000];
 
     for &nr in &bad_nrs {
         let ret = unsafe { raw_syscall0(nr) } as i64;
@@ -289,20 +289,20 @@ fn phase_3_bad_addresses() {
 
     // process_create with bad ELF pointer.
     for &addr in &bad_addrs {
-        let ret = unsafe { raw_syscall2(25, addr, 1024) } as i64;
+        let ret = unsafe { raw_syscall2(27, addr, 1024) } as i64;
         if ret >= 0 {
             phase_fail(b"phase 3", b"process_create with bad ptr should fail");
         }
     }
 
     // process_create with zero length.
-    let ret = unsafe { raw_syscall2(25, buf.as_ptr() as u64, 0) } as i64;
+    let ret = unsafe { raw_syscall2(27, buf.as_ptr() as u64, 0) } as i64;
     if ret >= 0 {
         phase_fail(b"phase 3", b"process_create with len=0 should fail");
     }
 
     // process_create with huge length.
-    let ret = unsafe { raw_syscall2(25, buf.as_ptr() as u64, 100_000_000) } as i64;
+    let ret = unsafe { raw_syscall2(27, buf.as_ptr() as u64, 100_000_000) } as i64;
     if ret >= 0 {
         phase_fail(b"phase 3", b"process_create with huge len should fail");
     }
@@ -321,16 +321,16 @@ fn phase_3_bad_addresses() {
     let _ = ret; // Any error is fine.
 
     // thread_create with bad entry/stack.
-    let ret = unsafe { raw_syscall2(29, 0xFFFF_0000_0000_0000, 0x1000) } as i64;
+    let ret = unsafe { raw_syscall2(31, 0xFFFF_0000_0000_0000, 0x1000) } as i64;
     if ret >= 0 {
         phase_fail(b"phase 3", b"thread_create with kernel entry should fail");
     }
-    let ret = unsafe { raw_syscall2(29, 0x1000, 0xFFFF_0000_0000_0000) } as i64;
+    let ret = unsafe { raw_syscall2(31, 0x1000, 0xFFFF_0000_0000_0000) } as i64;
     if ret >= 0 {
         phase_fail(b"phase 3", b"thread_create with kernel stack should fail");
     }
     // Unaligned stack.
-    let ret = unsafe { raw_syscall2(29, 0x1000, 0x1001) } as i64;
+    let ret = unsafe { raw_syscall2(31, 0x1000, 0x1001) } as i64;
     if ret >= 0 {
         phase_fail(
             b"phase 3",
@@ -357,13 +357,13 @@ fn phase_3_bad_addresses() {
     }
 
     // device_map with RAM address (not device MMIO).
-    let ret = unsafe { raw_syscall2(34, 0x4000_0000, 0x1000) } as i64;
+    let ret = unsafe { raw_syscall2(36, 0x4000_0000, 0x1000) } as i64;
     if ret >= 0 {
         phase_fail(b"phase 3", b"device_map into RAM should fail");
     }
 
     // device_map with size=0.
-    let ret = unsafe { raw_syscall2(34, 0x0800_0000, 0) } as i64;
+    let ret = unsafe { raw_syscall2(36, 0x0800_0000, 0) } as i64;
     if ret >= 0 {
         phase_fail(b"phase 3", b"device_map with size=0 should fail");
     }
@@ -377,7 +377,7 @@ fn phase_3_bad_addresses() {
     let _ = ret; // Should fail.
 
     // scheduling_context_create with zero budget/period.
-    let ret = unsafe { raw_syscall2(30, 0, 0) } as i64;
+    let ret = unsafe { raw_syscall2(32, 0, 0) } as i64;
     let _ = ret; // May or may not fail — kernel decides.
 
     phase_ok(b"phase 3: bad address arguments");

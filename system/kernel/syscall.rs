@@ -128,21 +128,23 @@ pub mod nr {
     pub const VMO_RESTORE: u64 = 22;
     pub const VMO_SEAL: u64 = 23;
     pub const VMO_OP_RANGE: u64 = 24;
-    // --- Process/thread lifecycle (25–29) ---
-    pub const PROCESS_CREATE: u64 = 25;
-    pub const PROCESS_START: u64 = 26;
-    pub const PROCESS_KILL: u64 = 27;
-    pub const PROCESS_SET_SYSCALL_FILTER: u64 = 28;
-    pub const THREAD_CREATE: u64 = 29;
-    // --- Scheduling (30–33) ---
-    pub const SCHEDULING_CONTEXT_CREATE: u64 = 30;
-    pub const SCHEDULING_CONTEXT_BORROW: u64 = 31;
-    pub const SCHEDULING_CONTEXT_RETURN: u64 = 32;
-    pub const SCHEDULING_CONTEXT_BIND: u64 = 33;
-    // --- Device layer (34–36) ---
-    pub const DEVICE_MAP: u64 = 34;
-    pub const INTERRUPT_REGISTER: u64 = 35;
-    pub const INTERRUPT_ACK: u64 = 36;
+    pub const VMO_SET_PAGER: u64 = 25;
+    pub const PAGER_SUPPLY: u64 = 26;
+    // --- Process/thread lifecycle (27–31) ---
+    pub const PROCESS_CREATE: u64 = 27;
+    pub const PROCESS_START: u64 = 28;
+    pub const PROCESS_KILL: u64 = 29;
+    pub const PROCESS_SET_SYSCALL_FILTER: u64 = 30;
+    pub const THREAD_CREATE: u64 = 31;
+    // --- Scheduling (32–35) ---
+    pub const SCHEDULING_CONTEXT_CREATE: u64 = 32;
+    pub const SCHEDULING_CONTEXT_BORROW: u64 = 33;
+    pub const SCHEDULING_CONTEXT_RETURN: u64 = 34;
+    pub const SCHEDULING_CONTEXT_BIND: u64 = 35;
+    // --- Device layer (36–38) ---
+    pub const DEVICE_MAP: u64 = 36;
+    pub const INTERRUPT_REGISTER: u64 = 37;
+    pub const INTERRUPT_ACK: u64 = 38;
 }
 
 /// Maximum DMA allocation order — matches page_allocator::MAX_ORDER.
@@ -680,6 +682,36 @@ fn sys_memory_free(va: u64, _page_count: u64) -> Result<u64, Error> {
             .unmap_heap(va)
             .ok_or(Error::InvalidArgument)
     })?;
+
+    Ok(0)
+}
+fn sys_pager_supply(vmo_handle_nr: u64, offset_pages: u64, page_count: u64) -> Result<u64, Error> {
+    if vmo_handle_nr > u16::MAX as u64 || page_count == 0 {
+        return Err(Error::InvalidArgument);
+    }
+
+    // Resolve VMO handle (WRITE right — pager needs to commit pages).
+    let vmo_id = scheduler::current_process_do(|process| {
+        let obj = process
+            .handles
+            .get(Handle(vmo_handle_nr as u16), Rights::WRITE)?;
+
+        match obj {
+            HandleObject::Vmo(id) => Ok(id),
+            _ => Err(HandleError::InvalidHandle),
+        }
+    })?;
+
+    // Validate range.
+    let size = vmo::size_pages(vmo_id).ok_or(Error::InvalidArgument)?;
+
+    if offset_pages >= size || offset_pages + page_count > size {
+        return Err(Error::InvalidArgument);
+    }
+
+    // Clear pending faults and wake blocked threads.
+    vmo::clear_pending_faults(vmo_id, offset_pages, page_count);
+    scheduler::wake_pager_waiters(vmo_id, offset_pages, page_count);
 
     Ok(0)
 }
@@ -1421,6 +1453,37 @@ fn sys_vmo_seal(handle_nr: u64) -> Result<u64, Error> {
 
     Ok(0)
 }
+fn sys_vmo_set_pager(vmo_handle_nr: u64, channel_handle_nr: u64) -> Result<u64, Error> {
+    if vmo_handle_nr > u16::MAX as u64 || channel_handle_nr > u16::MAX as u64 {
+        return Err(Error::InvalidArgument);
+    }
+
+    // Resolve VMO (WRITE right) and channel handle.
+    let (vmo_id, channel_id) = scheduler::current_process_do(|process| {
+        let vmo_obj = process
+            .handles
+            .get(Handle(vmo_handle_nr as u16), Rights::WRITE)?;
+        let vmo_id = match vmo_obj {
+            HandleObject::Vmo(id) => id,
+            _ => return Err(HandleError::InvalidHandle),
+        };
+        let ch_obj = process
+            .handles
+            .get(Handle(channel_handle_nr as u16), Rights::NONE)?;
+        let channel_id = match ch_obj {
+            HandleObject::Channel(id) => id,
+            _ => return Err(HandleError::InvalidHandle),
+        };
+
+        Ok((vmo_id, channel_id))
+    })?;
+
+    if vmo::set_pager(vmo_id, channel_id) {
+        Ok(0)
+    } else {
+        Err(Error::PermissionDenied) // Sealed
+    }
+}
 fn sys_vmo_snapshot(handle_nr: u64) -> Result<u64, Error> {
     if handle_nr > u16::MAX as u64 {
         return Err(Error::InvalidArgument);
@@ -1974,6 +2037,13 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
             let x2 = unsafe { xbase.add(2).read() };
             let x3 = unsafe { xbase.add(3).read() };
             dispatch_ok(ctx, result_to_u64!(sys_vmo_op_range(x0, x1, x2, x3)))
+        }
+        nr::VMO_SET_PAGER => dispatch_ok(ctx, result_to_u64!(sys_vmo_set_pager(x0, x1))),
+        nr::PAGER_SUPPLY => {
+            let xbase = unsafe { core::ptr::addr_of!((*ctx).x) as *const u64 };
+            let x2 = unsafe { xbase.add(2).read() };
+
+            dispatch_ok(ctx, result_to_u64!(sys_pager_supply(x0, x1, x2)))
         }
 
         _ => dispatch_ok(

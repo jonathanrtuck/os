@@ -532,14 +532,78 @@ Design informed by cross-OS comparison and research survey:
 
 **Key insight:** No existing microkernel combines all four novel features (ownership-typed, versioned, permission-rich, content-tagged). Each exists in isolation in research systems. This kernel composes them into a single coherent abstraction.
 
-**3b. Pager interface / exception forwarding:**
+**3b. Pager interface (SETTLED 2026-04-01):**
 
-When a process faults, instead of killing it, forward the fault to a designated pager process. The pager resolves the fault (e.g., reads from disk, decompresses, generates content) and replies. The faulting thread resumes.
+VMO-level pagers: a channel attached to a VMO that receives page fault notifications. When an uncommitted page is accessed, the kernel forwards the fault to the pager instead of zero-filling. The pager resolves the fault (reads from disk, decompresses, generates content), commits the page, and tells the kernel to wake blocked threads.
 
-- Unlocks: demand-paged filesystems, memory-mapped files, sandboxed decoders that lazily decode on access, debuggers (breakpoints are faults).
-- This is §9.9 (COW kernel mechanics) generalized: instead of the kernel handling COW faults internally, it forwards them to userspace.
-- Reference: seL4 fault endpoints, Zircon exception channels.
-- Subsumes §9.9 entirely — COW becomes a userspace policy, not a kernel mechanism.
+**Design:** Pager as VMO attribute (Zircon-inspired, not seL4's thread-level model). Different VMOs can have different pagers — the document service pages document VMOs, the filesystem service pages file VMOs.
+
+**Exception dispatch priority chain** (designed for future extensibility):
+
+1. Translation fault on pager-backed VMO → dispatch to VMO pager (this phase)
+2. Any exception + process has exception handler → dispatch to process handler (future phase 3d)
+3. Kill the process
+
+The extension point for process-level exception handling (phase 3d: debuggers, breakpoints, illegal instructions) is a one-line addition to the fault handler. No refactoring needed.
+
+**Syscalls:**
+
+| Nr  | Name          | Args                                     | Returns | Rights       |
+| --- | ------------- | ---------------------------------------- | ------- | ------------ |
+| 25  | vmo_set_pager | x0=vmo_handle, x1=channel_handle         | 0       | WRITE on VMO |
+| 26  | pager_supply  | x0=vmo_handle, x1=offset_pages, x2=count | 0       | WRITE on VMO |
+
+**VMO changes:**
+
+```rust
+/// Optional pager channel. Kernel sends fault offsets here.
+pager: Option<ChannelId>,
+/// Page offsets with pending pager requests (deduplication).
+pending_faults: BTreeSet<u64>,
+```
+
+**Pager ring protocol** (in channel shared page, kernel → pager direction):
+
+```text
+Bytes [0..8]:   write_head (u64, kernel increments)
+Bytes [8..16]:  read_head (u64, pager increments after consuming)
+Bytes [16..]:   entries[]: u64 page offsets
+                capacity = (PAGE_SIZE - 16) / 8
+```
+
+Standard SPSC ring. Kernel produces, pager consumes. Pager reads `write_head`, processes entries up to it, updates `read_head`.
+
+**Fault handler changes:**
+
+`handle_fault_vmo` returns `FaultResult::NeedsPager { vmo_id, page_offset, channel_id }` when it finds an uncommitted page on a pager-backed VMO. The VMO lock is released before blocking.
+
+`user_fault_handler` dispatches: write fault offset to pager ring → signal pager channel → block thread via `scheduler::block_current_for_pager(ctx, vmo_id, page_offset)` → schedule next thread.
+
+**Thread blocking:**
+
+New field `pager_wait: Option<(VmoId, u64)>` on Thread. `block_current_for_pager` marks the thread as blocked with this info. `pager_supply` scans the blocked list for matching (vmo_id, page_offset) and wakes them. Woken threads re-enter the fault handler and find committed pages.
+
+**Deduplication:** `pending_faults` BTreeSet in VMO. First fault on page N adds to set + sends to pager. Subsequent faults on page N just block (no duplicate message). `pager_supply` removes from set.
+
+**Pager death:** Channel close → wake all pager waiters → re-fault → no pager + uncommitted → kill process. Conservative: wrong data is worse than no data.
+
+**Unlocks:** Demand-paged filesystems, memory-mapped files, sandboxed decoders that lazily decode on access. Future: debuggers via process-level exception handler (phase 3d).
+
+**Implementation plan (6 steps, testable at each):**
+
+**Step 1: Data structures.** Add `pager` and `pending_faults` to Vmo. `set_pager()` and `clear_pending()` methods. Tests: set/clear pager, pending fault tracking.
+
+**Step 2: FaultResult enum + fault handler.** Change `handle_fault` from `bool` to `FaultResult`. `handle_fault_vmo` returns `NeedsPager` for uncommitted + pager. All existing callers updated. Tests: existing demand paging still works.
+
+**Step 3: Thread pager_wait + scheduler.** Add `pager_wait` to Thread. `block_current_for_pager` and `wake_pager_waiters` in scheduler. Tests: block/wake roundtrip.
+
+**Step 4: `vmo_set_pager` syscall.** Attach pager channel to VMO. Rights check. Tests: set pager, verify in VMO info.
+
+**Step 5: Pager ring + fault dispatch.** Kernel writes fault offset to pager channel ring. Signal channel. Block thread. Tests: fault on pager VMO produces ring entry.
+
+**Step 6: `pager_supply` syscall + pager death.** Supply wakes blocked threads. Channel close kills waiters. Tests: full lifecycle.
+
+**References:** Zircon pager (zx_pager_create, zx_pager_supply_pages), seL4 fault endpoints, Mach external memory managers.
 
 **3c. Signals / event objects:**
 

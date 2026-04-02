@@ -10,7 +10,7 @@
 //! - SyscallBlocked error code value
 //! - Out-of-range syscall numbers bypass the filter
 
-// --- Must match kernel/syscall.rs::nr exactly (dense 0–36) ---
+// --- Must match kernel/syscall.rs::nr exactly (dense 0–38) ---
 
 mod nr {
     // Runtime basics (0–2)
@@ -46,23 +46,26 @@ mod nr {
     pub const VMO_RESTORE: u64 = 22;
     pub const VMO_SEAL: u64 = 23;
     pub const VMO_OP_RANGE: u64 = 24;
-    // Process/thread lifecycle (25–29)
-    pub const PROCESS_CREATE: u64 = 25;
-    pub const PROCESS_START: u64 = 26;
-    pub const PROCESS_KILL: u64 = 27;
-    pub const PROCESS_SET_SYSCALL_FILTER: u64 = 28;
-    pub const THREAD_CREATE: u64 = 29;
-    // Scheduling (30–33)
-    pub const SCHEDULING_CONTEXT_CREATE: u64 = 30;
-    pub const SCHEDULING_CONTEXT_BORROW: u64 = 31;
-    pub const SCHEDULING_CONTEXT_RETURN: u64 = 32;
-    pub const SCHEDULING_CONTEXT_BIND: u64 = 33;
-    // Device layer (34–36)
-    pub const DEVICE_MAP: u64 = 34;
-    pub const INTERRUPT_REGISTER: u64 = 35;
-    pub const INTERRUPT_ACK: u64 = 36;
+    // Pager (25–26)
+    pub const VMO_SET_PAGER: u64 = 25;
+    pub const PAGER_SUPPLY: u64 = 26;
+    // Process/thread lifecycle (27–31)
+    pub const PROCESS_CREATE: u64 = 27;
+    pub const PROCESS_START: u64 = 28;
+    pub const PROCESS_KILL: u64 = 29;
+    pub const PROCESS_SET_SYSCALL_FILTER: u64 = 30;
+    pub const THREAD_CREATE: u64 = 31;
+    // Scheduling (32–35)
+    pub const SCHEDULING_CONTEXT_CREATE: u64 = 32;
+    pub const SCHEDULING_CONTEXT_BORROW: u64 = 33;
+    pub const SCHEDULING_CONTEXT_RETURN: u64 = 34;
+    pub const SCHEDULING_CONTEXT_BIND: u64 = 35;
+    // Device layer (36–38)
+    pub const DEVICE_MAP: u64 = 36;
+    pub const INTERRUPT_REGISTER: u64 = 37;
+    pub const INTERRUPT_ACK: u64 = 38;
     /// Total syscall count (for iteration bounds).
-    pub const COUNT: u64 = 37;
+    pub const COUNT: u64 = 39;
 }
 
 // --- Duplicated Error enum from syscall.rs ---
@@ -116,7 +119,7 @@ fn is_syscall_allowed(syscall_nr: u64, mask: u64) -> bool {
 fn default_mask_allows_all() {
     let mask = u64::MAX;
 
-    // Every syscall 0-36 should be allowed.
+    // Every syscall 0-38 should be allowed.
     for nr in 0..nr::COUNT {
         assert!(
             is_syscall_allowed(nr, mask),
@@ -154,7 +157,7 @@ fn mask_zero_blocks_all_except_exit() {
     // EXIT is allowed.
     assert!(is_syscall_allowed(nr::EXIT, mask));
 
-    // Every other syscall (1-36) is blocked.
+    // Every other syscall (1-38) is blocked.
     for nr in 1..nr::COUNT {
         assert!(
             !is_syscall_allowed(nr, mask),
@@ -240,6 +243,8 @@ fn editor_mask_scenario() {
         nr::VMO_RESTORE,
         nr::VMO_SEAL,
         nr::VMO_OP_RANGE,
+        nr::VMO_SET_PAGER,
+        nr::PAGER_SUPPLY,
         nr::PROCESS_CREATE,
         nr::PROCESS_START,
         nr::PROCESS_KILL,
@@ -342,12 +347,12 @@ fn userspace_syscall_blocked_matches_kernel() {
 }
 
 // ==========================================================================
-// Syscall number 27 is defined
+// Syscall number 30 is PROCESS_SET_SYSCALL_FILTER
 // ==========================================================================
 
 #[test]
-fn process_set_syscall_filter_is_nr_28() {
-    assert_eq!(nr::PROCESS_SET_SYSCALL_FILTER, 28);
+fn process_set_syscall_filter_is_nr_30() {
+    assert_eq!(nr::PROCESS_SET_SYSCALL_FILTER, 30);
 }
 
 // ==========================================================================
@@ -389,7 +394,7 @@ fn mask_single_bit_per_syscall() {
 #[test]
 fn default_process_mask_is_u64_max() {
     // Process::new() initializes syscall_mask to u64::MAX.
-    // Verify that this means all 37 syscalls are allowed.
+    // Verify that this means all 39 syscalls are allowed.
     let mask = u64::MAX;
 
     for nr in 0u64..nr::COUNT {
