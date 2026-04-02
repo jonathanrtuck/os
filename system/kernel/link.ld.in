@@ -44,16 +44,16 @@ SECTIONS
     *(.rodata .rodata.*)
   }
 
-  /* --- Relocations for KASLR (RO, within rodata page) ---
-   * With --emit-relocs, the linker produces .rela.text, .rela.rodata, etc.
-   * Collect ALL relocation sections here so boot.S can iterate them. */
+  /* --- KASLR relocations (PIE, allocated .rela.dyn) ---
+   *
+   * With --pie, the linker generates R_AARCH64_RELATIVE entries in an
+   * allocated .rela.dyn section (SHF_ALLOC). boot.S iterates these at
+   * physical addresses before MMU enable, adding the KASLR slide to each
+   * absolute kernel VA. Self-contained: no post-link tool needed.
+   */
   __rela_start = .;
   .rela.dyn : AT(ADDR(.rela.dyn) - KERNEL_VA_OFFSET) {
     *(.rela.dyn .rela.dyn.*)
-    *(.rela.text .rela.text.*)
-    *(.rela.rodata .rela.rodata.*)
-    *(.rela.data .rela.data.*)
-    *(.rela.text.boot)
   }
   __rela_end = .;
   __rodata_end = .;
@@ -103,6 +103,10 @@ SECTIONS
   __bss_start_phys  = __bss_start  - KERNEL_VA_OFFSET;
   __bss_end_phys    = __bss_end    - KERNEL_VA_OFFSET;
   __stack_top_phys  = __stack_top  - KERNEL_VA_OFFSET;
+  boot_tt0_l2_phys  = boot_tt0_l2 - KERNEL_VA_OFFSET;
+  boot_tt1_l2_phys  = boot_tt1_l2 - KERNEL_VA_OFFSET;
+  __rela_start_phys = __rela_start - KERNEL_VA_OFFSET;
+  __rela_end_phys   = __rela_end   - KERNEL_VA_OFFSET;
 
   . = ALIGN(@PAGE_SIZE@);
   __kernel_end = .;

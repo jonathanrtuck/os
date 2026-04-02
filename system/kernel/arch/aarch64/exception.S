@@ -46,8 +46,8 @@
 .equ CTX_SIZE,      0x330
 // --------------------------------------------------------------------------
 // UART helpers (PL011 at kernel VA = phys + KERNEL_VA_OFFSET)
+// Callers set x2 = UART0 base VA before calling.
 // --------------------------------------------------------------------------
-.equ UART0_BASE_VA, 0xFFFFFFF009000000  // 0xFFFF_FFF0_0900_0000
 .equ UART0_DR,   0x00
 .equ UART0_FR,   0x18
 .equ UART0_TXFF, (1 << 5)
@@ -197,7 +197,8 @@ exc_fatal:
   and x4, x4, #0xFF      // core_id
   add x4, x4, #1         // (core_id + 1) → stack top
   lsl x4, x4, #14        // × 16384
-  ldr x5, =__exc_stacks
+  adrp x5, __exc_stacks
+  add  x5, x5, :lo12:__exc_stacks
   add sp, x5, x4
 
   // Call Rust: kernel_fault_handler(esr, elr, far, type, sp, lr, tpidr) -> !
@@ -448,10 +449,13 @@ handler_returned_bad_ctx:
   and x4, x4, #0xFF
   add x4, x4, #1
   lsl x4, x4, #14
-  ldr x5, =__exc_stacks
+  adrp x5, __exc_stacks
+  add  x5, x5, :lo12:__exc_stacks
   add sp, x5, x4
 
-  ldr x2, =UART0_BASE_VA
+  movz x2, #0x0900, lsl #16    // UART0 kernel VA = 0xFFFFFFF009000000
+  movk x2, #0xFFF0, lsl #32
+  movk x2, #0xFFFF, lsl #48
   adr x0, .Lbad_ctx_msg
   bl uart_puts
   mov x0, x20
@@ -467,7 +471,7 @@ handler_returned_bad_ctx:
   adr x0, .Lnl
   bl uart_puts
 
-  ldr x0, =0x09020000        // pvpanic
+  movz x0, #0x0902, lsl #16    // pvpanic MMIO = 0x09020000
   mov w1, #1
   str w1, [x0]
 
@@ -487,11 +491,14 @@ handler_returned_null:
   and x4, x4, #0xFF
   add x4, x4, #1
   lsl x4, x4, #14
-  ldr x5, =__exc_stacks
+  adrp x5, __exc_stacks
+  add  x5, x5, :lo12:__exc_stacks
   add sp, x5, x4
 
   // Print diagnostic.
-  ldr x2, =UART0_BASE_VA
+  movz x2, #0x0900, lsl #16    // UART0 kernel VA = 0xFFFFFFF009000000
+  movk x2, #0xFFF0, lsl #32
+  movk x2, #0xFFFF, lsl #48
   adr x0, .Lnull_msg
   bl uart_puts
   mov x0, x7
@@ -528,10 +535,13 @@ eret_guard_fail:
   and x4, x4, #0xFF
   add x4, x4, #1
   lsl x4, x4, #14
-  ldr x5, =__exc_stacks
+  adrp x5, __exc_stacks
+  add  x5, x5, :lo12:__exc_stacks
   add sp, x5, x4
 
-  ldr x2, =UART0_BASE_VA
+  movz x2, #0x0900, lsl #16    // UART0 kernel VA = 0xFFFFFFF009000000
+  movk x2, #0xFFF0, lsl #32
+  movk x2, #0xFFFF, lsl #48
   adr x0, .Leret_msg
   bl uart_puts
   mov x0, x20
@@ -556,7 +566,7 @@ eret_guard_fail:
   bl uart_puts
 
   // Trigger pvpanic so the hypervisor writes a crash report.
-  ldr x0, =0x09020000        // pvpanic MMIO address
+  movz x0, #0x0902, lsl #16    // pvpanic MMIO = 0x09020000
   mov w1, #1
   str w1, [x0]
 

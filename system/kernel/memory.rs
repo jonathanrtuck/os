@@ -32,9 +32,9 @@ pub const KERNEL_VA_OFFSET: usize = super::paging::KERNEL_VA_OFFSET as usize;
 
 /// KASLR slide — random offset added to all kernel VA computations.
 ///
-/// Set once in boot.S before calling kernel_main. Defaults to 0 (no slide),
-/// which preserves current behavior. The slide is 2 MiB-aligned so all
-/// L2 block mappings remain valid.
+/// Set once in kernel_main from the value generated in boot.S. Defaults to 0
+/// (no slide). The slide is 32 MiB-aligned (L2 block granularity with 16K
+/// pages) so TTBR1 page table indices shift cleanly.
 ///
 /// Atomic because secondary cores read it during SMP boot.
 static KASLR_SLIDE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
@@ -50,7 +50,7 @@ pub fn kaslr_slide() -> usize {
 /// # Safety
 ///
 /// Must be called exactly once, before any code that uses `phys_to_virt`
-/// or `virt_to_phys`. The slide must be 2 MiB-aligned.
+/// or `virt_to_phys`. The slide must be 32 MiB-aligned.
 pub unsafe fn set_kaslr_slide(slide: usize) {
     KASLR_SLIDE.store(slide, core::sync::atomic::Ordering::Release);
 }
@@ -160,6 +160,16 @@ fn tlb_invalidate_all() {
     super::arch::mmu::tlbi_all();
 }
 
+/// Compute the TTBR1 L2 index for a physical address.
+///
+/// The KASLR slide shifts which L2 entries map the RAM region in TTBR1.
+/// Without a slide, the L2 index equals `(pa >> 25) & 0x7FF`. With a
+/// slide, it's `((pa + slide) >> 25) & 0x7FF` because the TTBR1 mapping
+/// is at `PA + KERNEL_VA_OFFSET + slide`.
+fn kernel_l2_index(pa: u64) -> usize {
+    (((pa + kaslr_slide() as u64) >> 25) & 0x7FF) as usize
+}
+
 /// Refine TTBR1 with 16KB pages for the kernel's 32MB block.
 ///
 /// boot.S created coarse 32MB-block tables. This replaces the kernel's
@@ -203,7 +213,7 @@ pub fn init() {
 
     // Patch TTBR1 L2 to point at L3 instead of the 32MB block.
     let l3_kern_pa = virt_to_phys(TT1_L3_KERN.get() as usize).as_u64();
-    let kernel_l2_idx = ((kernel_block_pa >> 25) & 0x7FF) as usize;
+    let kernel_l2_idx = kernel_l2_index(kernel_block_pa);
     // SAFETY: boot_tt1_l2 is a page-aligned L2 table defined in boot.S.
     // Cast to *mut u64 is valid because page table entries are 8-byte u64s.
     // Called during single-core boot — no concurrent access.
@@ -239,7 +249,7 @@ pub fn try_set_kernel_guard_page(va: usize) -> bool {
 
     let _lock = KERNEL_PT_LOCK.lock();
     let pa = virt_to_phys(va).0 as u64;
-    let l2_idx = ((pa >> 25) & 0x7FF) as usize;
+    let l2_idx = kernel_l2_index(pa);
     // SAFETY: boot_tt1_l2 is a page-aligned L2 table defined in boot.S.
     // Cast to *mut u64 is valid because page table entries are 8-byte u64s.
     // KERNEL_PT_LOCK is held, ensuring exclusive access.
@@ -323,7 +333,7 @@ pub fn clear_kernel_guard_page(va: usize) {
 
     let _lock = KERNEL_PT_LOCK.lock();
     let pa = virt_to_phys(va).0 as u64;
-    let l2_idx = ((pa >> 25) & 0x7FF) as usize;
+    let l2_idx = kernel_l2_index(pa);
     // SAFETY: boot_tt1_l2 is a page-aligned L2 table defined in boot.S.
     // Cast to *mut u64 is valid because page table entries are 8-byte u64s.
     // KERNEL_PT_LOCK is held, ensuring exclusive access.

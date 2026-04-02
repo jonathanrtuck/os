@@ -21,6 +21,13 @@
 //! (`R_AARCH64_RELATIVE = 0x403`) is ARM64-specific. A RISC-V port would
 //! define `R_RISCV_RELATIVE = 3`.
 
+/// ELF64 relocation type: R_AARCH64_ABS64.
+///
+/// Absolute 64-bit address. With `--emit-relocs`, the linker resolves
+/// the symbol value and writes it to the target; the relocation entry
+/// is preserved for tools to find the fixup sites.
+pub const R_AARCH64_ABS64: u64 = 0x101;
+
 /// ELF64 relocation type: R_AARCH64_RELATIVE.
 ///
 /// "The location is adjusted by the difference between the address at
@@ -49,6 +56,11 @@ impl RelaEntry {
             info: u64::from_le_bytes(bytes[8..16].try_into().unwrap()),
             addend: i64::from_le_bytes(bytes[16..24].try_into().unwrap()),
         }
+    }
+
+    /// Check if this is an R_AARCH64_ABS64 relocation.
+    pub fn is_abs64(&self) -> bool {
+        (self.info & 0xFFFF_FFFF) == R_AARCH64_ABS64
     }
 
     /// Check if this is an R_AARCH64_RELATIVE relocation.
@@ -112,4 +124,59 @@ pub fn apply_relocation(binary: &mut [u8], entry: &RelaEntry, slide: u64) {
 
     let new_value = (entry.addend as u64).wrapping_add(slide);
     binary[offset..offset + 8].copy_from_slice(&new_value.to_le_bytes());
+}
+
+/// Apply a single R_AARCH64_ABS64 relocation (from `--emit-relocs`) to a
+/// binary region.
+///
+/// With `--emit-relocs`, the linker already resolved the absolute address.
+/// The value at `r_offset` is `symbol + addend`. To apply KASLR, we add
+/// the slide — but only if the current value is a kernel VA (>= `va_threshold`).
+/// Physical addresses (e.g., `secondary_entry` for PSCI CPU_ON) must not
+/// be adjusted.
+///
+/// The `va_threshold` parameter is `KERNEL_VA_OFFSET` — any value at or
+/// above it is considered a kernel virtual address.
+pub fn apply_abs64_relocation(
+    binary: &mut [u8],
+    entry: &RelaEntry,
+    slide: u64,
+    va_threshold: u64,
+) {
+    if !entry.is_abs64() {
+        return;
+    }
+
+    let offset = entry.offset as usize;
+
+    if offset + 8 > binary.len() {
+        return;
+    }
+
+    let current = u64::from_le_bytes(binary[offset..offset + 8].try_into().unwrap());
+
+    if current < va_threshold {
+        return; // Physical address — leave unchanged.
+    }
+
+    let new_value = current.wrapping_add(slide);
+    binary[offset..offset + 8].copy_from_slice(&new_value.to_le_bytes());
+}
+
+/// Apply all ABS64 relocations from a `.rela.dyn` section (from `--emit-relocs`).
+///
+/// Iterates the relocation table and applies each ABS64 entry to the binary.
+/// Only values >= `va_threshold` are adjusted; physical addresses are skipped.
+pub fn apply_abs64_table(
+    binary: &mut [u8],
+    rela_table: &[u8],
+    slide: u64,
+    va_threshold: u64,
+) {
+    let count = rela_entry_count(rela_table);
+
+    for i in 0..count {
+        let entry = rela_entry_at(rela_table, i);
+        apply_abs64_relocation(binary, &entry, slide, va_threshold);
+    }
 }

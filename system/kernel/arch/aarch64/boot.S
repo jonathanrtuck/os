@@ -1,9 +1,10 @@
 // ==========================================================================
 // boot.S — Early boot trampoline (.text.boot, runs at physical VA).
 //
-// Handles: core parking, BSS zero, EL2→EL1 drop, FP enable, builds
-// coarse 32MB-block L2 page tables for TTBR0 (identity) and TTBR1
-// (kernel), enables MMU, transitions to upper VA, jumps to kernel_main.
+// Handles: core parking, BSS zero, EL2→EL1 drop, FP enable, KASLR
+// slide generation, builds coarse 32MB-block L2 page tables for TTBR0
+// (identity) and TTBR1 (kernel with KASLR), applies relocations,
+// enables MMU, transitions to upper VA, jumps to kernel_main.
 //
 // 16 KiB granule, T0SZ=28/T1SZ=28 (36-bit VA = 64 GiB per half).
 // 2-level page tables: L2 root (2048 entries) + L3 (2048 entries).
@@ -42,12 +43,6 @@
 .equ PXN,           (1 << 53)
 .equ UXN_LO,        0                  // UXN bit 54 — set via movk below
 
-// VA → PA: clear bits [63:36] (kernel VA offset = 0xFFFF_FFF0_0000_0000).
-// Used during early boot when we need physical addresses from linker symbols.
-.macro va_to_pa reg
-  and \reg, \reg, #0x0000000FFFFFFFFF
-.endm
-
 // --------------------------------------------------------------------------
 // Page table storage (in .bss, zeroed by BSS init).
 // 16KB-aligned, 2 L2 root tables = 32KB.
@@ -76,12 +71,15 @@ _start:
   cbnz x0, park
 
   // Physical stack for early boot.
-  ldr x0, =__stack_top_phys
+  adrp x0, __stack_top_phys
+  add  x0, x0, :lo12:__stack_top_phys
   mov sp, x0
 
   // Zero BSS (physical addresses).
-  ldr x1, =__bss_start_phys
-  ldr x2, =__bss_end_phys
+  adrp x1, __bss_start_phys
+  add  x1, x1, :lo12:__bss_start_phys
+  adrp x2, __bss_end_phys
+  add  x2, x2, :lo12:__bss_end_phys
 1:
   cmp x1, x2
   b.ge 2f
@@ -117,7 +115,8 @@ _start:
   msr s3_4_c12_c9_5, x0       // ICC_SRE_EL2
   isb
 
-  ldr x0, =__stack_top_phys
+  adrp x0, __stack_top_phys
+  add  x0, x0, :lo12:__stack_top_phys
   msr sp_el1, x0
   mov x0, #0b0101              // EL1h
   msr spsr_el2, x0
@@ -129,7 +128,8 @@ _start:
 el1_start:
   msr spsel, #1
   isb
-  ldr x0, =__stack_top_phys
+  adrp x0, __stack_top_phys
+  add  x0, x0, :lo12:__stack_top_phys
   mov sp, x0
 
   // Install early exception vectors (physical VA, in .text.boot).
@@ -145,14 +145,82 @@ el1_start:
   isb
 
   // ------------------------------------------------------------------
+  // Generate KASLR slide from the timer counter.
+  //
+  // CNTVCT_EL0 provides boot-time entropy (host uptime + startup jitter).
+  // We extract 8 bits at the 32 MiB boundary to get a 32 MiB-aligned slide
+  // with 256 possible positions (~8 bits of entropy). x25 is preserved
+  // across all boot code (callee-saved) and passed to kernel_main.
+  // ------------------------------------------------------------------
+  mrs  x25, cntvct_el0
+  and  x25, x25, #0x1FE000000    // keep bits [32:25] → 0..255 × 32 MiB
+
+  // ------------------------------------------------------------------
   // Build page tables (32MB blocks, coarse). 2-level: L2 root only.
-  // TTBR0: identity map (PA == VA). TTBR1: kernel map (VA = PA + offset,
-  // but page table indices are identical since offset only affects [63:36]).
+  // TTBR0: identity map (PA == VA, no slide).
+  // TTBR1: kernel map (VA = PA + offset + KASLR slide).
+  // The KASLR slide shifts TTBR1 RAM L2 indices by slide / 32 MiB.
   // ------------------------------------------------------------------
   bl build_boot_tables
 
   // x0 = TTBR0 L2 PA, x1 = TTBR1 L2 PA (returned by build_boot_tables).
   mov x20, x1                  // save TTBR1 L2 PA
+
+  // ------------------------------------------------------------------
+  // KASLR relocation processing (runs at physical VA, before MMU).
+  //
+  // Iterates the .rela.dyn section (collected from all .rela.* by the
+  // linker script). For each R_AARCH64_ABS64 entry, reads the value at
+  // the target offset. If the value is a kernel VA (>= KERNEL_VA_OFFSET),
+  // adjusts it by the KASLR slide. Physical addresses (e.g.,
+  // secondary_entry for PSCI CPU_ON) are left untouched.
+  //
+  // Register contract:
+  //   x0  = preserved (TTBR0 L2 PA, needed for MMU setup below)
+  //   x20 = preserved (TTBR1 L2 PA)
+  //   x24 = preserved (DTB PA)
+  //   x25 = KASLR slide (0 = no KASLR, loop is skipped entirely)
+  //   x1-x5 = clobbered
+  // ------------------------------------------------------------------
+  cbz  x25, .Lrela_done           // slide == 0 → nothing to relocate
+
+  // Process R_AARCH64_RELATIVE entries from .rela.dyn (PIE, allocated).
+  // Each Rela entry is 24 bytes: r_offset[0:8], r_info[8:16], r_addend[16:24].
+  // RELATIVE: write (r_addend + slide) to the location at r_offset.
+  adrp x1, __rela_start_phys
+  add  x1, x1, :lo12:__rela_start_phys
+  adrp x2, __rela_end_phys
+  add  x2, x2, :lo12:__rela_end_phys
+
+  // Build KERNEL_VA_OFFSET for r_offset → PA conversion.
+  movz x5, #0xFFF0, lsl #32
+  movk x5, #0xFFFF, lsl #48       // x5 = 0xFFFF_FFF0_0000_0000
+
+.Lrela_loop:
+  cmp  x1, x2
+  b.ge .Lrela_done
+
+  // Parse Rela entry.
+  ldr  x3, [x1]                   // r_offset (VMA of target)
+  ldr  x4, [x1, #16]              // r_addend (link-time value)
+  add  x1, x1, #24                // advance to next entry
+
+  // Convert r_offset to physical address.
+  cmp  x3, x5                     // >= KERNEL_VA_OFFSET?
+  b.lo 1f                         // already physical (.text.boot)
+  sub  x3, x3, x5                 // kernel VA → PA
+1:
+  // Only adjust kernel VA addends (>= KERNEL_VA_OFFSET). Physical address
+  // addends (e.g., SECONDARY_ENTRY_PA for PSCI CPU_ON) must not be slid.
+  cmp  x4, x5                     // addend >= KERNEL_VA_OFFSET?
+  b.lo 2f                         // physical → write addend as-is
+  add  x4, x4, x25                // kernel VA: addend + slide
+2:
+  str  x4, [x3]                   // write to target PA
+
+  b    .Lrela_loop
+
+.Lrela_done:
 
   // ------------------------------------------------------------------
   // Configure and enable MMU with both TTBR0 and TTBR1.
@@ -204,17 +272,24 @@ el1_start:
   // ------------------------------------------------------------------
   // MMU is live. Both TTBR0 (identity) and TTBR1 (kernel) active.
   // Switch SP to upper VA, install vectors, jump to kernel_main.
+  //
+  // These are kernel VA symbols — unreachable by adrp from .text.boot
+  // (different VMA domain, ~16 EiB apart). Load from a relocated data
+  // area instead. The .quad values are resolved at link time and will
+  // be adjusted by the KASLR relocation processor when slide != 0.
   // ------------------------------------------------------------------
-  ldr x0, =__stack_top
-  mov sp, x0
+  adr  x10, .Lprimary_addrs
+  ldr  x0, [x10]              // __stack_top (kernel VA)
+  mov  sp, x0
 
-  ldr x0, =vectors
-  msr vbar_el1, x0
+  ldr  x0, [x10, #8]          // vectors (kernel VA)
+  msr  vbar_el1, x0
   isb
 
-  mov x0, x24              // DTB PA as first argument to kernel_main
-  ldr x1, =kernel_main
-  blr x1
+  ldr  x2, [x10, #16]         // kernel_main (kernel VA)
+  mov  x0, x24                 // DTB PA (arg 0)
+  mov  x1, x25                 // KASLR slide (arg 1)
+  blr  x2
 
 park:
   wfe
@@ -266,13 +341,13 @@ secondary_entry:
 
   // TTBR0: empty (no user mappings). Use boot_tt0_l2 as a zeroed L2 table.
   // (We only need TTBR1 for kernel VA; TTBR0 must be valid but can be empty.)
-  ldr x0, =boot_tt0_l2
-  va_to_pa x0
+  adrp x0, boot_tt0_l2_phys
+  add  x0, x0, :lo12:boot_tt0_l2_phys
   msr ttbr0_el1, x0
 
   // TTBR1: shared kernel page tables (same as core 0).
-  ldr x0, =boot_tt1_l2
-  va_to_pa x0
+  adrp x0, boot_tt1_l2_phys
+  add  x0, x0, :lo12:boot_tt1_l2_phys
   msr ttbr1_el1, x0
 
   dsb sy
@@ -291,27 +366,52 @@ secondary_entry:
   isb
 
   // --- MMU is live. Switch to upper VA. ---
+  // Load kernel VA symbols from relocated data area (same pattern as primary).
+  adr  x10, .Lsecondary_addrs
 
   // Install exception vectors (upper VA).
-  ldr x0, =vectors
-  msr vbar_el1, x0
+  ldr  x0, [x10]              // vectors (kernel VA)
+  msr  vbar_el1, x0
   isb
 
   // Set per-core kernel stack.
   // Stack top = __secondary_stacks + core_id * 0x4000 (16 KiB per core).
-  ldr x0, =__secondary_stacks
-  mov x1, #0x4000
-  mul x1, x19, x1
-  add x0, x0, x1
-  mov sp, x0
+  ldr  x0, [x10, #8]          // __secondary_stacks (kernel VA)
+  mov  x1, #0x4000
+  mul  x1, x19, x1
+  add  x0, x0, x1
+  mov  sp, x0
 
   // Jump to Rust with core_id in x0.
-  mov x0, x19
-  ldr x1, =secondary_main
-  blr x1
+  mov  x0, x19
+  ldr  x1, [x10, #16]         // secondary_main (kernel VA)
+  blr  x1
   b park
 
-// Force literal pool within .text.boot (physical VMA).
+// --------------------------------------------------------------------------
+// Kernel VA address tables — loaded via adr+ldr from .text.boot code.
+//
+// These .quad entries hold absolute kernel VA addresses, resolved by the
+// linker at link time. They cannot be reached by adrp from .text.boot
+// because .text.boot VMA is physical (~0x4xxx_xxxx) while kernel VA is
+// ~0xFFFF_FFF0_xxxx_xxxx — far beyond adrp's ±4 GiB range.
+//
+// With KASLR, the relocation processor adjusts these values by the slide
+// delta before they are used.
+// --------------------------------------------------------------------------
+.align 3
+.Lprimary_addrs:
+  .quad __stack_top             // [0]  kernel stack pointer
+  .quad vectors                 // [8]  exception vector base
+  .quad kernel_main             // [16] Rust entry point
+
+.align 3
+.Lsecondary_addrs:
+  .quad vectors                 // [0]  exception vector base
+  .quad __secondary_stacks      // [8]  per-core stack base
+  .quad secondary_main          // [16] Rust entry point (secondary)
+
+// Force literal pool within .text.boot (no entries expected after PIC conversion).
 .ltorg
 
 // --------------------------------------------------------------------------
@@ -369,7 +469,7 @@ early_vectors:
   .space 0x80 - 4
 
 early_exc:
-  ldr x2, =0x09000000
+  movz x2, #0x0900, lsl #16    // UART0 phys = 0x09000000
   mov w0, #33    // '!'
   str w0, [x2]
   b .
@@ -380,40 +480,53 @@ early_exc:
 // Builds TTBR0 (identity) and TTBR1 (kernel) L2 root tables using 32MB
 // block entries. Returns: x0 = TTBR0 L2 PA, x1 = TTBR1 L2 PA.
 //
-// Both tables have identical structure (same indices, same PAs) because
-// the kernel VA offset only affects bits [63:36], not the index bits [35:0].
+// TTBR0 maps PA == VA (identity, for early boot).
+// TTBR1 maps PA → VA + KERNEL_VA_OFFSET + KASLR slide. The KASLR slide
+// shifts the RAM L2 indices by slide / 32 MiB. Device mappings are not
+// affected (their VAs don't include the slide).
 //
 // Register usage:
 //   x9  = current L2 PA
+//   x10 = RAM L2 index offset (0 for TTBR0, slide/32M for TTBR1)
 //   x13-x18 = clobbers (used by fill_table)
 //   x20 = saved TTBR0 L2 PA
 //   x21 = saved TTBR1 L2 PA
+//   x22 = slide in L2 index units (slide >> 25)
+//   x25 = KASLR slide (preserved from caller)
 // --------------------------------------------------------------------------
 
 build_boot_tables:
   stp x29, x30, [sp, #-16]!
 
-  // --- Build TTBR0 table (identity map) ---
-  ldr x9,  =boot_tt0_l2
-  va_to_pa x9
-  mov x20, x9                  // save TTBR0 L2 PA
-  bl fill_table
+  // Compute RAM L2 index offset from KASLR slide.
+  lsr  x22, x25, #25            // x22 = slide / 32M = L2 index offset
 
-  // --- Build TTBR1 table (kernel map) ---
-  ldr x9,  =boot_tt1_l2
-  va_to_pa x9
-  mov x21, x9                  // save TTBR1 L2 PA
-  bl fill_table
+  // --- Build TTBR0 table (identity map, no KASLR offset) ---
+  adrp x9, boot_tt0_l2_phys
+  add  x9, x9, :lo12:boot_tt0_l2_phys
+  mov  x10, xzr                 // no RAM offset for identity map
+  mov  x20, x9                  // save TTBR0 L2 PA
+  bl   fill_table
 
-  mov x0, x20                  // TTBR0 L2 PA
-  mov x1, x21                  // TTBR1 L2 PA
+  // --- Build TTBR1 table (kernel map, RAM shifted by KASLR offset) ---
+  adrp x9, boot_tt1_l2_phys
+  add  x9, x9, :lo12:boot_tt1_l2_phys
+  mov  x10, x22                 // RAM index offset = slide / 32M
+  mov  x21, x9                  // save TTBR1 L2 PA
+  bl   fill_table
 
-  ldp x29, x30, [sp], #16
+  mov  x0, x20                  // TTBR0 L2 PA
+  mov  x1, x21                  // TTBR1 L2 PA
+
+  ldp  x29, x30, [sp], #16
   ret
 
 // --------------------------------------------------------------------------
 // fill_table — populate one L2 root table with 32MB block entries.
-// Input: x9 = L2 table PA.
+// Input: x9  = L2 table PA.
+//        x10 = L2 index offset (0 for identity, slide/32M for kernel).
+//              ALL entries (device + RAM) shift by this offset so that
+//              phys_to_virt works uniformly for both MMIO and RAM.
 // Clobbers: x13–x18.
 // --------------------------------------------------------------------------
 
@@ -425,15 +538,20 @@ fill_table:
   mov x16, #0x405
   movk x16, #0x0060, lsl #48  // PXN | UXN in upper halfword
 
-  // L2[4]: 0x0800_0000..0x0A00_0000 (GIC + UART). Index = 0x08000000 >> 25 = 4.
+  // L2[offset+4]: 0x0800_0000..0x0A00_0000 (GIC + UART).
+  // Device entries shift by the same KASLR offset as RAM so that
+  // phys_to_virt(device_pa) = device_pa + KERNEL_VA_OFFSET + slide
+  // lands in the correct TTBR1 mapping.
   mov x14, #0x08000000
   orr x15, x14, x16
-  str x15, [x9, #(4 * 8)]
+  add x18, x10, #4              // index = KASLR_offset + 4
+  str x15, [x9, x18, lsl #3]
 
-  // L2[5]: 0x0A00_0000..0x0C00_0000 (Virtio MMIO). Index = 0x0A000000 >> 25 = 5.
+  // L2[offset+5]: 0x0A00_0000..0x0C00_0000 (Virtio MMIO).
   mov x14, #0x0A000000
   orr x15, x14, x16
-  str x15, [x9, #(5 * 8)]
+  add x18, x10, #5              // index = KASLR_offset + 5
+  str x15, [x9, x18, lsl #3]
 
   // --- RAM blocks ---
   // RAM: 0x4000_0000..0x5000_0000 (8 x 32MB blocks). L2 indices 32..39.
@@ -447,15 +565,16 @@ fill_table:
 
   mov x13, #0                  // loop index
   mov x14, RAM_START           // current PA (0x40000000)
-  ldr x17, =RAM_END
+  movz x17, #0x5000, lsl #16           // RAM_END = 0x50000000
   mov x3, BLOCK_32MB           // 32 MiB step (too large for add immediate)
 .Lram_loop:
   cmp x14, x17
   b.ge .Lram_done
 
   orr x15, x14, x16           // PA | attrs
-  add x18, x13, #32           // L2 index = loop_index + 32
-  str x15, [x9, x18, lsl #3]  // L2[index] = descriptor
+  add x18, x13, #32           // base L2 index = loop_index + 32
+  add x18, x18, x10           // + KASLR offset (0 for TTBR0, slide/32M for TTBR1)
+  str x15, [x9, x18, lsl #3]  // L2[index + offset] = descriptor
 
   add x13, x13, #1
   add x14, x14, x3            // advance PA by 32 MiB

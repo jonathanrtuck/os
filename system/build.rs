@@ -120,9 +120,17 @@ fn main() {
 
     // Tell Cargo to pass the kernel linker script and SYSTEM_CONFIG env var.
     println!("cargo:rustc-link-arg=-T{}/kernel.ld", out_dir.display());
-    // Emit relocations for KASLR — preserves linker relocation entries so
-    // a post-link tool can extract absolute addresses that need fixup.
-    println!("cargo:rustc-link-arg=--emit-relocs");
+    // PIE for KASLR — tells the linker to generate R_AARCH64_RELATIVE entries
+    // in an allocated .rela.dyn section. boot.S processes these at runtime to
+    // adjust all absolute addresses by the KASLR slide. Self-contained: no
+    // post-link tool needed, the binary works on any bootloader or bare metal.
+    //
+    // -z notext: allow text-segment relocations from non-PIC objects (the
+    // precompiled core/alloc sysroot uses static relocation model). The linker
+    // converts ABS64 refs to RELATIVE entries in .rela.dyn.
+    println!("cargo:rustc-link-arg=--pie");
+    println!("cargo:rustc-link-arg=-z");
+    println!("cargo:rustc-link-arg=notext");
     println!("cargo:rustc-env=SYSTEM_CONFIG={config_path_str}");
 
     // Rebuild when the config or templates change.

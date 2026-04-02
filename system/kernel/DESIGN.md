@@ -1435,3 +1435,95 @@ Architectural concerns that don't affect current milestones but will need kernel
 **Kernel implications:** If the answer to (1) or (3) is "no," the syscall interface may need priority hints or deadline annotations (e.g., `thread_set_deadline(period, runtime)` à la SCHED_DEADLINE). This is a syscall ABI addition — easier to add before services depend on default behavior.
 
 **When to resolve:** v0.6 should include scheduler stress tests with media-like workload patterns (periodic short bursts at fixed intervals). Priority/deadline syscall design before v0.9.
+
+---
+
+## 14. Platform Assumptions & Porting Notes
+
+The kernel currently targets two platforms: QEMU `virt` machine and a custom macOS ARM64 hypervisor. This section documents every platform-specific assumption, so a porter knows exactly what to change for real hardware (Raspberry Pi, ARM server, custom SoC, etc.).
+
+### 14.1 Hardcoded Physical Addresses
+
+These constants assume the QEMU `virt` memory map. Real hardware has different addresses.
+
+| Constant        | Value        | File                     | What it is                                | Porting                                                             |
+| --------------- | ------------ | ------------------------ | ----------------------------------------- | ------------------------------------------------------------------- |
+| RAM_START       | 0x4000_0000  | boot.S, system_config.rs | Physical RAM base                         | DTB `/memory` node; RPi=0x0, server=0x8000_0000                     |
+| RAM_END         | 0x5000_0000  | boot.S                   | Identity map ceiling (256 MiB)            | DTB `/memory` size; increase for >256 MiB                           |
+| PHYS_BASE       | 0x4008_0000  | link.ld.in               | Kernel load address (RAM_START + 512 KiB) | Adjust with RAM_START                                               |
+| UART0_PA        | 0x0900_0000  | serial.rs                | PL011 console                             | DTB serial/UART node                                                |
+| DEFAULT_GICD_PA | 0x0800_0000  | interrupt_controller.rs  | GIC distributor                           | DTB `interrupt-controller` node                                     |
+| DEFAULT_GICR_PA | 0x080A_0000  | interrupt_controller.rs  | GIC redistributor                         | DTB `interrupt-controller` node                                     |
+| pvpanic         | 0x0902_0000  | exception.S, main.rs     | QEMU panic device                         | Not present on real hardware; skip if DTB lacks `qemu,pvpanic-mmio` |
+| Virtio MMIO     | 0x0A00_0000  | main.rs                  | 32 virtio slots, stride 0x200             | DTB `virtio,mmio` nodes; real hardware may not have virtio          |
+| Device L2       | indices 4, 5 | boot.S fill_table        | Boot page table device blocks             | Derived from device PAs; adjust if MMIO range differs               |
+
+### 14.2 Memory & Page Table Layout
+
+| Assumption              | Value                   | File                                 | Porting                                                                                                     |
+| ----------------------- | ----------------------- | ------------------------------------ | ----------------------------------------------------------------------------------------------------------- |
+| Page granule            | 16 KiB                  | system_config.rs, boot.S, link.ld.in | Some SoCs prefer 4 KiB; requires coordinated changes to page tables, linker script, and all PAGE_SIZE users |
+| T0SZ / T1SZ             | 28 (36-bit VA = 64 GiB) | boot.S                               | Sufficient for ≤64 GiB RAM; adjust for larger systems                                                       |
+| KERNEL_VA_OFFSET        | 0xFFFF_FFF0_0000_0000   | system_config.rs                     | Derived from T1SZ=28; changes if T1SZ changes                                                               |
+| L2 block size           | 32 MiB                  | boot.S                               | Consequence of 16 KiB granule; 4 KiB granule → 2 MiB blocks                                                 |
+| KASLR slide granularity | 32 MiB                  | boot.S                               | Must match L2 block size                                                                                    |
+
+### 14.3 Boot Protocol
+
+| Assumption                  | File              | Porting                                                                                                                                |
+| --------------------------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| Entry at EL2 (optional)     | boot.S            | Code detects EL via `CurrentEL` and handles EL1 or EL2. Works on both firmware (EL2) and bootloader (EL1) entry.                       |
+| DTB PA in x0                | boot.S, main.rs   | AArch64 boot protocol standard. Fallback: scan first 256 KiB of RAM for FDT magic. Real bootloaders (U-Boot, UEFI) pass DTB correctly. |
+| PSCI for SMP                | main.rs, power.rs | HVC #0 (assumes EL2 or KVM). Bare-metal with ATF uses SMC instead. `power.rs` already abstracts the conduit — change HVC→SMC.          |
+| ICC_SRE_EL2 for GICv3       | boot.S            | Configures system register interface at EL2. Safe to skip at EL1 (firmware already configured).                                        |
+| Core parking via MPIDR[7:0] | boot.S            | Assumes flat affinity (core_id = MPIDR Aff0). Hierarchical affinity (clusters) requires `Aff1:Aff0` decoding.                          |
+
+### 14.4 Interrupt Controller
+
+| Assumption                 | File                    | Porting                                                                                                                                                          |
+| -------------------------- | ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GICv3                      | interrupt_controller.rs | GICv2 has different register layout (no redistributors, 1-byte ITARGETSR instead of 8-byte IROUTER). Needs a separate driver or version-dispatching abstraction. |
+| GICR stride = 128 KiB      | interrupt_controller.rs | GICv3 standard. GICv4 may differ; query DTB `#redistributor-regions`.                                                                                            |
+| Flat affinity for IPI      | interrupt_controller.rs | `ICC_SGI1R_EL1` target list assumes Aff3=Aff2=Aff1=0. Multi-cluster SoCs need hierarchical affinity routing.                                                     |
+| Virtual timer PPI = IRQ 27 | timer.rs                | ARM architectural standard for CNTV. Universal across all ARMv8.                                                                                                 |
+
+### 14.5 Timer & Entropy
+
+| Assumption                       | File       | Porting                                                                                                                                                                                      |
+| -------------------------------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| CNTVCT_EL0 for KASLR entropy     | boot.S     | Generic timer present on all ARMv8. Entropy quality depends on boot-time counter value (host uptime on hypervisor, time-since-reset on bare metal). Acceptable for KASLR; not cryptographic. |
+| RNDR (FEAT_RNG) for PRNG seeding | entropy.rs | Probed at runtime via `ID_AA64ISAR0_EL1[63:60]`. Falls back to jitter entropy if absent. Apple M1+ and ARMv8.5+ support RNDR.                                                                |
+| Jitter entropy from CNTVCT       | entropy.rs | Works on all CPUs. Quality varies: higher on bare metal (real cache effects), lower on VMs (deterministic scheduling).                                                                       |
+| CNTFRQ varies                    | timer.rs   | Read dynamically via `mrs cntfrq_el0`. 24 MHz (Apple Silicon), 62.5 MHz (QEMU), 50–125 MHz (server SoCs). No hardcoded assumption.                                                           |
+
+### 14.6 KASLR
+
+| Assumption                             | File              | Porting                                                                                                                                      |
+| -------------------------------------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| PIE binary (--pie -z notext)           | build.rs          | Linker generates allocated R_AARCH64_RELATIVE entries. Self-contained: works on any ELF loader.                                              |
+| 8-bit entropy (256 × 32 MiB positions) | boot.S            | Bits [32:25] of CNTVCT_EL0. On bare metal with short uptime, lower bits may be predictable. Mix with RNDR if available for stronger entropy. |
+| All TTBR1 entries shift uniformly      | boot.S fill_table | Device + RAM L2 entries shift by the same offset. Ensures `phys_to_virt` works uniformly.                                                    |
+| RELATIVE addend check                  | boot.S            | Physical address addends (< KERNEL_VA_OFFSET) are not slid. Kernel VA addends (≥ KERNEL_VA_OFFSET) are slid.                                 |
+
+### 14.7 Hypervisor-Specific Code (Remove for Bare Metal)
+
+| Feature                      | Files                | What to do                                                                                                                |
+| ---------------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| pvpanic                      | exception.S, main.rs | DTB-conditional. Already skipped gracefully if `qemu,pvpanic-mmio` absent. No changes needed.                             |
+| HVF MMIO workarounds         | memory_mapped_io.rs  | Avoids writeback/pair addressing modes. Harmless on real hardware (generates valid but slightly slower MMIO).             |
+| Virtual timer (CNTV vs CNTP) | timer.rs             | Uses CNTV (virtual timer) due to HVF restrictions. CNTV works on bare metal too (CNTVOFF=0 by default). No change needed. |
+| DTB RAM scan                 | main.rs              | Fallback for hypervisors that don't pass DTB in x0. Harmless — real bootloaders pass DTB correctly, scan never triggers.  |
+
+### 14.8 Migration Checklist
+
+For a new platform, in order:
+
+1. **DTB required.** Ensure the bootloader passes a valid DTB in x0 (or place one in the first 256 KiB of RAM).
+2. **Adjust RAM_START** in `system_config.rs` and `boot.S` to match the platform's physical memory base.
+3. **Adjust PHYS_BASE** in `link.ld.in` (RAM_START + 512 KiB).
+4. **Verify UART.** Serial output is the first sign of life. If the platform UART isn't PL011 at 0x0900_0000, update `serial.rs` UART0_PA. Long-term: probe from DTB.
+5. **Verify GIC version.** If GICv2 (e.g., Raspberry Pi 4 uses a BCM interrupt controller, not GIC), a new driver is needed. If GICv3, DTB discovery already works.
+6. **PSCI conduit.** Change HVC→SMC in `power.rs` if running at EL1 with ARM Trusted Firmware.
+7. **Page granule.** If the platform requires 4 KiB pages instead of 16 KiB, this is a significant change: `system_config.rs`, `boot.S` (TCR, block sizes), `link.ld.in`, and all code that uses PAGE_SIZE.
+8. **Test entropy.** Boot twice, verify different KASLR slides in serial output. If slides are identical, the timer counter isn't providing entropy — add RNDR or another source to boot.S.
+9. **Remove nothing.** pvpanic, DTB scan fallback, and HVF MMIO workarounds are all harmless on real hardware. Don't remove code that works everywhere.

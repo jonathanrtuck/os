@@ -85,8 +85,12 @@ const DEFAULT_GICR_PA: usize = 0x080A_0000;
 // Global state
 // ---------------------------------------------------------------------------
 
-static GICD_BASE: AtomicUsize = AtomicUsize::new(DEFAULT_GICD_PA + KERNEL_VA_OFFSET);
-static GICR_BASE: AtomicUsize = AtomicUsize::new(DEFAULT_GICR_PA + KERNEL_VA_OFFSET);
+/// GIC base VAs — 0 until `set_base_addresses()` is called from DTB parsing.
+/// If still 0 at access time, `gicd()`/`gicr_for_core()` compute the VA
+/// from the default PA + KERNEL_VA_OFFSET + KASLR slide. This handles the
+/// case where DTB is missing or doesn't contain GIC info.
+static GICD_BASE: AtomicUsize = AtomicUsize::new(0);
+static GICR_BASE: AtomicUsize = AtomicUsize::new(0);
 
 /// Global GICv3 instance. Static dispatch — no vtable.
 pub static GIC: GicV3 = GicV3;
@@ -102,11 +106,22 @@ pub struct GicV3;
 
 impl GicV3 {
     fn gicd(&self) -> usize {
-        GICD_BASE.load(Ordering::Relaxed)
+        let base = GICD_BASE.load(Ordering::Relaxed);
+        if base != 0 {
+            base
+        } else {
+            DEFAULT_GICD_PA + KERNEL_VA_OFFSET + memory::kaslr_slide()
+        }
     }
 
     fn gicr_for_core(&self, core_id: u32) -> usize {
-        GICR_BASE.load(Ordering::Relaxed) + (core_id as usize) * GICR_STRIDE
+        let base = GICR_BASE.load(Ordering::Relaxed);
+        let base = if base != 0 {
+            base
+        } else {
+            DEFAULT_GICR_PA + KERNEL_VA_OFFSET + memory::kaslr_slide()
+        };
+        base + (core_id as usize) * GICR_STRIDE
     }
 }
 
