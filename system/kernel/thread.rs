@@ -109,6 +109,10 @@ pub(crate) struct Scheduling {
     pub(crate) saved_context_id: Option<SchedulingContextId>,
     /// Hardware counter timestamp when this thread last started running.
     pub(crate) last_started: u64,
+    /// Core this thread last ran on. Used for cache-affine placement
+    /// when the thread is woken from blocked state. Set in schedule_inner
+    /// when the thread is activated. Default 0 for newly created threads.
+    pub(crate) last_core: u32,
 }
 
 impl Scheduling {
@@ -118,6 +122,7 @@ impl Scheduling {
             context_id: None,
             saved_context_id: None,
             last_started: 0,
+            last_core: 0,
         }
     }
 }

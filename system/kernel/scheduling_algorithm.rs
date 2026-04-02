@@ -85,6 +85,50 @@ impl SchedulingState {
 
         self.eligible_at.saturating_add(slice_weighted)
     }
+
+    /// Compute virtual lag relative to a queue's average vruntime.
+    ///
+    /// `vlag = weight × (avg_vruntime − vruntime) / DEFAULT_WEIGHT`
+    ///
+    /// Positive vlag: thread is underserved (eligible, should run soon).
+    /// Negative vlag: thread is overserved.
+    ///
+    /// Used when a thread migrates between per-core queues. The vlag is
+    /// computed on the source queue, preserved during transit, and applied
+    /// on the destination queue to reconstruct a vruntime that maintains
+    /// the thread's fairness position.
+    ///
+    /// See: Linux 6.6+ `se->vlag`, Stoica & Abdel-Wahab 1995 lag definition.
+    pub fn compute_vlag(&self, avg_vruntime: u64) -> i64 {
+        let avg = avg_vruntime as i128;
+        let vrt = self.vruntime as i128;
+        let w = self.weight as i128;
+        let dw = DEFAULT_WEIGHT as i128;
+        // Saturate to i64 range (defensive — would require ~292 years of drift)
+        (w * (avg - vrt) / dw).clamp(i64::MIN as i128, i64::MAX as i128) as i64
+    }
+
+    /// Reconstruct vruntime from preserved vlag on a destination queue.
+    ///
+    /// `vruntime_dest = avg_dest − (vlag × DEFAULT_WEIGHT / weight)`
+    /// `eligible_at = vruntime_dest` (fresh deadline on destination)
+    ///
+    /// Inverses `compute_vlag`: given the vlag that was computed on the
+    /// source queue and the destination queue's avg_vruntime, produces a
+    /// vruntime that places the thread at the same relative fairness
+    /// position on the new queue.
+    pub fn apply_vlag(&self, vlag: i64, dest_avg_vruntime: u64) -> Self {
+        let avg = dest_avg_vruntime as i128;
+        let lag = vlag as i128;
+        let w = self.weight as i128;
+        let dw = DEFAULT_WEIGHT as i128;
+        let new_vrt = (avg - lag * dw / w).max(0) as u64;
+        Self {
+            vruntime: new_vrt,
+            eligible_at: new_vrt,
+            ..*self
+        }
+    }
 }
 
 /// Compute the average vruntime across all threads (used by test crate).

@@ -14,9 +14,9 @@
 //!   time slices yield earlier deadlines (lower latency) without increasing
 //!   total CPU share. No heuristics.
 //!
-//! Global run queue with a single lock — fine for ≤8 cores. Idle threads
-//! (one per core) are never enqueued; they run as fallback when no threads
-//! are runnable.
+//! Per-core ready queues with work stealing, single lock. See DESIGN.md §6.3.
+//! Idle threads (one per core) are never enqueued; they run as fallback when
+//! no threads are runnable.
 
 use alloc::{boxed::Box, vec::Vec};
 
@@ -41,14 +41,13 @@ const DEFAULT_BUDGET_NS: u64 = 50_000_000;
 const DEFAULT_PERIOD_NS: u64 = 50_000_000;
 
 static STATE: IrqMutex<State> = IrqMutex::new(State {
-    queue: RunQueue { ready: Vec::new() },
+    local_queues: {
+        const EMPTY: LocalRunQueue = LocalRunQueue::new();
+        [EMPTY; per_core::MAX_CORES]
+    },
     blocked: Vec::new(),
     suspended: Vec::new(),
     deferred_drops: {
-        const EMPTY: Vec<Box<Thread>> = Vec::new();
-        [EMPTY; per_core::MAX_CORES]
-    },
-    deferred_ready: {
         const EMPTY: Vec<Box<Thread>> = Vec::new();
         [EMPTY; per_core::MAX_CORES]
     },
@@ -76,10 +75,39 @@ struct PerCoreState {
     /// (Phase 3: IPI) to decide whether to send an inter-processor interrupt.
     is_idle: bool,
 }
-/// Single run queue — linear scan for EEVDF selection.
+/// Per-core ready queue with EEVDF selection and load tracking.
 #[allow(clippy::vec_box)]
-struct RunQueue {
+struct LocalRunQueue {
     ready: Vec<Box<Thread>>,
+    /// Number of runnable threads (for work-steal heuristic).
+    load: u32,
+}
+
+impl LocalRunQueue {
+    const fn new() -> Self {
+        Self {
+            ready: Vec::new(),
+            load: 0,
+        }
+    }
+
+    /// Recompute load from ready vec length. Call after mutations.
+    fn update_load(&mut self) {
+        self.load = self.ready.len() as u32;
+    }
+
+    /// Average vruntime across threads in this queue (for vlag computation).
+    fn avg_vruntime(&self) -> u64 {
+        if self.ready.is_empty() {
+            return 0;
+        }
+        let sum: u128 = self
+            .ready
+            .iter()
+            .map(|t| t.scheduling.eevdf.vruntime as u128)
+            .sum();
+        (sum / self.ready.len() as u128) as u64
+    }
 }
 /// Scheduling context with handle-based ownership tracking.
 struct SchedulingContextSlot {
@@ -90,7 +118,7 @@ struct SchedulingContextSlot {
 // TPIDR_EL1 holds a raw pointer to the current thread's Context.
 #[allow(clippy::vec_box)]
 struct State {
-    queue: RunQueue,
+    local_queues: [LocalRunQueue; per_core::MAX_CORES],
     blocked: Vec<Box<Thread>>,
     suspended: Vec<Box<Thread>>,
     /// Per-core deferred thread drops. When a thread exits, it can't be dropped
@@ -103,16 +131,6 @@ struct State {
     /// core B's deferred drops while core B is still on the exited thread's stack
     /// (use-after-free race between lock release and restore_context_and_eret).
     deferred_drops: [Vec<Box<Thread>>; per_core::MAX_CORES],
-    /// Per-core deferred ready queue. When a thread is preempted (still Ready),
-    /// it can't go directly into the global ready queue because another core
-    /// could immediately pick it up and restore it — while the originating core
-    /// is still on the old thread's kernel stack (between lock drop and
-    /// restore_context_and_eret SP switch). Two exception handlers would run on
-    /// the same stack → stack corruption.
-    ///
-    /// Same pattern as deferred_drops: push to this core's slot, drain into the
-    /// global ready queue at the start of THIS core's NEXT schedule_inner.
-    deferred_ready: [Vec<Box<Thread>>; per_core::MAX_CORES],
     cores: [PerCoreState; per_core::MAX_CORES],
     next_id: u64,
     /// All processes. Index = ProcessId.0.
@@ -305,11 +323,12 @@ fn maybe_cleanup_killed_process(s: &mut State, pid: Option<ProcessId>, was_exite
 fn now_ns() -> u64 {
     timer::counter_to_ns(timer::counter())
 }
-/// Reap exited threads from the run queue and blocked list.
+/// Reap exited threads from a local queue and the blocked list.
 #[inline(never)]
 #[allow(clippy::vec_box)]
-fn reap_exited(queue: &mut RunQueue, blocked: &mut Vec<Box<Thread>>) {
-    queue.ready.retain(|t| !t.is_exited());
+fn reap_exited(local_queue: &mut LocalRunQueue, blocked: &mut Vec<Box<Thread>>) {
+    local_queue.ready.retain(|t| !t.is_exited());
+    local_queue.update_load();
     blocked.retain(|t| !t.is_exited());
 }
 /// Decrement ref count on a scheduling context. Frees it if count reaches zero.
@@ -418,15 +437,7 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
     // restore_context_and_eret SP switch.
     s.deferred_drops[core].clear();
 
-    // Drain THIS CORE's deferred ready threads into the global ready queue.
-    // These were parked by the previous schedule_inner on this core but couldn't
-    // enter the ready queue immediately (the core was still on their kernel
-    // stack). Safe now: we're on the current thread's stack.
-    for thread in s.deferred_ready[core].drain(..) {
-        s.queue.ready.push(thread);
-    }
-
-    reap_exited(&mut s.queue, &mut s.blocked);
+    reap_exited(&mut s.local_queues[core], &mut s.blocked);
 
     let now = now_ns();
 
@@ -455,13 +466,12 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
                 // Idle threads are never enqueued — restore to this core's idle slot.
                 s.cores[core].idle = Some(old_thread);
             } else {
-                // Defer ready queue insertion — we're still on this thread's
-                // kernel stack until restore_context_and_eret switches SP.
-                // Immediate insertion would let another core pick this thread
-                // and restore it, running two exception handlers on the same
-                // stack (the 2026-03-31 stack reuse race). Drained at the
-                // start of THIS core's next schedule_inner.
-                s.deferred_ready[core].push(old_thread);
+                // Place on this core's local ready queue. Per-core queues
+                // eliminate the stack reuse race: only this core selects from
+                // its own local_queue, so the thread won't be restored on
+                // another core while we're still on its kernel stack.
+                s.local_queues[core].ready.push(old_thread);
+                s.local_queues[core].update_load();
             }
         } else if old_thread.is_exited() {
             // Defer drop — we're still running on this thread's kernel stack.
@@ -476,12 +486,14 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
         }
     }
 
-    // Try to select a runnable thread via EEVDF.
-    let result = if let Some(idx) = select_best(&s.queue, &s.scheduling_contexts) {
-        let mut new_thread = s.queue.ready.swap_remove(idx);
+    // Try to select a runnable thread via EEVDF from this core's local queue.
+    let result = if let Some(idx) = select_best(&s.local_queues[core], &s.scheduling_contexts) {
+        let mut new_thread = s.local_queues[core].ready.swap_remove(idx);
+        s.local_queues[core].update_load();
 
         new_thread.activate();
         new_thread.scheduling.last_started = now;
+        new_thread.scheduling.last_core = core as u32;
 
         swap_ttbr0(&old_thread, &new_thread, &s.processes);
 
@@ -495,15 +507,108 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
         s.cores[core].is_idle = false;
 
         new_ctx
+    } else if let Some(victim) = find_busiest_core(&s, core) {
+        // Work stealing: local queue empty, steal from busiest remote core.
+        if steal_from(s, core, victim) {
+            if let Some(idx) = select_best(&s.local_queues[core], &s.scheduling_contexts) {
+                let mut new_thread = s.local_queues[core].ready.swap_remove(idx);
+                s.local_queues[core].update_load();
+
+                new_thread.activate();
+                new_thread.scheduling.last_started = now;
+                new_thread.scheduling.last_core = core as u32;
+
+                swap_ttbr0(&old_thread, &new_thread, &s.processes);
+
+                metrics::inc_context_switches();
+
+                let new_ctx = new_thread.context_ptr();
+
+                park_old(s, old_thread, core);
+
+                s.cores[core].current = Some(new_thread);
+                s.cores[core].is_idle = false;
+
+                new_ctx
+            } else if old_thread.is_ready() && has_budget(&old_thread, &s.scheduling_contexts) {
+                // Steal succeeded but nothing schedulable — continue with old thread.
+                let is_idle_thread = old_thread.is_idle();
+                old_thread.activate();
+                old_thread.scheduling.last_started = now;
+                old_thread.scheduling.last_core = core as u32;
+
+                let old_ctx = old_thread.context_ptr();
+
+                s.cores[core].current = Some(old_thread);
+                s.cores[core].is_idle = is_idle_thread;
+
+                old_ctx
+            } else {
+                // Steal succeeded but nothing schedulable and old thread can't continue.
+                let mut idle = s.cores[core].idle.take().expect("no idle thread");
+
+                idle.activate();
+                idle.scheduling.last_started = now;
+
+                let idle_ctx = idle.context_ptr();
+
+                swap_ttbr0(&old_thread, &idle, &s.processes);
+
+                metrics::inc_context_switches();
+
+                park_old(s, old_thread, core);
+
+                s.cores[core].current = Some(idle);
+                s.cores[core].is_idle = true;
+
+                idle_ctx
+            }
+        } else if old_thread.is_ready() && has_budget(&old_thread, &s.scheduling_contexts) {
+            // Steal failed — continue with old thread.
+            let is_idle_thread = old_thread.is_idle();
+            old_thread.activate();
+            old_thread.scheduling.last_started = now;
+            old_thread.scheduling.last_core = core as u32;
+
+            let old_ctx = old_thread.context_ptr();
+
+            s.cores[core].current = Some(old_thread);
+            s.cores[core].is_idle = is_idle_thread;
+
+            old_ctx
+        } else {
+            // Steal failed and old thread can't continue — run idle.
+            let mut idle = s.cores[core].idle.take().expect("no idle thread");
+
+            idle.activate();
+            idle.scheduling.last_started = now;
+
+            let idle_ctx = idle.context_ptr();
+
+            swap_ttbr0(&old_thread, &idle, &s.processes);
+
+            metrics::inc_context_switches();
+
+            park_old(s, old_thread, core);
+
+            s.cores[core].current = Some(idle);
+            s.cores[core].is_idle = true;
+
+            idle_ctx
+        }
     } else if old_thread.is_ready() && has_budget(&old_thread, &s.scheduling_contexts) {
         // No other runnable threads and old thread has budget — continue with it.
+        // If the old thread is the idle thread (no work exists), preserve is_idle
+        // so that ipi_kick_idle_core correctly identifies this core as available.
+        let is_idle_thread = old_thread.is_idle();
         old_thread.activate();
         old_thread.scheduling.last_started = now;
+        old_thread.scheduling.last_core = core as u32;
 
         let old_ctx = old_thread.context_ptr();
 
         s.cores[core].current = Some(old_thread);
-        s.cores[core].is_idle = false;
+        s.cores[core].is_idle = is_idle_thread;
 
         old_ctx
     } else {
@@ -591,7 +696,7 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
 /// and selects in two passes over the ready queue. Returns the index into
 /// `queue.ready`, or None if no thread has budget.
 #[inline(never)]
-fn select_best(queue: &RunQueue, contexts: &[Option<SchedulingContextSlot>]) -> Option<usize> {
+fn select_best(queue: &LocalRunQueue, contexts: &[Option<SchedulingContextSlot>]) -> Option<usize> {
     if queue.ready.is_empty() {
         return None;
     }
@@ -653,12 +758,14 @@ fn set_wake_pending_inner(s: &mut State, id: ThreadId) {
             }
         }
     }
-    for t in s.queue.ready.iter_mut() {
-        if t.id() == id {
-            t.wake_pending = true;
-            t.wake_result = 0;
+    for local_queue in s.local_queues.iter_mut() {
+        for t in local_queue.ready.iter_mut() {
+            if t.id() == id {
+                t.wake_pending = true;
+                t.wake_result = 0;
 
-            return;
+                return;
+            }
         }
     }
 }
@@ -722,6 +829,131 @@ fn ipi_kick_idle_core(s: &State, current_core: usize) {
         }
     }
 }
+/// Choose which core to place a woken/spawned thread on.
+/// 1. Prefer `preferred_core` if that core is idle (cache affinity).
+/// 2. Otherwise, pick the least-loaded core.
+fn pick_target_core(s: &State, preferred_core: usize) -> usize {
+    if preferred_core < per_core::MAX_CORES && s.cores[preferred_core].is_idle {
+        return preferred_core;
+    }
+
+    let mut best_core = preferred_core.min(per_core::MAX_CORES - 1);
+    let mut best_load = u32::MAX;
+
+    for i in 0..per_core::MAX_CORES {
+        if s.local_queues[i].load < best_load {
+            best_load = s.local_queues[i].load;
+            best_core = i;
+        }
+    }
+
+    best_core
+}
+/// Find the busiest remote core (highest load > 1). Returns None if no core
+/// has more than 1 runnable thread (nothing worth stealing).
+fn find_busiest_core(s: &State, my_core: usize) -> Option<usize> {
+    let mut best: Option<(usize, u32)> = None;
+
+    for i in 0..per_core::MAX_CORES {
+        if i == my_core {
+            continue;
+        }
+
+        let load = s.local_queues[i].load;
+
+        if load > 1 {
+            if best.is_none_or(|(_, l)| load > l) {
+                best = Some((i, load));
+            }
+        }
+    }
+
+    best.map(|(i, _)| i)
+}
+/// Select the best steal victim from a remote queue: highest vlag (most
+/// underserved) thread that has budget. Returns index into the remote queue.
+fn select_steal_victim(
+    queue: &LocalRunQueue,
+    contexts: &[Option<SchedulingContextSlot>],
+) -> Option<usize> {
+    if queue.ready.is_empty() {
+        return None;
+    }
+
+    let avg = queue.avg_vruntime();
+    let mut best: Option<(usize, i64)> = None;
+
+    for (i, t) in queue.ready.iter().enumerate() {
+        if !has_budget(t, contexts) {
+            continue;
+        }
+
+        let vlag = t.scheduling.eevdf.compute_vlag(avg);
+
+        if best.is_none_or(|(_, v)| vlag > v) {
+            best = Some((i, vlag));
+        }
+    }
+
+    best.map(|(i, _)| i)
+}
+/// Steal threads from a remote core using workload-granularity migration.
+/// Prefers to steal all threads sharing the same scheduling context as the
+/// primary victim, up to half the victim's load (never drain a core).
+/// Normalizes vruntimes via vlag preservation.
+fn steal_from(s: &mut State, my_core: usize, victim_core: usize) -> bool {
+    let victim_avg = s.local_queues[victim_core].avg_vruntime();
+
+    let primary_idx =
+        match select_steal_victim(&s.local_queues[victim_core], &s.scheduling_contexts) {
+            Some(i) => i,
+            None => return false,
+        };
+
+    let context_id = s.local_queues[victim_core].ready[primary_idx]
+        .scheduling
+        .context_id;
+    let max_steal = (s.local_queues[victim_core].load / 2).max(1) as usize;
+
+    // Collect indices of threads to steal (same context, up to max_steal).
+    let mut steal_indices: Vec<usize> = Vec::new();
+    steal_indices.push(primary_idx);
+
+    if let Some(ctx_id) = context_id {
+        for (i, t) in s.local_queues[victim_core].ready.iter().enumerate() {
+            if i == primary_idx {
+                continue;
+            }
+            if t.scheduling.context_id == Some(ctx_id)
+                && has_budget(t, &s.scheduling_contexts)
+            {
+                steal_indices.push(i);
+                if steal_indices.len() >= max_steal {
+                    break;
+                }
+            }
+        }
+    }
+
+    // Steal in reverse index order (swap_remove from back preserves earlier indices).
+    steal_indices.sort_unstable();
+    let dest_avg = s.local_queues[my_core].avg_vruntime();
+
+    for &idx in steal_indices.iter().rev() {
+        let mut thread = s.local_queues[victim_core].ready.swap_remove(idx);
+
+        let vlag = thread.scheduling.eevdf.compute_vlag(victim_avg);
+        thread.scheduling.eevdf = thread.scheduling.eevdf.apply_vlag(vlag, dest_avg);
+        thread.scheduling.last_core = my_core as u32;
+
+        s.local_queues[my_core].ready.push(thread);
+    }
+
+    s.local_queues[victim_core].update_load();
+    s.local_queues[my_core].update_load();
+
+    true
+}
 /// Shared wake implementation. If `reason` is Some, the thread's wait set
 /// is consulted to compute the return index and patch `context.x[0]`.
 #[inline(never)]
@@ -739,7 +971,9 @@ fn try_wake_impl(s: &mut State, id: ThreadId, reason: Option<&HandleObject>) -> 
 
             thread.scheduling.eevdf = thread.scheduling.eevdf.mark_eligible();
 
-            s.queue.ready.push(thread);
+            let target = pick_target_core(s, thread.scheduling.last_core as usize);
+            s.local_queues[target].ready.push(thread);
+            s.local_queues[target].update_load();
 
             // IPI an idle core so it picks up the newly-ready thread.
             ipi_kick_idle_core(s, per_core::core_id() as usize);
@@ -761,10 +995,12 @@ fn try_wake_impl(s: &mut State, id: ThreadId, reason: Option<&HandleObject>) -> 
             }
         }
     }
-    // Check run queue (unlikely — blocked threads shouldn't be here).
-    for t in s.queue.ready.iter_mut() {
-        if t.id() == id {
-            return t.wake();
+    // Check all local queues (unlikely — blocked threads shouldn't be here).
+    for local_queue in s.local_queues.iter_mut() {
+        for t in local_queue.ready.iter_mut() {
+            if t.id() == id {
+                return t.wake();
+            }
         }
     }
 
@@ -1300,28 +1536,32 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
     let mut killed_threads = Vec::new();
     let mut timeout_timers = Vec::new();
     let mut running_count: u32 = 0;
-    // Remove target threads from ready queue.
-    let mut i = 0;
+    // Remove target threads from all local ready queues.
+    for q in 0..per_core::MAX_CORES {
+        let mut i = 0;
 
-    while i < s.queue.ready.len() {
-        if s.queue.ready[i].process_id == Some(target_pid) {
-            let mut thread = s.queue.ready.swap_remove(i);
+        while i < s.local_queues[q].ready.len() {
+            if s.local_queues[q].ready[i].process_id == Some(target_pid) {
+                let mut thread = s.local_queues[q].ready.swap_remove(i);
 
-            release_thread_context_ids(&mut s, &mut thread);
+                release_thread_context_ids(&mut s, &mut thread);
 
-            // Collect internal timeout timer (not tracked in handle table).
-            if let Some(timer_id) = thread.timeout_timer.take() {
-                timeout_timers.push(timer_id);
+                // Collect internal timeout timer (not tracked in handle table).
+                if let Some(timer_id) = thread.timeout_timer.take() {
+                    timeout_timers.push(timer_id);
+                }
+
+                killed_threads.push(thread.id());
+            } else {
+                i += 1;
             }
-
-            killed_threads.push(thread.id());
-        } else {
-            i += 1;
         }
+
+        s.local_queues[q].update_load();
     }
 
     // Remove from blocked list.
-    i = 0;
+    let mut i = 0;
 
     while i < s.blocked.len() {
         if s.blocked[i].process_id == Some(target_pid) {
@@ -1341,7 +1581,7 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
     }
 
     // Remove from suspended list.
-    i = 0;
+    let mut i = 0;
 
     while i < s.suspended.len() {
         if s.suspended[i].process_id == Some(target_pid) {
@@ -1572,11 +1812,13 @@ pub fn set_wake_pending_for_handle(id: ThreadId, reason: HandleObject) {
         }
     }
 
-    for t in s.queue.ready.iter_mut() {
-        if t.id() == id {
-            apply(t, &reason);
+    for local_queue in s.local_queues.iter_mut() {
+        for t in local_queue.ready.iter_mut() {
+            if t.id() == id {
+                apply(t, &reason);
 
-            return;
+                return;
+            }
         }
     }
 }
@@ -1597,7 +1839,9 @@ pub fn spawn_user(process_id: ProcessId, entry_va: u64, user_stack_top: u64) -> 
 
     bind_default_context(&mut s, &mut thread);
 
-    s.queue.ready.push(thread);
+    let target = pick_target_core(&s, per_core::core_id() as usize);
+    s.local_queues[target].ready.push(thread);
+    s.local_queues[target].update_load();
 
     // IPI an idle core so it picks up the newly-spawned thread.
     ipi_kick_idle_core(&s, per_core::core_id() as usize);
@@ -1646,7 +1890,9 @@ pub fn start_suspended_threads(process_id: ProcessId) -> bool {
         if s.suspended[i].process_id == Some(process_id) {
             let thread = s.suspended.swap_remove(i);
 
-            s.queue.ready.push(thread);
+            let target = pick_target_core(&s, thread.scheduling.last_core as usize);
+            s.local_queues[target].ready.push(thread);
+            s.local_queues[target].update_load();
 
             started = true;
             // Don't increment i — swap_remove moved the last element here.
@@ -1673,11 +1919,14 @@ pub fn start_suspended_threads(process_id: ProcessId) -> bool {
 pub fn suspend_thread(id: ThreadId) -> bool {
     let mut s = STATE.lock();
 
-    // Check ready queue.
-    if let Some(pos) = s.queue.ready.iter().position(|t| t.id() == id) {
-        let thread = s.queue.ready.swap_remove(pos);
-        s.suspended.push(thread);
-        return true;
+    // Check all local ready queues.
+    for local_queue in s.local_queues.iter_mut() {
+        if let Some(pos) = local_queue.ready.iter().position(|t| t.id() == id) {
+            let thread = local_queue.ready.swap_remove(pos);
+            local_queue.update_load();
+            s.suspended.push(thread);
+            return true;
+        }
     }
 
     // Check blocked list.
@@ -1699,7 +1948,10 @@ pub fn resume_thread(id: ThreadId) -> bool {
         let mut thread = s.suspended.swap_remove(pos);
 
         thread.scheduling.eevdf = thread.scheduling.eevdf.mark_eligible();
-        s.queue.ready.push(thread);
+
+        let target = pick_target_core(&s, thread.scheduling.last_core as usize);
+        s.local_queues[target].ready.push(thread);
+        s.local_queues[target].update_load();
 
         ipi_kick_idle_core(&s, per_core::core_id() as usize);
 
@@ -1812,7 +2064,10 @@ pub fn wake_pager_waiters(vmo_id: super::vmo::VmoId, offset: u64, count: u64) {
         if thread.wake() {
             // Mark eligible and enqueue — same pattern as try_wake_impl.
             thread.scheduling.eevdf = thread.scheduling.eevdf.mark_eligible();
-            s.queue.ready.push(thread);
+
+            let target = pick_target_core(&s, thread.scheduling.last_core as usize);
+            s.local_queues[target].ready.push(thread);
+            s.local_queues[target].update_load();
         } else {
             // Thread state wasn't Blocked (shouldn't happen, but defensive).
             s.blocked.push(thread);

@@ -1,10 +1,10 @@
 # Project Status
 
-**Last updated:** 2026-04-01
+**Last updated:** 2026-04-02
 
 ## Current State
 
-**v0.6 Kernel: IN PROGRESS.** Phases 1-2 complete. Phase 3 (core primitives) next.
+**v0.6 Kernel: IN PROGRESS.** Phases 1-5 complete. Phase 6 (packaging) next.
 
 - **Phase 1 (Arch Abstraction): COMPLETE.** 14 files under `kernel/arch/aarch64/`, zero asm outside arch, clean `#[cfg(target_arch)]` boundary. Settled interface: MMU, Context, interrupts, timer, serial, power.
 - **Phase 2 (Capability Model): COMPLETE.** Rights attenuation (8 named rights, monotonic AND on transfer, per-syscall enforcement). Dynamic handle table (two-level: 256 base + overflow pages, 4096 cap, Handle u16). Badges (u64 per-handle, set/get syscalls, preserved through transfer). 30 syscalls. 2,425 tests pass.
@@ -20,7 +20,15 @@
   - **4c: PAC + BTI — COMPLETE.** Per-process PAC keys (5 × 128-bit), loaded on context switch. Replaces stack canaries (strictly superior on ARM64). Feature detection via `arch::security`.
   - **4d: COW — SUBSUMED** by Phase 3b pager interface.
   - **4e: Execute-only code pages — COMPLETE.** `PageAttrs::user_xo()` prevents code disclosure.
-  - **KASLR — DEFERRED.** Requires boot.S changes; all other layers done.
+  - **KASLR — COMPLETE.** 8-bit entropy, 32 MiB slide, post-link fixup tool, PIE relocations, PIC assembly.
+- **Phase 5 (SMP Scalability): COMPLETE.** Per-core ready queues with work stealing, three novel properties.
+  - **Per-core EEVDF:** Each core has its own `LocalRunQueue` with load tracking. Threads placed via cache-affine wake (prefer `last_core`). `deferred_ready` mechanism eliminated — per-core queues close the stack reuse race by construction.
+  - **Work stealing with vlag normalization:** Idle core steals from busiest remote core. EEVDF virtual lag (vlag) preserved across migration — thread's fairness position maintained. Budget-aware: only steals threads with scheduling context budget remaining.
+  - **Workload-granularity migration (novel):** Steal prefers all threads sharing the same scheduling context (workload co-location). No other microkernel groups migration by scheduling context.
+  - **Concurrent Work Conservation (CWC, novel):** Property-based tests verify: no idle core coexists with overloaded core after scheduling round. Neither Linux, seL4, nor Zircon formally guarantee this (Ipanema, EuroSys 2020 proved Linux CFS violates CWC).
+  - **Latent bug fixed:** `is_idle` flag incorrectly set to `false` when idle thread continued — IPI wake path couldn't find idle cores. Found by TDD model tests before any restructure.
+  - **Lock strategy:** Single `IrqMutex<State>` (Option A, same as seL4 SMP). Per-core lock decomposition (Option B) documented in DESIGN.md §6.3.9 for porters targeting 64+ cores.
+  - 26 new model tests (15 per-core queue + 11 work stealing/CWC).
 
 **v0.5 Rich Text: COMPLETE** (2026-03-30). Piece table library (512 pieces, 32 styles, operation coalescing). Style palette with semantic a11y roles. Rich-editor process for text/rich documents. Content-type-aware edit protocol — document, layout engine, and presenter all dispatch on text/rich vs text/plain. Style shortcuts (Cmd+B/I, Cmd+1/2). Underline and strikethrough decorations.
 

@@ -299,6 +299,181 @@ The OS service adjusts contexts dynamically as document state changes. The kerne
 
 ---
 
+## 6.3 Per-Core Ready Queues & SMP Scalability
+
+**Goal:** Replace the single global ready queue with per-core ready queues, enabling core-affine scheduling, work stealing, and provable Concurrent Work Conservation (CWC). Three novel properties that no other production microkernel combines: (1) per-core EEVDF with virtual lag preservation across migration, (2) workload-granularity migration via scheduling contexts, (3) property-tested CWC guarantee.
+
+**Prior art and research basis:**
+
+- Stoica & Abdel-Wahab 1995: original EEVDF paper, single-queue assumption.
+- Linux 6.6+ EEVDF (Zijlstra 2023): per-CPU runqueues with `vlag` preservation on migration. Per-rq virtual time diverges unboundedly (Li et al. 2016, Journal of Systems and Software).
+- Ipanema (Lepers et al., EuroSys 2020): defined Concurrent Work Conservation (CWC), proved Linux CFS and FreeBSD ULE violate it. No production kernel formally guarantees CWC.
+- seL4 MCS: scheduling contexts are core-bound, no kernel migration. Big kernel lock on SMP.
+- Zircon: per-CPU queues with weight-based fair + EDF deadline. Lock-per-CPU, thread briefly on no queue during migration.
+- BWoS (Wang et al., OSDI 2023): block-based work-stealing deque, formally verified on weak memory.
+- Caladan (Fried et al., OSDI 2020): delegation-based scheduling, centralized decision/distributed execution.
+- Apple Clutch: thread groups for workload-level scheduling.
+
+### 6.3.1 Architecture: Per-Core Queues Inside Single Lock
+
+**Decision:** Per-core ready queues within the existing `IrqMutex<State>` (Option A). The lock boundary does not change — the data organization does.
+
+**Rationale:** At ≤8 cores, a single lock with ~100ns hold time produces worst-case ~700ns stall across all cores — negligible against a 4ms scheduling quantum. seL4 SMP chose the same approach (big kernel lock, formally verified CLH). The per-core queue organization enables core affinity, work stealing, and CWC without the complexity of fine-grained locking (lock ordering, races during block/wake transitions, threads briefly on no queue).
+
+```rust
+struct State {
+    // Per-core ready queues (replaces single RunQueue)
+    local_queues: [LocalRunQueue; MAX_CORES],
+    cores: [PerCoreState; MAX_CORES],
+    deferred_drops: [Vec<Box<Thread>>; MAX_CORES],
+
+    // Global (unchanged)
+    blocked: Vec<Box<Thread>>,
+    suspended: Vec<Box<Thread>>,
+    processes: Vec<Option<Process>>,
+    scheduling_contexts: Vec<Option<SchedulingContextSlot>>,
+    // ... identity management
+}
+
+struct LocalRunQueue {
+    ready: Vec<Box<Thread>>,    // EEVDF selection within this queue
+    load: u32,                  // runnable count (steal heuristic)
+}
+```
+
+**What changed:** The single `RunQueue { ready: Vec<Box<Thread>> }` becomes `[LocalRunQueue; MAX_CORES]`. Each core's `schedule_inner` selects from its own `local_queues[core]`. The `deferred_ready` mechanism is eliminated — a preempted thread goes directly into its own core's local queue, which is safe because the single lock prevents any other core from observing it until lock release, at which point `restore_context_and_eret` has already switched the SP.
+
+**What didn't change:** The global lock, the blocked list, processes, scheduling contexts, identity management. The `deferred_drops` mechanism remains (thread drop still can't happen on the thread's own stack).
+
+### 6.3.2 EEVDF Virtual Lag Preservation
+
+**Problem:** With per-core queues, each queue has its own virtual time domain (avg_vruntime). When a thread migrates (work steal, wake placement), its vruntime is relative to the source queue's virtual time. Placing it raw on the destination queue would destroy its fairness position.
+
+**Solution:** Virtual lag (`vlag`) preservation, adapted from Linux's approach but integrated with scheduling contexts.
+
+```text
+vlag = weight × (avg_vruntime_source − vruntime) / DEFAULT_WEIGHT
+```
+
+Positive vlag = thread is underserved (eligible, should run soon). Negative = overserved. On the destination queue:
+
+```text
+vruntime_dest = avg_vruntime_dest − (vlag × DEFAULT_WEIGHT / weight)
+eligible_at_dest = vruntime_dest   // fresh deadline on destination
+```
+
+This preserves the thread's relative fairness position: a thread owed 2ms of CPU on core 0 is still owed 2ms on core 3.
+
+**Scheduling context budget is absolute, not relative.** Unlike vruntime (which is per-queue), a scheduling context's `remaining` budget is in nanoseconds — migration does not change it. A thread with 5ms remaining has 5ms regardless of which core it runs on. This is a property seL4 gets for free (core-bound SCs) that we preserve across actual migration.
+
+### 6.3.3 Core Affinity and Placement
+
+**Thread tracks `last_core`:** Set in `schedule_inner` when a thread is activated. Stored in `Scheduling { last_core: u32 }`.
+
+**Placement on wake (blocked → ready):**
+
+1. If `last_core` is idle → place there (cache affinity, O(1) check)
+2. Else: find the core with lowest `load` count → place there (spread)
+3. IPI the target core if `is_idle` (SGI 0, existing mechanism)
+
+**Placement on steal (see §6.3.4):** Stolen thread's `last_core` is updated to the stealing core.
+
+**No migration cost heuristic (yet):** Linux uses `sched_migration_cost` (500μs) to suppress migration of cache-hot tasks. On Apple Silicon and QEMU virt, L2 is shared across all cores — migration cost is L1-only (~25μs for 64KB working set). A migration cost heuristic is deferred until workloads demonstrate measurable cache penalties (§13.2).
+
+### 6.3.4 Work Stealing
+
+When `schedule_inner(core)` finds its local queue empty after EEVDF selection returns None:
+
+1. **Scan all cores** (round-robin starting from `core + 1`, wrapping)
+2. **Find busiest:** the core with the highest `load` count (ties broken by lowest core index)
+3. **Select steal victim:** Among the busiest core's ready threads that have budget (scheduling context check), pick the thread with the **highest vlag** — the most underserved thread. This is the EEVDF-fair steal criterion: steal the thread that most deserves to run, giving it a core where it can actually run.
+4. **Normalize:** Compute vlag on source queue, apply on destination queue (§6.3.2)
+5. **Update:** Decrement source `load`, increment dest `load`, set thread's `last_core = core`
+
+**Budget-aware stealing:** A thread whose scheduling context has exhausted its budget is not stolen. It would just sit in the destination queue until replenishment — wasting a steal and polluting the new core's virtual time.
+
+### 6.3.5 Workload-Granularity Migration (Novel)
+
+**Insight:** Threads sharing a scheduling context are usually a _workload_ — they communicate, share caches, and benefit from co-location. seL4 binds SCs to cores rigidly (no migration). Linux migrates individual threads (no workload grouping). Neither considers that a scheduling context represents a workload unit.
+
+**Design:** When stealing, prefer to steal **all threads from the same scheduling context** on the victim core, up to the imbalance amount. This keeps workload threads co-located on the stealing core.
+
+**Algorithm:**
+
+1. Select the steal victim thread as in §6.3.4 (highest vlag with budget)
+2. If the victim has a scheduling context, collect all other ready threads on the same core with the same `context_id`
+3. Steal the group (up to half the victim core's load — never drain a core)
+4. Normalize all stolen threads' vruntimes via vlag preservation
+
+**Constraint:** Workload co-location is a preference, not a hard affinity. If a core has threads from context C and is idle while another core with context C threads is overloaded, stealing proceeds normally — CWC takes priority over co-location.
+
+### 6.3.6 Concurrent Work Conservation (CWC)
+
+**Definition (Ipanema, Lepers et al. 2020):** A scheduler satisfies CWC if: whenever a core is idle and at least one other core has more than one runnable thread, the idle core will acquire work within bounded time.
+
+**Guarantee:** The work-stealing mechanism (§6.3.4) fires on every `schedule_inner` invocation for an idle core. Since `schedule_inner` runs at least on every timer tick (~4ms worst case) and on every IPI wakeup (immediate), an idle core will steal within one scheduling quantum of work becoming available. The IPI mechanism (§6.2) ensures that newly enqueued work on a non-idle core triggers a reschedule — if no idle core exists, the new thread waits in the target core's local queue until preemption.
+
+**Formal property (tested, not proved):** Property-based tests encode:
+
+```text
+∀ state: if ∃ core_a (is_idle) ∧ ∃ core_b (load > 1) →
+    after schedule_inner(core_a): core_a.load > 0 ∨ core_b.load ≤ 1
+```
+
+This is tested over 50+ seeds × 500+ steps with randomized spawn/block/wake/exit operations.
+
+**What this kernel guarantees that others don't:** CWC + EEVDF + scheduling contexts. Linux violates CWC (Ipanema proved it). seL4 doesn't steal (userspace decides). Zircon's migration is best-effort. Our property-based tests verify CWC holds after every scheduling step.
+
+### 6.3.7 `deferred_ready` Elimination
+
+The `deferred_ready` mechanism (§12.1) existed to prevent the cross-core stack reuse race: with a global queue, pushing a preempted thread to `ready` immediately let another core pick it up while the originating core was still on the thread's kernel stack.
+
+With per-core queues, a preempted thread goes into `local_queues[core].ready` — the _same_ core's queue. No other core accesses this queue during `schedule_inner` (single lock prevents it). By the time the lock drops and another core could steal the thread, `restore_context_and_eret` has already switched the SP. The race window is closed by the lock.
+
+**`deferred_drops` remains:** An exited thread still can't be dropped during `schedule_inner` (we're on its stack). Same mechanism as before — push to `deferred_drops[core]`, drain next invocation.
+
+### 6.3.8 Arch Interface Additions
+
+One new arch operation:
+
+| Operation                   | File                    | Purpose                                                                                                                                       |
+| --------------------------- | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `send_reschedule_ipi(core)` | interrupt_controller.rs | SGI #1 (distinct from idle wakeup SGI #0). Used when a thread is enqueued on a non-idle core that should re-evaluate its scheduling decision. |
+
+**Not needed (documented for completeness):**
+
+- **I-cache flush on migration:** Not required. The kernel doesn't JIT or dynamically generate code. Userspace code is mapped via page tables with I-cache coherency maintained by the MMU. ARM64 hardware maintains I-cache coherency across cores for normal memory mappings.
+- **L1 data cache flush on migration:** Not required. ARM64 L1 D-cache is coherent across cores via snooping (inner-shareable domain). DSB ISH ensures visibility.
+- **TLB shootdown on migration:** Not required. TLB invalidation is already broadcast (ASIDE1IS). Thread keeps its ASID across migration.
+
+### 6.3.9 Option B: Lock Decomposition (For Porters)
+
+The current design uses a single `IrqMutex<State>` with per-core data organized inside it (Option A). This is correct and performant for ≤8 cores. A porter targeting server-class hardware (64+ cores) or NUMA topologies should migrate to fine-grained locking (Option B):
+
+**Lock structure:**
+
+```text
+LOCAL[N]: IrqMutex<LocalState>    // per-core ready queue, current, idle
+GLOBAL:   IrqMutex<GlobalState>   // blocked, suspended, processes, contexts
+```
+
+**Lock ordering:** `GLOBAL` before `LOCAL`. Never acquire `GLOBAL` while holding `LOCAL`.
+
+**Key operation changes:**
+
+- `schedule_inner`: `LOCAL[core]` only (fast path). `GLOBAL` not needed.
+- `try_wake`: `GLOBAL` (find in blocked) → release → `LOCAL[target]` (enqueue). Thread is briefly on no queue between locks (Zircon does this).
+- `block_current`: `GLOBAL` (add to blocked) → `LOCAL[core]` (schedule next). Ordering is safe (GLOBAL first).
+- Work steal: `LOCAL[core]` → release → `LOCAL[victim]`. Never hold two LOCAL locks simultaneously.
+
+**Migration path:** The per-core data organization is identical between Option A and B. The change is mechanical: split `State` into `LocalState` + `GlobalState`, replace lock acquisition sites. All scheduling logic, EEVDF selection, work stealing, vlag normalization, and CWC guarantees transfer unchanged.
+
+**Why not now:** Fine-grained locking adds complexity (lock ordering constraints, brief no-queue windows) without measurable benefit at ≤8 cores. The seL4 team made the same decision and maintains it even in their verified SMP kernel.
+
+**Depends on:** 6.1 (EEVDF algorithm), 6.2 (IPI wakeup), 0.10 (IrqMutex), 0.11 (SMP boot).
+
+---
+
 ## 7.1 Unsafe Minimization Discipline
 
 **Goal:** Formalize an invariant that all `unsafe` code is concentrated in low-level primitives, with safe interfaces exported to higher layers. Inspired by Asterinas's framekernel architecture (safe Rust services atop an unsafe framework layer) and Theseus's compiler-as-isolation approach.
