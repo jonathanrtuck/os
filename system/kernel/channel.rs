@@ -129,11 +129,7 @@ pub fn close_endpoint(id: ChannelId) {
     };
 
     if let Some((waiter_id, peer_id)) = peer_wake {
-        let reason = HandleObject::Channel(peer_id);
-
-        if !scheduler::try_wake_for_handle(waiter_id, reason) {
-            scheduler::set_wake_pending_for_handle(waiter_id, reason);
-        }
+        scheduler::wake_for_handle(waiter_id, HandleObject::Channel(peer_id));
     }
 
     if let Some(pages) = pages_to_free {
@@ -239,11 +235,7 @@ pub fn signal(id: ChannelId) {
     if let Some(waiter_id) = waiter {
         // Reason is the peer's own ChannelId — matches the HandleObject stored
         // in the peer's wait set.
-        let reason = HandleObject::Channel(peer_id);
-
-        if !scheduler::try_wake_for_handle(waiter_id, reason) {
-            scheduler::set_wake_pending_for_handle(waiter_id, reason);
-        }
+        scheduler::wake_for_handle(waiter_id, HandleObject::Channel(peer_id));
     }
 }
 /// Unregister a waiter (cleanup when `wait` returns).

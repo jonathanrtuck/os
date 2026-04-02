@@ -20,7 +20,6 @@
 //! This gives O(1) lookup for common cases (handles 0-255) and bounded
 //! growth for compound documents that need many channels.
 
-#[cfg(any(test, not(test)))]
 extern crate alloc;
 
 use alloc::{boxed::Box, vec::Vec};

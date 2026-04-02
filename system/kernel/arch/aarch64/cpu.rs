@@ -19,6 +19,8 @@ pub fn dsb_ish() {
 pub fn read_elr() -> u64 {
     let val: u64;
 
+    // SAFETY: Reads ELR_EL1 (Exception Link Register). Only valid at EL1 during exception
+    // handling. `nomem` is correct: MRS of a CPU register has no memory side effects.
     unsafe {
         core::arch::asm!("mrs {}, elr_el1", out(reg) val, options(nostack, nomem));
     }
@@ -43,6 +45,8 @@ pub fn read_esr() -> u64 {
 pub fn read_far() -> u64 {
     let val: u64;
 
+    // SAFETY: Reads FAR_EL1 (Fault Address Register), set by the MMU on translation faults.
+    // Only meaningful during a synchronous exception. `nomem` is correct: pure register read.
     unsafe {
         core::arch::asm!("mrs {}, far_el1", out(reg) val, options(nostack, nomem));
     }
@@ -54,6 +58,8 @@ pub fn read_far() -> u64 {
 pub fn read_sp() -> u64 {
     let val: u64;
 
+    // SAFETY: Reads the current stack pointer. Always valid at EL1. `nomem` is correct:
+    // MOV from SP is a pure register read with no memory side effects.
     unsafe {
         core::arch::asm!("mov {}, sp", out(reg) val, options(nostack, nomem));
     }

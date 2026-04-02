@@ -54,11 +54,7 @@ pub fn destroy(thread_id: ThreadId) {
     let waiter = STATE.lock().destroy(thread_id);
 
     if let Some(waiter_id) = waiter {
-        let reason = HandleObject::Thread(thread_id);
-
-        if !scheduler::try_wake_for_handle(waiter_id, reason) {
-            scheduler::set_wake_pending_for_handle(waiter_id, reason);
-        }
+        scheduler::wake_for_handle(waiter_id, HandleObject::Thread(thread_id));
     }
 }
 /// Notify that a thread has exited. Two-phase wake.
@@ -66,11 +62,7 @@ pub fn notify_exit(thread_id: ThreadId) {
     let waiter = STATE.lock().notify(thread_id);
 
     if let Some(waiter_id) = waiter {
-        let reason = HandleObject::Thread(thread_id);
-
-        if !scheduler::try_wake_for_handle(waiter_id, reason) {
-            scheduler::set_wake_pending_for_handle(waiter_id, reason);
-        }
+        scheduler::wake_for_handle(waiter_id, HandleObject::Thread(thread_id));
     }
 }
 /// Register a thread as the waiter for another thread's exit.

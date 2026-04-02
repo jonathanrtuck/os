@@ -164,9 +164,7 @@ pub fn check_expired() {
 
     // Phase 2: wake threads (acquires scheduler lock).
     for &(timer_id, thread_id) in &to_wake[..wake_count] {
-        if !scheduler::try_wake_for_handle(thread_id, HandleObject::Timer(timer_id)) {
-            scheduler::set_wake_pending_for_handle(thread_id, HandleObject::Timer(timer_id));
-        }
+        scheduler::wake_for_handle(thread_id, HandleObject::Timer(timer_id));
     }
 }
 /// Check whether a timer has fired (for `sys_wait` readiness check).
@@ -271,11 +269,7 @@ pub fn destroy(id: TimerId) {
     };
 
     if let Some(waiter_id) = waiter {
-        let reason = HandleObject::Timer(id);
-
-        if !scheduler::try_wake_for_handle(waiter_id, reason) {
-            scheduler::set_wake_pending_for_handle(waiter_id, reason);
-        }
+        scheduler::wake_for_handle(waiter_id, HandleObject::Timer(id));
     }
 }
 /// Handle a timer interrupt: check timer objects for expiry.

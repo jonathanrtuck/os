@@ -64,11 +64,7 @@ pub fn destroy(id: EventId) {
     let waiter = TABLE.lock().waiters.destroy(id);
 
     if let Some(waiter_id) = waiter {
-        let reason = HandleObject::Event(id);
-
-        if !scheduler::try_wake_for_handle(waiter_id, reason) {
-            scheduler::set_wake_pending_for_handle(waiter_id, reason);
-        }
+        scheduler::wake_for_handle(waiter_id, HandleObject::Event(id));
     }
 }
 /// Register a thread as the waiter for an event.
@@ -93,11 +89,7 @@ pub fn signal(id: EventId) {
     };
 
     if let Some(waiter_id) = waiter {
-        let reason = HandleObject::Event(id);
-
-        if !scheduler::try_wake_for_handle(waiter_id, reason) {
-            scheduler::set_wake_pending_for_handle(waiter_id, reason);
-        }
+        scheduler::wake_for_handle(waiter_id, HandleObject::Event(id));
     }
 }
 /// Clear the waiter registration for an event.

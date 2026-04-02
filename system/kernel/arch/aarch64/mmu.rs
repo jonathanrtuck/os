@@ -33,6 +33,10 @@ pub fn is_user_page_writable(va: u64) -> bool {
 /// DSB ISHST → TLBI VMALLE1IS → DSB ISH → ISB.
 #[inline(always)]
 pub fn tlbi_all() {
+    // SAFETY: DSB ISHST -> TLBI VMALLE1IS -> DSB ISH -> ISB sequence per ARM ARM D5.10.
+    // Invalidates all EL1 TLB entries across all cores in the inner-shareable domain.
+    // Caller must ensure no concurrent page table modifications rely on stale TLB entries.
+    // `nomem` is NOT used: barriers and TLBI have memory-ordering side effects.
     unsafe {
         core::arch::asm!(
             "dsb ishst",
@@ -49,6 +53,9 @@ pub fn tlbi_all() {
 /// Uses `vmalle1` (not `vmalle1is`) because secondary cores aren't started yet.
 #[inline(always)]
 pub fn tlbi_all_local() {
+    // SAFETY: Same sequence as tlbi_all() but uses VMALLE1 (no IS suffix) — invalidates
+    // only the local core's TLB. Used during early boot before secondary cores are active.
+    // `nomem` is NOT used: barriers have memory-ordering side effects.
     unsafe {
         core::arch::asm!(
             "dsb ishst",
@@ -83,6 +90,10 @@ pub fn tlbi_asid(asid: u64) {
 /// DSB ISH → TLBI VALE1IS → DSB ISH (no ISB — caller writes new descriptor next).
 #[inline(always)]
 pub fn tlbi_bbm(va: u64, asid: u64) {
+    // SAFETY: Break-before-make sequence per ARM ARM D5.10.1. Invalidates a single VA's
+    // TLB entry across all cores before the caller overwrites the page table descriptor.
+    // Caller must provide a valid VA shifted right by 12 (page-aligned, ASID in high bits).
+    // `nomem` is NOT used: TLBI and barriers have memory-ordering side effects.
     unsafe {
         core::arch::asm!(
             "dsb ish",

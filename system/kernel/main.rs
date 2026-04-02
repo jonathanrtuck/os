@@ -492,7 +492,14 @@ fn validate_context_before_eret(ctx: *const Context) {
         serial::panic_put_hex(ctx as u64);
 
         // Dump more context: x30 (link register), thread ID
+        // SAFETY: ctx is a valid pointer to the exception Context struct, passed from
+        // exception.S. The x[] field is [u64; 31], so index 30 (link register / x30)
+        // is within bounds. This is a diagnostic read for panic output.
         let x30 = unsafe { core::ptr::addr_of!((*ctx).x).cast::<u64>().add(30).read() };
+        // SAFETY: ctx is a valid Context pointer. Offset 0x330 is the thread_id field
+        // (verified by Context layout). read_volatile prevents the compiler from eliding
+        // this diagnostic read, which could otherwise be optimized away since ctx is not
+        // &Context.
         let thread_id =
             unsafe { core::ptr::read_volatile((ctx as *const u8).add(0x330) as *const u64) };
 

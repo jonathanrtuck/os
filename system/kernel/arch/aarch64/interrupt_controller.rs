@@ -351,11 +351,9 @@ impl InterruptController for GicV3 {
         }
 
         // Enable SGI 0 (IPI) at the redistributor. The virtual timer PPI (27)
-        // is enabled later by timer::init() via enable_irq(). PPI 30 (physical
-        // timer) is also enabled here for legacy reasons but is unused — the
-        // kernel uses the virtual timer (CNTV_*).
+        // is enabled later by timer::init() via enable_irq().
         // GICR_ISENABLER0 covers IRQs 0-31 (SGIs and PPIs).
-        let enable_bits = (1u32 << 0) | (1u32 << 30); // SGI 0 + PPI 30 (legacy)
+        let enable_bits = 1u32 << 0; // SGI 0
 
         memory_mapped_io::write32(gicr + GICR_ISENABLER0, enable_bits);
 

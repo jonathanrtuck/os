@@ -217,6 +217,25 @@ fn dispatch_ok(ctx: *mut Context, val: u64) -> *const Context {
 
     ctx as *const Context
 }
+/// Read a single register from a saved Context via raw pointer.
+///
+/// # Safety
+///
+/// - `ctx` must be a valid pointer to the current thread's `Context` (set by
+///   `exception.S` from `TPIDR_EL1`).
+/// - `n` must be < 31 (the `x` array has 31 entries: x0..x30).
+///
+/// Uses `addr_of!` to avoid creating `&*ctx`, which would be aliasing UB with
+/// the scheduler lock's `&mut State` (the `Context` is embedded at offset 0 of
+/// the `Thread` inside `State`). All syscall argument reads go through this
+/// helper so the safety argument lives in one place.
+#[inline(always)]
+unsafe fn ctx_reg(ctx: *const Context, n: usize) -> u64 {
+    // SAFETY: Caller guarantees ctx is valid and n < 31. addr_of! avoids
+    // creating a reference. The pointer arithmetic stays within the [u64; 31]
+    // array bounds.
+    unsafe { (core::ptr::addr_of!((*ctx).x) as *const u64).add(n).read() }
+}
 /// Check if a user virtual address is readable by EL0 using the hardware
 /// address translation instruction. Returns false if the page is unmapped
 /// or inaccessible.
@@ -446,15 +465,9 @@ fn sys_exit(ctx: *mut Context) -> *const Context {
 }
 #[inline(never)]
 fn sys_futex_wait(ctx: *mut Context) -> *const Context {
-    // SAFETY: Read args via raw pointer — no `&mut *ctx` (aliasing UB with
-    // scheduler lock). ctx is a valid pointer to the current thread's Context
-    // (set by exception.S). addr_of! avoids creating a reference. x[0] and
-    // x[1] are within the [u64; 31] array bounds.
-    let (addr, expected) = unsafe {
-        let x = core::ptr::addr_of!((*ctx).x) as *const u64;
-
-        (x.add(0).read(), x.add(1).read() as u32)
-    };
+    // SAFETY: ctx is valid (set by exception.S from TPIDR_EL1), registers 0
+    // and 1 are within bounds.
+    let (addr, expected) = unsafe { (ctx_reg(ctx, 0), ctx_reg(ctx, 1) as u32) };
 
     // Validate: must be in user VA space and word-aligned.
     if addr >= USER_VA_END || addr & 3 != 0 {
@@ -1695,15 +1708,10 @@ fn sys_vmo_write(handle_nr: u64, offset: u64, buf_va: u64, len: u64) -> Result<u
 fn sys_wait(ctx: *mut Context) -> *const Context {
     use super::thread::TIMEOUT_SENTINEL;
 
-    // SAFETY: Read args via raw pointer — no `&mut *ctx` (aliasing UB with
-    // scheduler lock). ctx is a valid pointer to the current thread's Context
-    // (set by exception.S). addr_of! avoids creating a reference. x[0], x[1],
-    // x[2] are within the [u64; 31] array bounds.
-    let (handles_ptr, count, timeout) = unsafe {
-        let x = core::ptr::addr_of!((*ctx).x) as *const u64;
-
-        (x.add(0).read(), x.add(1).read(), x.add(2).read())
-    };
+    // SAFETY: ctx is valid (set by exception.S from TPIDR_EL1), registers 0,
+    // 1, and 2 are within bounds.
+    let (handles_ptr, count, timeout) =
+        unsafe { (ctx_reg(ctx, 0), ctx_reg(ctx, 1), ctx_reg(ctx, 2)) };
 
     // Clean up any stale timeout timer from a previous blocked wait.
     // This handles the deferred cleanup case where sys_wait couldn't
@@ -2066,19 +2074,13 @@ fn user_va_to_pa(va: u64) -> Option<u64> {
 pub fn dispatch(ctx: *mut Context) -> *const Context {
     metrics::inc_syscalls();
 
-    // SAFETY: Read syscall arguments from the context via raw pointer. We must
-    // NOT create `&mut *ctx` here — the scheduler lock's `&mut State`
-    // transitively covers the same Context (it's in `cores[core].current`).
-    // With inlining at opt-level 3, LLVM sees two `noalias` mutable references
-    // to overlapping memory, which is UB that causes miscompilation (corrupted
-    // return addresses on the kernel stack). ctx is valid (set by exception.S
-    // from TPIDR_EL1). addr_of! avoids reference creation. x[0], x[1], x[8]
-    // are within the [u64; 31] array bounds.
-    let (syscall_nr, x0, x1) = unsafe {
-        let x = core::ptr::addr_of!((*ctx).x) as *const u64;
-
-        (x.add(8).read(), x.add(0).read(), x.add(1).read())
-    };
+    // SAFETY: ctx is valid (set by exception.S from TPIDR_EL1), registers 0,
+    // 1, and 8 are within bounds. We must NOT create `&mut *ctx` — the
+    // scheduler lock's `&mut State` transitively covers the same Context
+    // (it's in `cores[core].current`). With inlining at opt-level 3, LLVM
+    // sees two `noalias` mutable references to overlapping memory, which is UB
+    // that causes miscompilation. ctx_reg uses addr_of! to avoid references.
+    let (syscall_nr, x0, x1) = unsafe { (ctx_reg(ctx, 8), ctx_reg(ctx, 0), ctx_reg(ctx, 1)) };
 
     // Syscall filtering: check caller's per-process mask.
     // EXIT is always allowed (can't trap a process with no way out).
@@ -2128,10 +2130,8 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
         nr::PROCESS_CREATE => dispatch_ok(ctx, result_to_u64!(sys_process_create(x0, x1))),
         nr::PROCESS_START => dispatch_ok(ctx, result_to_u64!(sys_process_start(x0))),
         nr::HANDLE_SEND => {
-            // SAFETY: ctx is valid, x[2] is within [u64; 31] bounds. addr_of!
-            // avoids creating a reference (same aliasing UB prevention as above).
-            let xbase = unsafe { core::ptr::addr_of!((*ctx).x) as *const u64 };
-            let x2 = unsafe { xbase.add(2).read() };
+            // SAFETY: ctx is valid, register 2 is within bounds.
+            let x2 = unsafe { ctx_reg(ctx, 2) };
 
             dispatch_ok(ctx, result_to_u64!(sys_handle_send(x0, x1, x2)))
         }
@@ -2145,29 +2145,27 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
         nr::HANDLE_SET_BADGE => dispatch_ok(ctx, result_to_u64!(sys_handle_set_badge(x0, x1))),
         nr::HANDLE_GET_BADGE => dispatch_ok(ctx, result_to_u64!(sys_handle_get_badge(x0))),
         nr::VMO_CREATE => {
-            let xbase = unsafe { core::ptr::addr_of!((*ctx).x) as *const u64 };
-            let x2 = unsafe { xbase.add(2).read() };
+            // SAFETY: ctx is valid, register 2 is within bounds.
+            let x2 = unsafe { ctx_reg(ctx, 2) };
 
             dispatch_ok(ctx, result_to_u64!(sys_vmo_create(x0, x1, x2)))
         }
         nr::VMO_MAP => {
-            let xbase = unsafe { core::ptr::addr_of!((*ctx).x) as *const u64 };
-            let x2 = unsafe { xbase.add(2).read() };
+            // SAFETY: ctx is valid, register 2 is within bounds.
+            let x2 = unsafe { ctx_reg(ctx, 2) };
 
             dispatch_ok(ctx, result_to_u64!(sys_vmo_map(x0, x1, x2)))
         }
         nr::VMO_UNMAP => dispatch_ok(ctx, result_to_u64!(sys_vmo_unmap(x0, x1))),
         nr::VMO_READ => {
-            let xbase = unsafe { core::ptr::addr_of!((*ctx).x) as *const u64 };
-            let x2 = unsafe { xbase.add(2).read() };
-            let x3 = unsafe { xbase.add(3).read() };
+            // SAFETY: ctx is valid, registers 2 and 3 are within bounds.
+            let (x2, x3) = unsafe { (ctx_reg(ctx, 2), ctx_reg(ctx, 3)) };
 
             dispatch_ok(ctx, result_to_u64!(sys_vmo_read(x0, x1, x2, x3)))
         }
         nr::VMO_WRITE => {
-            let xbase = unsafe { core::ptr::addr_of!((*ctx).x) as *const u64 };
-            let x2 = unsafe { xbase.add(2).read() };
-            let x3 = unsafe { xbase.add(3).read() };
+            // SAFETY: ctx is valid, registers 2 and 3 are within bounds.
+            let (x2, x3) = unsafe { (ctx_reg(ctx, 2), ctx_reg(ctx, 3)) };
 
             dispatch_ok(ctx, result_to_u64!(sys_vmo_write(x0, x1, x2, x3)))
         }
@@ -2176,9 +2174,8 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
         nr::VMO_RESTORE => dispatch_ok(ctx, result_to_u64!(sys_vmo_restore(x0, x1))),
         nr::VMO_SEAL => dispatch_ok(ctx, result_to_u64!(sys_vmo_seal(x0))),
         nr::VMO_OP_RANGE => {
-            let xbase = unsafe { core::ptr::addr_of!((*ctx).x) as *const u64 };
-            let x2 = unsafe { xbase.add(2).read() };
-            let x3 = unsafe { xbase.add(3).read() };
+            // SAFETY: ctx is valid, registers 2 and 3 are within bounds.
+            let (x2, x3) = unsafe { (ctx_reg(ctx, 2), ctx_reg(ctx, 3)) };
 
             dispatch_ok(ctx, result_to_u64!(sys_vmo_op_range(x0, x1, x2, x3)))
         }
@@ -2191,8 +2188,8 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
         nr::THREAD_READ_STATE => dispatch_ok(ctx, result_to_u64!(sys_thread_read_state(x0, x1))),
         nr::CLOCK_GET => dispatch_ok(ctx, result_to_u64!(sys_clock_get())),
         nr::PAGER_SUPPLY => {
-            let xbase = unsafe { core::ptr::addr_of!((*ctx).x) as *const u64 };
-            let x2 = unsafe { xbase.add(2).read() };
+            // SAFETY: ctx is valid, register 2 is within bounds.
+            let x2 = unsafe { ctx_reg(ctx, 2) };
 
             dispatch_ok(ctx, result_to_u64!(sys_pager_supply(x0, x1, x2)))
         }

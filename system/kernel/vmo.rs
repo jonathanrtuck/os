@@ -738,6 +738,12 @@ pub fn write(id: VmoId, offset: u64, data: &[u8], append_only: bool) -> Option<u
                 // COW: allocate, copy, replace.
                 let new_pa = super::page_allocator::alloc_frame()?;
 
+                // SAFETY: Both src and dst are kernel virtual addresses obtained from phys_to_virt()
+                // for pages allocated by the page allocator. They are guaranteed to be:
+                // - Valid: mapped in TTBR1 (kernel address space) with read/write permissions
+                // - Non-overlapping: src is the original page, dst is a freshly allocated page
+                // - Aligned: page allocator returns page-aligned physical addresses
+                // - Sized: PAGE_SIZE bytes is exactly one page, matching both allocations
                 unsafe {
                     let src = super::memory::phys_to_virt(existing_pa) as *const u8;
                     let dst = super::memory::phys_to_virt(new_pa) as *mut u8;

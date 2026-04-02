@@ -226,10 +226,9 @@ Every `unsafe` block in the kernel has a `// SAFETY:` comment explaining the inv
 
 ## References
 
-- [bahree/rust-microkernel](https://github.com/bahree/rust-microkernel) — reference for the initial boot sequence. The boot.S structure, exception vectors, and context save/restore originated there, with significant modifications for W^X, GICv3, SMP, the scheduler, and capability model.
-- EEVDF: adapted from Linux 6.6+ (Mollison, 2023). Per-core queue decomposition and vlag normalization integrated with scheduling contexts.
-- CWC property testing: inspired by Ipanema (Music et al., EuroSys 2020), which proved Linux CFS violates CWC.
-- ChaCha20 PRNG: RFC 8439 test vectors. Fast key erasure: Bernstein 2017.
+- EEVDF: adapted from [Linux 6.6+](https://lwn.net/Articles/925371/) (Zijlstra, 2023). Original algorithm: [Stoica & Abdel-Wahab, 1996](https://doi.org/10.1109/real.1996.563725). Per-core queue decomposition and vlag normalization integrated with scheduling contexts.
+- CWC property testing: inspired by [Ipanema](https://doi.org/10.1145/3342195.3387544) (Lepers et al., EuroSys 2020), which proved Linux CFS violates CWC.
+- ChaCha20 PRNG: [RFC 8439](https://datatracker.ietf.org/doc/html/rfc8439) test vectors. Fast key erasure: [Bernstein 2017](https://blog.cr.yp.to/20170723-random.html).
 
 ## license
 

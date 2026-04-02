@@ -33,10 +33,7 @@ pub fn destroy(process_id: ProcessId) {
     let waiter = STATE.lock().destroy(process_id);
 
     if let Some(waiter_id) = waiter {
-        let reason = HandleObject::Process(process_id);
-        if !scheduler::try_wake_for_handle(waiter_id, reason) {
-            scheduler::set_wake_pending_for_handle(waiter_id, reason);
-        }
+        scheduler::wake_for_handle(waiter_id, HandleObject::Process(process_id));
     }
 }
 /// Notify that a process's last thread has exited. Two-phase wake.
@@ -44,11 +41,7 @@ pub fn notify_exit(process_id: ProcessId) {
     let waiter = STATE.lock().notify(process_id);
 
     if let Some(waiter_id) = waiter {
-        let reason = HandleObject::Process(process_id);
-
-        if !scheduler::try_wake_for_handle(waiter_id, reason) {
-            scheduler::set_wake_pending_for_handle(waiter_id, reason);
-        }
+        scheduler::wake_for_handle(waiter_id, HandleObject::Process(process_id));
     }
 }
 /// Register a thread as the waiter for a process exit.

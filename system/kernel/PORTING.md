@@ -252,13 +252,11 @@ If the platform has no hardware RNG (`has_hardware_rng()` returns false), the ke
 
 ## 12. security — Control Flow Integrity
 
-| Function                          | Purpose                                | aarch64                                  | x86_64                                            |
-| --------------------------------- | -------------------------------------- | ---------------------------------------- | ------------------------------------------------- |
-| `pac_supported() -> bool`         | Check for pointer authentication       | FEAT_PAuth (ID_AA64ISAR1_EL1)            | Always false (x86 has no PAC)                     |
-| `bti_supported() -> bool`         | Check for branch target identification | FEAT_BTI (ID_AA64PFR1_EL1)               | CET IBT (CPUID)                                   |
-| `PacKeys::generate(prng) -> Self` | Generate per-process keys              | 5 × 128-bit keys                         | No-op on x86 (or generate CET shadow stack token) |
-| `PacKeys::zero() -> Self`         | Zero keys (feature unavailable)        | All zeros                                | All zeros                                         |
-| `set_pac_keys(keys: &PacKeys)`    | Load keys on context switch            | Write APIA/APDA/APIB/APDB/APGA registers | No-op on x86 (or configure CET)                   |
+| Function                          | Purpose                         | aarch64                                  | x86_64                                            |
+| --------------------------------- | ------------------------------- | ---------------------------------------- | ------------------------------------------------- |
+| `PacKeys::generate(prng) -> Self` | Generate per-process keys       | 5 × 128-bit keys                         | No-op on x86 (or generate CET shadow stack token) |
+| `PacKeys::zero() -> Self`         | Zero keys (feature unavailable) | All zeros                                | All zeros                                         |
+| `set_pac_keys(keys: &PacKeys)`    | Load keys on context switch     | Write APIA/APDA/APIB/APDB/APGA registers | No-op on x86 (or configure CET)                   |
 
 The security module is **optional** in the sense that returning `false` from all feature checks and providing no-op implementations is valid. The kernel adapts — when PAC is unavailable, `Process::new` calls `PacKeys::zero()` and `set_pac_keys` writes zeros.
 

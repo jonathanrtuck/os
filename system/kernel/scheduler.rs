@@ -1091,6 +1091,9 @@ pub fn block_current_for_pager(
 pub fn block_current_unless_woken(ctx: *mut Context) -> BlockResult {
     let mut canary: u64 = 0;
 
+    // SAFETY: Writing to a local variable via write_volatile. The address (&mut canary)
+    // is valid stack memory. write_volatile ensures the compiler doesn't optimize away
+    // this sentinel write, which we check after context switch to detect stack corruption.
     unsafe {
         core::ptr::write_volatile(&mut canary, 0xDEAD_BEEF_CAFE_BABE_u64);
     }
@@ -1126,6 +1129,10 @@ pub fn block_current_unless_woken(ctx: *mut Context) -> BlockResult {
     thread.block();
 
     let result = schedule_inner(&mut s, ctx, core);
+    // SAFETY: Reading from a local variable via read_volatile. The address (&canary) is
+    // valid stack memory that persists across the context switch (this thread's stack is
+    // preserved). read_volatile ensures the compiler reads the actual memory value, not
+    // a cached register copy, which is essential for detecting stack corruption.
     let check = unsafe { core::ptr::read_volatile(&canary) };
 
     if check != 0xDEAD_BEEF_CAFE_BABE {
@@ -2048,6 +2055,18 @@ pub fn try_wake_for_handle(id: ThreadId, reason: HandleObject) -> bool {
     let mut s = STATE.lock();
 
     try_wake_impl(&mut s, id, Some(&reason))
+}
+/// Two-phase wake: attempt to wake a blocked thread, falling back to
+/// setting the wake-pending flag if the thread isn't blocked yet.
+///
+/// This is the standard pattern used after releasing a subsystem lock
+/// (channel, timer, event, interrupt, etc.) to maintain lock ordering:
+/// subsystem lock → scheduler lock. The two phases handle the race where
+/// the target thread may not have blocked yet when the signal arrives.
+pub fn wake_for_handle(id: ThreadId, reason: HandleObject) {
+    if !try_wake_for_handle(id, reason) {
+        set_wake_pending_for_handle(id, reason);
+    }
 }
 /// Wake all threads blocked on pager faults for the given VMO page range.
 ///

@@ -101,10 +101,7 @@ pub fn destroy(id: InterruptId) {
     }
 
     if let Some(waiter_id) = waiter {
-        let reason = HandleObject::Interrupt(id);
-        if !scheduler::try_wake_for_handle(waiter_id, reason) {
-            scheduler::set_wake_pending_for_handle(waiter_id, reason);
-        }
+        scheduler::wake_for_handle(waiter_id, HandleObject::Interrupt(id));
     }
 }
 /// Handle an IRQ from the hardware. Called from `irq_handler` in main.rs.
@@ -144,9 +141,7 @@ pub fn handle_irq(irq: u32) -> bool {
 
     // Phase 2: wake the driver thread (acquires scheduler lock).
     if let Some((int_id, thread_id)) = to_wake {
-        if !scheduler::try_wake_for_handle(thread_id, HandleObject::Interrupt(int_id)) {
-            scheduler::set_wake_pending_for_handle(thread_id, HandleObject::Interrupt(int_id));
-        }
+        scheduler::wake_for_handle(thread_id, HandleObject::Interrupt(int_id));
     }
 
     found

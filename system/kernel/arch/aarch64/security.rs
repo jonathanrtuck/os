@@ -52,56 +52,17 @@ impl PacKeys {
     }
 }
 
-/// Check if Branch Target Identification (FEAT_BTI) is available.
-///
-/// Reads `ID_AA64PFR1_EL1` and checks BT field (bits \[3:0\]).
-pub fn bti_supported() -> bool {
-    let pfr1: u64;
-
-    // SAFETY: Reading an identification register. Read-only.
-    unsafe {
-        core::arch::asm!(
-            "mrs {}, id_aa64pfr1_el1",
-            out(reg) pfr1,
-            options(nostack),
-        );
-    }
-
-    // BT field: bits [3:0]. 0b0001 = BTI supported.
-    (pfr1 & 0xF) >= 1
-}
-/// Check if Pointer Authentication (FEAT_PAuth) is available.
-///
-/// Reads `ID_AA64ISAR1_EL1` and checks APA/API fields.
-pub fn pac_supported() -> bool {
-    let isar1: u64;
-
-    // SAFETY: Reading an identification register. Read-only, no side effects.
-    // No `nomem` — system register reads have implicit ordering requirements.
-    unsafe {
-        core::arch::asm!(
-            "mrs {}, id_aa64isar1_el1",
-            out(reg) isar1,
-            options(nostack),
-        );
-    }
-
-    // APA field: bits [7:4]. API field: bits [11:8].
-    // Either non-zero means some form of PAC is supported.
-    let apa = (isar1 >> 4) & 0xF;
-    let api = (isar1 >> 8) & 0xF;
-
-    apa > 0 || api > 0
-}
 /// Load PAC keys into the EL1 key registers.
 ///
 /// Called during context switch to set the current process's PAC keys.
 /// Each key register is 128 bits, split across two 64-bit system registers
 /// (KEY_HI and KEY_LO).
 pub fn set_pac_keys(keys: &PacKeys) {
-    // SAFETY: Writing PAC key registers. These control pointer authentication
-    // for EL0 code. No `nomem` — system register writes affect subsequent
-    // pointer authentication operations.
+    // SAFETY: Writes Pointer Authentication key registers (APIAKeyLo/Hi, APDAKeyLo/Hi)
+    // via MSR instructions. Must be called at EL1 with interrupts masked to ensure atomic
+    // key installation. `nomem` is NOT used: MSR to system registers has side effects on
+    // the CPU's authentication state. Keys are per-address-space; caller must ensure the
+    // correct process context.
     //
     // Raw system register encodings (LLVM doesn't recognize the friendly names
     // without +pauth target feature, which we don't want to enable globally):
