@@ -288,7 +288,10 @@ fn find_busiest_core(s: &State, my_core: usize) -> Option<usize> {
 
         let load = s.local_queues[i].load;
 
-        if load > 1 {
+        // Steal from any core with ready threads. The previous threshold
+        // of `load > 1` prevented stealing a single queued thread, causing
+        // starvation when only one thread existed (e.g., standalone init).
+        if load > 0 {
             if best.is_none_or(|(_, l)| load > l) {
                 best = Some((i, load));
             }
@@ -1484,6 +1487,7 @@ pub fn init() {
     // No separate idle thread needed — the zeroed Context is populated by
     // save_context on the first exception (timer IRQ during WFI loop).
     s.cores[0].current = Some(boot_thread);
+    s.cores[0].is_idle = true;
 
     // Create the default scheduling context for kernel-spawned user threads.
     // ref_count starts at 1 (the State itself holds a logical reference).
@@ -1518,6 +1522,11 @@ pub fn init_secondary(core_id: u32) {
     let boot_ctx_ptr = boot_thread.context_ptr();
 
     s.cores[idx].current = Some(boot_thread);
+    // Mark idle so ipi_kick_idle_core can target this core. Without this,
+    // is_idle stays false (default) until schedule_inner runs — but
+    // schedule_inner only runs in response to IRQs, and no IRQ arrives
+    // unless someone sends an IPI, creating a deadlock.
+    s.cores[idx].is_idle = true;
 
     // SAFETY: boot_ctx_ptr points to a stable Context in a Box.
     unsafe {

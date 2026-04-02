@@ -982,14 +982,18 @@ pub extern "C" fn kernel_main(dtb_pa: u64, kaslr_slide: u64) -> ! {
     channel::setup_endpoint(ch_b, init_pid).expect("failed to setup init channel");
     // Close kernel's endpoint — init reads the manifest from the shared page.
     channel::close_endpoint(ch_a);
-    // Start init now that everything is set up.
-    scheduler::start_suspended_threads(init_pid);
-    serial::puts("  🔀 processes - init started with device manifest\n");
 
     boot_secondaries();
 
     timer::init();
     serial::puts("  ⏱️  timer - tickless\n");
+
+    // Start init AFTER secondaries and timer are live. start_suspended_threads
+    // sends an IPI to wake an idle core — secondaries must be online for the
+    // IPI to reach them. Without this ordering, the init thread sits in a ready
+    // queue with no core to pick it up.
+    scheduler::start_suspended_threads(init_pid);
+    serial::puts("  🔀 processes - init started with device manifest\n");
     serial::puts("🥾 booted.\n");
 
     loop {
