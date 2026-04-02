@@ -120,6 +120,9 @@ fn main() {
 
     // Tell Cargo to pass the kernel linker script and SYSTEM_CONFIG env var.
     println!("cargo:rustc-link-arg=-T{}/kernel.ld", out_dir.display());
+    // Emit relocations for KASLR — preserves linker relocation entries so
+    // a post-link tool can extract absolute addresses that need fixup.
+    println!("cargo:rustc-link-arg=--emit-relocs");
     println!("cargo:rustc-env=SYSTEM_CONFIG={config_path_str}");
 
     // Rebuild when the config or templates change.

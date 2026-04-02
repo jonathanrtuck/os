@@ -180,16 +180,16 @@ pub fn create_from_user_elf(elf_bytes: &[u8]) -> Result<(ProcessId, ThreadId), &
     let process_id = scheduler::create_process(addr_space, pac_keys);
     let thread_id =
         match scheduler::spawn_user_suspended(process_id, header.entry, layout.stack_top) {
-        Some(tid) => tid,
-        None => {
-            // Clean up the orphaned process slot. The process has no threads
-            // (spawn failed), so remove_empty_process drops the Box<AddressSpace>
-            // which triggers AddressSpace::Drop (free all frames + ASID).
-            scheduler::remove_empty_process(process_id);
+            Some(tid) => tid,
+            None => {
+                // Clean up the orphaned process slot. The process has no threads
+                // (spawn failed), so remove_empty_process drops the Box<AddressSpace>
+                // which triggers AddressSpace::Drop (free all frames + ASID).
+                scheduler::remove_empty_process(process_id);
 
-            return Err("out of memory for initial thread stack");
-        }
-    };
+                return Err("out of memory for initial thread stack");
+            }
+        };
 
     Ok((process_id, thread_id))
 }

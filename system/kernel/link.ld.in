@@ -43,6 +43,19 @@ SECTIONS
   .rodata : AT(ADDR(.rodata) - KERNEL_VA_OFFSET) {
     *(.rodata .rodata.*)
   }
+
+  /* --- Relocations for KASLR (RO, within rodata page) ---
+   * With --emit-relocs, the linker produces .rela.text, .rela.rodata, etc.
+   * Collect ALL relocation sections here so boot.S can iterate them. */
+  __rela_start = .;
+  .rela.dyn : AT(ADDR(.rela.dyn) - KERNEL_VA_OFFSET) {
+    *(.rela.dyn .rela.dyn.*)
+    *(.rela.text .rela.text.*)
+    *(.rela.rodata .rela.rodata.*)
+    *(.rela.data .rela.data.*)
+    *(.rela.text.boot)
+  }
+  __rela_end = .;
   __rodata_end = .;
 
   /* --- Service pack (RO, page-aligned) --- */

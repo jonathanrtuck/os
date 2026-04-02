@@ -1,0 +1,115 @@
+//! ELF64 relocation processing for KASLR.
+//!
+//! Processes `R_AARCH64_RELATIVE` entries from the `.rela.dyn` section to
+//! adjust absolute addresses in the kernel binary by the KASLR slide delta.
+//!
+//! Each R_AARCH64_RELATIVE entry says: "at offset `r_offset` in the binary,
+//! write `r_addend + delta`." This is the simplest relocation type — the
+//! linker computed the absolute address at link time, and we just add the
+//! slide to it.
+//!
+//! # Safety
+//!
+//! The relocation processor runs once during early boot, before any kernel
+//! subsystem is initialized. It operates on raw memory at physical addresses
+//! and must not use any kernel services (heap, serial, etc.).
+//!
+//! # Architecture boundary
+//!
+//! This module is generic — the ELF Rela format and relocation logic are
+//! architecture-independent. Only the relocation type constant
+//! (`R_AARCH64_RELATIVE = 0x403`) is ARM64-specific. A RISC-V port would
+//! define `R_RISCV_RELATIVE = 3`.
+
+/// ELF64 relocation type: R_AARCH64_RELATIVE.
+///
+/// "The location is adjusted by the difference between the address at
+/// which the segment is loaded and the address at which it was linked."
+pub const R_AARCH64_RELATIVE: u64 = 0x403;
+
+/// Size of one ELF64 Rela entry (r_offset + r_info + r_addend).
+const RELA_ENTRY_SIZE: usize = 24;
+
+/// A parsed ELF64 Rela entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RelaEntry {
+    /// Offset in the binary where the relocated value lives.
+    pub offset: u64,
+    /// Relocation type and symbol index. Low 32 bits = type.
+    pub info: u64,
+    /// Addend — the value to add the delta to.
+    pub addend: i64,
+}
+
+impl RelaEntry {
+    /// Parse a Rela entry from 24 little-endian bytes.
+    pub fn from_le_bytes(bytes: &[u8]) -> Self {
+        Self {
+            offset: u64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+            info: u64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+            addend: i64::from_le_bytes(bytes[16..24].try_into().unwrap()),
+        }
+    }
+
+    /// Check if this is an R_AARCH64_RELATIVE relocation.
+    pub fn is_relative(&self) -> bool {
+        (self.info & 0xFFFF_FFFF) == R_AARCH64_RELATIVE
+    }
+}
+
+/// Count the number of complete Rela entries in a `.rela.dyn` section.
+///
+/// Truncated entries (< 24 bytes) at the end are ignored.
+pub fn rela_entry_count(table: &[u8]) -> usize {
+    table.len() / RELA_ENTRY_SIZE
+}
+
+/// Parse the Nth Rela entry from a `.rela.dyn` section.
+///
+/// # Panics
+///
+/// Panics if `index * 24 + 24 > table.len()`.
+pub fn rela_entry_at(table: &[u8], index: usize) -> RelaEntry {
+    let start = index * RELA_ENTRY_SIZE;
+    RelaEntry::from_le_bytes(&table[start..start + RELA_ENTRY_SIZE])
+}
+
+/// Apply all R_AARCH64_RELATIVE relocations from a `.rela.dyn` section.
+///
+/// Iterates the relocation table and applies each relative entry to the
+/// binary region. Non-relative entries are skipped.
+pub fn apply_rela_table(binary: &mut [u8], rela_table: &[u8], slide: u64) {
+    let count = rela_entry_count(rela_table);
+
+    for i in 0..count {
+        let entry = rela_entry_at(rela_table, i);
+        apply_relocation(binary, &entry, slide);
+    }
+}
+
+/// Parse a `.rela.dyn` section into a Vec of Rela entries (test helper).
+#[cfg(test)]
+pub fn parse_rela_entries(table: &[u8]) -> Vec<RelaEntry> {
+    (0..rela_entry_count(table))
+        .map(|i| rela_entry_at(table, i))
+        .collect()
+}
+
+/// Apply a single R_AARCH64_RELATIVE relocation to a binary region.
+///
+/// For relative relocations: writes `addend + slide` to the u64 at
+/// `binary[offset..offset+8]`. Non-relative entries are skipped.
+pub fn apply_relocation(binary: &mut [u8], entry: &RelaEntry, slide: u64) {
+    if !entry.is_relative() {
+        return;
+    }
+
+    let offset = entry.offset as usize;
+
+    if offset + 8 > binary.len() {
+        return; // Out of bounds — skip silently.
+    }
+
+    let new_value = (entry.addend as u64).wrapping_add(slide);
+    binary[offset..offset + 8].copy_from_slice(&new_value.to_le_bytes());
+}

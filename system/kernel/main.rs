@@ -103,6 +103,7 @@ mod power;
 mod process;
 mod process_exit;
 mod random;
+mod relocate;
 mod scheduler;
 mod scheduling_algorithm;
 mod scheduling_context;
@@ -159,8 +160,7 @@ extern "C" {
 ///
 /// Initialized during boot by `init_prng()`. Used for ASLR seeds, PAC keys,
 /// and per-process PRNG derivation. None until seeded.
-static KERNEL_PRNG: sync::IrqMutex<Option<random::Prng>> =
-    sync::IrqMutex::new(None);
+static KERNEL_PRNG: sync::IrqMutex<Option<random::Prng>> = sync::IrqMutex::new(None);
 
 /// Initialize the kernel PRNG from available entropy sources.
 ///
@@ -336,7 +336,7 @@ fn probe_from_dtb(
         }
 
         let pa = dtb_dev.base_address();
-        let base = pa as usize + memory::KERNEL_VA_OFFSET;
+        let base = pa as usize + memory::KERNEL_VA_OFFSET + memory::kaslr_slide();
 
         if memory_mapped_io::read32(base) != VIRTIO_MAGIC {
             continue;
@@ -370,7 +370,7 @@ fn probe_hardcoded(out: &mut [Option<VirtioDeviceInfo>; 8], count: &mut usize) {
         }
 
         let pa = VIRTIO_MMIO_BASE_PA + i as u64 * VIRTIO_MMIO_STRIDE;
-        let base = pa as usize + memory::KERNEL_VA_OFFSET;
+        let base = pa as usize + memory::KERNEL_VA_OFFSET + memory::kaslr_slide();
 
         if memory_mapped_io::read32(base) != VIRTIO_MAGIC {
             continue;
@@ -485,7 +485,7 @@ fn validate_context_before_eret(ctx: *const Context) {
     let sp = unsafe { core::ptr::addr_of!((*ctx).sp).read() };
     let mode = spsr & 0xF; // M[3:0]
     let is_el1 = mode == 0x4 || mode == 0x5; // EL1t or EL1h
-    let is_kernel_va = elr >= memory::KERNEL_VA_OFFSET as u64;
+    let is_kernel_va = elr >= (memory::KERNEL_VA_OFFSET + memory::kaslr_slide()) as u64;
 
     // EL1 return with user-range ELR: the eret would try to fetch instructions
     // from a lower-half VA at EL1, using TTBR0 (which may be empty for idle
@@ -524,7 +524,7 @@ fn validate_context_before_eret(ctx: *const Context) {
         panic!("corrupt context: EL0 eret to kernel VA");
     }
     // EL1 return with invalid kernel SP: stack corruption.
-    if is_el1 && (sp < memory::KERNEL_VA_OFFSET as u64 || sp == 0) {
+    if is_el1 && (sp < (memory::KERNEL_VA_OFFSET + memory::kaslr_slide()) as u64 || sp == 0) {
         serial::panic_puts("\n🛑 eret validation: EL1 return with bad SP\n  sp=0x");
         serial::panic_put_hex(sp);
         serial::panic_puts(" elr=0x");
@@ -709,7 +709,7 @@ pub extern "C" fn kernel_fault_handler(
     // Read the thread's saved Context from TPIDR to check if the crash
     // came from restoring a zeroed context (eret path) or from kernel code
     // (ret/blr to null — TPIDR context would have valid elr).
-    if tpidr >= memory::KERNEL_VA_OFFSET as u64 {
+    if tpidr >= (memory::KERNEL_VA_OFFSET + memory::kaslr_slide()) as u64 {
         // SAFETY: TPIDR_EL1 is validated above as a kernel VA (>= 0xFFFF...).
         // It points to a Thread's Context struct. Reading at documented
         // offsets (matching context.rs compile-time assertions) for diagnostics.
@@ -736,7 +736,7 @@ pub extern "C" fn kernel_fault_handler(
     }
 
     // Walk the stack for return addresses (best-effort backtrace).
-    let kva = memory::KERNEL_VA_OFFSET as u64;
+    let kva = (memory::KERNEL_VA_OFFSET + memory::kaslr_slide()) as u64;
 
     if (kva..kva + 0x1000_0000).contains(&sp) {
         serial::panic_puts("\n  stack:");
@@ -840,7 +840,10 @@ pub extern "C" fn kernel_main(dtb_pa: u64) -> ! {
             let pa = dev.base_address();
 
             if pa != 0 {
-                PVPANIC_ADDR.store(pa as usize + memory::KERNEL_VA_OFFSET, Ordering::Relaxed);
+                PVPANIC_ADDR.store(
+                    pa as usize + memory::KERNEL_VA_OFFSET + memory::kaslr_slide(),
+                    Ordering::Relaxed,
+                );
 
                 serial::puts("  🚨 pvpanic - registered\n");
             }
@@ -929,7 +932,7 @@ pub extern "C" fn kernel_main(dtb_pa: u64) -> ! {
     let pack_end_kva = unsafe { &_services_end as *const u8 as u64 };
     let pack_size = pack_end_kva - pack_start_kva;
     if pack_size > 0 {
-        let pack_pa = pack_start_kva - memory::KERNEL_VA_OFFSET as u64;
+        let pack_pa = pack_start_kva - (memory::KERNEL_VA_OFFSET + memory::kaslr_slide()) as u64;
         let page_count = (pack_size + paging::PAGE_SIZE - 1) / paging::PAGE_SIZE;
         scheduler::with_process(init_pid, |process| {
             assert!(

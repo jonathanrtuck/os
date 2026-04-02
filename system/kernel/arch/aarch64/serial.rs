@@ -11,12 +11,26 @@
 //! the panic handler (where the lock may already be held).
 
 use super::memory_mapped_io;
-use crate::{memory::KERNEL_VA_OFFSET, sync::IrqMutex};
+use crate::{
+    memory::{self, KERNEL_VA_OFFSET},
+    sync::IrqMutex,
+};
 
 const TXFF: u32 = 1 << 5;
-const UART0_BASE: usize = 0x0900_0000 + KERNEL_VA_OFFSET;
-const UART0_DR: usize = UART0_BASE;
-const UART0_FR: usize = UART0_BASE + 0x18;
+/// UART physical address (PL011 on QEMU virt).
+const UART0_PA: usize = 0x0900_0000;
+
+/// UART data register VA. Includes KASLR slide so it's correct after boot.
+#[inline(always)]
+fn uart0_dr() -> usize {
+    UART0_PA + KERNEL_VA_OFFSET + memory::kaslr_slide()
+}
+
+/// UART flag register VA.
+#[inline(always)]
+fn uart0_fr() -> usize {
+    UART0_PA + 0x18 + KERNEL_VA_OFFSET + memory::kaslr_slide()
+}
 /// Maximum iterations to wait for UART TXFF to clear. If the FIFO is
 /// stuck, we write anyway (lossy output > dead kernel).
 const TX_TIMEOUT: u32 = 1_000_000;
@@ -27,7 +41,7 @@ static LOCK: IrqMutex<()> = IrqMutex::new(());
 fn raw_putc(c: u8) {
     let mut timeout = TX_TIMEOUT;
 
-    while memory_mapped_io::read32(UART0_FR) & TXFF != 0 {
+    while memory_mapped_io::read32(uart0_fr()) & TXFF != 0 {
         timeout -= 1;
 
         if timeout == 0 {
@@ -35,7 +49,7 @@ fn raw_putc(c: u8) {
         }
     }
 
-    memory_mapped_io::write32(UART0_DR, c as u32);
+    memory_mapped_io::write32(uart0_dr(), c as u32);
 }
 fn raw_puts(s: &str) {
     for byte in s.bytes() {

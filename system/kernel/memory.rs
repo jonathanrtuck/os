@@ -26,7 +26,34 @@ use super::{
 const BLOCK_32MB: u64 = 32 * 1024 * 1024;
 
 pub const HEAP_SIZE: usize = 16 * 1024 * 1024;
+/// Link-time kernel VA offset (const — used in static initializers).
+/// The actual runtime offset is `KERNEL_VA_OFFSET + kaslr_slide()`.
 pub const KERNEL_VA_OFFSET: usize = super::paging::KERNEL_VA_OFFSET as usize;
+
+/// KASLR slide — random offset added to all kernel VA computations.
+///
+/// Set once in boot.S before calling kernel_main. Defaults to 0 (no slide),
+/// which preserves current behavior. The slide is 2 MiB-aligned so all
+/// L2 block mappings remain valid.
+///
+/// Atomic because secondary cores read it during SMP boot.
+static KASLR_SLIDE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Read the KASLR slide. Returns 0 if KASLR is not active.
+#[inline(always)]
+pub fn kaslr_slide() -> usize {
+    KASLR_SLIDE.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Set the KASLR slide. Called once from early boot before kernel_main.
+///
+/// # Safety
+///
+/// Must be called exactly once, before any code that uses `phys_to_virt`
+/// or `virt_to_phys`. The slide must be 2 MiB-aligned.
+pub unsafe fn set_kaslr_slide(slide: usize) {
+    KASLR_SLIDE.store(slide, core::sync::atomic::Ordering::Release);
+}
 
 extern "C" {
     static __text_start: u8;
@@ -109,11 +136,14 @@ static TT1_L3_KERN: SyncPageTable = SyncPageTable::new();
 #[inline(always)]
 pub fn phys_to_virt(pa: Pa) -> usize {
     pa.0.wrapping_add(KERNEL_VA_OFFSET)
+        .wrapping_add(kaslr_slide())
 }
 
 #[inline(always)]
 pub fn virt_to_phys(va: usize) -> Pa {
-    Pa(va.wrapping_sub(KERNEL_VA_OFFSET))
+    Pa(va
+        .wrapping_sub(KERNEL_VA_OFFSET)
+        .wrapping_sub(kaslr_slide()))
 }
 
 /// Physical address of the empty L0 table (for kernel threads' TTBR0).

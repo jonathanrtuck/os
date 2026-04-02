@@ -556,7 +556,7 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
 
     // Only check SP for EL1 returns — EL0 threads use SP_EL0 (not Context.sp).
     if (result_mode == 4 || result_mode == 5)
-        && (result_sp < memory::KERNEL_VA_OFFSET as u64 || result_sp == 0)
+        && (result_sp < (memory::KERNEL_VA_OFFSET + memory::kaslr_slide()) as u64 || result_sp == 0)
     {
         // The idle thread on its first activation would hit this — but with
         // the merged boot/idle thread, it should never have a zeroed Context.

@@ -13,7 +13,10 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use super::memory_mapped_io;
-use crate::{memory::KERNEL_VA_OFFSET, per_core};
+use crate::{
+    memory::{self, KERNEL_VA_OFFSET},
+    per_core,
+};
 
 // ---------------------------------------------------------------------------
 // InterruptController trait — 7 methods, static dispatch
@@ -435,6 +438,12 @@ pub fn init() {
 /// Must be called before `init()` and before booting secondary cores.
 /// Both arguments are physical addresses.
 pub fn set_base_addresses(gicd_pa: u64, gicr_pa: u64) {
-    GICD_BASE.store(gicd_pa as usize + KERNEL_VA_OFFSET, Ordering::Relaxed);
-    GICR_BASE.store(gicr_pa as usize + KERNEL_VA_OFFSET, Ordering::Relaxed);
+    GICD_BASE.store(
+        gicd_pa as usize + KERNEL_VA_OFFSET + memory::kaslr_slide(),
+        Ordering::Relaxed,
+    );
+    GICR_BASE.store(
+        gicr_pa as usize + KERNEL_VA_OFFSET + memory::kaslr_slide(),
+        Ordering::Relaxed,
+    );
 }
