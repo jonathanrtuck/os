@@ -1436,6 +1436,13 @@ pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
     // Notify process exit if this was the last thread.
     if is_last {
         super::process_exit::notify_exit(process_id);
+
+        // Init exiting means the system has no more work to do. Shut down
+        // cleanly via PSCI rather than leaving cores in idle loops forever.
+        if super::process::is_init(process_id) {
+            super::serial::puts("init exited — shutting down\n");
+            super::power::system_off();
+        }
     }
 
     // Phase 2a: remove from futex wait queues (acquires futex lock, not scheduler).

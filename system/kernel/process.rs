@@ -27,6 +27,10 @@ use super::{
     thread::ThreadId,
 };
 
+/// The init process PID. Set once at boot, checked on process exit to trigger
+/// system shutdown when init dies. AtomicU32::MAX means "not set yet".
+static INIT_PID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(u32::MAX);
+
 /// A process — owns an address space and handle table shared by all its threads.
 pub struct Process {
     pub(crate) address_space: Box<AddressSpace>,
@@ -220,4 +224,12 @@ pub fn create_from_user_elf(elf_bytes: &[u8]) -> Result<(ProcessId, ThreadId), &
         };
 
     Ok((process_id, thread_id))
+}
+/// Returns true if `pid` is the init process.
+pub fn is_init(pid: ProcessId) -> bool {
+    INIT_PID.load(core::sync::atomic::Ordering::Acquire) == pid.0
+}
+/// Record the init process ID. Called once during boot.
+pub fn set_init_pid(pid: ProcessId) {
+    INIT_PID.store(pid.0, core::sync::atomic::Ordering::Release);
 }

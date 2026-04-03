@@ -237,16 +237,34 @@ unsafe fn ctx_reg(ctx: *const Context, n: usize) -> u64 {
     unsafe { (core::ptr::addr_of!((*ctx).x) as *const u64).add(n).read() }
 }
 /// Check if a user virtual address is readable by EL0 using the hardware
-/// address translation instruction. Returns false if the page is unmapped
-/// or inaccessible.
+/// address translation instruction. If the page is unmapped but backed by
+/// a demand-paged VMA (e.g. VMO mapping), services the page fault inline
+/// so the syscall can proceed transparently.
 fn is_user_page_readable(va: u64) -> bool {
-    user_va_to_pa(va).is_some()
+    if user_va_to_pa(va).is_some() {
+        return true;
+    }
+
+    // Page not mapped. Try to service a demand-page fault (VMO-backed regions).
+    // Lock ordering: scheduler → address_space → vmo::STATE — same as
+    // user_fault_handler in main.rs.
+    let result = scheduler::current_process_do(|process| process.address_space.handle_fault(va));
+
+    matches!(result, super::address_space::FaultResult::Handled) && user_va_to_pa(va).is_some()
 }
 /// Check if a user virtual address is writable by EL0 using the hardware
-/// address translation instruction. Returns false if the page is unmapped,
-/// read-only, or inaccessible.
+/// address translation instruction. If the page is unmapped but backed by
+/// a demand-paged VMA, services the page fault inline.
 fn is_user_page_writable(va: u64) -> bool {
-    super::arch::mmu::is_user_page_writable(va)
+    if super::arch::mmu::is_user_page_writable(va) {
+        return true;
+    }
+
+    // Page not mapped. Try to service a demand-page fault.
+    let result = scheduler::current_process_do(|process| process.address_space.handle_fault(va));
+
+    matches!(result, super::address_space::FaultResult::Handled)
+        && super::arch::mmu::is_user_page_writable(va)
 }
 /// Verify that all pages in `[start, start+len)` are readable by EL0.
 fn is_user_range_readable(start: u64, len: u64) -> bool {

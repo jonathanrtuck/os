@@ -945,6 +945,9 @@ pub extern "C" fn kernel_main(dtb_pa: u64, kaslr_slide: u64) -> ! {
     // Spawn init (suspended) — the only process the kernel creates directly.
     // Microkernel pattern: kernel provides mechanism, init provides policy.
     let (init_pid, _) = process::create_from_user_elf(INIT_ELF).expect("failed to create init");
+
+    process::set_init_pid(init_pid);
+
     // Map the service pack into init's address space (read-only).
     // Init reads ELFs from this region at boot instead of compiled-in statics.
     // SAFETY: _services_start/_services_end are linker-defined symbols; taking
@@ -987,7 +990,6 @@ pub extern "C" fn kernel_main(dtb_pa: u64, kaslr_slide: u64) -> ! {
 
     timer::init();
     serial::puts("  ⏱️  timer - tickless\n");
-
     // Start init AFTER secondaries and timer are live. start_suspended_threads
     // sends an IPI to wake an idle core — secondaries must be online for the
     // IPI to reach them. Without this ordering, the init thread sits in a ready
