@@ -199,9 +199,9 @@ Every `.rs` file follows this order:
 # Without it, the document store has no content → nothing renders → no captures.
 # (cargo run -r handles this automatically via run.sh)
 
-# Automated: capture frame 30 as PNG, then exit
+# Automated: capture frame 150 as PNG, then exit
 cargo build --release
-hypervisor target/aarch64-unknown-none/release/kernel --drive disk.img --background --capture 30 /tmp/screenshot.png
+hypervisor target/aarch64-unknown-none/release/kernel --drive disk.img --background --capture 150 /tmp/screenshot.png
 # Then Read /tmp/screenshot.png
 
 # Multi-frame: capture frames 30, 60, 90 in a single boot
@@ -209,12 +209,15 @@ hypervisor target/aarch64-unknown-none/release/kernel --drive disk.img --backgro
 # Produces /tmp/test-030.png, /tmp/test-060.png, /tmp/test-090.png
 
 # Event script: type text, edit, capture result (deterministic visual test)
+# Frame 0 = first rendered frame. wait gives the scene time to settle.
 cat > /tmp/test.events << 'SCRIPT'
+wait 150
 type hello world
 key left left left
 key backspace
 wait 5
 capture /tmp/after-edit.png
+exit
 SCRIPT
 hypervisor target/aarch64-unknown-none/release/kernel --drive disk.img --background --events /tmp/test.events
 # Then Read /tmp/after-edit.png
@@ -238,6 +241,7 @@ kill -USR1 $(pgrep hypervisor)
 - `drag 100 200 300 200` — drag from (x1, y1) to (x2, y2) over ~10 frames
 - `wait 10` — wait 10 extra frames
 - `capture /tmp/out.png` — screenshot at this point
+- `exit` — exit the hypervisor cleanly
 
 **Background mode:** Always use `--background` for automated invocations (captures, event scripts, CI). Renders to an offscreen `MTLTexture` — no window, no CAMetalLayer, no interaction with the macOS window server. Zero focus disruption. Previously background mode was implicit with `--events`; now it's an explicit flag.
 

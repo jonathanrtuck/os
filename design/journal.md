@@ -13,6 +13,7 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 **Root cause:** The hypervisor conflates "GPU frame submitted" with "display tick elapsed." These are independent events. The frame counter should advance at display cadence regardless of GPU activity, driven by the hypervisor's own timer.
 
 **Correct fix (in `~/Sites/hypervisor/`):**
+
 1. Add a display-cadence timer in `VirtioMetal` (e.g., `DispatchSource.makeTimerSource` at `1/refreshRate` interval)
 2. Advance `frameCount` on each timer tick, not on `presentAndCommit`
 3. Fire `onFrame` callback (event injection) from the timer, not from the GPU path

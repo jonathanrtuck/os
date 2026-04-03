@@ -671,12 +671,9 @@ pub extern "C" fn _start() -> ! {
 
         if !scene_changed && !cursor_moved && !cursor_shape_changed && !cursor_opacity_changed {
             drop(reader);
-            // Nothing changed — send an empty frame to keep the hypervisor's
-            // frame counter advancing. Without this, event script timing
-            // (wait/capture) stalls during idle periods.
-            cmdbuf.clear();
-            cmdbuf.present_and_commit();
-            send_render(&device, &mut render_vq, irq_handle, &render_dma, &cmdbuf);
+            // Nothing changed — skip this frame entirely. The hypervisor's
+            // display-cadence timer advances the frame counter independently
+            // of GPU submission, so no heartbeat needed.
             continue;
         }
 

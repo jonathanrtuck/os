@@ -28,14 +28,16 @@ DISK_ORIG="$SYSTEM_DIR/disk.img"
 DISK="$CAPTURE_DIR/disk-test.img"
 
 # Boot wait: frames to wait before injecting events.
-# Headless rendering (offscreen MTLTexture) has no vsync throttle, so
-# frames process fast. The OS needs ~120 frames to fully boot and render
-# the test document from a fresh factory disk; 150 gives comfortable margin.
+# Frame 0 is the first rendered frame (timer starts on first presentAndCommit),
+# but the full scene (fonts, document, PNG) takes additional frames to settle.
+# 150 frames at display cadence gives comfortable margin.
 BOOT_WAIT=150
 # Post-event wait: frames to wait after events before capture.
 POST_WAIT=30
-# Hypervisor timeout in seconds.
-TIMEOUT=60
+# Outer safety net: if the hypervisor hasn't exited in this many seconds,
+# something is fundamentally broken (kernel panic, deadlock, boot failure).
+# The event scripts control normal exit via the `exit` command.
+TIMEOUT=10
 
 # ── Helpers ───────────────────────────────────────────────────────
 
@@ -91,6 +93,7 @@ wait 150
 move 400 400
 wait 60
 capture /tmp/visual-tests/cursor-dark.png
+exit
 EVENTS
     run_hypervisor "$CAPTURE_DIR/cursor-dark.events" >/dev/null 2>&1
     run_verify "$CAPTURE_DIR/cursor-dark.png" "$SPEC_DIR/cursor-dark.spec"
@@ -103,6 +106,7 @@ wait 150
 move 2000 2000
 wait 60
 capture /tmp/visual-tests/cursor-page.png
+exit
 EVENTS
     run_hypervisor "$CAPTURE_DIR/cursor-page.events" >/dev/null 2>&1
     run_verify "$CAPTURE_DIR/cursor-page.png" "$SPEC_DIR/cursor-page.spec"
@@ -115,6 +119,7 @@ wait 150
 type x
 wait 30
 capture /tmp/visual-tests/after-type.png
+exit
 EVENTS
     run_hypervisor "$CAPTURE_DIR/after-type.events" >/dev/null 2>&1
     run_verify "$CAPTURE_DIR/after-type.png" "$SPEC_DIR/after-type.spec"
@@ -134,6 +139,7 @@ wait 20
 type Z
 wait 30
 capture /tmp/visual-tests/click-placement.png
+exit
 EVENTS
     hypervisor "$KERNEL" --drive "$DISK" --background \
         --resolution 800x600 \
@@ -153,6 +159,7 @@ wait 5
 dblclick 280 60
 wait 30
 capture /tmp/visual-tests/dblclick-select.png
+exit
 EVENTS
     hypervisor "$KERNEL" --drive "$DISK" --background \
         --resolution 800x600 \
@@ -179,6 +186,7 @@ wait 20
 type Z
 wait 30
 capture /tmp/visual-tests/tripleclick-line.png
+exit
 EVENTS
     hypervisor "$KERNEL" --drive "$DISK" --background \
         --resolution 800x600 \
@@ -198,6 +206,7 @@ wait 5
 drag 250 60 400 60
 wait 60
 capture /tmp/visual-tests/drag-select.png
+exit
 EVENTS
     hypervisor "$KERNEL" --drive "$DISK" --background \
         --resolution 800x600 \
@@ -232,6 +241,7 @@ wait 5
 click 600 120
 wait 30
 capture /tmp/visual-tests/caret-height.png
+exit
 EVENTS
     hypervisor "$KERNEL" --drive "$DISK" --background \
         --resolution 1600x1200 \
@@ -280,6 +290,7 @@ wait 20
 type Z
 wait 30
 capture /tmp/visual-tests/cursor-mixed.png
+exit
 EVENTS
     hypervisor "$KERNEL" --drive "$DISK" --background \
         --resolution 1600x1200 \
@@ -305,6 +316,7 @@ wait 5
 click 500 400
 wait 30
 capture /tmp/visual-tests/cursor-italic.png
+exit
 EVENTS
     hypervisor "$KERNEL" --drive "$DISK" --background \
         --resolution 1600x1200 \
