@@ -1,3 +1,4 @@
+#![feature(allocator_api)]
 //! Adversarial tests for rapid create/destroy cycles.
 //!
 //! Exercises 100+ cycles each of: channel create/close, timer create/close,

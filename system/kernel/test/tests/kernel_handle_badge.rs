@@ -1,3 +1,4 @@
+#![feature(allocator_api)]
 //! Tests for handle badges (v0.6 Phase 2c).
 //!
 //! Covers: set/get roundtrip, default badge, badge preserved through transfer,

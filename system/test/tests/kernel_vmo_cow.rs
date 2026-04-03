@@ -1,3 +1,4 @@
+#![feature(allocator_api)]
 //! Host-side tests for VMO Copy-on-Write through the fault handler path.
 //!
 //! Tests the COW data-structure operations that `handle_fault_vmo` relies on:

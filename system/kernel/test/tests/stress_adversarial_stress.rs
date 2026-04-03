@@ -1,3 +1,4 @@
+#![feature(allocator_api)]
 //! Adversarial stress / fuzz tests targeting specific audit findings from
 //! milestones 1-6 of the kernel bug audit.
 //!

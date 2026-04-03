@@ -2037,7 +2037,11 @@ pub fn set_wake_pending_for_handle(id: ThreadId, reason: HandleObject) {
 
     // O(1) via pool lookup + location check.
     {
-        let State { ref mut pool, ref mut slots, .. } = *s;
+        let State {
+            ref mut pool,
+            ref mut slots,
+            ..
+        } = *s;
         if let Some(thread) = pool.get_mut(slots, id) {
             match thread.location {
                 ThreadLocation::Current(_)
@@ -2080,7 +2084,11 @@ pub fn spawn_user(process_id: ProcessId, entry_va: u64, user_stack_top: u64) -> 
     bind_default_context(&mut s, &mut thread);
 
     let (slot, tid) = {
-        let State { ref mut pool, ref mut slots, .. } = *s;
+        let State {
+            ref mut pool,
+            ref mut slots,
+            ..
+        } = *s;
         pool.alloc(slots, thread)?
     };
 
@@ -2098,7 +2106,11 @@ pub fn spawn_user(process_id: ProcessId, entry_va: u64, user_stack_top: u64) -> 
         .expect("just-allocated slot empty")
         .location = ThreadLocation::Ready(target as u8);
     {
-        let State { ref mut local_queues, ref mut slots, .. } = *s;
+        let State {
+            ref mut local_queues,
+            ref mut slots,
+            ..
+        } = *s;
         local_queues[target].ready.push_back(slot, slots);
     }
     s.local_queues[target].update_load();
@@ -2130,7 +2142,11 @@ pub fn spawn_user_suspended(
     bind_default_context(&mut s, &mut thread);
 
     let (slot, tid) = {
-        let State { ref mut pool, ref mut slots, .. } = *s;
+        let State {
+            ref mut pool,
+            ref mut slots,
+            ..
+        } = *s;
         pool.alloc(slots, thread)?
     };
 
@@ -2146,7 +2162,11 @@ pub fn spawn_user_suspended(
         .expect("just-allocated slot empty")
         .location = ThreadLocation::Suspended;
     {
-        let State { ref mut suspended, ref mut slots, .. } = *s;
+        let State {
+            ref mut suspended,
+            ref mut slots,
+            ..
+        } = *s;
         suspended.push_back(slot, slots);
     }
 
@@ -2175,16 +2195,30 @@ pub fn start_suspended_threads(process_id: ProcessId) -> bool {
         let slot = to_start[i];
 
         {
-            let State { ref mut suspended, ref mut slots, .. } = *s;
+            let State {
+                ref mut suspended,
+                ref mut slots,
+                ..
+            } = *s;
             suspended.remove(slot, slots);
         }
 
-        let preferred = s.slots.get(slot).expect("start: empty slot").scheduling.last_core as usize;
+        let preferred = s
+            .slots
+            .get(slot)
+            .expect("start: empty slot")
+            .scheduling
+            .last_core as usize;
         let target = pick_target_core(&s.cores, &s.local_queues, preferred);
 
-        s.slots.get_mut(slot).expect("start: empty slot").location = ThreadLocation::Ready(target as u8);
+        s.slots.get_mut(slot).expect("start: empty slot").location =
+            ThreadLocation::Ready(target as u8);
         {
-            let State { ref mut local_queues, ref mut slots, .. } = *s;
+            let State {
+                ref mut local_queues,
+                ref mut slots,
+                ..
+            } = *s;
             local_queues[target].ready.push_back(slot, slots);
         }
         s.local_queues[target].update_load();
@@ -2217,7 +2251,11 @@ pub fn suspend_thread(id: ThreadId) -> bool {
     match location {
         ThreadLocation::Ready(core) => {
             {
-                let State { ref mut local_queues, ref mut slots, .. } = *s;
+                let State {
+                    ref mut local_queues,
+                    ref mut slots,
+                    ..
+                } = *s;
                 local_queues[core as usize].ready.remove(slot, slots);
             }
             s.local_queues[core as usize].update_load();
@@ -2225,7 +2263,11 @@ pub fn suspend_thread(id: ThreadId) -> bool {
             s.slots.get_mut(slot).expect("suspend: slot empty").location =
                 ThreadLocation::Suspended;
             {
-                let State { ref mut suspended, ref mut slots, .. } = *s;
+                let State {
+                    ref mut suspended,
+                    ref mut slots,
+                    ..
+                } = *s;
                 suspended.push_back(slot, slots);
             }
 
@@ -2233,14 +2275,22 @@ pub fn suspend_thread(id: ThreadId) -> bool {
         }
         ThreadLocation::Blocked => {
             {
-                let State { ref mut blocked, ref mut slots, .. } = *s;
+                let State {
+                    ref mut blocked,
+                    ref mut slots,
+                    ..
+                } = *s;
                 blocked.remove(slot, slots);
             }
 
             s.slots.get_mut(slot).expect("suspend: slot empty").location =
                 ThreadLocation::Suspended;
             {
-                let State { ref mut suspended, ref mut slots, .. } = *s;
+                let State {
+                    ref mut suspended,
+                    ref mut slots,
+                    ..
+                } = *s;
                 suspended.push_back(slot, slots);
             }
 
@@ -2266,7 +2316,11 @@ pub fn resume_thread(id: ThreadId) -> bool {
     let slot = id.slot();
 
     {
-        let State { ref mut suspended, ref mut slots, .. } = *s;
+        let State {
+            ref mut suspended,
+            ref mut slots,
+            ..
+        } = *s;
         suspended.remove(slot, slots);
     }
 
@@ -2277,9 +2331,14 @@ pub fn resume_thread(id: ThreadId) -> bool {
     let preferred = thread.scheduling.last_core as usize;
     let target = pick_target_core(&s.cores, &s.local_queues, preferred);
 
-    s.slots.get_mut(slot).expect("resume: slot empty").location = ThreadLocation::Ready(target as u8);
+    s.slots.get_mut(slot).expect("resume: slot empty").location =
+        ThreadLocation::Ready(target as u8);
     {
-        let State { ref mut local_queues, ref mut slots, .. } = *s;
+        let State {
+            ref mut local_queues,
+            ref mut slots,
+            ..
+        } = *s;
         local_queues[target].ready.push_back(slot, slots);
     }
     s.local_queues[target].update_load();
@@ -2390,7 +2449,11 @@ pub fn wake_pager_waiters(vmo_id: super::vmo::VmoId, offset: u64, count: u64) {
         let slot = to_wake[i];
 
         {
-            let State { ref mut blocked, ref mut slots, .. } = *s;
+            let State {
+                ref mut blocked,
+                ref mut slots,
+                ..
+            } = *s;
             blocked.remove(slot, slots);
         }
 
@@ -2412,15 +2475,25 @@ pub fn wake_pager_waiters(vmo_id: super::vmo::VmoId, offset: u64, count: u64) {
                 .expect("wake_pager: slot empty")
                 .location = ThreadLocation::Ready(target as u8);
             {
-                let State { ref mut local_queues, ref mut slots, .. } = *s;
+                let State {
+                    ref mut local_queues,
+                    ref mut slots,
+                    ..
+                } = *s;
                 local_queues[target].ready.push_back(slot, slots);
             }
             s.local_queues[target].update_load();
         } else {
-            s.slots.get_mut(slot).expect("wake_pager: slot empty").location =
-                ThreadLocation::Blocked;
+            s.slots
+                .get_mut(slot)
+                .expect("wake_pager: slot empty")
+                .location = ThreadLocation::Blocked;
             {
-                let State { ref mut blocked, ref mut slots, .. } = *s;
+                let State {
+                    ref mut blocked,
+                    ref mut slots,
+                    ..
+                } = *s;
                 blocked.push_back(slot, slots);
             }
         }

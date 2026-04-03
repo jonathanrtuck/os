@@ -215,7 +215,8 @@ impl HandleTable {
             return Err(HandleError::TableFull);
         }
 
-        let mut page = Box::new([None; OVERFLOW_PAGE_SIZE]);
+        let mut page =
+            Box::try_new([None; OVERFLOW_PAGE_SIZE]).map_err(|_| HandleError::TableFull)?;
 
         page[0] = Some(HandleEntry {
             object,
@@ -250,7 +251,9 @@ impl HandleTable {
                     return Err(HandleError::TableFull);
                 }
 
-                self.overflow.push(Box::new([None; OVERFLOW_PAGE_SIZE]));
+                self.overflow.push(
+                    Box::try_new([None; OVERFLOW_PAGE_SIZE]).map_err(|_| HandleError::TableFull)?,
+                );
             }
         }
 

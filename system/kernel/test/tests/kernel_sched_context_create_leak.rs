@@ -1,3 +1,4 @@
+#![feature(allocator_api)]
 //! Test for sys_scheduling_context_create resource leak when handle table is full.
 //!
 //! Bug: sys_scheduling_context_create calls scheduler::create_scheduling_context()

@@ -1,3 +1,4 @@
+#![feature(allocator_api)]
 //! Host-side tests for the kernel handle table.
 //!
 //! Includes the kernel's handle.rs directly — it has zero external dependencies,

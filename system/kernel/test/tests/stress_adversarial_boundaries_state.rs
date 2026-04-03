@@ -1,3 +1,4 @@
+#![feature(allocator_api)]
 //! Adversarial tests for boundary values and state confusion across all syscalls.
 //!
 //! **Boundary values:** u64::MAX for counts/sizes, zero-length buffers, extreme

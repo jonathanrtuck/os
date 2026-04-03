@@ -280,7 +280,7 @@ impl Thread {
         thread.process_id = Some(process_id);
         thread.ttbr0 = ttbr0;
 
-        Some(Box::new(thread))
+        Box::try_new(thread).ok()
     }
 }
 // --- State transitions ---

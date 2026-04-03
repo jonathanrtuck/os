@@ -1,3 +1,4 @@
+#![feature(allocator_api)]
 //! Tests for capability rights attenuation (v0.6 Phase 2a).
 //!
 //! Covers: 8 named rights, bitwise AND attenuation, per-right enforcement,

@@ -1,3 +1,4 @@
+#![feature(allocator_api)]
 //! Host-side tests for VMO (Virtual Memory Object) kernel module.
 //!
 //! Tests the VMO lifecycle: create, page tracking, snapshots, seal,

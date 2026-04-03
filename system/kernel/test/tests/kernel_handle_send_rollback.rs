@@ -1,3 +1,4 @@
+#![feature(allocator_api)]
 //! Test for sys_handle_send partial rollback: when channel SHM pages are mapped
 //! into the target process but a subsequent step fails, the mapped pages should
 //! be unmapped (rolled back).

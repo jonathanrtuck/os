@@ -1,3 +1,4 @@
+#![feature(allocator_api)]
 //! Test for sys_channel_create PTE leak: when the second map_channel_page
 //! fails, the first mapped page's page table entry is not cleaned up.
 //!

@@ -1,3 +1,4 @@
+#![feature(allocator_api)]
 //! Test for sys_channel_create handle leak when map_channel_page fails.
 //!
 //! Bug: sys_channel_create inserts both handles into the handle table, then

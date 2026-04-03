@@ -1,3 +1,4 @@
+#![feature(allocator_api)]
 //! Pager fault dispatch model tests (v0.6).
 //!
 //! Tests the pager integration with VMOs: fault classification, pending fault

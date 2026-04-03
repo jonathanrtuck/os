@@ -1,3 +1,4 @@
+#![feature(allocator_api)]
 //! Adversarial tests for all pointer-accepting and handle-accepting syscalls.
 //!
 //! Exercises every pointer validation path with hostile inputs: null, kernel-range

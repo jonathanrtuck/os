@@ -1,3 +1,4 @@
+#![feature(allocator_api)]
 //! Host-side tests for the demand-paging fix (Bug 3).
 //!
 //! Bug 3: VMO-mapped pages that were committed via `vmo::write()` were

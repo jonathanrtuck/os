@@ -1,3 +1,4 @@
+#![feature(allocator_api)]
 //! Tests for dynamic (two-level) handle table (v0.6 Phase 2b).
 //!
 //! Covers: Handle(u16), overflow beyond 256, two-level lookup, insert/close/drain

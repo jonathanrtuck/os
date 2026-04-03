@@ -1,3 +1,4 @@
+#![feature(allocator_api)]
 //! Integration stress tests: multi-subsystem interaction under load.
 //!
 //! These tests exercise the interaction between IPC, scheduling, allocation,

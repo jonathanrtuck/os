@@ -157,7 +157,13 @@ pub fn create_from_user_elf(elf_bytes: &[u8]) -> Result<(ProcessId, ThreadId), &
         None => AslrLayout::deterministic(),
     };
     let mut addr_space = match AddressSpace::new(asid, &layout) {
-        Some(a) => Box::new(a),
+        Some(a) => match Box::try_new(a) {
+            Ok(b) => b,
+            Err(_) => {
+                address_space_id::free(asid);
+                return Err("out of memory for address space");
+            }
+        },
         None => {
             address_space_id::free(asid);
             return Err("out of frames for L0 page table");
