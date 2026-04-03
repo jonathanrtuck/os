@@ -99,11 +99,11 @@ while true; do
         exit 1
     fi
 
-    # Check for crash.
-    if grep -q "panicking" "$SERIAL_LOG" 2>/dev/null; then
+    # Check for crash or corruption.
+    if grep -qE "panicking|canary corrupt|stack overflow|data abort|kernel sync:" "$SERIAL_LOG" 2>/dev/null; then
         echo "CRASH detected after ${ELAPSED}s"
         echo "--- crash output ---"
-        grep -A 20 "panicking\|kernel sync\|BUG:" "$SERIAL_LOG" 2>/dev/null || tail -30 "$SERIAL_LOG"
+        grep -B2 -A20 "panicking\|canary\|stack overflow\|data abort\|kernel sync\|BUG:" "$SERIAL_LOG" 2>/dev/null || tail -30 "$SERIAL_LOG"
         exit 1
     fi
 

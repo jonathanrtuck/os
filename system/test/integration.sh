@@ -147,15 +147,17 @@ EXPECTED_INIT=(
     "init - proto-os-service"
     "devices in manifest"
     "spawning driver"
-    "spawned driver: blk"
+    "spawned (process+channel+handle ok)"
+    "store - starting"
 )
 
 # Display pipeline.
 EXPECTED_PIPELINE=(
-    "setting up display pipeline"
-    "starting gpu driver"
-    "starting compositor"
-    "display pipeline running"
+    "metal-render - starting"
+    "metal pipeline running"
+    "entering render loop"
+    "boot complete"
+    "init: monitoring child processes"
 )
 
 PASS=true
@@ -187,12 +189,27 @@ for pattern in "${EXPECTED_PIPELINE[@]}"; do
     fi
 done
 
-# Must NOT contain crash markers.
-if grep -q "panicking\|💥\|BUG:" "$SERIAL_LOG"; then
-    echo "  FAIL: crash detected in output"
-    PASS=false
-else
-    echo "  OK: no crashes"
+# Must NOT contain crash or corruption markers.
+NEGATIVE_PATTERNS=(
+    "panicking"
+    "💥"
+    "BUG:"
+    "canary corrupt"
+    "stack overflow"
+    "kernel sync:"
+    "FATAL:"
+    "data abort"
+)
+
+for pattern in "${NEGATIVE_PATTERNS[@]}"; do
+    if grep -q "$pattern" "$SERIAL_LOG"; then
+        echo "  FAIL: found '$pattern' in output"
+        PASS=false
+    fi
+done
+
+if $PASS; then
+    echo "  OK: no crashes or corruption"
 fi
 
 echo ""

@@ -68,17 +68,39 @@ OUTPUT=$(cd "$SYSTEM_DIR" && hypervisor "$KERNEL" \
 
 rm -f "$EVENT_SCRIPT"
 
-# Check for crash indicators in output.
-if echo "$OUTPUT" | grep -qE "panicking|💥|BUG:|kernel sync:"; then
+# Check for crash or corruption indicators in output.
+CRASH_PATTERNS="panicking|💥|BUG:|kernel sync:|canary corrupt|stack overflow|data abort|FATAL:"
+
+if echo "$OUTPUT" | grep -qE "$CRASH_PATTERNS"; then
     echo "CRASH detected during SMP stress!"
     echo "--- crash output ---"
-    echo "$OUTPUT" | grep -B2 -A20 "panicking\|💥\|BUG:\|kernel sync:"
+    echo "$OUTPUT" | grep -B2 -A20 -E "$CRASH_PATTERNS"
+    exit 1
+fi
+
+# Check that the kernel booted successfully.
+if ! echo "$OUTPUT" | grep -q "booted."; then
+    echo "FAIL — kernel did not boot"
+    echo "--- output ---"
+    echo "$OUTPUT" | tail -30
+    exit 1
+fi
+
+# Check that init started and the pipeline is running.
+if ! echo "$OUTPUT" | grep -q "init - proto-os-service"; then
+    echo "FAIL — init did not start"
+    exit 1
+fi
+
+if ! echo "$OUTPUT" | grep -q "metal pipeline running"; then
+    echo "FAIL — display pipeline did not start"
     exit 1
 fi
 
 # Check that we got the final screenshot (proves the kernel survived).
 if [ -f /tmp/smp-stress-final.png ]; then
-    echo "PASS — kernel survived ${CYCLES} Ctrl+Tab cycles without crash"
+    echo "PASS — kernel survived ${CYCLES} Ctrl+Tab cycles"
+    echo "  boot: OK, init: OK, pipeline: OK, no crashes, screenshot captured"
     rm -f /tmp/smp-stress-final.png
     exit 0
 else

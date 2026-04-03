@@ -103,6 +103,18 @@ for pattern in "${EXPECTED[@]}"; do
     fi
 done
 
+# Must NOT contain crash or corruption markers.
+for pattern in "panicking" "💥" "canary corrupt" "stack overflow" "data abort" "FATAL:"; do
+    if grep -q "$pattern" "$OUTPUT_FILE"; then
+        echo "  FAIL: found '$pattern'"
+        PASS=false
+    fi
+done
+
+if $PASS; then
+    echo "  OK: no crashes or corruption"
+fi
+
 rm -f "$OUTPUT_FILE" "$DISK_IMG" "$DTB_FILE"
 
 if $PASS; then
