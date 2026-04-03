@@ -283,3 +283,14 @@ pub fn init(start_pa: usize, end_pa: usize) {
 pub fn set_fail_after(n: Option<usize>) {
     STATE.lock().fail_after = n;
 }
+/// Reset the allocator to empty state. Used by host-side tests between
+/// sections that reinitialize with different memory regions.
+#[allow(dead_code)]
+pub fn reset() {
+    let mut s = STATE.lock();
+    s.free_lists = [core::ptr::null_mut(); MAX_ORDER + 1];
+    s.free_count = 0;
+    s.region_start = 0;
+    s.region_end = 0;
+    s.fail_after = None;
+}
