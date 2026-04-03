@@ -279,6 +279,11 @@ struct State {
     local_queues: Vec<LocalRunQueue>,
     blocked: Vec<Thread>,
     deferred_drops: Vec<Vec<Thread>>,
+    /// Per-core deferred ready threads. Preempted threads go here instead of
+    /// directly to local_queues — prevents work stealing from grabbing a thread
+    /// while the parking core is still on its kernel stack. Drained into
+    /// local_queues at the start of the NEXT schedule_inner on that core.
+    deferred_ready: Vec<Vec<Thread>>,
     contexts: Vec<Option<SchedulingContext>>,
     num_cores: usize,
     next_id: u64,
@@ -300,6 +305,7 @@ impl State {
             local_queues: (0..num_cores).map(|_| LocalRunQueue::new()).collect(),
             blocked: Vec::new(),
             deferred_drops: (0..num_cores).map(|_| Vec::new()).collect(),
+            deferred_ready: (0..num_cores).map(|_| Vec::new()).collect(),
             contexts: Vec::new(),
             num_cores,
             next_id: 1,
@@ -338,7 +344,9 @@ impl State {
 // Work stealing
 // ============================================================
 
-/// Find the busiest remote core (highest load, ties broken by lowest index).
+/// Find the busiest remote core (highest load). Steal from any core with
+/// ready threads — the previous `>1` threshold prevented stealing a single
+/// queued thread, causing starvation (matches kernel fix 2d904ca).
 fn find_busiest(s: &State, my_core: usize) -> Option<usize> {
     let mut best: Option<(usize, u32)> = None;
     for i in 0..s.num_cores {
@@ -346,8 +354,7 @@ fn find_busiest(s: &State, my_core: usize) -> Option<usize> {
             continue;
         }
         let load = s.local_queues[i].load;
-        if load > 1 {
-            // Only steal if victim has >1 (leaves it at least 1).
+        if load > 0 {
             if best.is_none_or(|(_, l)| load > l) {
                 best = Some((i, load));
             }
@@ -467,8 +474,10 @@ fn park_old(s: &mut State, old_thread: Thread, core: usize) {
         if old_thread.is_idle() {
             s.cores[core].idle = Some(old_thread);
         } else {
-            s.local_queues[core].ready.push(old_thread);
-            s.local_queues[core].update_load();
+            // Defer ready — do NOT push directly to local_queues.
+            // Work stealing could grab the thread while this core is still
+            // on its kernel stack. Drained at start of next schedule_inner.
+            s.deferred_ready[core].push(old_thread);
         }
     } else if old_thread.is_exited() {
         s.deferred_drops[core].push(old_thread);
@@ -509,6 +518,12 @@ fn try_wake(s: &mut State, id: u64) -> bool {
 /// Schedule with work stealing. When local queue is empty, steal from busiest.
 fn schedule_on_core(s: &mut State, core: usize) -> u64 {
     s.deferred_drops[core].clear();
+
+    // Drain deferred ready into local queue — safe now, we're on a different stack.
+    for thread in s.deferred_ready[core].drain(..) {
+        s.local_queues[core].ready.push(thread);
+    }
+
     s.local_queues[core].ready.retain(|t| !t.is_exited());
     s.local_queues[core].update_load();
 
@@ -574,6 +589,11 @@ fn schedule_on_core(s: &mut State, core: usize) -> u64 {
 
 fn schedule_on_core_no_steal(s: &mut State, core: usize) -> u64 {
     s.deferred_drops[core].clear();
+
+    for thread in s.deferred_ready[core].drain(..) {
+        s.local_queues[core].ready.push(thread);
+    }
+
     s.local_queues[core].ready.retain(|t| !t.is_exited());
     s.local_queues[core].update_load();
 
@@ -615,12 +635,17 @@ fn schedule_on_core_no_steal(s: &mut State, core: usize) -> u64 {
 // ============================================================
 
 /// Check CWC: if any core is idle and any other core has >1 runnable thread
-/// (in its local queue), that's a CWC violation.
+/// (in its local queue + deferred_ready), that's a CWC violation.
 ///
-/// This must hold AFTER a full round of scheduling on all cores.
-fn check_cwc_after_full_round(s: &State) -> bool {
+/// With deferred_ready, CWC holds after TWO full rounds: the first round
+/// drains deferred threads into local queues, the second round allows
+/// stealing. Use `check_cwc_after_two_rounds` for the typical assertion.
+fn check_cwc(s: &State) -> bool {
     let any_idle = s.cores.iter().any(|c| c.is_idle);
-    let any_overloaded = s.local_queues.iter().any(|q| q.load > 1);
+    let any_overloaded = s.local_queues.iter().enumerate().any(|(i, q)| {
+        let effective_load = q.load as usize + s.deferred_ready[i].len();
+        effective_load > 1
+    });
 
     // CWC satisfied if: NOT (idle AND overloaded simultaneously)
     !(any_idle && any_overloaded)
@@ -658,6 +683,19 @@ fn check_invariants(s: &State) {
         for t in drops {
             assert_eq!(t.state, ThreadState::Exited);
             assert!(!seen_ids.contains(&t.id), "thread {} duplicated", t.id);
+            seen_ids.push(t.id);
+        }
+    }
+
+    for (core_idx, deferred) in s.deferred_ready.iter().enumerate() {
+        for t in deferred {
+            assert!(t.is_ready(), "non-ready thread in deferred_ready[{core_idx}]");
+            assert!(!t.is_idle(), "idle thread in deferred_ready[{core_idx}]");
+            assert!(
+                !seen_ids.contains(&t.id),
+                "thread {} duplicated (deferred_ready[{core_idx}])",
+                t.id,
+            );
             seen_ids.push(t.id);
         }
     }
@@ -867,7 +905,7 @@ fn steal_does_not_drain_victim_core() {
 // ============================================================
 
 #[test]
-fn cwc_holds_after_full_round() {
+fn cwc_holds_after_two_rounds() {
     let mut s = State::new(4);
 
     // Load 8 threads onto core 0 only.
@@ -875,18 +913,103 @@ fn cwc_holds_after_full_round() {
         s.spawn(0);
     }
 
-    // Schedule all cores (full round).
-    for core in 0..4 {
-        schedule_on_core(&mut s, core);
+    // Two full rounds: first drains deferred_ready, second allows stealing.
+    for _round in 0..2 {
+        for core in 0..4 {
+            schedule_on_core(&mut s, core);
+        }
     }
 
     // CWC: no idle core should coexist with an overloaded core.
     assert!(
-        check_cwc_after_full_round(&s),
-        "CWC violated: idle core + overloaded core after full round"
+        check_cwc(&s),
+        "CWC violated: idle core + overloaded core after two full rounds"
     );
 
     check_invariants(&s);
+}
+
+#[test]
+fn deferred_ready_prevents_cross_core_steal() {
+    // This test verifies the safety property: a thread in deferred_ready[0]
+    // must NOT be stealable by core 1. It only becomes stealable after core 0
+    // drains it into local_queues on core 0's next schedule.
+    let mut s = State::new(2);
+
+    // Three threads on core 0 — need enough that after first schedule,
+    // a non-idle thread gets preempted into deferred_ready.
+    s.spawn(0);
+    s.spawn(0);
+    s.spawn(0);
+
+    // First schedule on core 0: boot idle is parked, picks a thread.
+    // Two threads remain in local_queues[0].
+    schedule_on_core(&mut s, 0);
+
+    // Second schedule on core 0: preempts current (non-idle, ready) thread
+    // → goes to deferred_ready[0]. Picks another from local queue.
+    schedule_on_core(&mut s, 0);
+    assert!(
+        !s.deferred_ready[0].is_empty(),
+        "preempted thread should be deferred"
+    );
+    let deferred_id = s.deferred_ready[0][0].id;
+
+    // Core 1 schedules: tries to steal. deferred_ready is NOT visible.
+    // Whether it steals from local_queues depends on load, but the deferred
+    // thread must NOT be the one that moves.
+    schedule_on_core(&mut s, 1);
+    // The deferred thread must still be in deferred_ready (not stolen).
+    let still_deferred = s.deferred_ready[0].iter().any(|t| t.id == deferred_id);
+    let on_core_1 = s.cores[1]
+        .current
+        .as_ref()
+        .map_or(false, |t| t.id == deferred_id);
+    let in_queue_1 = s.local_queues[1].ready.iter().any(|t| t.id == deferred_id);
+    assert!(
+        still_deferred || !(on_core_1 || in_queue_1),
+        "deferred thread must not be stolen by core 1"
+    );
+
+    check_invariants(&s);
+}
+
+#[test]
+fn deferred_ready_drains_within_one_round() {
+    // Verify liveness: deferred threads from round N are drained at the start
+    // of round N+1 on the same core. They don't accumulate indefinitely.
+    let mut s = State::new(4);
+
+    for _ in 0..8 {
+        s.spawn(0);
+    }
+
+    // Collect deferred thread IDs after each round.
+    let mut prev_deferred_ids: Vec<u64> = Vec::new();
+
+    for _round in 0..5 {
+        for core in 0..4 {
+            schedule_on_core(&mut s, core);
+        }
+
+        // Check: none of the previously deferred threads are still deferred.
+        let curr_deferred: Vec<u64> = s
+            .deferred_ready
+            .iter()
+            .flat_map(|d| d.iter().map(|t| t.id))
+            .collect();
+
+        for id in &prev_deferred_ids {
+            assert!(
+                !curr_deferred.contains(id),
+                "thread {id} was deferred in the previous round and still deferred — \
+                 drain failed"
+            );
+        }
+
+        prev_deferred_ids = curr_deferred;
+        check_invariants(&s);
+    }
 }
 
 #[test]
@@ -906,7 +1029,7 @@ fn cwc_violated_without_stealing() {
 
     // CWC should be VIOLATED: cores 1-3 are idle, core 0 is overloaded.
     assert!(
-        !check_cwc_after_full_round(&s),
+        !check_cwc(&s),
         "CWC should be violated without work stealing"
     );
 }
@@ -965,12 +1088,15 @@ fn property_cwc_holds_under_random_workload() {
                     }
                 }
                 _ => {
-                    // Full round — schedule ALL cores, then check CWC.
-                    for c in 0..num_cores {
-                        schedule_on_core(&mut s, c);
+                    // Two full rounds — first drains deferred_ready, second
+                    // allows stealing. CWC holds after both rounds complete.
+                    for _round in 0..2 {
+                        for c in 0..num_cores {
+                            schedule_on_core(&mut s, c);
+                        }
                     }
                     assert!(
-                        check_cwc_after_full_round(&s),
+                        check_cwc(&s),
                         "CWC violated at seed={seed}, step={_step}"
                     );
                 }

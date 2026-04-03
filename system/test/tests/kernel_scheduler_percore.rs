@@ -633,13 +633,15 @@ fn wake_picks_least_loaded_when_last_core_busy() {
 }
 
 // ============================================================
-// Tests: deferred_ready elimination
+// Tests: per-core parking (no work stealing in this model)
 // ============================================================
 
 #[test]
-fn no_deferred_ready_in_percore_model() {
-    // With per-core queues, preempted threads go directly to the local queue.
-    // No deferred_ready mechanism exists in this model.
+fn percore_model_parks_to_local_queue() {
+    // This simplified model has NO work stealing, so parking directly to
+    // local_queues is safe. The full steal model (kernel_scheduler_steal.rs)
+    // uses deferred_ready because work stealing lets another core grab a
+    // thread while the parking core is still on its kernel stack.
     let mut s = State::new(2);
 
     s.spawn(0);
@@ -647,7 +649,6 @@ fn no_deferred_ready_in_percore_model() {
 
     // First schedule: picks one, parks one back in local queue.
     schedule_on_core(&mut s, 0);
-    // The parked thread should be in local_queues[0], not in a deferred list.
     assert_eq!(s.local_queues[0].load, 1, "parked thread in local queue");
 
     // Second schedule: preempts current, picks the parked one.
