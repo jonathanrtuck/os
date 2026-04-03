@@ -165,22 +165,6 @@ pub struct Thread {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ThreadId(pub u64);
 
-impl ThreadId {
-    /// Create a ThreadId from a pool slot and generation.
-    pub fn new(slot: u16, generation: u64) -> Self {
-        Self((generation << 16) | slot as u64)
-    }
-    /// Extract the pool slot index (bits [15:0]).
-    pub fn slot(self) -> u16 {
-        self.0 as u16
-    }
-    /// Extract the generation counter (bits [63:16]).
-    #[allow(dead_code)] // API for tests and future use (stale-ID diagnostics).
-    pub fn generation(self) -> u64 {
-        self.0 >> 16
-    }
-}
-
 /// An entry in a thread's wait set — one handle being waited on.
 #[derive(Clone, Copy)]
 pub(crate) struct WaitEntry {
@@ -422,6 +406,22 @@ unsafe impl Send for Thread {}
 // is needed for the static IrqMutex.
 unsafe impl Sync for Thread {}
 
+impl ThreadId {
+    /// Create a ThreadId from a pool slot and generation.
+    pub fn new(slot: u16, generation: u64) -> Self {
+        Self((generation << 16) | slot as u64)
+    }
+
+    /// Extract the generation counter (bits [63:16]).
+    #[allow(dead_code)] // API for tests and future use (stale-ID diagnostics).
+    pub fn generation(self) -> u64 {
+        self.0 >> 16
+    }
+    /// Extract the pool slot index (bits [15:0]).
+    pub fn slot(self) -> u16 {
+        self.0 as u16
+    }
+}
 impl super::waitable::WaitableId for ThreadId {
     fn index(self) -> usize {
         self.slot() as usize

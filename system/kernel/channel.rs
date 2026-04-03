@@ -176,16 +176,13 @@ pub fn create() -> Option<(ChannelId, ChannelId)> {
             return None;
         }
     };
-
     let new_channel = Channel {
         pages: [page0, page1],
         pending_signal: [false, false],
         waiter: [None, None],
         closed_count: 0,
     };
-
     let mut s = STATE.lock();
-
     // Reuse a freed slot if available.
     let idx = if let Some(free_id) = s.free_ids.pop() {
         s.channels[free_id as usize] = Some(new_channel);

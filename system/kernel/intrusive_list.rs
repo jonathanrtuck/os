@@ -21,31 +21,6 @@ use alloc::{boxed::Box, vec::Vec};
 
 use super::thread::{Thread, ThreadId};
 
-/// The slot array holding all thread `Box`es.
-///
-/// Separated from `PoolMeta` so the scheduler can borrow `slots` independently
-/// from other State fields (lists, cores, etc.).
-pub struct ThreadSlots {
-    pub inner: Vec<Option<Box<Thread>>>,
-}
-
-impl ThreadSlots {
-    pub const fn new() -> Self {
-        Self { inner: Vec::new() }
-    }
-
-    /// Direct slot access (no generation check). Used when the slot index
-    /// is known-valid (e.g., from a list or `current_slot`).
-    pub fn get(&self, slot: u16) -> Option<&Thread> {
-        self.inner.get(slot as usize)?.as_deref()
-    }
-
-    /// Mutable direct slot access.
-    pub fn get_mut(&mut self, slot: u16) -> Option<&mut Thread> {
-        self.inner.get_mut(slot as usize)?.as_deref_mut()
-    }
-}
-
 /// Intrusive doubly-linked list of threads, linked by pool slot indices.
 ///
 /// O(1) push_back, remove, pop_front, is_empty. O(n) iteration.
@@ -54,6 +29,30 @@ pub struct IntrusiveList {
     head: Option<u16>,
     tail: Option<u16>,
     len: u32,
+}
+/// Iterator over slot indices in an IntrusiveList.
+pub struct ListIter<'a> {
+    current: Option<u16>,
+    slots: &'a ThreadSlots,
+}
+/// Pool metadata: free list and generation counters.
+///
+/// The actual slot storage is in `ThreadSlots` (a sibling field in State).
+/// This separation enables Rust's borrow checker to split borrows between
+/// the slot array and pool metadata.
+pub struct PoolMeta {
+    /// Free slot indices available for allocation.
+    free_slots: Vec<u16>,
+    /// Generation counter per slot. Incremented on free. Prevents stale
+    /// ThreadId from aliasing a reused slot.
+    generations: Vec<u64>,
+}
+/// The slot array holding all thread `Box`es.
+///
+/// Separated from `PoolMeta` so the scheduler can borrow `slots` independently
+/// from other State fields (lists, cores, etc.).
+pub struct ThreadSlots {
+    pub inner: Vec<Option<Box<Thread>>>,
 }
 
 impl IntrusiveList {
@@ -65,14 +64,30 @@ impl IntrusiveList {
         }
     }
 
-    pub fn len(&self) -> u32 {
-        self.len
-    }
-
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
+    /// Iterate over slot indices in list order (head to tail).
+    ///
+    /// The returned iterator borrows `slots` immutably. Do not modify the list
+    /// during iteration — collect slot indices first if you need to mutate.
+    pub fn iter<'a>(&self, slots: &'a ThreadSlots) -> ListIter<'a> {
+        ListIter {
+            current: self.head,
+            slots,
+        }
+    }
+    pub fn len(&self) -> u32 {
+        self.len
+    }
+    /// Remove and return the first thread in the list. O(1).
+    pub fn pop_front(&mut self, slots: &mut ThreadSlots) -> Option<u16> {
+        let head = self.head?;
 
+        self.remove(head, slots);
+
+        Some(head)
+    }
     /// Append a thread to the back of the list. O(1).
     pub fn push_back(&mut self, slot: u16, slots: &mut ThreadSlots) {
         let thread = slots.inner[slot as usize]
@@ -94,7 +109,6 @@ impl IntrusiveList {
         self.tail = Some(slot);
         self.len += 1;
     }
-
     /// Remove a thread from anywhere in the list. O(1).
     ///
     /// The caller must ensure `slot` is in this list (checked by ThreadLocation).
@@ -114,7 +128,6 @@ impl IntrusiveList {
         } else {
             self.head = next;
         }
-
         // Update successor.
         if let Some(n) = next {
             slots.inner[n as usize]
@@ -134,32 +147,6 @@ impl IntrusiveList {
         thread.list_prev = None;
         self.len -= 1;
     }
-
-    /// Remove and return the first thread in the list. O(1).
-    pub fn pop_front(&mut self, slots: &mut ThreadSlots) -> Option<u16> {
-        let head = self.head?;
-
-        self.remove(head, slots);
-
-        Some(head)
-    }
-
-    /// Iterate over slot indices in list order (head to tail).
-    ///
-    /// The returned iterator borrows `slots` immutably. Do not modify the list
-    /// during iteration — collect slot indices first if you need to mutate.
-    pub fn iter<'a>(&self, slots: &'a ThreadSlots) -> ListIter<'a> {
-        ListIter {
-            current: self.head,
-            slots,
-        }
-    }
-}
-
-/// Iterator over slot indices in an IntrusiveList.
-pub struct ListIter<'a> {
-    current: Option<u16>,
-    slots: &'a ThreadSlots,
 }
 
 impl Iterator for ListIter<'_> {
@@ -177,38 +164,11 @@ impl Iterator for ListIter<'_> {
     }
 }
 
-/// Pool metadata: free list and generation counters.
-///
-/// The actual slot storage is in `ThreadSlots` (a sibling field in State).
-/// This separation enables Rust's borrow checker to split borrows between
-/// the slot array and pool metadata.
-pub struct PoolMeta {
-    /// Free slot indices available for allocation.
-    free_slots: Vec<u16>,
-    /// Generation counter per slot. Incremented on free. Prevents stale
-    /// ThreadId from aliasing a reused slot.
-    generations: Vec<u64>,
-}
-
 impl PoolMeta {
     pub const fn new() -> Self {
         Self {
             free_slots: Vec::new(),
             generations: Vec::new(),
-        }
-    }
-
-    /// Pre-allocate pool to full capacity. Called once at boot.
-    pub fn init(&mut self, slots: &mut ThreadSlots, capacity: usize) {
-        slots.inner.reserve(capacity);
-        self.free_slots.reserve(capacity);
-        self.generations.resize(capacity, 0);
-
-        // Pre-fill slots and free list so push() never allocates at runtime.
-        for i in 0..capacity {
-            slots.inner.push(None);
-            // Push in reverse order so pop() yields low indices first.
-            self.free_slots.push((capacity - 1 - i) as u16);
         }
     }
 
@@ -226,12 +186,13 @@ impl PoolMeta {
         let id = ThreadId::new(slot, gen);
 
         thread.pool_slot = slot;
+
         thread.set_id(id);
+
         slots.inner[slot as usize] = Some(thread);
 
         Some((slot, id))
     }
-
     /// Free a slot, dropping the `Box<Thread>` (which frees the kernel stack).
     /// Increments the generation so stale ThreadIds won't match.
     ///
@@ -248,6 +209,7 @@ impl PoolMeta {
         // slot will use generation+1, so old ThreadIds with the old generation
         // will fail the generation check in get/get_mut.
         self.generations[slot as usize] += 1;
+
         self.free_slots.push(slot);
 
         // Thread is dropped here — kernel stack is freed by Thread::drop.
@@ -255,7 +217,6 @@ impl PoolMeta {
 
         pid
     }
-
     /// Look up a thread by ThreadId. Returns None if the slot is empty or
     /// the generation doesn't match (stale ID).
     pub fn get<'a>(&self, slots: &'a ThreadSlots, id: ThreadId) -> Option<&'a Thread> {
@@ -273,7 +234,6 @@ impl PoolMeta {
 
         Some(thread)
     }
-
     /// Mutable lookup by ThreadId.
     pub fn get_mut<'a>(&self, slots: &'a mut ThreadSlots, id: ThreadId) -> Option<&'a mut Thread> {
         let slot = id.slot() as usize;
@@ -289,5 +249,34 @@ impl PoolMeta {
         }
 
         Some(thread)
+    }
+    /// Pre-allocate pool to full capacity. Called once at boot.
+    pub fn init(&mut self, slots: &mut ThreadSlots, capacity: usize) {
+        slots.inner.reserve(capacity);
+        self.free_slots.reserve(capacity);
+        self.generations.resize(capacity, 0);
+
+        // Pre-fill slots and free list so push() never allocates at runtime.
+        for i in 0..capacity {
+            slots.inner.push(None);
+            // Push in reverse order so pop() yields low indices first.
+            self.free_slots.push((capacity - 1 - i) as u16);
+        }
+    }
+}
+
+impl ThreadSlots {
+    pub const fn new() -> Self {
+        Self { inner: Vec::new() }
+    }
+
+    /// Direct slot access (no generation check). Used when the slot index
+    /// is known-valid (e.g., from a list or `current_slot`).
+    pub fn get(&self, slot: u16) -> Option<&Thread> {
+        self.inner.get(slot as usize)?.as_deref()
+    }
+    /// Mutable direct slot access.
+    pub fn get_mut(&mut self, slot: u16) -> Option<&mut Thread> {
+        self.inner.get_mut(slot as usize)?.as_deref_mut()
     }
 }

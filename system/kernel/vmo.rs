@@ -42,6 +42,10 @@ use super::{handle::ChannelId, memory::Pa, process::ProcessId};
 /// Default maximum snapshot depth (undo ring size).
 const DEFAULT_MAX_SNAPSHOTS: usize = 64;
 
+/// Info returned by `vmo_get_info`.
+pub const VMO_FLAG_CONTIGUOUS: u64 = 1 << 0;
+pub const VMO_FLAG_SEALED: u64 = 1 << 1;
+
 /// A COW snapshot of a VMO's page list at a specific generation.
 struct VmoSnapshot {
     generation: u64,
@@ -49,6 +53,9 @@ struct VmoSnapshot {
     /// current generation have refcount > 1.
     pages: BTreeMap<u64, (Pa, u32)>,
 }
+
+#[cfg(not(test))]
+pub static STATE: IrqMutex<VmoTable> = IrqMutex::new(VmoTable::new_const());
 
 /// A Virtual Memory Object.
 ///
@@ -491,10 +498,6 @@ impl VmoFlags {
     }
 }
 
-/// Info returned by `vmo_get_info`.
-pub const VMO_FLAG_CONTIGUOUS: u64 = 1 << 0;
-pub const VMO_FLAG_SEALED: u64 = 1 << 1;
-
 impl VmoTable {
     #[allow(dead_code)] // Test-only: used by kernel/test/ VMO tests
     pub const fn new() -> Self {
@@ -555,10 +558,6 @@ impl VmoTable {
         self.vmos.get_mut(id.0 as usize)?.as_mut()
     }
 }
-
-#[cfg(not(test))]
-pub static STATE: IrqMutex<VmoTable> = IrqMutex::new(VmoTable::new_const());
-
 #[cfg(not(test))]
 impl VmoTable {
     /// Const constructor for static initialization.
@@ -573,6 +572,7 @@ impl VmoTable {
     /// Called once from `kernel_main` after heap init.
     pub fn init(&mut self) {
         self.cap = super::paging::MAX_VMOS as usize;
+
         self.vmos.reserve(self.cap);
     }
 }

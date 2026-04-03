@@ -86,6 +86,33 @@ static STATE: IrqMutex<State> = IrqMutex::new(State {
     default_context_id: None,
 });
 
+/// Get a mutable reference to the current thread on `core`.
+///
+/// For user threads (current_slot is Some), returns from the pool slots.
+/// For idle threads (current_slot is None), returns from PerCoreState.idle.
+///
+/// This is a macro to enable the caller to hold other borrows of State fields
+/// simultaneously (structural decomposition).
+macro_rules! current_thread {
+    ($slots:expr, $cores:expr, $core:expr) => {
+        if let Some(slot) = $cores[$core].current_slot {
+            $slots.get_mut(slot).expect("current slot empty")
+        } else {
+            $cores[$core].idle.as_mut().expect("no idle thread")
+        }
+    };
+}
+/// Like `current_thread!` but returns a shared reference.
+macro_rules! current_thread_ref {
+    ($slots:expr, $cores:expr, $core:expr) => {
+        if let Some(slot) = $cores[$core].current_slot {
+            $slots.get(slot).expect("current slot empty")
+        } else {
+            $cores[$core].idle.as_ref().expect("no idle thread")
+        }
+    };
+}
+
 /// Information collected under the scheduler lock for thread exit.
 #[allow(clippy::large_enum_variant)]
 enum ExitInfo {
@@ -116,7 +143,12 @@ pub enum BlockResult {
     /// Caller must NOT run cleanup (wrong thread identity).
     Blocked(*const Context),
 }
-
+/// Per-core ready queue with EEVDF selection and load tracking.
+struct LocalRunQueue {
+    ready: IntrusiveList,
+    /// Number of runnable threads (for work-steal heuristic).
+    load: u32,
+}
 struct PerCoreState {
     /// If Some(slot), a user thread at slots[slot] is running on this core.
     /// If None, the idle thread (stored in `idle`) is running.
@@ -130,19 +162,10 @@ struct PerCoreState {
     /// (Phase 3: IPI) to decide whether to send an inter-processor interrupt.
     is_idle: bool,
 }
-
-/// Per-core ready queue with EEVDF selection and load tracking.
-struct LocalRunQueue {
-    ready: IntrusiveList,
-    /// Number of runnable threads (for work-steal heuristic).
-    load: u32,
-}
-
 struct SchedulingContextSlot {
     context: SchedulingContext,
     ref_count: u32,
 }
-
 struct State {
     /// Thread slot storage (separate from pool metadata for borrow splitting).
     slots: ThreadSlots,
@@ -189,34 +212,6 @@ struct State {
     default_context_id: Option<SchedulingContextId>,
 }
 
-/// Get a mutable reference to the current thread on `core`.
-///
-/// For user threads (current_slot is Some), returns from the pool slots.
-/// For idle threads (current_slot is None), returns from PerCoreState.idle.
-///
-/// This is a macro to enable the caller to hold other borrows of State fields
-/// simultaneously (structural decomposition).
-macro_rules! current_thread {
-    ($slots:expr, $cores:expr, $core:expr) => {
-        if let Some(slot) = $cores[$core].current_slot {
-            $slots.get_mut(slot).expect("current slot empty")
-        } else {
-            $cores[$core].idle.as_mut().expect("no idle thread")
-        }
-    };
-}
-
-/// Like `current_thread!` but returns a shared reference.
-macro_rules! current_thread_ref {
-    ($slots:expr, $cores:expr, $core:expr) => {
-        if let Some(slot) = $cores[$core].current_slot {
-            $slots.get(slot).expect("current slot empty")
-        } else {
-            $cores[$core].idle.as_ref().expect("no idle thread")
-        }
-    };
-}
-
 /// Handles sorted by type for cleanup outside the scheduler lock.
 pub struct HandleCategories {
     pub channels: Vec<super::handle::ChannelId>,
@@ -226,7 +221,6 @@ pub struct HandleCategories {
     pub process_handles: Vec<ProcessId>,
     pub vmos: Vec<super::vmo::VmoId>,
 }
-
 /// Information collected by `kill_process` for cleanup outside the scheduler lock.
 pub struct KillInfo {
     pub thread_ids: Vec<ThreadId>,
@@ -245,7 +239,6 @@ impl ExitInfo {
             ExitInfo::Last { process_id, .. } | ExitInfo::NonLast { process_id, .. } => *process_id,
         }
     }
-
     fn thread_id(&self) -> ThreadId {
         match self {
             ExitInfo::Last { thread_id, .. } | ExitInfo::NonLast { thread_id, .. } => *thread_id,
@@ -283,7 +276,6 @@ impl LocalRunQueue {
 
         (sum / count) as u64
     }
-
     /// Recompute load from ready list length. Call after mutations.
     fn update_load(&mut self) {
         self.load = self.ready.len();
@@ -300,7 +292,6 @@ fn bind_default_context(s: &mut State, thread: &mut Thread) {
         }
     }
 }
-
 /// Sort handle objects into typed buckets for cleanup outside the lock.
 ///
 /// SchedulingContext handles are released immediately (they only need `s`).
@@ -329,7 +320,6 @@ fn categorize_handles(objects: Vec<HandleObject>, s: &mut State) -> HandleCatego
 
     categories
 }
-
 /// Charge elapsed time to the old thread's EEVDF vruntime and scheduling context.
 #[inline(never)]
 fn charge_thread(thread: &mut Thread, contexts: &mut [Option<SchedulingContextSlot>], now: u64) {
@@ -353,7 +343,6 @@ fn charge_thread(thread: &mut Thread, contexts: &mut [Option<SchedulingContextSl
         }
     }
 }
-
 /// Find the busiest remote core (highest load > 0). Returns None if no core
 /// has any runnable threads (nothing worth stealing).
 fn find_busiest_core(local_queues: &[LocalRunQueue], my_core: usize) -> Option<usize> {
@@ -378,7 +367,6 @@ fn find_busiest_core(local_queues: &[LocalRunQueue], my_core: usize) -> Option<u
 
     best.map(|(i, _)| i)
 }
-
 /// Check if a thread has budget (unlimited if no scheduling context).
 fn has_budget(thread: &Thread, contexts: &[Option<SchedulingContextSlot>]) -> bool {
     match thread.scheduling.context_id {
@@ -389,7 +377,6 @@ fn has_budget(thread: &Thread, contexts: &[Option<SchedulingContextSlot>]) -> bo
             .is_none_or(|slot| slot.context.has_budget()),
     }
 }
-
 /// Send an IPI to a single idle core (if any), skipping `current_core`.
 ///
 /// Called under the STATE lock after adding a thread to the ready queue.
@@ -413,7 +400,6 @@ fn ipi_kick_idle_core(cores: &[PerCoreState], current_core: usize) {
         }
     }
 }
-
 /// Deferred address space cleanup for killed processes.
 ///
 /// When `kill_process` finds threads still running on other cores, it marks
@@ -451,12 +437,10 @@ fn maybe_cleanup_killed_process(s: &mut State, pid: Option<ProcessId>, was_exite
         }
     }
 }
-
 /// Read hardware counter and convert to nanoseconds.
 fn now_ns() -> u64 {
     timer::counter_to_ns(timer::counter())
 }
-
 /// Choose which core to place a woken/spawned thread on.
 /// 1. Prefer `preferred_core` if that core is idle (cache affinity).
 /// 2. Otherwise, pick the least-loaded core.
@@ -481,7 +465,6 @@ fn pick_target_core(
 
     best_core
 }
-
 /// Reap exited threads from a local queue and the blocked list.
 ///
 /// With intrusive lists, iterate and collect slots of exited threads, then
@@ -529,7 +512,6 @@ fn reap_exited(s: &mut State, core: usize) {
         s.pool.free(&mut s.slots, slot);
     }
 }
-
 /// Decrement ref count on a scheduling context. Frees it if count reaches zero.
 fn release_context_inner(s: &mut State, ctx_id: SchedulingContextId) {
     if let Some(slot) = s.scheduling_contexts.get_mut(ctx_id.0 as usize) {
@@ -544,25 +526,6 @@ fn release_context_inner(s: &mut State, ctx_id: SchedulingContextId) {
         }
     }
 }
-
-/// Release a thread's bound and borrowed scheduling context refs.
-///
-/// Takes both `context_id` and `saved_context_id` from the thread and
-/// decrements the corresponding ref counts. Used by both thread exit and
-/// process kill paths.
-fn release_thread_context_ids(
-    scheduling_contexts: &mut Vec<Option<SchedulingContextSlot>>,
-    free_context_ids: &mut Vec<u32>,
-    thread: &mut Thread,
-) {
-    if let Some(id) = thread.scheduling.context_id.take() {
-        release_context_slot(scheduling_contexts, free_context_ids, id);
-    }
-    if let Some(id) = thread.scheduling.saved_context_id.take() {
-        release_context_slot(scheduling_contexts, free_context_ids, id);
-    }
-}
-
 /// Decrement ref count on a scheduling context (standalone version that takes
 /// the individual fields rather than &mut State, for use in borrow-split code).
 fn release_context_slot(
@@ -582,7 +545,23 @@ fn release_context_slot(
         }
     }
 }
-
+/// Release a thread's bound and borrowed scheduling context refs.
+///
+/// Takes both `context_id` and `saved_context_id` from the thread and
+/// decrements the corresponding ref counts. Used by both thread exit and
+/// process kill paths.
+fn release_thread_context_ids(
+    scheduling_contexts: &mut Vec<Option<SchedulingContextSlot>>,
+    free_context_ids: &mut Vec<u32>,
+    thread: &mut Thread,
+) {
+    if let Some(id) = thread.scheduling.context_id.take() {
+        release_context_slot(scheduling_contexts, free_context_ids, id);
+    }
+    if let Some(id) = thread.scheduling.saved_context_id.take() {
+        release_context_slot(scheduling_contexts, free_context_ids, id);
+    }
+}
 /// Replenish all scheduling contexts that are due.
 #[inline(never)]
 fn replenish_contexts(contexts: &mut [Option<SchedulingContextSlot>], now: u64) {
@@ -590,7 +569,6 @@ fn replenish_contexts(contexts: &mut [Option<SchedulingContextSlot>], now: u64) 
         entry.context = entry.context.maybe_replenish(now);
     }
 }
-
 /// Compute the scheduler's next deadline in counter ticks.
 ///
 /// Considers:
@@ -654,7 +632,6 @@ fn scheduler_deadline_ticks(
         }
     })
 }
-
 #[inline(never)]
 fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Context {
     // Drop threads deferred from THIS CORE's previous schedule_inner. Safe now
@@ -714,35 +691,6 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
         old_is_ready = old_thread.is_ready();
     }
 
-    // Park the old thread in its appropriate location.
-    // `park_old` handles the three cases: Ready (deferred_ready or idle restore),
-    // Exited (deferred_drops), Blocked (blocked list).
-    #[inline(never)]
-    fn park_old(s: &mut State, old_slot: Option<u16>, core: usize) {
-        if let Some(slot) = old_slot {
-            let thread = s.slots.get_mut(slot).expect("park_old: empty slot");
-
-            if thread.is_ready() {
-                // Update eligible_at before re-enqueuing.
-                thread.scheduling.eevdf = thread.scheduling.eevdf.mark_eligible();
-
-                // Defer ready — we're still on this thread's kernel stack
-                // until restore_context_and_eret switches SP.
-                thread.location = ThreadLocation::DeferredReady(core as u8);
-                s.deferred_ready[core].push_back(slot, &mut s.slots);
-            } else if thread.is_exited() {
-                // Defer drop — we're still running on this thread's kernel stack.
-                thread.location = ThreadLocation::DeferredDrop(core as u8);
-                s.deferred_drops[core].push_back(slot, &mut s.slots);
-            } else {
-                // Blocked — park until wake() re-enqueues it.
-                thread.location = ThreadLocation::Blocked;
-                s.blocked.push_back(slot, &mut s.slots);
-            }
-        }
-        // If old_slot is None, the idle thread was current — no parking needed.
-    }
-
     // Helper: activate a user thread from a pool slot.
     #[inline(always)]
     fn activate_slot(
@@ -782,7 +730,6 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
 
         new_ctx
     }
-
     // Helper: continue running the old thread (re-activate without context switch).
     #[inline(always)]
     fn continue_old(s: &mut State, core: usize, now: u64, is_idle: bool) -> *const Context {
@@ -802,7 +749,37 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
 
         ctx
     }
+    // Park the old thread in its appropriate location.
+    // `park_old` handles the three cases: Ready (deferred_ready or idle restore),
+    // Exited (deferred_drops), Blocked (blocked list).
+    #[inline(never)]
+    fn park_old(s: &mut State, old_slot: Option<u16>, core: usize) {
+        if let Some(slot) = old_slot {
+            let thread = s.slots.get_mut(slot).expect("park_old: empty slot");
 
+            if thread.is_ready() {
+                // Update eligible_at before re-enqueuing.
+                thread.scheduling.eevdf = thread.scheduling.eevdf.mark_eligible();
+
+                // Defer ready — we're still on this thread's kernel stack
+                // until restore_context_and_eret switches SP.
+                thread.location = ThreadLocation::DeferredReady(core as u8);
+
+                s.deferred_ready[core].push_back(slot, &mut s.slots);
+            } else if thread.is_exited() {
+                // Defer drop — we're still running on this thread's kernel stack.
+                thread.location = ThreadLocation::DeferredDrop(core as u8);
+
+                s.deferred_drops[core].push_back(slot, &mut s.slots);
+            } else {
+                // Blocked — park until wake() re-enqueues it.
+                thread.location = ThreadLocation::Blocked;
+
+                s.blocked.push_back(slot, &mut s.slots);
+            }
+        }
+        // If old_slot is None, the idle thread was current — no parking needed.
+    }
     // Helper: switch to the idle thread.
     #[inline(always)]
     fn switch_to_idle(
@@ -937,7 +914,6 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
 
     result
 }
-
 /// Select the best thread from the ready queue using EEVDF.
 ///
 /// Returns the pool slot of the chosen thread, or None if no thread has budget.
@@ -969,7 +945,6 @@ fn select_best(
     }
 
     let avg = (sum / count as u128) as u64;
-
     // Pass 2: eligible + budget → earliest deadline; also track fallback.
     let mut best: Option<(u16, u64)> = None;
     let mut fallback: Option<(u16, u64)> = None;
@@ -998,37 +973,6 @@ fn select_best(
 
     best.or(fallback).map(|(slot, _)| slot)
 }
-
-/// Set wake_pending on a thread that is not yet blocked (Running or Ready).
-#[inline(never)]
-fn set_wake_pending_inner(s: &mut State, id: ThreadId) {
-    // O(1) via pool lookup + location check.
-    if let Some(thread) = s.pool.get_mut(&mut s.slots, id) {
-        match thread.location {
-            ThreadLocation::Current(_)
-            | ThreadLocation::Ready(_)
-            | ThreadLocation::DeferredReady(_) => {
-                thread.wake_pending = true;
-                thread.wake_result = 0;
-            }
-            _ => {}
-        }
-        return;
-    }
-
-    // Also check idle threads (they can be "current" without a pool slot).
-    for core_state in s.cores.iter_mut() {
-        if let Some(idle) = &mut core_state.idle {
-            if idle.id() == id {
-                idle.wake_pending = true;
-                idle.wake_result = 0;
-
-                return;
-            }
-        }
-    }
-}
-
 /// Select the best steal victim from a remote queue.
 fn select_steal_victim(
     queue: &LocalRunQueue,
@@ -1058,7 +1002,35 @@ fn select_steal_victim(
 
     best.map(|(slot, _)| slot)
 }
+/// Set wake_pending on a thread that is not yet blocked (Running or Ready).
+#[inline(never)]
+fn set_wake_pending_inner(s: &mut State, id: ThreadId) {
+    // O(1) via pool lookup + location check.
+    if let Some(thread) = s.pool.get_mut(&mut s.slots, id) {
+        match thread.location {
+            ThreadLocation::Current(_)
+            | ThreadLocation::Ready(_)
+            | ThreadLocation::DeferredReady(_) => {
+                thread.wake_pending = true;
+                thread.wake_result = 0;
+            }
+            _ => {}
+        }
+        return;
+    }
 
+    // Also check idle threads (they can be "current" without a pool slot).
+    for core_state in s.cores.iter_mut() {
+        if let Some(idle) = &mut core_state.idle {
+            if idle.id() == id {
+                idle.wake_pending = true;
+                idle.wake_result = 0;
+
+                return;
+            }
+        }
+    }
+}
 /// Steal threads from a remote core using workload-granularity migration.
 fn steal_from(s: &mut State, my_core: usize, victim_core: usize) -> bool {
     let victim_avg = s.local_queues[victim_core].avg_vruntime(&s.slots);
@@ -1070,7 +1042,6 @@ fn steal_from(s: &mut State, my_core: usize, victim_core: usize) -> bool {
         Some(slot) => slot,
         None => return false,
     };
-
     let context_id = s
         .slots
         .get(primary_slot)
@@ -1078,7 +1049,6 @@ fn steal_from(s: &mut State, my_core: usize, victim_core: usize) -> bool {
         .scheduling
         .context_id;
     let max_steal = (s.local_queues[victim_core].load / 2).max(1) as usize;
-
     // Collect slot indices of threads to steal (same context, up to max_steal).
     let mut steal_buf = [0u16; 128];
     let mut steal_count = 0;
@@ -1128,7 +1098,6 @@ fn steal_from(s: &mut State, my_core: usize, victim_core: usize) -> bool {
 
     true
 }
-
 /// Swap TTBR0 when the address space changes between old and new threads.
 #[inline(never)]
 fn swap_ttbr0(old: &Thread, new: &Thread, processes: &[Option<Process>]) {
@@ -1153,7 +1122,6 @@ fn swap_ttbr0(old: &Thread, new: &Thread, processes: &[Option<Process>]) {
         }
     }
 }
-
 /// Shared wake implementation.
 #[inline(never)]
 fn try_wake_impl(s: &mut State, id: ThreadId, reason: Option<&HandleObject>) -> bool {
@@ -1203,19 +1171,17 @@ fn try_wake_impl(s: &mut State, id: ThreadId, reason: Option<&HandleObject>) -> 
 
     // Not actually blocked — put it back.
     thread.location = ThreadLocation::Blocked;
+
     s.blocked.push_back(slot, &mut s.slots);
 
     false
 }
-
 fn ttbr0_for(thread: &Thread) -> u64 {
     match thread.process_id {
         Some(_) => thread.ttbr0,
         None => memory::empty_ttbr0(),
     }
 }
-
-// --- Public API ---
 
 /// Bind a scheduling context to the current thread.
 #[inline(never)]
@@ -1244,7 +1210,6 @@ pub fn bind_scheduling_context(ctx_id: SchedulingContextId) -> bool {
 
     true
 }
-
 /// Block the current thread waiting for a userspace pager to supply a page.
 pub fn block_current_for_pager(
     ctx: *mut Context,
@@ -1256,11 +1221,11 @@ pub fn block_current_for_pager(
     let thread = current_thread!(s.slots, s.cores, core);
 
     thread.pager_wait = Some((vmo_id, page_offset));
+
     thread.block();
 
     schedule_inner(&mut s, ctx, core)
 }
-
 /// Block the current thread and reschedule, unless a wake is already pending.
 #[inline(never)]
 pub fn block_current_unless_woken(ctx: *mut Context) -> BlockResult {
@@ -1307,7 +1272,6 @@ pub fn block_current_unless_woken(ctx: *mut Context) -> BlockResult {
 
     BlockResult::Blocked(result)
 }
-
 /// Borrow another thread's scheduling context (context donation).
 #[inline(never)]
 pub fn borrow_scheduling_context(ctx_id: SchedulingContextId) -> bool {
@@ -1340,7 +1304,6 @@ pub fn borrow_scheduling_context(ctx_id: SchedulingContextId) -> bool {
 
     true
 }
-
 /// Clear the wait set and any pending wake on the current thread.
 #[inline(never)]
 pub fn clear_wait_state() {
@@ -1349,9 +1312,9 @@ pub fn clear_wait_state() {
     let thread = current_thread!(s.slots, s.cores, core);
 
     thread.wait_set.clear();
+
     thread.wake_pending = false;
 }
-
 /// Close all resources in a `HandleCategories` set. Must be called outside the
 /// scheduler lock — the individual destroy functions acquire their own locks.
 #[inline(never)]
@@ -1379,7 +1342,6 @@ pub fn close_handle_categories(h: HandleCategories) {
         }
     }
 }
-
 /// Create a new process with the given address space.
 #[inline(never)]
 pub fn create_process(
@@ -1407,7 +1369,6 @@ pub fn create_process(
 
     Some(ProcessId(id))
 }
-
 /// Create a new scheduling context. Returns the SchedulingContextId.
 #[inline(never)]
 pub fn create_scheduling_context(budget: u64, period: u64) -> Option<SchedulingContextId> {
@@ -1422,7 +1383,6 @@ pub fn create_scheduling_context(budget: u64, period: u64) -> Option<SchedulingC
         context,
         ref_count: 1,
     };
-
     let id = if let Some(free_id) = s.free_context_ids.pop() {
         s.scheduling_contexts[free_id as usize] = Some(slot);
 
@@ -1441,7 +1401,6 @@ pub fn create_scheduling_context(budget: u64, period: u64) -> Option<SchedulingC
 
     Some(id)
 }
-
 /// Access the current thread's process via closure.
 #[inline(never)]
 pub fn current_process_do<R>(f: impl FnOnce(&mut Process) -> R) -> R {
@@ -1455,7 +1414,6 @@ pub fn current_process_do<R>(f: impl FnOnce(&mut Process) -> R) -> R {
 
     f(process)
 }
-
 /// Access the current thread's process AND its ProcessId via closure.
 #[inline(never)]
 pub fn current_process_with_pid_do<R>(f: impl FnOnce(ProcessId, &mut Process) -> R) -> R {
@@ -1470,13 +1428,11 @@ pub fn current_process_with_pid_do<R>(f: impl FnOnce(ProcessId, &mut Process) ->
 
     f(pid, process)
 }
-
 /// Access both the current thread and its process via closure.
 #[inline(never)]
 pub fn current_thread_and_process_do<R>(f: impl FnOnce(&mut Thread, &mut Process) -> R) -> R {
     let mut s = STATE.lock();
     let core = per_core::core_id() as usize;
-
     // Destructure State for disjoint field borrows (slots/cores vs processes).
     let State {
         ref mut slots,
@@ -1484,7 +1440,6 @@ pub fn current_thread_and_process_do<R>(f: impl FnOnce(&mut Thread, &mut Process
         ref mut processes,
         ..
     } = *s;
-
     let thread = if let Some(slot) = cores[core].current_slot {
         slots.get_mut(slot).expect("current slot empty")
     } else {
@@ -1495,7 +1450,6 @@ pub fn current_thread_and_process_do<R>(f: impl FnOnce(&mut Thread, &mut Process
 
     f(thread, process)
 }
-
 /// Access the current thread via closure.
 #[inline(never)]
 pub fn current_thread_do<R>(f: impl FnOnce(&mut Thread) -> R) -> R {
@@ -1505,15 +1459,12 @@ pub fn current_thread_do<R>(f: impl FnOnce(&mut Thread) -> R) -> R {
 
     f(thread)
 }
-
 #[inline(never)]
 pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
     let core = per_core::core_id() as usize;
-
     // Phase 1: determine if this is the last thread, collect resources.
     let exit_info = {
         let mut s = STATE.lock();
-
         // Release all scheduling context bind/borrow refs on exit.
         let (ctx_id, saved_ctx_id) = {
             let thread = current_thread!(s.slots, s.cores, core);
@@ -1627,7 +1578,6 @@ pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
         }
     }
 }
-
 #[inline(never)]
 pub fn init() {
     let mut s = STATE.lock();
@@ -1677,7 +1627,6 @@ pub fn init() {
         super::arch::scheduler::set_current_thread(ctx_ptr as usize);
     }
 }
-
 /// Initialize a secondary core's scheduler state with a boot/idle thread.
 #[inline(never)]
 pub fn init_secondary(core_id: u32) {
@@ -1696,7 +1645,6 @@ pub fn init_secondary(core_id: u32) {
         super::arch::scheduler::set_current_thread(boot_ctx_ptr as usize);
     }
 }
-
 /// Kill all threads of a process and collect resources for cleanup.
 #[inline(never)]
 pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
@@ -1736,7 +1684,6 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
 
         count
     }
-
     // Helper: remove collected slots from a list, release context refs, free.
     fn remove_and_free(
         list: &mut IntrusiveList,
@@ -1765,8 +1712,8 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
             }
 
             killed_threads.push(thread.id());
-
             pool.free(slots, slot);
+
             removed += 1;
         }
 
@@ -1777,7 +1724,6 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
     for q in 0..per_core::MAX_CORES {
         let mut buf: [u16; 128] = [0; 128];
         let count = collect_matching(&s.local_queues[q].ready, &s.slots, target_pid, &mut buf);
-
         let State {
             ref mut local_queues,
             ref mut slots,
@@ -1806,7 +1752,6 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
     {
         let mut buf: [u16; 128] = [0; 128];
         let count = collect_matching(&s.blocked, &s.slots, target_pid, &mut buf);
-
         let State {
             ref mut blocked,
             ref mut slots,
@@ -1828,12 +1773,10 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
             &mut timeout_timers,
         );
     }
-
     // Remove from suspended list.
     {
         let mut buf: [u16; 128] = [0; 128];
         let count = collect_matching(&s.suspended, &s.slots, target_pid, &mut buf);
-
         let State {
             ref mut suspended,
             ref mut slots,
@@ -1898,7 +1841,6 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
         process.handles.drain().map(|(obj, _, _)| obj).collect()
     };
     let handles = categorize_handles(handle_objects, &mut s);
-
     let address_space = if running_count == 0 {
         let process = s.processes[target_pid.0 as usize].take().unwrap();
 
@@ -1921,7 +1863,35 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
         timeout_timers,
     })
 }
+/// Push a single entry to the current thread's wait set.
+#[inline(never)]
+pub fn push_wait_entry(entry: WaitEntry) {
+    let mut s = STATE.lock();
+    let core = per_core::core_id() as usize;
+    let thread = current_thread!(s.slots, s.cores, core);
 
+    thread.wait_set.push(entry);
+}
+/// Read the saved register state of a suspended thread.
+///
+/// # Safety
+///
+/// `dst` must point to a valid, writable buffer of at least
+/// `size_of::<Context>()` bytes.
+pub unsafe fn read_thread_state(id: ThreadId, dst: *mut u8) -> bool {
+    let s = STATE.lock();
+    let thread = match s.pool.get(&s.slots, id) {
+        Some(t) if t.location == ThreadLocation::Suspended => t,
+        _ => return false,
+    };
+    let src = &thread.context as *const super::Context as *const u8;
+    let size = core::mem::size_of::<super::Context>();
+
+    // SAFETY: src is the thread's Context (valid, aligned). dst validated by caller.
+    core::ptr::copy_nonoverlapping(src, dst, size);
+
+    true
+}
 /// Release a scheduling context handle (decrement ref count, free if zero).
 #[inline(never)]
 pub fn release_scheduling_context(ctx_id: SchedulingContextId) {
@@ -1929,7 +1899,6 @@ pub fn release_scheduling_context(ctx_id: SchedulingContextId) {
 
     release_context_inner(&mut s, ctx_id);
 }
-
 /// Remove an orphaned process that has no threads.
 #[inline(never)]
 pub fn remove_empty_process(pid: ProcessId) {
@@ -1948,7 +1917,56 @@ pub fn remove_empty_process(pid: ProcessId) {
         }
     }
 }
+/// Resume a suspended thread.
+pub fn resume_thread(id: ThreadId) -> bool {
+    let mut s = STATE.lock();
+    let location = match s.pool.get(&s.slots, id) {
+        Some(t) => t.location,
+        None => return false,
+    };
 
+    if location != ThreadLocation::Suspended {
+        return false;
+    }
+
+    let slot = id.slot();
+
+    {
+        let State {
+            ref mut suspended,
+            ref mut slots,
+            ..
+        } = *s;
+
+        suspended.remove(slot, slots);
+    }
+
+    let thread = s.slots.get_mut(slot).expect("resume: slot empty");
+
+    thread.scheduling.eevdf = thread.scheduling.eevdf.mark_eligible();
+
+    let preferred = thread.scheduling.last_core as usize;
+    let target = pick_target_core(&s.cores, &s.local_queues, preferred);
+
+    s.slots.get_mut(slot).expect("resume: slot empty").location =
+        ThreadLocation::Ready(target as u8);
+
+    {
+        let State {
+            ref mut local_queues,
+            ref mut slots,
+            ..
+        } = *s;
+
+        local_queues[target].ready.push_back(slot, slots);
+    }
+
+    s.local_queues[target].update_load();
+
+    ipi_kick_idle_core(&s.cores, per_core::core_id() as usize);
+
+    true
+}
 /// Return a borrowed scheduling context, restoring the saved one.
 #[inline(never)]
 pub fn return_scheduling_context() -> bool {
@@ -1971,7 +1989,6 @@ pub fn return_scheduling_context() -> bool {
         None => false,
     }
 }
-
 #[inline(never)]
 pub fn schedule(ctx: *mut Context) -> *const Context {
     let mut canary: u64 = 0;
@@ -1984,7 +2001,6 @@ pub fn schedule(ctx: *mut Context) -> *const Context {
     let mut s = STATE.lock();
     let core = per_core::core_id() as usize;
     let result = schedule_inner(&mut s, ctx, core);
-
     // SAFETY: volatile read of our stack-local canary.
     let check = unsafe { core::ptr::read_volatile(&canary) };
 
@@ -1994,7 +2010,6 @@ pub fn schedule(ctx: *mut Context) -> *const Context {
 
     result
 }
-
 /// Store a timeout timer ID on the current thread for deferred cleanup.
 #[inline(never)]
 pub fn set_timeout_timer(timer_id: timer::TimerId) {
@@ -2004,7 +2019,6 @@ pub fn set_timeout_timer(timer_id: timer::TimerId) {
 
     thread.timeout_timer = Some(timer_id);
 }
-
 /// Clear the timeout timer field on the current thread (timer already destroyed).
 #[inline(never)]
 pub fn set_timeout_timer_none() {
@@ -2014,7 +2028,6 @@ pub fn set_timeout_timer_none() {
 
     thread.timeout_timer = None;
 }
-
 /// Set the wake-pending flag on a thread that is not yet blocked (futex path).
 #[inline(never)]
 pub fn set_wake_pending(id: ThreadId) {
@@ -2022,7 +2035,6 @@ pub fn set_wake_pending(id: ThreadId) {
 
     set_wake_pending_inner(&mut s, id);
 }
-
 /// Set the wake-pending flag for a handle-based event (channel signal, etc.).
 #[inline(never)]
 pub fn set_wake_pending_for_handle(id: ThreadId, reason: HandleObject) {
@@ -2042,6 +2054,7 @@ pub fn set_wake_pending_for_handle(id: ThreadId, reason: HandleObject) {
             ref mut slots,
             ..
         } = *s;
+
         if let Some(thread) = pool.get_mut(slots, id) {
             match thread.location {
                 ThreadLocation::Current(_)
@@ -2051,6 +2064,7 @@ pub fn set_wake_pending_for_handle(id: ThreadId, reason: HandleObject) {
                 }
                 _ => {}
             }
+
             return;
         }
     }
@@ -2066,7 +2080,6 @@ pub fn set_wake_pending_for_handle(id: ThreadId, reason: HandleObject) {
         }
     }
 }
-
 #[inline(never)]
 pub fn spawn_user(process_id: ProcessId, entry_va: u64, user_stack_top: u64) -> Option<ThreadId> {
     let mut s = STATE.lock();
@@ -2089,9 +2102,9 @@ pub fn spawn_user(process_id: ProcessId, entry_va: u64, user_stack_top: u64) -> 
             ref mut slots,
             ..
         } = *s;
+
         pool.alloc(slots, thread)?
     };
-
     let process = s.processes[process_id.0 as usize]
         .as_mut()
         .expect("process not found");
@@ -2105,21 +2118,23 @@ pub fn spawn_user(process_id: ProcessId, entry_va: u64, user_stack_top: u64) -> 
         .get_mut(slot)
         .expect("just-allocated slot empty")
         .location = ThreadLocation::Ready(target as u8);
+
     {
         let State {
             ref mut local_queues,
             ref mut slots,
             ..
         } = *s;
+
         local_queues[target].ready.push_back(slot, slots);
     }
+
     s.local_queues[target].update_load();
 
     ipi_kick_idle_core(&s.cores, per_core::core_id() as usize);
 
     Some(tid)
 }
-
 /// Like `spawn_user`, but the thread is placed in the suspended list.
 #[inline(never)]
 pub fn spawn_user_suspended(
@@ -2147,9 +2162,9 @@ pub fn spawn_user_suspended(
             ref mut slots,
             ..
         } = *s;
+
         pool.alloc(slots, thread)?
     };
-
     let process = s.processes[process_id.0 as usize]
         .as_mut()
         .expect("process not found");
@@ -2161,24 +2176,24 @@ pub fn spawn_user_suspended(
         .get_mut(slot)
         .expect("just-allocated slot empty")
         .location = ThreadLocation::Suspended;
+
     {
         let State {
             ref mut suspended,
             ref mut slots,
             ..
         } = *s;
+
         suspended.push_back(slot, slots);
     }
 
     Some(tid)
 }
-
 /// Move all suspended threads belonging to `process_id` into the ready queue.
 #[inline(never)]
 pub fn start_suspended_threads(process_id: ProcessId) -> bool {
     let mut s = STATE.lock();
     let mut started = false;
-
     let mut to_start: [u16; 128] = [0; 128];
     let mut start_count = 0;
 
@@ -2200,6 +2215,7 @@ pub fn start_suspended_threads(process_id: ProcessId) -> bool {
                 ref mut slots,
                 ..
             } = *s;
+
             suspended.remove(slot, slots);
         }
 
@@ -2213,14 +2229,17 @@ pub fn start_suspended_threads(process_id: ProcessId) -> bool {
 
         s.slots.get_mut(slot).expect("start: empty slot").location =
             ThreadLocation::Ready(target as u8);
+
         {
             let State {
                 ref mut local_queues,
                 ref mut slots,
                 ..
             } = *s;
+
             local_queues[target].ready.push_back(slot, slots);
         }
+
         s.local_queues[target].update_load();
 
         started = true;
@@ -2236,16 +2255,13 @@ pub fn start_suspended_threads(process_id: ProcessId) -> bool {
 
     started
 }
-
 /// Suspend a thread by ThreadId.
 pub fn suspend_thread(id: ThreadId) -> bool {
     let mut s = STATE.lock();
-
     let location = match s.pool.get(&s.slots, id) {
         Some(t) => t.location,
         None => return false,
     };
-
     let slot = id.slot();
 
     match location {
@@ -2256,12 +2272,15 @@ pub fn suspend_thread(id: ThreadId) -> bool {
                     ref mut slots,
                     ..
                 } = *s;
+
                 local_queues[core as usize].ready.remove(slot, slots);
             }
+
             s.local_queues[core as usize].update_load();
 
             s.slots.get_mut(slot).expect("suspend: slot empty").location =
                 ThreadLocation::Suspended;
+
             {
                 let State {
                     ref mut suspended,
@@ -2285,12 +2304,14 @@ pub fn suspend_thread(id: ThreadId) -> bool {
 
             s.slots.get_mut(slot).expect("suspend: slot empty").location =
                 ThreadLocation::Suspended;
+
             {
                 let State {
                     ref mut suspended,
                     ref mut slots,
                     ..
                 } = *s;
+
                 suspended.push_back(slot, slots);
             }
 
@@ -2299,88 +2320,6 @@ pub fn suspend_thread(id: ThreadId) -> bool {
         _ => false,
     }
 }
-
-/// Resume a suspended thread.
-pub fn resume_thread(id: ThreadId) -> bool {
-    let mut s = STATE.lock();
-
-    let location = match s.pool.get(&s.slots, id) {
-        Some(t) => t.location,
-        None => return false,
-    };
-
-    if location != ThreadLocation::Suspended {
-        return false;
-    }
-
-    let slot = id.slot();
-
-    {
-        let State {
-            ref mut suspended,
-            ref mut slots,
-            ..
-        } = *s;
-        suspended.remove(slot, slots);
-    }
-
-    let thread = s.slots.get_mut(slot).expect("resume: slot empty");
-
-    thread.scheduling.eevdf = thread.scheduling.eevdf.mark_eligible();
-
-    let preferred = thread.scheduling.last_core as usize;
-    let target = pick_target_core(&s.cores, &s.local_queues, preferred);
-
-    s.slots.get_mut(slot).expect("resume: slot empty").location =
-        ThreadLocation::Ready(target as u8);
-    {
-        let State {
-            ref mut local_queues,
-            ref mut slots,
-            ..
-        } = *s;
-        local_queues[target].ready.push_back(slot, slots);
-    }
-    s.local_queues[target].update_load();
-
-    ipi_kick_idle_core(&s.cores, per_core::core_id() as usize);
-
-    true
-}
-
-/// Read the saved register state of a suspended thread.
-///
-/// # Safety
-///
-/// `dst` must point to a valid, writable buffer of at least
-/// `size_of::<Context>()` bytes.
-pub unsafe fn read_thread_state(id: ThreadId, dst: *mut u8) -> bool {
-    let s = STATE.lock();
-
-    let thread = match s.pool.get(&s.slots, id) {
-        Some(t) if t.location == ThreadLocation::Suspended => t,
-        _ => return false,
-    };
-
-    let src = &thread.context as *const super::Context as *const u8;
-    let size = core::mem::size_of::<super::Context>();
-
-    // SAFETY: src is the thread's Context (valid, aligned). dst validated by caller.
-    core::ptr::copy_nonoverlapping(src, dst, size);
-
-    true
-}
-
-/// Push a single entry to the current thread's wait set.
-#[inline(never)]
-pub fn push_wait_entry(entry: WaitEntry) {
-    let mut s = STATE.lock();
-    let core = per_core::core_id() as usize;
-    let thread = current_thread!(s.slots, s.cores, core);
-
-    thread.wait_set.push(entry);
-}
-
 /// Take and return stale waiter entries from the current thread.
 #[inline(never)]
 pub fn take_stale_waiters() -> Vec<WaitEntry> {
@@ -2390,7 +2329,6 @@ pub fn take_stale_waiters() -> Vec<WaitEntry> {
 
     core::mem::take(&mut thread.stale_waiters)
 }
-
 /// Take and return any stale timeout timer from the current thread.
 #[inline(never)]
 pub fn take_timeout_timer() -> Option<timer::TimerId> {
@@ -2400,7 +2338,6 @@ pub fn take_timeout_timer() -> Option<timer::TimerId> {
 
     thread.timeout_timer.take()
 }
-
 /// Wake a blocked thread (Blocked -> Ready). Returns true if it was blocked.
 #[inline(never)]
 pub fn try_wake(id: ThreadId) -> bool {
@@ -2408,7 +2345,6 @@ pub fn try_wake(id: ThreadId) -> bool {
 
     try_wake_impl(&mut s, id, None)
 }
-
 /// Wake a blocked thread and resolve its wait set against `reason`.
 #[inline(never)]
 pub fn try_wake_for_handle(id: ThreadId, reason: HandleObject) -> bool {
@@ -2416,19 +2352,16 @@ pub fn try_wake_for_handle(id: ThreadId, reason: HandleObject) -> bool {
 
     try_wake_impl(&mut s, id, Some(&reason))
 }
-
 /// Two-phase wake: attempt to wake, fall back to setting wake-pending flag.
 pub fn wake_for_handle(id: ThreadId, reason: HandleObject) {
     if !try_wake_for_handle(id, reason) {
         set_wake_pending_for_handle(id, reason);
     }
 }
-
 /// Wake all threads blocked on pager faults for the given VMO page range.
 pub fn wake_pager_waiters(vmo_id: super::vmo::VmoId, offset: u64, count: u64) {
     let mut s = STATE.lock();
     let range_end = offset + count;
-
     let mut to_wake: [u16; 64] = [0; 64];
     let mut wake_count = 0;
 
@@ -2454,16 +2387,21 @@ pub fn wake_pager_waiters(vmo_id: super::vmo::VmoId, offset: u64, count: u64) {
                 ref mut slots,
                 ..
             } = *s;
+
             blocked.remove(slot, slots);
         }
 
         let (did_wake, preferred) = {
             let thread = s.slots.get_mut(slot).expect("wake_pager: empty slot");
+
             thread.pager_wait = None;
+
             let did_wake = thread.wake();
+
             if did_wake {
                 thread.scheduling.eevdf = thread.scheduling.eevdf.mark_eligible();
             }
+
             (did_wake, thread.scheduling.last_core as usize)
         };
 
@@ -2474,14 +2412,17 @@ pub fn wake_pager_waiters(vmo_id: super::vmo::VmoId, offset: u64, count: u64) {
                 .get_mut(slot)
                 .expect("wake_pager: slot empty")
                 .location = ThreadLocation::Ready(target as u8);
+
             {
                 let State {
                     ref mut local_queues,
                     ref mut slots,
                     ..
                 } = *s;
+
                 local_queues[target].ready.push_back(slot, slots);
             }
+
             s.local_queues[target].update_load();
         } else {
             s.slots
@@ -2494,6 +2435,7 @@ pub fn wake_pager_waiters(vmo_id: super::vmo::VmoId, offset: u64, count: u64) {
                     ref mut slots,
                     ..
                 } = *s;
+
                 blocked.push_back(slot, slots);
             }
         }
@@ -2503,7 +2445,6 @@ pub fn wake_pager_waiters(vmo_id: super::vmo::VmoId, offset: u64, count: u64) {
         ipi_kick_idle_core(&s.cores, per_core::core_id() as usize);
     }
 }
-
 /// Access a process by ProcessId. Acquires the scheduler lock.
 #[inline(never)]
 pub fn with_process<R>(pid: ProcessId, f: impl FnOnce(&mut Process) -> R) -> Option<R> {
