@@ -91,6 +91,7 @@ mod handle;
 mod heap;
 mod interrupt;
 mod interrupt_controller;
+mod intrusive_list;
 mod memory;
 mod memory_mapped_io;
 mod memory_region;

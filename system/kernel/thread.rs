@@ -21,6 +21,9 @@
 //   Running→Blocked, Running→Exited, Blocked→Ready. deschedule is intentionally
 //   a no-op for non-Running states (handles kill_process marking threads Exited
 //   on other cores).
+//
+// 2026-04-03: Added intrusive list links (pool_slot, list_next, list_prev),
+// ThreadLocation enum, and generational ThreadId for O(1) scheduler operations.
 
 //! Kernel thread representation.
 
@@ -35,9 +38,6 @@ use super::{
     scheduling_algorithm::SchedulingState,
     scheduling_context::SchedulingContextId,
 };
-
-/// Distinguished ID marker for idle threads: `core_id | IDLE_THREAD_ID_MARKER`.
-const IDLE_THREAD_ID_MARKER: u64 = 0xFF00;
 
 pub const KERNEL_STACK_SIZE: usize = super::paging::KERNEL_STACK_SIZE as usize;
 /// Sentinel user_index for internal timeout timer entries in the wait set.
@@ -61,6 +61,26 @@ pub enum ThreadState {
 pub enum TrustLevel {
     Kernel,
     Untrusted,
+}
+
+/// Where a thread lives in the scheduler's data structures.
+///
+/// Used for O(1) thread lookup: instead of scanning all lists to find a thread,
+/// check its location and go directly to the right list.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ThreadLocation {
+    /// Running on core N. Stored in pool, referenced by cores[N].current_slot.
+    Current(u8),
+    /// In local_queues[N].ready intrusive list.
+    Ready(u8),
+    /// In the blocked intrusive list.
+    Blocked,
+    /// In the suspended intrusive list.
+    Suspended,
+    /// In deferred_drops[N]. Awaiting Drop on next schedule_inner.
+    DeferredDrop(u8),
+    /// In deferred_ready[N]. Will be moved to ready on next schedule_inner.
+    DeferredReady(u8),
 }
 
 /// Scheduling-related fields grouped together.
@@ -121,9 +141,46 @@ pub struct Thread {
     /// Contains (VmoId, page_offset). Set by `block_current_for_pager`,
     /// cleared by `wake_pager_waiters` when the page is supplied.
     pub(crate) pager_wait: Option<(super::vmo::VmoId, u64)>,
+    /// True if this is a boot/idle thread (one per core, never enqueued).
+    pub(crate) is_idle_thread: bool,
+    /// Index of this thread's slot in the ThreadPool. Only valid for
+    /// non-idle threads (idle threads are not in the pool).
+    pub(crate) pool_slot: u16,
+    /// Intrusive list link: next thread in the same list (pool slot index).
+    pub(crate) list_next: Option<u16>,
+    /// Intrusive list link: previous thread in the same list (pool slot index).
+    pub(crate) list_prev: Option<u16>,
+    /// Which scheduler list this thread is currently in.
+    /// Only valid for non-idle threads.
+    pub(crate) location: ThreadLocation,
 }
+
+/// Generational thread identifier.
+///
+/// Packs a slot index and a generation counter into a single u64:
+/// - bits [15:0] = pool slot index (max 65535)
+/// - bits [63:16] = generation (increments on slot reuse, prevents stale aliasing)
+///
+/// ThreadId is kernel-internal — userspace only sees opaque handles.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ThreadId(pub u64);
+
+impl ThreadId {
+    /// Create a ThreadId from a pool slot and generation.
+    pub fn new(slot: u16, generation: u64) -> Self {
+        Self((generation << 16) | slot as u64)
+    }
+    /// Extract the pool slot index (bits [15:0]).
+    pub fn slot(self) -> u16 {
+        self.0 as u16
+    }
+    /// Extract the generation counter (bits [63:16]).
+    #[allow(dead_code)] // API for tests and future use (stale-ID diagnostics).
+    pub fn generation(self) -> u64 {
+        self.0 >> 16
+    }
+}
+
 /// An entry in a thread's wait set — one handle being waited on.
 #[derive(Clone, Copy)]
 pub(crate) struct WaitEntry {
@@ -168,6 +225,11 @@ impl Thread {
             stale_waiters: Vec::new(),
             timeout_timer: None,
             pager_wait: None,
+            is_idle_thread: false,
+            pool_slot: 0,
+            list_next: None,
+            list_prev: None,
+            location: ThreadLocation::Suspended,
         }
     }
 
@@ -178,28 +240,35 @@ impl Thread {
     /// no user threads are runnable. Context is populated by exception.S save_context
     /// on the first exception entry.
     ///
-    /// Marked with IDLE_THREAD_ID_MARKER so park_old returns it to the per-core
-    /// idle slot (never the global ready queue). This prevents cross-core migration:
-    /// each boot thread stays on its originating core, using that core's boot stack.
-    pub fn new_boot_idle(core_id: u64) -> Box<Self> {
-        Box::new(Self::base(
-            ThreadId(core_id | IDLE_THREAD_ID_MARKER),
+    /// Idle threads live outside the thread pool (in PerCoreState::idle/current).
+    /// They are never enqueued in any scheduler list.
+    pub fn new_boot_idle(_core_id: u64) -> Box<Self> {
+        let mut thread = Self::base(
+            ThreadId::new(0, 0), // Idle threads don't need a valid pool ID.
             ThreadState::Running,
             TrustLevel::Kernel,
-        ))
+        );
+
+        thread.is_idle_thread = true;
+
+        Box::new(thread)
     }
     /// User thread — runs at EL0 in a process's address space.
     ///
     /// Returns `None` if the kernel stack cannot be allocated (OOM).
+    /// The caller (ThreadPool::alloc) assigns the pool_slot and ThreadId.
     pub fn new_user(
-        id: u64,
         process_id: ProcessId,
         ttbr0: u64,
         entry_va: u64,
         user_stack_top: u64,
     ) -> Option<Box<Self>> {
         let (kernel_stack_top, alloc_pa, alloc_order) = alloc_guarded_stack(KERNEL_STACK_SIZE)?;
-        let mut thread = Self::base(ThreadId(id), ThreadState::Ready, TrustLevel::Untrusted);
+        let mut thread = Self::base(
+            ThreadId::new(0, 0), // Placeholder — set by ThreadPool::alloc.
+            ThreadState::Ready,
+            TrustLevel::Untrusted,
+        );
 
         thread.context.set_pc(entry_va);
         thread.context.set_sp(kernel_stack_top);
@@ -312,12 +381,15 @@ impl Thread {
     pub(crate) fn is_exited(&self) -> bool {
         self.state == ThreadState::Exited
     }
-    /// Idle threads have distinguished IDs: `core_id | IDLE_THREAD_ID_MARKER`.
     pub(crate) fn is_idle(&self) -> bool {
-        self.id.0 & IDLE_THREAD_ID_MARKER == IDLE_THREAD_ID_MARKER
+        self.is_idle_thread
     }
     pub(crate) fn is_ready(&self) -> bool {
         self.state == ThreadState::Ready
+    }
+    /// Set the thread's ID. Called by ThreadPool::alloc after slot assignment.
+    pub(crate) fn set_id(&mut self, id: ThreadId) {
+        self.id = id;
     }
 }
 impl Drop for Thread {
@@ -352,7 +424,7 @@ unsafe impl Sync for Thread {}
 
 impl super::waitable::WaitableId for ThreadId {
     fn index(self) -> usize {
-        self.0 as usize
+        self.slot() as usize
     }
 }
 
