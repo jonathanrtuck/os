@@ -420,7 +420,7 @@ fn sys_device_map(pa: u64, size: u64) -> Result<u64, Error> {
     })
 }
 fn sys_event_create() -> Result<u64, Error> {
-    let event_id = event::create();
+    let event_id = event::create().ok_or(Error::OutOfMemory)?;
 
     scheduler::current_process_do(|process| {
         process

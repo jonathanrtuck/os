@@ -905,6 +905,9 @@ pub extern "C" fn kernel_main(dtb_pa: u64, kaslr_slide: u64) -> ! {
     init_prng();
 
     scheduler::init();
+    channel::init();
+    event::init();
+    vmo::init();
     serial::puts("  📋 scheduler - eevdf + scheduling contexts\n");
 
     // Probe virtio devices (before spawning init so the manifest is ready).

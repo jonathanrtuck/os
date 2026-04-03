@@ -117,6 +117,8 @@ pub struct VmoMapping {
 /// Here exposed directly for testing.
 pub struct VmoTable {
     vmos: Vec<Option<Vmo>>,
+    /// System-wide VMO cap. Set from `MAX_VMOS` at init; tests can override.
+    cap: usize,
 }
 
 impl Vmo {
@@ -496,7 +498,10 @@ pub const VMO_FLAG_SEALED: u64 = 1 << 1;
 impl VmoTable {
     #[allow(dead_code)] // Test-only: used by kernel/test/ VMO tests
     pub const fn new() -> Self {
-        Self { vmos: Vec::new() }
+        Self {
+            vmos: Vec::new(),
+            cap: usize::MAX,
+        }
     }
 
     /// Create a new VMO. Returns None if size is 0.
@@ -515,6 +520,11 @@ impl VmoTable {
 
                 return Some(VmoId(i as u32));
             }
+        }
+
+        // Enforce system-wide VMO cap.
+        if self.vmos.len() >= self.cap {
+            return None;
         }
 
         let id = self.vmos.len() as u32;
@@ -553,7 +563,17 @@ pub static STATE: IrqMutex<VmoTable> = IrqMutex::new(VmoTable::new_const());
 impl VmoTable {
     /// Const constructor for static initialization.
     const fn new_const() -> Self {
-        Self { vmos: Vec::new() }
+        Self {
+            vmos: Vec::new(),
+            cap: usize::MAX, // Set to MAX_VMOS by init().
+        }
+    }
+
+    /// Pre-allocate to full capacity and set the system-wide cap.
+    /// Called once from `kernel_main` after heap init.
+    pub fn init(&mut self) {
+        self.cap = super::paging::MAX_VMOS as usize;
+        self.vmos.reserve(self.cap);
     }
 }
 
@@ -615,6 +635,12 @@ pub fn get_mappings(id: VmoId) -> Vec<VmoMapping> {
         .get(id)
         .map(|v| v.mappings().to_vec())
         .unwrap_or_default()
+}
+/// Pre-allocate VMO data structures and set the system-wide cap.
+/// Called once from `kernel_main` after heap init.
+#[cfg(not(test))]
+pub fn init() {
+    STATE.lock().init();
 }
 /// Read from a VMO into a kernel buffer. Returns bytes read.
 ///

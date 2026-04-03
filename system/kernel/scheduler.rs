@@ -65,8 +65,9 @@ static STATE: IrqMutex<State> = IrqMutex::new(State {
         [INIT; per_core::MAX_CORES]
     },
     next_id: 1,
+    live_thread_count: 0,
     processes: Vec::new(),
-    next_process_id: 0,
+    free_process_ids: Vec::new(),
     scheduling_contexts: Vec::new(),
     free_context_ids: Vec::new(),
     default_context_id: None,
@@ -149,10 +150,14 @@ struct State {
     deferred_ready: [Vec<Box<Thread>>; per_core::MAX_CORES],
     cores: [PerCoreState; per_core::MAX_CORES],
     next_id: u64,
+    /// Live thread count (across all lists + cores). Checked against MAX_THREADS
+    /// on spawn. Incremented on spawn, decremented when deferred_drops drains.
+    live_thread_count: u32,
     /// All processes. Index = ProcessId.0.
     /// None = freed slot (available via free_process_ids).
     processes: Vec<Option<Process>>,
-    next_process_id: u32,
+    /// Freed process IDs available for reuse.
+    free_process_ids: Vec<u32>,
     /// All scheduling contexts. Index = SchedulingContextId.0.
     /// None = freed slot (available via free_context_ids).
     scheduling_contexts: Vec<Option<SchedulingContextSlot>>,
@@ -376,6 +381,8 @@ fn maybe_cleanup_killed_process(s: &mut State, pid: Option<ProcessId>, was_exite
                 addr_space.free_all();
 
                 super::address_space_id::free(super::address_space_id::Asid(addr_space.asid()));
+
+                s.free_process_ids.push(pid.0);
             }
         }
     }
@@ -516,7 +523,11 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
     // one's. Only this core's slot is drained — other cores may still be on
     // their exited threads' stacks between their lock release and their
     // restore_context_and_eret SP switch.
+    let drop_count = s.deferred_drops[core].len() as u32;
+
     s.deferred_drops[core].clear();
+
+    s.live_thread_count = s.live_thread_count.saturating_sub(drop_count);
 
     // Drain deferred ready threads into this core's local queue. These were
     // parked by the PREVIOUS schedule_inner on this core — safe to enqueue
@@ -911,9 +922,12 @@ fn steal_from(s: &mut State, my_core: usize, victim_core: usize) -> bool {
         .context_id;
     let max_steal = (s.local_queues[victim_core].load / 2).max(1) as usize;
     // Collect indices of threads to steal (same context, up to max_steal).
-    let mut steal_indices: Vec<usize> = Vec::new();
+    // Stack array avoids heap allocation on the work-stealing hot path.
+    let mut steal_buf = [0usize; 128];
+    let mut steal_count = 0;
 
-    steal_indices.push(primary_idx);
+    steal_buf[0] = primary_idx;
+    steal_count += 1;
 
     if let Some(ctx_id) = context_id {
         for (i, t) in s.local_queues[victim_core].ready.iter().enumerate() {
@@ -922,14 +936,17 @@ fn steal_from(s: &mut State, my_core: usize, victim_core: usize) -> bool {
             }
 
             if t.scheduling.context_id == Some(ctx_id) && has_budget(t, &s.scheduling_contexts) {
-                steal_indices.push(i);
+                steal_buf[steal_count] = i;
+                steal_count += 1;
 
-                if steal_indices.len() >= max_steal {
+                if steal_count >= max_steal || steal_count >= steal_buf.len() {
                     break;
                 }
             }
         }
     }
+
+    let steal_indices = &mut steal_buf[..steal_count];
 
     // Steal in reverse index order (swap_remove from back preserves earlier indices).
     steal_indices.sort_unstable();
@@ -1241,25 +1258,36 @@ pub fn close_handle_categories(h: HandleCategories) {
         }
     }
 }
-/// Create a new process with the given address space. Returns the ProcessId.
+/// Create a new process with the given address space.
 ///
+/// Returns `None` if the system-wide process cap (`MAX_PROCESSES`) is reached.
 /// The process starts with an empty handle table. No threads yet — call
 /// `spawn_user` to add the initial thread.
 #[inline(never)]
 pub fn create_process(
     addr_space: Box<super::address_space::AddressSpace>,
     pac_keys: super::arch::security::PacKeys,
-) -> ProcessId {
+) -> Option<ProcessId> {
     let mut s = STATE.lock();
-    let id = s.next_process_id;
-
-    s.next_process_id += 1;
-
     let process = Process::new(addr_space, pac_keys);
+
+    // Reuse a freed slot if available.
+    if let Some(free_id) = s.free_process_ids.pop() {
+        s.processes[free_id as usize] = Some(process);
+
+        return Some(ProcessId(free_id));
+    }
+
+    // Otherwise append — but enforce the cap.
+    if s.processes.len() >= paging::MAX_PROCESSES as usize {
+        return None;
+    }
+
+    let id = s.processes.len() as u32;
 
     s.processes.push(Some(process));
 
-    ProcessId(id)
+    Some(ProcessId(id))
 }
 /// Create a new scheduling context. Returns the SchedulingContextId.
 ///
@@ -1287,8 +1315,8 @@ pub fn create_scheduling_context(budget: u64, period: u64) -> Option<SchedulingC
     } else {
         let len = s.scheduling_contexts.len();
 
-        if len > u32::MAX as usize {
-            return None; // ID space exhausted
+        if len >= paging::MAX_SCHEDULING_CONTEXTS as usize {
+            return None; // System-wide scheduling context cap reached.
         }
 
         s.scheduling_contexts.push(Some(slot));
@@ -1533,6 +1561,28 @@ pub fn init() {
 
     s.default_context_id = Some(SchedulingContextId(0));
 
+    // Pre-allocate all capped data structures to full capacity. After this,
+    // push() on these Vecs will never reallocate (as long as len < capacity).
+    // This eliminates OOM risk from Vec growth on the syscall hot path.
+    s.processes.reserve(paging::MAX_PROCESSES as usize);
+    s.free_process_ids.reserve(paging::MAX_PROCESSES as usize);
+    s.scheduling_contexts
+        .reserve(paging::MAX_SCHEDULING_CONTEXTS as usize);
+    s.free_context_ids
+        .reserve(paging::MAX_SCHEDULING_CONTEXTS as usize);
+    s.blocked.reserve(paging::MAX_THREADS as usize);
+    s.suspended.reserve(paging::MAX_THREADS as usize);
+
+    for q in &mut s.local_queues {
+        q.ready.reserve(paging::MAX_THREADS as usize);
+    }
+    for d in &mut s.deferred_drops {
+        d.reserve(paging::MAX_THREADS as usize);
+    }
+    for d in &mut s.deferred_ready {
+        d.reserve(paging::MAX_THREADS as usize);
+    }
+
     // Set current-thread pointer so exception.S can locate the save area.
     // SAFETY: ctx_ptr points to the Context at offset 0 of the boot thread,
     // which lives in a Box (stable address) stored in the scheduler state.
@@ -1590,6 +1640,8 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
     let mut killed_threads = Vec::new();
     let mut timeout_timers = Vec::new();
     let mut running_count: u32 = 0;
+    let mut removed_count: u32 = 0;
+
     // Remove target threads from all local ready queues.
     for q in 0..per_core::MAX_CORES {
         let mut i = 0;
@@ -1606,6 +1658,8 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
                 }
 
                 killed_threads.push(thread.id());
+
+                removed_count += 1;
             } else {
                 i += 1;
             }
@@ -1629,6 +1683,8 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
             }
 
             killed_threads.push(thread.id());
+
+            removed_count += 1;
         } else {
             i += 1;
         }
@@ -1650,10 +1706,16 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
             }
 
             killed_threads.push(thread.id());
+
+            removed_count += 1;
         } else {
             i += 1;
         }
     }
+
+    // Decrement live count for immediately-removed threads. Threads still
+    // running on other cores are decremented when they hit deferred_drops.
+    s.live_thread_count = s.live_thread_count.saturating_sub(removed_count);
 
     // Mark running threads on other cores as Exited. Collect context IDs and
     // timeout timers to release after the loop (can't call release_context_inner
@@ -1701,6 +1763,8 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
         // No threads running on any core — take the process for immediate cleanup.
         // Unwrap justified: process validated at top of kill_process.
         let process = s.processes[target_pid.0 as usize].take().unwrap();
+
+        s.free_process_ids.push(target_pid.0);
 
         Some(process.address_space)
     } else {
@@ -1753,7 +1817,9 @@ pub fn remove_empty_process(pid: ProcessId) {
         }
 
         // Take and drop the process — AddressSpace::drop handles cleanup.
-        *slot = None;
+        if slot.take().is_some() {
+            s.free_process_ids.push(pid.0);
+        }
     }
 }
 /// Return a borrowed scheduling context, restoring the saved one.
@@ -1879,6 +1945,11 @@ pub fn set_wake_pending_for_handle(id: ThreadId, reason: HandleObject) {
 #[inline(never)]
 pub fn spawn_user(process_id: ProcessId, entry_va: u64, user_stack_top: u64) -> Option<ThreadId> {
     let mut s = STATE.lock();
+
+    if s.live_thread_count >= paging::MAX_THREADS as u32 {
+        return None;
+    }
+
     let id = s.next_id;
 
     s.next_id += 1;
@@ -1890,6 +1961,7 @@ pub fn spawn_user(process_id: ProcessId, entry_va: u64, user_stack_top: u64) -> 
     let mut thread = Thread::new_user(id, process_id, ttbr0, entry_va, user_stack_top)?;
 
     process.thread_count += 1;
+    s.live_thread_count += 1;
 
     bind_default_context(&mut s, &mut thread);
 
@@ -1914,6 +1986,11 @@ pub fn spawn_user_suspended(
     user_stack_top: u64,
 ) -> Option<ThreadId> {
     let mut s = STATE.lock();
+
+    if s.live_thread_count >= paging::MAX_THREADS as u32 {
+        return None;
+    }
+
     let id = s.next_id;
 
     s.next_id += 1;
@@ -1925,6 +2002,7 @@ pub fn spawn_user_suspended(
     let mut thread = Thread::new_user(id, process_id, ttbr0, entry_va, user_stack_top)?;
 
     process.thread_count += 1;
+    s.live_thread_count += 1;
 
     bind_default_context(&mut s, &mut thread);
 

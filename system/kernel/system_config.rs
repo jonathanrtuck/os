@@ -32,16 +32,28 @@ pub const KERNEL_STACK_SIZE: u64 = 16 * 1024; // 16 KiB
 /// addresses. T1SZ=28 => kernel VA starts at 0xFFFF_FFF0_0000_0000.
 /// kernel/link.ld.in has `KERNEL_VA_OFFSET = @KERNEL_VA_OFFSET@`.
 pub const KERNEL_VA_OFFSET: u64 = 0xFFFF_FFF0_0000_0000;
+/// Maximum concurrent channels (global). Two endpoints per channel.
+pub const MAX_CHANNELS: u64 = 512;
 /// Maximum SMP cores. Determines per-core data structure sizing.
 /// Actual core count discovered from DTB; this is the compile-time upper bound.
 pub const MAX_CORES: u64 = 8;
+/// Maximum concurrent events (global). Lightweight waitable notifications.
+pub const MAX_EVENTS: u64 = 128;
 /// Maximum handles per process. Two-level table: BASE inline + overflow pages.
 /// 4096 handles × 16 bytes/entry = 64 KiB worst-case per process.
 pub const MAX_HANDLES: u64 = 4096;
 /// Maximum concurrent interrupt handles (global).
 pub const MAX_INTERRUPTS: u64 = 32;
+/// Maximum concurrent processes (global). Each owns an address space.
+pub const MAX_PROCESSES: u64 = 256;
+/// Maximum concurrent scheduling contexts (global). Budget/period isolation.
+pub const MAX_SCHEDULING_CONTEXTS: u64 = 128;
+/// Maximum concurrent threads (global). Across all processes.
+pub const MAX_THREADS: u64 = 512;
 /// Maximum concurrent timer objects (global).
 pub const MAX_TIMERS: u64 = 32;
+/// Maximum concurrent VMOs (global). Virtual memory objects.
+pub const MAX_VMOS: u64 = 1024;
 /// Maximum handles in a single `wait()` syscall.
 pub const MAX_WAIT_HANDLES: u64 = 16;
 /// log2(PAGE_SIZE). Used in boot.S shift instructions and page table indexing.

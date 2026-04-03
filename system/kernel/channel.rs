@@ -4,6 +4,10 @@
 // closed_count >= 2. Close-while-blocked-reader race verified correct (two-phase wake
 // pattern). Signal on half-closed channel is harmless. Shared memory pages freed
 // exactly once when both endpoints close. Lock ordering (channel → scheduler) verified.
+//
+// 2026-04-03: Added resource caps (MAX_CHANNELS) and slot reuse via free list.
+// Vec<Channel> → Vec<Option<Channel>> with free_ids recycling. Pre-allocated
+// to full capacity at boot so push() never reallocates.
 
 //! IPC channels — shared memory with signal/wait notification.
 //!
@@ -44,7 +48,7 @@ use alloc::vec::Vec;
 
 use super::{
     handle::{ChannelId, Handle, HandleError, HandleObject, Rights},
-    memory, page_allocator,
+    memory, page_allocator, paging,
     process::ProcessId,
     scheduler,
     sync::IrqMutex,
@@ -59,11 +63,14 @@ struct Channel {
     closed_count: u8,
 }
 struct State {
-    channels: Vec<Channel>,
+    channels: Vec<Option<Channel>>,
+    /// Freed channel indices available for reuse.
+    free_ids: Vec<u32>,
 }
 
 static STATE: IrqMutex<State> = IrqMutex::new(State {
     channels: Vec::new(),
+    free_ids: Vec::new(),
 });
 
 fn channel_index(id: ChannelId) -> usize {
@@ -79,7 +86,14 @@ fn endpoint_index(id: ChannelId) -> usize {
 /// caller should NOT block. Returns `false` if no signal was pending.
 pub fn check_pending(id: ChannelId) -> bool {
     let mut s = STATE.lock();
-    let ch = &mut s.channels[channel_index(id)];
+    let ch = match s
+        .channels
+        .get_mut(channel_index(id))
+        .and_then(|s| s.as_mut())
+    {
+        Some(ch) => ch,
+        None => return false,
+    };
     let ep = endpoint_index(id);
 
     if ch.pending_signal[ep] {
@@ -97,7 +111,10 @@ pub fn close_endpoint(id: ChannelId) {
     let (pages_to_free, peer_wake) = {
         let mut s = STATE.lock();
         let ch_idx = channel_index(id);
-        let ch = &mut s.channels[ch_idx];
+        let ch = match s.channels.get_mut(ch_idx).and_then(|s| s.as_mut()) {
+            Some(ch) => ch,
+            None => return,
+        };
 
         // Already fully closed — prevent double-free of shared pages.
         if ch.closed_count >= 2 {
@@ -120,6 +137,10 @@ pub fn close_endpoint(id: ChannelId) {
 
             ch.pages = [memory::Pa(0), memory::Pa(0)];
 
+            // Both endpoints closed — free the slot for reuse.
+            s.channels[ch_idx] = None;
+            s.free_ids.push(ch_idx as u32);
+
             Some(pages)
         } else {
             None
@@ -139,6 +160,9 @@ pub fn close_endpoint(id: ChannelId) {
 }
 /// Create a channel. Allocates two shared physical pages and returns two endpoint IDs.
 ///
+/// Returns `None` if page allocation fails or the system-wide channel cap
+/// (`MAX_CHANNELS`) is reached.
+///
 /// Page 0 carries messages from endpoint 0 to endpoint 1.
 /// Page 1 carries messages from endpoint 1 to endpoint 0.
 /// Both endpoints start unmapped — use `setup_endpoint` for boot-time setup
@@ -152,22 +176,60 @@ pub fn create() -> Option<(ChannelId, ChannelId)> {
             return None;
         }
     };
-    let mut s = STATE.lock();
-    let idx = s.channels.len() as u32;
 
-    s.channels.push(Channel {
+    let new_channel = Channel {
         pages: [page0, page1],
         pending_signal: [false, false],
         waiter: [None, None],
         closed_count: 0,
-    });
+    };
+
+    let mut s = STATE.lock();
+
+    // Reuse a freed slot if available.
+    let idx = if let Some(free_id) = s.free_ids.pop() {
+        s.channels[free_id as usize] = Some(new_channel);
+
+        free_id
+    } else {
+        // Enforce system-wide cap.
+        if s.channels.len() >= paging::MAX_CHANNELS as usize {
+            page_allocator::free_frame(page0);
+            page_allocator::free_frame(page1);
+
+            return None;
+        }
+
+        let idx = s.channels.len() as u32;
+
+        s.channels.push(Some(new_channel));
+
+        idx
+    };
 
     Some((ChannelId(idx * 2), ChannelId(idx * 2 + 1)))
+}
+/// Pre-allocate channel data structures to full capacity.
+///
+/// Called once from `kernel_main` after heap init. Ensures that `push()` on
+/// the channels Vec never triggers reallocation during syscall handling.
+pub fn init() {
+    let mut s = STATE.lock();
+
+    s.channels.reserve(paging::MAX_CHANNELS as usize);
+    s.free_ids.reserve(paging::MAX_CHANNELS as usize);
 }
 /// Register a thread as the waiter for a channel endpoint.
 pub fn register_waiter(id: ChannelId, waiter: ThreadId) {
     let mut s = STATE.lock();
-    let ch = &mut s.channels[channel_index(id)];
+    let ch = match s
+        .channels
+        .get_mut(channel_index(id))
+        .and_then(|s| s.as_mut())
+    {
+        Some(ch) => ch,
+        None => return,
+    };
     let ep = endpoint_index(id);
 
     ch.waiter[ep] = Some(waiter);
@@ -180,7 +242,11 @@ pub fn register_waiter(id: ChannelId, waiter: ThreadId) {
 pub fn setup_endpoint(id: ChannelId, pid: ProcessId) -> Result<Handle, HandleError> {
     let pages = {
         let s = STATE.lock();
-        s.channels[channel_index(id)].pages
+
+        match s.channels.get(channel_index(id)).and_then(|s| s.as_ref()) {
+            Some(ch) => ch.pages,
+            None => return Err(HandleError::InvalidHandle),
+        }
     };
 
     scheduler::with_process(pid, |process| {
@@ -205,14 +271,8 @@ pub fn setup_endpoint(id: ChannelId, pid: ProcessId) -> Result<Handle, HandleErr
 /// page 1 is the ep1→ep0 ring. Returns `None` if the channel is fully closed.
 pub fn shared_pages(id: ChannelId) -> Option<[memory::Pa; 2]> {
     let s = STATE.lock();
-    let idx = channel_index(id);
-    let ch = &s.channels[idx];
 
-    if ch.closed_count >= 2 {
-        return None;
-    }
-
-    Some(ch.pages)
+    Some(s.channels.get(channel_index(id))?.as_ref()?.pages)
 }
 /// Signal the peer endpoint of a channel.
 ///
@@ -222,7 +282,10 @@ pub fn signal(id: ChannelId) {
     let (waiter, peer_id) = {
         let mut s = STATE.lock();
         let ch_idx = channel_index(id);
-        let ch = &mut s.channels[ch_idx];
+        let ch = match s.channels.get_mut(ch_idx).and_then(|s| s.as_mut()) {
+            Some(ch) => ch,
+            None => return,
+        };
         let peer_ep = 1 - endpoint_index(id);
 
         ch.pending_signal[peer_ep] = true;
@@ -241,7 +304,14 @@ pub fn signal(id: ChannelId) {
 /// Unregister a waiter (cleanup when `wait` returns).
 pub fn unregister_waiter(id: ChannelId) {
     let mut s = STATE.lock();
-    let ch = &mut s.channels[channel_index(id)];
+    let ch = match s
+        .channels
+        .get_mut(channel_index(id))
+        .and_then(|s| s.as_mut())
+    {
+        Some(ch) => ch,
+        None => return,
+    };
     let ep = endpoint_index(id);
 
     ch.waiter[ep] = None;

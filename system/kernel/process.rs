@@ -209,7 +209,8 @@ pub fn create_from_user_elf(elf_bytes: &[u8]) -> Result<(ProcessId, ThreadId), &
         Some(mut prng) => super::arch::security::PacKeys::generate(&mut prng),
         None => super::arch::security::PacKeys::zero(),
     };
-    let process_id = scheduler::create_process(addr_space, pac_keys);
+    let process_id =
+        scheduler::create_process(addr_space, pac_keys).ok_or("process limit reached")?;
     let thread_id =
         match scheduler::spawn_user_suspended(process_id, header.entry, layout.stack_top) {
             Some(tid) => tid,
