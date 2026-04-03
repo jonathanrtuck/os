@@ -9,6 +9,14 @@
 *~
 design/drafts/
 docs/
-reference/
 target/
 .venv/
+
+# Build artifacts
+*.bin
+*.dtb
+*.img
+rustc-ice-*.txt
+
+# Vendored binaries (untracked)
+/vendor/

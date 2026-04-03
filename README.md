@@ -75,14 +75,12 @@ For the full design landscape, see the [decision register](design/decisions.md) 
 ### Build
 
 ```sh
-cd system
 cargo build -r
 ```
 
 ### Run
 
 ```sh
-cd system
 cargo run -r
 ```
 
@@ -113,48 +111,49 @@ os/
 │   ├── roadmap.md                   # Milestone plan (v0.5–v1.0), sequencing rationale
 │   ├── journal.md                   # Open threads, insights, research spikes
 │   ├── research/                    # COW filesystems, OS landscape, font rendering
+│   ├── reference/                   # External papers (Mercury OS, Ideal OS)
 │   └── *.mermaid                    # Architecture, dependency, pipeline diagrams
-├── system/                          # OS implementation (Rust, no_std)
-│   ├── kernel/                      # Microkernel (46 syscalls, EEVDF, GICv3, SMP)
-│   ├── services/
-│   │   ├── init/                    # Root task — spawns everything, wires IPC
-│   │   ├── presenter/               # View engine (C) — scene graph builder, input router
-│   │   ├── layout/                  # Layout engine (B) — text layout with styled runs
-│   │   ├── document/                # Document service — COW persistence, undo/redo
-│   │   ├── store/                   # Store service — metadata catalog
-│   │   ├── decoders/png/            # Sandboxed PNG decoder
-│   │   └── drivers/
-│   │       ├── metal-render/        # Metal render service (sole backend, via hypervisor)
-│   │       ├── virtio-input/        # Keyboard + tablet input (evdev translation)
-│   │       ├── virtio-9p/           # Host filesystem passthrough (9P2000.L)
-│   │       ├── virtio-blk/          # Block device (sector reads)
-│   │       └── virtio-console/      # Serial console (minimal)
-│   ├── libraries/
-│   │   ├── sys/                     # Syscall wrappers + userspace allocator
-│   │   ├── virtio/                  # MMIO transport + split virtqueue
-│   │   ├── drawing/                 # Surfaces, colors, compositing, palette
-│   │   ├── fonts/                   # TrueType rasterizer, stem darkening, glyph cache
-│   │   ├── piecetable/              # Piece table for text/rich documents
-│   │   ├── animation/               # Easing functions, spring physics, timelines
-│   │   ├── layout/                  # Unified text layout engine (mono + proportional)
-│   │   ├── render/                  # Frame scheduler, path rasterizer, coordinate helpers
-│   │   ├── scene/                   # Scene graph nodes, triple-buffered shared memory
-│   │   ├── icons/                   # Named vector icons (Tabler SVGs, mimetype lookup)
-│   │   ├── ipc/                     # Lock-free SPSC ring buffers
-│   │   ├── protocol/                # IPC message types + payload structs (10 boundaries)
-│   │   ├── fs/                      # COW filesystem (block device, snapshots, inodes)
-│   │   └── store/                   # Document store metadata layer
-│   ├── user/
-│   │   ├── text-editor/             # Editor for text/plain (input → write requests)
-│   │   ├── rich-editor/             # Editor for text/rich (piece table documents)
-│   │   ├── echo/                    # IPC test program
-│   │   ├── stress/                  # IPC stress test program
-│   │   ├── fuzz/                    # Fuzzing harness
-│   │   └── fuzz-helper/             # Fuzzing helper
-│   ├── test/                        # Host-side unit + visual regression tests
-│   └── tools/mkdisk/               # Factory disk image builder
-├── prototype/
-│   └── files/                       # Files interface prototype (macOS-backed)
+├── kernel/                          # Microkernel (46 syscalls, EEVDF, GICv3, SMP)
+├── services/
+│   ├── init/                        # Root task — spawns everything, wires IPC
+│   ├── presenter/                   # View engine — scene graph builder, input router
+│   ├── layout/                      # Layout engine — text layout with styled runs
+│   ├── document/                    # Document service — COW persistence, undo/redo
+│   ├── store/                       # Store service — metadata catalog
+│   ├── decoders/png/                # Sandboxed PNG decoder
+│   └── drivers/
+│       ├── metal-render/            # Metal render service (sole backend, via hypervisor)
+│       ├── virtio-input/            # Keyboard + tablet input (evdev translation)
+│       ├── virtio-9p/               # Host filesystem passthrough (9P2000.L)
+│       ├── virtio-blk/              # Block device (sector reads)
+│       └── virtio-console/          # Serial console (minimal)
+├── libraries/
+│   ├── sys/                         # Syscall wrappers + userspace allocator
+│   ├── virtio/                      # MMIO transport + split virtqueue
+│   ├── drawing/                     # Surfaces, colors, compositing, palette
+│   ├── fonts/                       # TrueType rasterizer, stem darkening, glyph cache
+│   ├── piecetable/                  # Piece table for text/rich documents
+│   ├── animation/                   # Easing functions, spring physics, timelines
+│   ├── layout/                      # Unified text layout engine (mono + proportional)
+│   ├── render/                      # Frame scheduler, path rasterizer, coordinate helpers
+│   ├── scene/                       # Scene graph nodes, triple-buffered shared memory
+│   ├── icons/                       # Named vector icons (Tabler SVGs, mimetype lookup)
+│   ├── ipc/                         # Lock-free SPSC ring buffers
+│   ├── protocol/                    # IPC message types + payload structs (10 boundaries)
+│   ├── fs/                          # COW filesystem (block device, snapshots, inodes)
+│   └── store/                       # Document store metadata layer
+├── user/
+│   ├── text-editor/                 # Editor for text/plain (input → write requests)
+│   ├── rich-editor/                 # Editor for text/rich (piece table documents)
+│   ├── echo/                        # IPC test program
+│   ├── stress/                      # IPC stress test program
+│   ├── fuzz/                        # Fuzzing harness
+│   └── fuzz-helper/                 # Fuzzing helper
+├── host/                            # Host-side unit + visual regression tests
+├── assets/                          # Fonts, icons, test images (baked into disk.img)
+├── tools/                           # Host-side build tools (mkdisk, mkservices)
+├── Cargo.toml                       # Workspace root
+├── build.rs                         # Build orchestrator
 ├── CLAUDE.md                        # AI collaboration context
 ├── README.md
 └── UNLICENSE
@@ -173,10 +172,10 @@ If you’re curious about the design, read in this order:
 
 If you're curious about the implementation, start here:
 
-1. **[System Design](system/DESIGN.md)** — Userspace architecture: libraries, services, drivers, what's foundational vs scaffolding
-2. **[Kernel Design](system/kernel/DESIGN.md)** — Rationale for every kernel subsystem (boot, memory, scheduling, IPC, devices)
-3. **[Kernel README](system/kernel/README.md)** — Feature list, build/test commands, source file guide
-4. **[Rendering Capabilities](system/rendering-capabilities.md)** — What the rendering pipeline can and cannot do, compared to real systems
+1. **[System Design](design/userspace.md)** — Userspace architecture: libraries, services, drivers, what's foundational vs scaffolding
+2. **[Kernel Design](kernel/DESIGN.md)** — Rationale for every kernel subsystem (boot, memory, scheduling, IPC, devices)
+3. **[Kernel README](kernel/README.md)** — Feature list, build/test commands, source file guide
+4. **[Rendering Capabilities](design/rendering-capabilities.md)** — What the rendering pipeline can and cannot do, compared to real systems
 
 ## influences
 

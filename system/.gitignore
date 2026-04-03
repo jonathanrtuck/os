@@ -1,6 +1,0 @@
-*.bin
-*.dtb
-*.img
-/bin/
-rustc-ice-*.txt
-target/

@@ -77,7 +77,7 @@ Read these before making any design suggestions:
 - `design/architecture.md` — The system's architectural narrative: one-way pipeline, what each component understands, where responsibilities live, decision checklist
 - `design/architecture.mermaid` — System architecture diagram (process layers, IPC, memory mapping)
 - `design/journal.md` — Open threads, discussion backlog, insights log, research spikes. The "pick up where you left off" document.
-- `system/DESIGN.md` — Userspace architecture: libraries, services, drivers. Component status (foundational vs scaffolding), constraints, gaps, dependency map. Companion to `system/kernel/DESIGN.md`.
+- `design/userspace.md` — Userspace architecture: libraries, services, drivers. Component status (foundational vs scaffolding), constraints, gaps, dependency map. Companion to `kernel/DESIGN.md`.
 
 ## Settled Decisions
 
@@ -140,7 +140,7 @@ Read these before making any design suggestions:
 
 ### Testing requirements
 
-- `cargo test -- --test-threads=1` in `system/test/` MUST pass (all ~2,236 tests).
+- `cargo test -- --test-threads=1` in `host/` MUST pass (all ~2,236 tests).
 - Any change touching syscall handlers, scheduling, IPC (channel/timer/interrupt/futex), or thread lifecycle MUST be stress tested:
   ```sh
   # Boot QEMU with full display pipeline and send sustained input for 60+ seconds
@@ -156,13 +156,13 @@ Read these before making any design suggestions:
 
 ## Rust Formatting Convention (MANDATORY)
 
-All `.rs` files follow standard Rust community conventions. Mechanical formatting is handled by `rustfmt` (config in `system/rustfmt.toml`); file layout is enforced by convention.
+All `.rs` files follow standard Rust community conventions. Mechanical formatting is handled by `rustfmt` (config in `rustfmt.toml`); file layout is enforced by convention.
 
 ### Mechanical formatting (rustfmt)
 
-A PostToolUse hook (`.claude/hooks/rustfmt-post-edit.sh`) runs `rustfmt --edition 2021` on every `.rs` file after Edit or Write. Manual runs: `rustfmt --edition 2021 <file>` or `cargo +nightly fmt` from `system/`.
+A PostToolUse hook (`.claude/hooks/rustfmt-post-edit.sh`) runs `rustfmt --edition 2021` on every `.rs` file after Edit or Write. Manual runs: `rustfmt --edition 2021 <file>` or `cargo +nightly fmt` from the repo root.
 
-`system/rustfmt.toml` enables two nightly features:
+`rustfmt.toml` enables two nightly features:
 
 - `group_imports = "StdExternalCrate"` — separates std, external, and local imports with blank lines
 - `imports_granularity = "Crate"` — merges imports from the same crate into one `use` statement
@@ -200,7 +200,7 @@ Every `.rs` file follows this order:
 # (cargo run -r handles this automatically via run.sh)
 
 # Automated: capture frame 30 as PNG, then exit
-cd system && cargo build --release
+cargo build --release
 hypervisor target/aarch64-unknown-none/release/kernel --drive disk.img --background --capture 30 /tmp/screenshot.png
 # Then Read /tmp/screenshot.png
 
@@ -243,25 +243,25 @@ kill -USR1 $(pgrep hypervisor)
 
 ### Visual assertion tool (verify.py) — MANDATORY
 
-**Never eyeball screenshots to judge correctness.** Downscaled images in the conversation are unreliable — you WILL hallucinate pixel differences. Use `system/test/verify.py` for PASS/FAIL verdicts. **Never interpret raw measurements** — the tool makes the judgment call, not you.
+**Never eyeball screenshots to judge correctness.** Downscaled images in the conversation are unreliable — you WILL hallucinate pixel differences. Use `host/verify.py` for PASS/FAIL verdicts. **Never interpret raw measurements** — the tool makes the judgment call, not you.
 
 ```sh
-PYTHON=system/test/.venv/bin/python3
+PYTHON=host/.venv/bin/python3
 
 # Run assertions against a capture — returns PASS or FAIL with evidence
-$PYTHON system/test/verify.py /tmp/screenshot.png \
+$PYTHON host/verify.py /tmp/screenshot.png \
   --assert 'frame_not_blank' \
   --assert 'page_centered tol=5' \
   --assert 'cursor_visible_at x=400 y=400 size=32 tol=15'
 
 # Run from a spec file (one assertion per line, # comments)
-$PYTHON system/test/verify.py /tmp/screenshot.png --spec system/test/visual/boot-idle.spec
+$PYTHON host/verify.py /tmp/screenshot.png --spec host/visual/boot-idle.spec
 
 # SSIM comparison against a baseline
-$PYTHON system/test/verify.py /tmp/after.png --assert 'ssim_above ref=/tmp/before.png threshold=0.99'
+$PYTHON host/verify.py /tmp/after.png --assert 'ssim_above ref=/tmp/before.png threshold=0.99'
 
 # Specific pixel check
-$PYTHON system/test/verify.py /tmp/screenshot.png --assert 'pixel_is x=100 y=100 r=32 g=32 b=32 tol=5'
+$PYTHON host/verify.py /tmp/screenshot.png --assert 'pixel_is x=100 y=100 r=32 g=32 b=32 tol=5'
 ```
 
 **Available assertions:**
@@ -282,7 +282,7 @@ $PYTHON system/test/verify.py /tmp/screenshot.png --assert 'pixel_is x=100 y=100
 
 **Cursor compositing:** Captures always include the cursor (composited via GPU onto the staging texture). Event scripts can position the cursor with `move x y`.
 
-**Visual test suite:** Run `cd system/test && ./visual-test.sh` to execute all visual regression tests (boot-idle, cursor-dark, cursor-page, after-type). Each test boots the hypervisor, runs a scenario, captures, and asserts. All tests must pass before shipping display changes.
+**Visual test suite:** Run `cd host && ./visual-test.sh` to execute all visual regression tests (boot-idle, cursor-dark, cursor-page, after-type). Each test boots the hypervisor, runs a scenario, captures, and asserts. All tests must pass before shipping display changes.
 
 **Visual TDD workflow:**
 
@@ -296,7 +296,7 @@ $PYTHON system/test/verify.py /tmp/screenshot.png --assert 'pixel_is x=100 y=100
 
 **Legacy tool (imgdiff.py):** Still available for raw measurements, but prefer verify.py for all verification. imgdiff.py returns numbers for you to interpret; verify.py returns verdicts.
 
-Launch: `cd system && cargo run -r` (default, no env vars needed).
+Launch: `cargo run -r` (default, no env vars needed).
 
 ### When to use this
 

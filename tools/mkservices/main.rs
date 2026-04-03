@@ -13,7 +13,7 @@ use std::{env, fs, process};
 
 mod pack_format {
     #![allow(dead_code)]
-    include!("../../system/pack_format.rs");
+    include!("../../pack_format.rs");
 }
 
 fn main() {

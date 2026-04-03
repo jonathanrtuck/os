@@ -26,7 +26,7 @@ Two additional decisions: `IrqState` opaque newtype for saved interrupt state (R
 
 ## Sole-Writer Scaling Under Compound Documents — OPEN (2026-04-01)
 
-**Context:** Extracted from a deep research review (most findings were wrong, but this userspace concern is real). The kernel-level concerns from the same review (security model, EEVDF tuning) are in `system/kernel/DESIGN.md` §13.1–13.2.
+**Context:** Extracted from a deep research review (most findings were wrong, but this userspace concern is real). The kernel-level concerns from the same review (security model, EEVDF tuning) are in `kernel/DESIGN.md` §13.1–13.2.
 
 The document service is the sole writer to document state — core design principle (Decision #8, #9). Today this is one document, one editor, no contention. But compound documents (v0.8) introduce multiple content parts edited simultaneously, and realtime/streaming (v0.9) adds multiple concurrent writers (local user + remote participants).
 
@@ -239,7 +239,7 @@ Every service is marked "scaffolding" in DESIGN.md. The libraries are "foundatio
 
 **No action needed** — just awareness. When promoting services from scaffolding to foundational, the test is interface stability, not implementation quality.
 
-**Resolution (2026-03-31):** Replaced scaffolding/foundational with a two-axis labeling model. See `system/DESIGN.md` for details.
+**Resolution (2026-03-31):** Replaced scaffolding/foundational with a two-axis labeling model. See `design/userspace.md` for details.
 
 **Axis 1 — Interface change cost** (property of the interface, not the code):
 
@@ -1238,7 +1238,7 @@ The durable content from the v0.4 sprint spec has been extracted into `design/fo
 | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | B1   | virtio-blk driver rewrite: `BlkDevice` struct with `read_block`/`write_block`/`flush`, `VIRTIO_BLK_F_FLUSH` feature negotiation, self-test (read/write/verify cycle)                                   |
 | B2   | Hypervisor file-backed virtio-blk backend: `VirtioBlock.swift`, `--drive` flag, `F_FULLFSYNC` on flush for crash consistency on macOS                                                                  |
-| B3   | Filesystem service port to bare-metal: `no_std` fs library at `system/libraries/fs/`, `VirtioBlockDevice` with `RefCell` for interior mutability, filesystem service at `system/services/filesystem/`  |
+| B3   | Filesystem service port to bare-metal: `no_std` fs library at `libraries/fs/`, `VirtioBlockDevice` with `RefCell` for interior mutability, filesystem service at `services/filesystem/`                |
 | B4   | Core integration via IPC: `protocol::blkfs` boundary, core sends `MSG_FS_COMMIT` at operation boundaries (after draining pending editor messages), doc buffer shared read-only with filesystem service |
 
 ### Design decisions that emerged
@@ -1340,7 +1340,7 @@ Syscall wrappers, GlobalAlloc, spinlocks, timers, atomics all in one file. Every
 
 **Status: DONE** — implemented.
 
-`system/system_config.rs` is the SSOT for 9 root constants (PAGE_SIZE, PAGE_SHIFT, RAM_START, KERNEL_VA_OFFSET, USER_CODE_BASE, CHANNEL_SHM_BASE, USER_STACK_TOP, USER_STACK_PAGES, SHARED_MEMORY_BASE). All `u64`. Consumed by:
+`kernel/system_config.rs` is the SSOT for 9 root constants (PAGE_SIZE, PAGE_SHIFT, RAM_START, KERNEL_VA_OFFSET, USER_CODE_BASE, CHANNEL_SHM_BASE, USER_STACK_TOP, USER_STACK_PAGES, SHARED_MEMORY_BASE). All `u64`. Consumed by:
 
 - **Kernel:** `paging.rs` includes via `mod system_config { include!(...) }; pub use system_config::*`
 - **Userspace libraries:** ipc, sys, protocol, virtio — each includes in a private `mod system_config`
@@ -2272,7 +2272,7 @@ How should the OS store, render, and map icons? Three sub-questions: (1) what fo
 
 1. Add arc, h/v, s, q command support to path pipeline (scene library)
 2. Add runtime stroke rendering to path pipeline (render backends)
-3. Build host-side SVG→path converter tool (`system/tools/svg2path/` or in `build.rs`)
+3. Build host-side SVG→path converter tool (`tools/svg2path/` or in `build.rs`)
 4. Create `libraries/icons/` with compiled-in icon data and mimetype lookup
 5. Integrate into core: document type icon in title bar, baseline-aligned with text
 
@@ -3910,7 +3910,7 @@ All 36 fuzz phases pass. 896 host tests pass. Build clean.
 **Architecture notes:**
 
 - Chose 9P over virtiofs (simpler protocol, no host daemon, confirmed in QEMU).
-- Shared host directory: `system/share/` — contains source-code-pro.ttf (9 KB).
+- Shared host directory: `assets/` — contains source-code-pro.ttf (9 KB).
 - QEMU flags added to all 4 scripts (run, test, integration, crash).
 - This validates the prototype-on-host strategy from Decision #16: implement Files against the host filesystem during prototyping, defer the real COW filesystem.
 
@@ -4106,9 +4106,9 @@ Open questions: system gesture vs shell input boundary, compound editor nesting 
 - **Three components, one interface.** Compositor (above) works with surfaces, calls trait methods. Driver (below) translates trait methods to hardware operations. The trait is the boundary — a contract, not a component. The compositor doesn't know if the driver uses CPU loops, GPU commands, or anything else. Software rendering is a fallback strategy inside the driver, not a separate thing the OS selects.
 - **virtio-gpu overhead is inherent, not architectural.** Performance hit is the VM boundary (guest→host copy). With real hardware, the display controller reads directly from the buffer via DMA scanout — no copy. The abstraction doesn't add overhead; virtio does.
 - **Build plan:** (a) virtio-gpu userspace driver ✅, (b) drawing primitives + bitmap font ✅, (c) toy compositor ✅. All done. Everything above the driver is portable to real hardware.
-- **Step (a) done (2026-03-10):** `system/services/drivers/virtio-gpu/main.rs`. All 6 core 2D commands. Test pattern at 1280x800.
-- **Step (b) done (2026-03-10):** `system/libraries/drawing/` — pure no_std drawing library. Surface abstraction with RGBA canonical format (encode/decode at pixel boundary). Primitives: fill_rect, draw_rect, draw_line (Bresenham), draw_hline/vline, set/get_pixel, blit. Embedded 8×16 VGA bitmap font with draw_glyph/draw_text. 41 host-side tests.
-- **Step (c) done (2026-03-10):** `system/services/compositor/main.rs` — toy compositor draws demo scene (title bar, 3 colored panels with text, status bar) into shared framebuffer. `system/services/init/main.rs` — proto-OS-service that embeds all ELFs, reads device manifest, spawns all processes, orchestrates display pipeline. Kernel `memory_share` syscall (#24) enables zero-copy framebuffer sharing. Full pipeline: init → DMA alloc → share with compositor → compositor draws → signal → GPU driver presents → pixels on screen.
+- **Step (a) done (2026-03-10):** `services/drivers/virtio-gpu/main.rs`. All 6 core 2D commands. Test pattern at 1280x800.
+- **Step (b) done (2026-03-10):** `libraries/drawing/` — pure no_std drawing library. Surface abstraction with RGBA canonical format (encode/decode at pixel boundary). Primitives: fill_rect, draw_rect, draw_line (Bresenham), draw_hline/vline, set/get_pixel, blit. Embedded 8×16 VGA bitmap font with draw_glyph/draw_text. 41 host-side tests.
+- **Step (c) done (2026-03-10):** `services/compositor/main.rs` — toy compositor draws demo scene (title bar, 3 colored panels with text, status bar) into shared framebuffer. `services/init/main.rs` — proto-OS-service that embeds all ELFs, reads device manifest, spawns all processes, orchestrates display pipeline. Kernel `memory_share` syscall (#24) enables zero-copy framebuffer sharing. Full pipeline: init → DMA alloc → share with compositor → compositor draws → signal → GPU driver presents → pixels on screen.
 - **Alignment bug found (2026-03-10):** u64 `read_volatile` from 4-byte-aligned address is UB in Rust. Caused silent process death. Fixed by padding device manifest entries to 8-byte alignment. User fault handler didn't print diagnostic before killing process — known kernel bug.
 
 Open questions: exact surface trait API, double buffering strategy, font choice for production (Spleen PSF2 over hand-rolled VGA font), trait naming.
@@ -4521,7 +4521,7 @@ Active or planned coding explorations. These are learning exercises, not commitm
 **Status:** Complete — all 7 steps done
 **Goal:** Build a minimal kernel on aarch64/QEMU. Learn what's involved in boot, exception handling, context switching, memory management.
 **Informs:** Decision #16 (Technical Foundation) — whether writing our own kernel is tractable and worthwhile vs. building on existing.
-**What exists:** `system/kernel/` — ~2,150 lines across 18 source files (at time of spike completion). boot.S (boot trampoline, coarse 2MB page tables, EL2→EL1 drop, early exception vectors), exception.S (upper-VA vectors, context save/restore, SVC routing), main.rs (Context struct, kernel_main, irq/svc dispatch, ELF loader + user thread spawn), elf.rs (pure functional ELF64 parser), build.rs (compiles user ELFs at build time), memory.rs (TTBR1 L3 refinement for W^X, PA/VA conversion, empty TTBR0 for kernel threads), heap.rs (bump allocator, 16 MiB), page_alloc.rs (free-list 4KB frame allocator), asid.rs (8-bit ASID allocator), addr_space.rs (per-process TTBR0 page tables, 4-level walk_or_create, W^X user page attrs with nG), scheduler.rs (round-robin preemptive, TTBR0 swap on context switch), thread.rs (kernel + user thread creation, separate kernel/user stacks), syscall.rs (exit/write/yield, user VA validation), timer.rs (ARM generic timer at 10 Hz), gic.rs (GICv2 driver), uart.rs (PL011 TX), mmio.rs (volatile helpers). Init later promoted to proto-OS-service at `system/services/init/`. Builds with `cargo run --release` targeting `aarch64-unknown-none` on nightly Rust.
+**What exists:** `kernel/` — ~2,150 lines across 18 source files (at time of spike completion). boot.S (boot trampoline, coarse 2MB page tables, EL2→EL1 drop, early exception vectors), exception.S (upper-VA vectors, context save/restore, SVC routing), main.rs (Context struct, kernel_main, irq/svc dispatch, ELF loader + user thread spawn), elf.rs (pure functional ELF64 parser), build.rs (compiles user ELFs at build time), memory.rs (TTBR1 L3 refinement for W^X, PA/VA conversion, empty TTBR0 for kernel threads), heap.rs (bump allocator, 16 MiB), page_alloc.rs (free-list 4KB frame allocator), asid.rs (8-bit ASID allocator), addr_space.rs (per-process TTBR0 page tables, 4-level walk_or_create, W^X user page attrs with nG), scheduler.rs (round-robin preemptive, TTBR0 swap on context switch), thread.rs (kernel + user thread creation, separate kernel/user stacks), syscall.rs (exit/write/yield, user VA validation), timer.rs (ARM generic timer at 10 Hz), gic.rs (GICv2 driver), uart.rs (PL011 TX), mmio.rs (volatile helpers). Init later promoted to proto-OS-service at `services/init/`. Builds with `cargo run --release` targeting `aarch64-unknown-none` on nightly Rust.
 **Original success criteria:** ~~Something boots and prints to serial console.~~ Done.
 **Next steps (in order):**
 
@@ -4531,7 +4531,7 @@ Active or planned coding explorations. These are learning exercises, not commitm
 4. ~~**Kernel threads + scheduler**~~ — Done. Thread struct with Context at offset 0 (compile-time assertion). Round-robin in `irq_handler` on each timer tick. Boot thread becomes idle thread (`wfe`). Box<Thread> for pointer stability (TPIDR_EL1 holds raw pointers into contexts). IRQ masking around scheduler state mutations.
 5. ~~**Syscall interface**~~ — Done. SVC handler with ESR check, syscall table (exit/write/yield), user VA validation. EL0 test stub proves full EL0→SVC→EL1→eret path.
 6. ~~**Per-process address spaces**~~ — Done. Kernel at upper VA (TTBR1), per-process TTBR0 with 8-bit ASID, 4-level page tables (walk_or_create), W^X user pages with nG bit, frame allocator for dynamic page table allocation, scheduler swaps TTBR0 on context switch, empty TTBR0 for kernel threads.
-7. ~~**First real userspace process**~~ — Done. Standalone init binary compiled to ELF64 by build.rs, embedded in kernel via `include_bytes!`. Pure functional ELF parser extracts PT_LOAD segments. Loader allocates frames, copies data, maps with W^X permissions. Entry point from ELF header. Init later promoted to proto-OS-service at `system/services/init/`.
+7. ~~**First real userspace process**~~ — Done. Standalone init binary compiled to ELF64 by build.rs, embedded in kernel via `include_bytes!`. Pure functional ELF parser extracts PT_LOAD segments. Loader allocates frames, copies data, maps with W^X permissions. Entry point from ELF header. Init later promoted to proto-OS-service at `services/init/`.
 
 **Known simplifications (intentional, revisit later):** Single-core only (multi-core after userspace works). Bump allocator never frees (replace when threads are created/destroyed). No per-CPU IRQ stack (not needed — EL0→EL1 transitions use SP_EL1 automatically). 10 Hz timer (increase when scheduling granularity matters). No ASID recycling (255 max user address spaces). Coarse TTBR0 identity map from boot.S still loaded but unused after transition to upper VA.
 
