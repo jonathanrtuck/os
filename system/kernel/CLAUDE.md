@@ -1,6 +1,6 @@
 # kernel
 
-Bare-metal aarch64 microkernel. 33 .rs files + 2 .S + link.ld, 46 syscalls, ~5000 lines.
+Bare-metal aarch64 microkernel. 56 .rs files + 2 .S + link.ld, 46 syscalls, ~15,000 lines.
 
 ## Build & Test
 

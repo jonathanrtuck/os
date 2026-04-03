@@ -324,14 +324,17 @@ no reverse edge exists anywhere in the codebase.
 
 ### Allocation-induced nesting
 
-Any code that calls `Vec::push()`, `Box::new()`, etc. under a lock will
+Any code that calls `Box::try_new()`, `Vec::push()`, etc. under a lock will
 transitively acquire `ALLOC_LOCK` (via `GlobalAlloc::alloc()`), which may
 also acquire `SLAB.lock()` and then `page_allocator::STATE.lock()`.
 
-The scheduler lock (level 1) holds `Vec` operations (e.g., `s.queue.ready.push()`).
-This means: **scheduler → ALLOC_LOCK → SLAB → page_allocator** is a possible
-transitive path. This is consistent with the ordering (level 1 → 3 → 2 → 2),
-and no reverse path exists.
+The scheduler lock (level 1) no longer triggers allocation on the hot path:
+intrusive lists (O(1) link/unlink) replaced `Vec<Box<Thread>>`, and all Vecs
+are pre-allocated to full capacity at boot. The remaining allocation path
+under the scheduler lock is `Box::try_new()` during thread/process creation,
+which is infrequent. **scheduler → ALLOC_LOCK → SLAB → page_allocator** remains
+a possible transitive path. This is consistent with the ordering (level 1 →
+3 → 2 → 2), and no reverse path exists.
 
 ---
 

@@ -62,8 +62,9 @@ a level-0 lock and the scheduler lock simultaneously.
    `page_allocator::alloc_frame()`
 3. **KERNEL_PT_LOCK → page_allocator:** `memory::alloc_kernel_stack_guarded` →
    `page_allocator::alloc_frame()`
-4. **Implicit (scheduler → ALLOC_LOCK → slab → page_allocator):** Any
-   `Vec::push()` or `Box::new()` under the scheduler lock triggers GlobalAlloc.
+4. **Implicit (scheduler → ALLOC_LOCK):** Scheduling context Vec and process
+   Vec are pre-allocated to MAX capacity; intrusive lists don't allocate.
+   `Box::try_new()` in thread/process creation may trigger GlobalAlloc.
 
 **Cycle-freedom proof:** For every directed edge, verified the reverse edge
 does NOT exist by searching for lock acquisitions in the target module.
@@ -265,11 +266,13 @@ its free list with linked-list addresses.
 ### OOM Behavior
 
 - `GlobalAlloc::alloc()` returns null on exhaustion.
-- Rust's `handle_alloc_error` panics on null → kernel-heap OOM is fatal.
-- All user-controlled paths (`process_create`, `thread_create`, `channel_create`)
-  may trigger kernel-heap OOM. None return errors to userspace on OOM.
+- All userspace-reachable allocation paths return errors, not panics:
+  - `Box::try_new()` for AddressSpace, Thread, handle overflow pages.
+  - Resource caps (`MAX_PROCESSES`, `MAX_THREADS`, etc.) bound object counts.
+  - Pre-allocated Vecs (reserved to MAX capacity at boot) eliminate realloc.
+  - Intrusive scheduler lists allocate nothing at runtime.
 - Kernel heap (16 MiB) stores only kernel objects; user data lives in
-  demand-paged user address spaces.
+  demand-paged user address spaces. Worst-case at full caps: ~3 MiB.
 
 ---
 

@@ -198,7 +198,7 @@ Lock ordering is documented in `LOCK-ORDERING.md`. Cross-cutting safety invarian
 
 **Per-core data:** `[PerCpu; MAX_CORES]` array (`MAX_CORES` = 8, QEMU `virt` max). Holds current thread pointer, core ID. Indexed by MPIDR affinity. `core_id()` reads MPIDR directly — single source of truth.
 
-**Boot/idle thread:** Each core has a single boot/idle thread (`new_boot_idle(core_id)`) that serves dual purpose: represents the initial execution context (kernel_main on core 0, secondary_main on cores 1+), and acts as the idle fallback when no user threads are runnable. Marked with `IDLE_THREAD_ID_MARKER` so the scheduler returns it to the per-core idle slot, never the global ready queue. This prevents cross-core migration — each boot thread stays on its originating core's boot stack.
+**Boot/idle thread:** Each core has a single boot/idle thread (`new_boot_idle(core_id)`) that serves dual purpose: represents the initial execution context (kernel_main on core 0, secondary_main on cores 1+), and acts as the idle fallback when no user threads are runnable. Marked with `is_idle_thread = true` so the scheduler returns it to the per-core idle slot, never the global ready queue. Idle threads live outside the thread pool (in `PerCoreState::idle`). This prevents cross-core migration — each boot thread stays on its originating core's boot stack.
 
 **Why PSCI over spin-table:** PSCI is the ARM-standard firmware interface. Works on QEMU, real hardware with UEFI/ATF, and most hypervisors. Spin-table is QEMU-specific.
 
@@ -410,28 +410,40 @@ The OS service adjusts contexts dynamically as document state changes. The kerne
 
 ```rust
 struct State {
-    // Per-core ready queues (replaces single RunQueue)
-    local_queues: [LocalRunQueue; MAX_CORES],
-    cores: [PerCoreState; MAX_CORES],
-    deferred_drops: [Vec<Box<Thread>>; MAX_CORES],
+    // Thread pool (pre-allocated, generational IDs, O(1) lookup)
+    slots: ThreadSlots,               // Box<Thread> storage, split for borrow checker
+    pool: PoolMeta,                    // Free list + generation counters
 
-    // Global (unchanged)
-    blocked: Vec<Box<Thread>>,
-    suspended: Vec<Box<Thread>>,
+    // Intrusive lists (O(1) push/remove, zero allocation)
+    local_queues: [LocalRunQueue; MAX_CORES],
+    blocked: IntrusiveList,
+    suspended: IntrusiveList,
+    deferred_drops: [IntrusiveList; MAX_CORES],
+    deferred_ready: [IntrusiveList; MAX_CORES],
+
+    cores: [PerCoreState; MAX_CORES],  // current_slot: Option<u16>, idle: Box<Thread>
+    live_thread_count: u32,            // Checked against MAX_THREADS on spawn
     processes: Vec<Option<Process>>,
+    free_process_ids: Vec<u32>,        // Slot recycling
     scheduling_contexts: Vec<Option<SchedulingContextSlot>>,
-    // ... identity management
+    free_context_ids: Vec<u32>,
 }
 
 struct LocalRunQueue {
-    ready: Vec<Box<Thread>>,    // EEVDF selection within this queue
-    load: u32,                  // runnable count (steal heuristic)
+    ready: IntrusiveList,   // EEVDF selection within this queue
+    load: u32,              // runnable count (steal heuristic)
 }
 ```
 
-**What changed:** The single `RunQueue { ready: Vec<Box<Thread>> }` becomes `[LocalRunQueue; MAX_CORES]`. Each core's `schedule_inner` selects from its own `local_queues[core]`. The `deferred_ready` mechanism is eliminated — a preempted thread goes directly into its own core's local queue, which is safe because the single lock prevents any other core from observing it until lock release, at which point `restore_context_and_eret` has already switched the SP.
+**Thread pool:** All user threads live in pre-allocated `ThreadSlots` for their entire lifetime. `Box<Thread>` address never moves (TPIDR_EL1 pointer stable). Generational `ThreadId` (slot:u16 + generation:u48 packed in u64) prevents stale-handle aliasing on slot reuse. Each `Thread` has `list_next`/`list_prev` fields and a `ThreadLocation` enum tracking which list it's in.
 
-**What didn't change:** The global lock, the blocked list, processes, scheduling contexts, identity management. The `deferred_drops` mechanism remains (thread drop still can't happen on the thread's own stack).
+**Intrusive lists:** `IntrusiveList` (head/tail/len) linked via `list_next`/`list_prev` on `Thread`. O(1) push_back, remove, pop_front. `try_wake`: O(1) pool lookup + location check (was O(n) blocked-list scan). `set_wake_pending_for_handle`: O(1) (was O(4n)). Zero heap allocation on the scheduler hot path.
+
+**Resource caps:** All kernel object types capped (`MAX_PROCESSES`, `MAX_THREADS`, `MAX_CHANNELS`, etc. in `system_config.rs`). All Vecs pre-allocated to full capacity at boot — runtime `push()` never reallocates. Process and scheduling context slots recycled via free lists.
+
+**Borrow checker design:** `ThreadSlots` separated from `PoolMeta` as sibling fields in `State`. Structural decomposition (`let State { ref mut pool, ref mut slots, .. } = *s;`) enables split borrows for list ops + pool metadata + core state. `current_thread!` / `current_thread_ref!` macros dispatch between idle threads (in `PerCoreState::idle`) and user threads (in pool slots).
+
+**What didn't change:** The global lock, EEVDF algorithm, scheduling contexts, process model, deferred_drops/deferred_ready race prevention (per-core, not global).
 
 ### 6.3.2 EEVDF Virtual Lag Preservation
 
@@ -512,13 +524,11 @@ This is tested over 50+ seeds × 500+ steps with randomized spawn/block/wake/exi
 
 **What this kernel guarantees that others don't:** CWC + EEVDF + scheduling contexts. Linux violates CWC (Ipanema proved it). seL4 doesn't steal (userspace decides). Zircon's migration is best-effort. Our property-based tests verify CWC holds after every scheduling step.
 
-### 6.3.7 `deferred_ready` Elimination
+### 6.3.7 `deferred_ready` and `deferred_drops`
 
-The `deferred_ready` mechanism (§12.1) existed to prevent the cross-core stack reuse race: with a global queue, pushing a preempted thread to `ready` immediately let another core pick it up while the originating core was still on the thread's kernel stack.
+Both mechanisms remain with intrusive lists. A preempted thread goes into `deferred_ready[core]` (not directly into the local ready queue) because work stealing could let another core pick it up while the originating core is still on the thread's kernel stack (between lock release and `restore_context_and_eret` SP switch). Per-core deferred lists close this race — only the owning core drains them.
 
-With per-core queues, a preempted thread goes into `local_queues[core].ready` — the _same_ core's queue. No other core accesses this queue during `schedule_inner` (single lock prevents it). By the time the lock drops and another core could steal the thread, `restore_context_and_eret` has already switched the SP. The race window is closed by the lock.
-
-**`deferred_drops` remains:** An exited thread still can't be dropped during `schedule_inner` (we're on its stack). Same mechanism as before — push to `deferred_drops[core]`, drain next invocation.
+**`deferred_drops`:** An exited thread still can't be dropped during `schedule_inner` (we're on its stack). Push to `deferred_drops[core]`, drain at the start of the next `schedule_inner` on that core via `pool.free(slot)` (which drops the `Box<Thread>`, freeing the kernel stack).
 
 ### 6.3.8 Arch Interface Additions
 
@@ -1549,13 +1559,13 @@ if i + 1 < bufs.len() {
 
 ---
 
-### 11.33 `0xFF00` idle thread marker is a magic constant
+### 11.33 `0xFF00` idle thread marker is a magic constant — RESOLVED
 
 **Severity:** Low.
 
 **Problem:** `thread.rs:139,270` — `0xFF00` appears as a bare hex literal. Used in `is_idle()` check and `new_idle()` constructor.
 
-**Fix:** `const IDLE_THREAD_ID_MARKER: u64 = 0xFF00;`.
+**Fix:** Replaced with `is_idle_thread: bool` field on Thread. Idle detection no longer depends on ThreadId encoding.
 
 ---
 

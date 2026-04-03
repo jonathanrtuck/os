@@ -2,7 +2,7 @@
 
 A practical Rust microkernel for aarch64. Capabilities, VMOs, EEVDF scheduling, SMP work-stealing, KASLR.
 
-~12,000 lines of Rust + assembly. 46 syscalls. 4 SMP cores. ~2,236 tests.
+~15,000 lines of Rust + assembly. 46 syscalls. 4 SMP cores. ~2,745 tests.
 
 ## Why This Kernel
 
