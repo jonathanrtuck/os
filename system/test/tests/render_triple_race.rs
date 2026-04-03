@@ -17,15 +17,14 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
 
 use scene::*;
 
-/// Duration of the stress test. Longer = more confident.
-/// At ~1 torn read per 70M iterations (unfixed), 10s (~100M iters)
-/// expects ~1.4 corruptions — sufficient for detection with >75%
-/// probability per run.
-const TEST_DURATION: Duration = Duration::from_secs(10);
+/// Minimum iterations per thread before the test may pass. At ~1 torn read
+/// per 70M iterations (unfixed), 100M iterations expects ~1.4 corruptions.
+/// Using iteration count instead of wall-clock time makes the test
+/// deterministic regardless of CPU speed or system load.
+const MIN_WRITER_ITERS: u64 = 100_000_000;
 
 #[test]
 fn triple_buffer_no_torn_reads_under_stress() {
@@ -100,7 +99,13 @@ fn triple_buffer_no_torn_reads_under_stress() {
         }
     });
 
-    thread::sleep(TEST_DURATION);
+    // Wait for sufficient iterations instead of a fixed duration.
+    // This makes the test deterministic: it always runs the same number
+    // of iterations regardless of CPU speed.
+    while writer_iters.load(Ordering::Relaxed) < MIN_WRITER_ITERS {
+        thread::yield_now();
+    }
+
     done.store(true, Ordering::Relaxed);
 
     writer.join().expect("writer panicked");
@@ -111,11 +116,8 @@ fn triple_buffer_no_torn_reads_under_stress() {
     let wi = writer_iters.load(Ordering::Relaxed);
 
     eprintln!(
-        "triple_buffer stress: {}s, writer={} reader={} corruptions={}",
-        TEST_DURATION.as_secs(),
-        wi,
-        ri,
-        c
+        "triple_buffer stress: writer={} reader={} corruptions={}",
+        wi, ri, c
     );
 
     assert_eq!(

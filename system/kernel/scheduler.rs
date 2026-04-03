@@ -52,6 +52,10 @@ static STATE: IrqMutex<State> = IrqMutex::new(State {
         const EMPTY: Vec<Box<Thread>> = Vec::new();
         [EMPTY; per_core::MAX_CORES]
     },
+    deferred_ready: {
+        const EMPTY: Vec<Box<Thread>> = Vec::new();
+        [EMPTY; per_core::MAX_CORES]
+    },
     cores: {
         const INIT: PerCoreState = PerCoreState {
             current: None,
@@ -135,6 +139,14 @@ struct State {
     /// core B's deferred drops while core B is still on the exited thread's stack
     /// (use-after-free race between lock release and restore_context_and_eret).
     deferred_drops: [Vec<Box<Thread>>; per_core::MAX_CORES],
+    /// Per-core deferred ready threads. When schedule_inner parks a preempted
+    /// thread, it can't go directly on the local ready queue because work
+    /// stealing would let another core pick it up while this core is still on
+    /// its kernel stack (between lock release and restore_context_and_eret).
+    ///
+    /// Same fix pattern as deferred_drops: push here, drain into local_queues
+    /// at the start of THIS CORE's next schedule_inner.
+    deferred_ready: [Vec<Box<Thread>>; per_core::MAX_CORES],
     cores: [PerCoreState; per_core::MAX_CORES],
     next_id: u64,
     /// All processes. Index = ProcessId.0.
@@ -506,6 +518,15 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
     // restore_context_and_eret SP switch.
     s.deferred_drops[core].clear();
 
+    // Drain deferred ready threads into this core's local queue. These were
+    // parked by the PREVIOUS schedule_inner on this core — safe to enqueue
+    // now because we're on a different thread's stack.
+    for thread in s.deferred_ready[core].drain(..) {
+        s.local_queues[core].ready.push(thread);
+    }
+
+    s.local_queues[core].update_load();
+
     reap_exited(&mut s.local_queues[core], &mut s.blocked);
 
     let now = now_ns();
@@ -535,12 +556,15 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
                 // Idle threads are never enqueued — restore to this core's idle slot.
                 s.cores[core].idle = Some(old_thread);
             } else {
-                // Place on this core's local ready queue. Per-core queues
-                // eliminate the stack reuse race: only this core selects from
-                // its own local_queue, so the thread won't be restored on
-                // another core while we're still on its kernel stack.
-                s.local_queues[core].ready.push(old_thread);
-                s.local_queues[core].update_load();
+                // Defer ready — we're still on this thread's kernel stack
+                // until restore_context_and_eret switches SP. If we put it
+                // directly on local_queues, work stealing would let another
+                // core pick it up and restore it while we're still on the
+                // stack (cross-core stack reuse → canary corruption).
+                //
+                // Same pattern as deferred_drops: pushed here, drained into
+                // local_queues at the start of this core's NEXT schedule_inner.
+                s.deferred_ready[core].push(old_thread);
             }
         } else if old_thread.is_exited() {
             // Defer drop — we're still running on this thread's kernel stack.

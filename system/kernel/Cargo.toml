@@ -1,9 +1,9 @@
 [package]
 name = "kernel"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2021"
 description = "A practical Rust microkernel for aarch64: capabilities, VMOs, EEVDF scheduling, SMP work-stealing, KASLR."
-license = "MIT OR Apache-2.0"
+license = "Unlicense"
 readme = "README.md"
 
 [[bin]]

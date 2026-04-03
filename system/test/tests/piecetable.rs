@@ -346,10 +346,14 @@ fn capacity_bigger_buffer_allows_more_data() {
 fn capacity_pieces_limited_by_buffer_size() {
     // Insert in the middle repeatedly to force splits until the buffer
     // can't fit any more pieces. The limit is buffer-derived, not a constant.
-    let mut buf = make_with_text(b"ab", 1024 * 1024);
+    //
+    // 16 KiB buffer: enough for >255 mid-piece inserts (each adds 2 pieces
+    // net) while keeping the O(n²) piece-shift cost under 0.1s. The previous
+    // 1 MiB buffer took ~49s due to 50K iterations of shifting a growing array.
+    let mut buf = make_with_text(b"ab", 16 * 1024);
 
     let mut success_count = 0;
-    for _ in 0..50000 {
+    loop {
         let tl = text_len(&buf);
         if tl < 2 {
             break;
@@ -361,7 +365,7 @@ fn capacity_pieces_limited_by_buffer_size() {
         }
     }
     assert!(success_count > 0);
-    // With a 1 MiB buffer, we should be able to fit far more than 512 pieces.
+    // With a 16 KiB buffer, we should be able to fit far more than 512 pieces.
     // Each mid-piece insert adds 2 pieces (net), so success_count > 255.
     assert!(success_count > 255, "got {} inserts, expected > 255", success_count);
     // Piece count fits in u16.
