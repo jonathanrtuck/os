@@ -4,6 +4,26 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Hypervisor Frame Counter Decoupling — OPEN-BUG (2026-04-03)
+
+**Problem:** The hypervisor's frame counter (`frameCount` in `VirtioMetal.swift:1113`) only advances on `presentAndCommit` commands from the guest render driver. Event script timing (`wait N`, `capture` at frame N) depends on this counter. When the render driver skips idle frames (nothing changed → no `presentAndCommit`), the counter stalls and event scripts time out.
+
+**Current workaround:** The render driver sends empty `presentAndCommit` heartbeats on idle frames. This works but is the wrong abstraction — the OS shouldn't need to send GPU commands to advance a timer.
+
+**Root cause:** The hypervisor conflates "GPU frame submitted" with "display tick elapsed." These are independent events. The frame counter should advance at display cadence regardless of GPU activity, driven by the hypervisor's own timer.
+
+**Correct fix (in `~/Sites/hypervisor/`):**
+1. Add a display-cadence timer in `VirtioMetal` (e.g., `DispatchSource.makeTimerSource` at `1/refreshRate` interval)
+2. Advance `frameCount` on each timer tick, not on `presentAndCommit`
+3. Fire `onFrame` callback (event injection) from the timer, not from the GPU path
+4. Captures trigger on the timer tick, compositing the latest retained frame + cursor
+
+This decouples event script timing from GPU submission, eliminates the heartbeat workaround, and fixes visual test flakiness where the multi-service pipeline needs wall-clock time to settle.
+
+**Impact:** ~20% visual test failure rate in the full suite (15 tests × 5 runs). Individual tests pass reliably. Failures are `caret_skewed`, `cursor_visible_at`, and `baseline_aligned` assertions — all timing-sensitive.
+
+---
+
 ## v0.6 Phase 1: Arch Interface — SETTLED (2026-04-01)
 
 **Design session resolving the three open questions from `kernel-v0.6.md` Phase 1.**
