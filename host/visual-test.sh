@@ -55,8 +55,16 @@ run_hypervisor() {
     if [ -n "$events_file" ]; then
         extra_args="--events $events_file"
     fi
-    hypervisor "$KERNEL" --drive "$DISK" --background \
-        $extra_args --timeout "$TIMEOUT" 2>&1
+    local hv_output
+    hv_output=$(hypervisor "$KERNEL" --drive "$DISK" --background \
+        $extra_args --timeout "$TIMEOUT" 2>&1)
+    local hv_exit=$?
+    if [ $hv_exit -ne 0 ]; then
+        echo "hypervisor exited with code $hv_exit" >&2
+        echo "$hv_output" | grep -E 'error|timeout|PANIC|fatal' | head -3 >&2
+    fi
+    echo "$hv_output"
+    return $hv_exit
 }
 
 run_verify() {
@@ -124,7 +132,7 @@ wait 5
 click 330 68
 wait 20
 type Z
-wait 20
+wait 30
 capture /tmp/visual-tests/click-placement.png
 EVENTS
     hypervisor "$KERNEL" --drive "$DISK" --background \
@@ -143,7 +151,7 @@ wait 150
 move 280 60
 wait 5
 dblclick 280 60
-wait 20
+wait 30
 capture /tmp/visual-tests/dblclick-select.png
 EVENTS
     hypervisor "$KERNEL" --drive "$DISK" --background \
@@ -169,7 +177,7 @@ wait 2
 click 300 115
 wait 20
 type Z
-wait 20
+wait 30
 capture /tmp/visual-tests/tripleclick-line.png
 EVENTS
     hypervisor "$KERNEL" --drive "$DISK" --background \
@@ -188,7 +196,7 @@ wait 150
 move 250 60
 wait 5
 drag 250 60 400 60
-wait 20
+wait 60
 capture /tmp/visual-tests/drag-select.png
 EVENTS
     hypervisor "$KERNEL" --drive "$DISK" --background \
@@ -222,7 +230,7 @@ wait 150
 move 600 120
 wait 5
 click 600 120
-wait 15
+wait 30
 capture /tmp/visual-tests/caret-height.png
 EVENTS
     hypervisor "$KERNEL" --drive "$DISK" --background \
@@ -270,7 +278,7 @@ wait 5
 click 850 160
 wait 20
 type Z
-wait 20
+wait 30
 capture /tmp/visual-tests/cursor-mixed.png
 EVENTS
     hypervisor "$KERNEL" --drive "$DISK" --background \
@@ -295,7 +303,7 @@ capture /tmp/visual-tests/italic-baseline.png
 move 500 400
 wait 5
 click 500 400
-wait 15
+wait 30
 capture /tmp/visual-tests/cursor-italic.png
 EVENTS
     hypervisor "$KERNEL" --drive "$DISK" --background \

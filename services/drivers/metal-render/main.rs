@@ -606,8 +606,12 @@ pub extern "C" fn _start() -> ! {
     let mut cursor_y: f32 = 0.0;
 
     loop {
-        // Wait for scene update signal from core, with frame-rate cadence.
-        let _ = sys::wait(&[SCENE_HANDLE, INIT_HANDLE], period_ns);
+        // Fixed cadence: wake at display refresh rate, sample latest scene.
+        // The presenter writes to the triple buffer at its own pace; we read
+        // the latest published frame each display tick. This ensures frame
+        // count = wall time (deterministic for event scripts and tests) and
+        // avoids wasted GPU work from back-to-back redraws during bursts.
+        let _ = sys::wait(&[INIT_HANDLE], period_ns);
         let _ = sys::interrupt_ack(sys::InterruptHandle(SCENE_HANDLE));
 
         // Read cursor position from the pointer state register (independent
@@ -667,7 +671,13 @@ pub extern "C" fn _start() -> ! {
 
         if !scene_changed && !cursor_moved && !cursor_shape_changed && !cursor_opacity_changed {
             drop(reader);
-            continue; // Nothing changed.
+            // Nothing changed — send an empty frame to keep the hypervisor's
+            // frame counter advancing. Without this, event script timing
+            // (wait/capture) stalls during idle periods.
+            cmdbuf.clear();
+            cmdbuf.present_and_commit();
+            send_render(&device, &mut render_vq, irq_handle, &render_dma, &cmdbuf);
+            continue;
         }
 
         if !scene_changed && !cursor_shape_changed {

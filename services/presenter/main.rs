@@ -1828,6 +1828,10 @@ pub extern "C" fn _start() -> ! {
                 s.pointer.y = scale_pointer_coord(y, fb_height);
 
                 // Cancel any pending fade-out and restore full opacity.
+                // Only update in-memory state here — the shared page write
+                // is deferred to after cursor shape re-evaluation to avoid
+                // a race where the render driver sees opacity=255 before
+                // the cursor shape/texture is established.
                 if let Some(id) = s.pointer.fade_id {
                     s.animation.timeline.cancel(id);
                     s.pointer.fade_id = None;
@@ -1835,9 +1839,6 @@ pub extern "C" fn _start() -> ! {
                 s.pointer.visible = true;
                 if s.pointer.opacity != 255 {
                     s.pointer.opacity = 255;
-                    if s.pointer.cursor_state_va != 0 {
-                        write_cursor_opacity(s.pointer.cursor_state_va, 255);
-                    }
                     changed = true;
                 }
                 s.pointer.last_event_ms = now_ms;
@@ -2904,14 +2905,6 @@ pub extern "C" fn _start() -> ! {
             if slide_changed {
                 scene.apply_slide(state().animation.slide_offset);
             }
-
-            // Write cursor opacity to shared register (render driver reads).
-            if needs_scene_update {
-                let s = state();
-                if s.pointer.cursor_state_va != 0 {
-                    write_cursor_opacity(s.pointer.cursor_state_va, s.pointer.opacity);
-                }
-            }
         }
 
         // ── Cursor shape re-evaluation ──────────────────────────────
@@ -2935,6 +2928,19 @@ pub extern "C" fn _start() -> ! {
                         new_shape,
                     );
                 }
+            }
+        }
+
+        // Write cursor opacity to shared register AFTER shape re-evaluation.
+        // Ordering matters: the render driver reads opacity and shape from the
+        // same shared page. If it sees opacity=255 before a shape is written,
+        // it sets cursorVisible=true but has no texture → cursor missing from
+        // captures. Writing opacity last ensures the shape/texture is ready
+        // before the cursor becomes visible.
+        if needs_scene_update || pointer_position_changed {
+            let s = state();
+            if s.pointer.cursor_state_va != 0 {
+                write_cursor_opacity(s.pointer.cursor_state_va, s.pointer.opacity);
             }
         }
 
