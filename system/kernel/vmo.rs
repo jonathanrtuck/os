@@ -191,6 +191,7 @@ impl Vmo {
         self.pending_faults.insert(page_offset)
     }
     /// Clear a pending fault (page was supplied by pager).
+    #[allow(dead_code)] // Test-only: used by kernel/test/tests/kernel_vmo.rs
     pub fn clear_pending_fault(&mut self, page_offset: u64) {
         self.pending_faults.remove(&page_offset);
     }
@@ -265,10 +266,12 @@ impl Vmo {
             }
         }
     }
+    #[allow(dead_code)] // Test-only: used by kernel/test/tests/kernel_vmo.rs
     pub fn generation(&self) -> u64 {
         self.generation
     }
     /// Check if this VMO has a pager attached.
+    #[allow(dead_code)] // Test-only: used by kernel/test/tests/kernel_vmo.rs
     pub fn has_pager(&self) -> bool {
         self.pager.is_some()
     }
@@ -307,15 +310,18 @@ impl Vmo {
     pub fn mappings(&self) -> &[VmoMapping] {
         &self.mappings
     }
+    #[allow(dead_code)] // Test-only: used by kernel/test/tests/kernel_vmo.rs
     pub fn max_snapshots(&self) -> usize {
         self.max_snapshots
     }
     /// Check if a page needs to be supplied by the pager.
     /// True if: pager exists AND page is uncommitted AND offset is in bounds.
+    #[allow(dead_code)] // Test-only: used by kernel/test/tests/kernel_pager.rs
     pub fn needs_pager_for(&self, offset: u64) -> bool {
         self.pager.is_some() && offset < self.size_pages && self.lookup_page(offset).is_none()
     }
     /// Check if a page needs COW (refcount > 1).
+    #[allow(dead_code)] // Test-only: used by kernel/test/tests/kernel_vmo.rs
     pub fn page_needs_cow(&self, offset: u64) -> bool {
         self.pages.get(&offset).map_or(false, |&(_, rc)| rc > 1)
     }
@@ -376,6 +382,7 @@ impl Vmo {
         Some(freed)
     }
     /// Seal the VMO. Irreversible.
+    #[allow(dead_code)] // Test-only: kernel uses seal_and_get_mappings() instead
     pub fn seal(&mut self) {
         self.sealed = true;
     }
@@ -446,6 +453,7 @@ impl Vmo {
     }
     /// Try to commit a page, respecting seal. Returns false if sealed or
     /// out of bounds.
+    #[allow(dead_code)] // Test-only: kernel uses commit_page() (post-validation)
     pub fn try_commit_page(&mut self, offset: u64, pa: Pa) -> bool {
         if self.sealed || offset >= self.size_pages {
             return false;
@@ -455,6 +463,7 @@ impl Vmo {
 
         true
     }
+    #[allow(dead_code)] // Test-only: kernel accesses field directly in info()
     pub fn type_tag(&self) -> u64 {
         self.type_tag
     }
@@ -464,12 +473,14 @@ impl VmoFlags {
     /// Physically contiguous pages (eager allocation via buddy allocator).
     pub const CONTIGUOUS: Self = Self(1 << 0);
 
+    #[allow(dead_code)] // Test-only: used by kernel/test/ VMO tests
     pub const fn bits(self) -> u32 {
         self.0
     }
     pub const fn contains(self, flag: Self) -> bool {
         self.0 & flag.0 == flag.0
     }
+    #[allow(dead_code)] // Test-only: used by kernel/test/ VMO tests
     pub const fn empty() -> Self {
         Self(0)
     }
@@ -483,6 +494,7 @@ pub const VMO_FLAG_CONTIGUOUS: u64 = 1 << 0;
 pub const VMO_FLAG_SEALED: u64 = 1 << 1;
 
 impl VmoTable {
+    #[allow(dead_code)] // Test-only: used by kernel/test/ VMO tests
     pub const fn new() -> Self {
         Self { vmos: Vec::new() }
     }

@@ -46,7 +46,6 @@ pub enum FaultResult {
     Unhandled,
 }
 
-const DEFAULT_DMA_PAGE_LIMIT: u64 = paging::RAM_SIZE_MAX / paging::PAGE_SIZE / 2;
 const DEFAULT_HEAP_PAGE_LIMIT: u64 = paging::RAM_SIZE_MAX / paging::PAGE_SIZE / 4;
 
 pub struct AddressSpace {
@@ -54,14 +53,6 @@ pub struct AddressSpace {
     asid: Asid,
     owned_frames: Vec<Pa>,
     pub(crate) vmas: VmaList,
-    /// Next available VA in the DMA buffer region. Bump-allocated.
-    next_dma_va: u64,
-    /// Active DMA buffer allocations (freed on process exit or dma_free).
-    dma_allocations: Vec<DmaAllocation>,
-    /// Number of DMA pages currently allocated by this process.
-    dma_pages_allocated: u64,
-    /// Maximum DMA pages this process may allocate.
-    dma_pages_limit: u64,
     /// Next available VA in the device MMIO region. Bump-allocated.
     next_device_va: u64,
     /// Next available VA in the channel shared memory region. Bump-allocated.
@@ -81,11 +72,6 @@ pub struct AddressSpace {
 }
 pub struct PageAttrs(u64);
 
-pub(crate) struct DmaAllocation {
-    va: u64,
-    pa: Pa,
-    order: u8,
-}
 pub(crate) struct HeapAllocation {
     va: u64,
     page_count: u64,
@@ -106,10 +92,6 @@ impl AddressSpace {
             asid,
             owned_frames: Vec::new(),
             vmas: VmaList::new(),
-            next_dma_va: layout.dma_base,
-            dma_allocations: Vec::new(),
-            dma_pages_allocated: 0,
-            dma_pages_limit: DEFAULT_DMA_PAGE_LIMIT,
             next_device_va: layout.device_base,
             next_channel_shm_va: layout.channel_shm_base,
             next_shared_va: layout.shared_base,
@@ -369,13 +351,6 @@ impl AddressSpace {
 
         self.heap_pages_allocated = 0;
 
-        // Free DMA buffer allocations (physically contiguous, multi-page).
-        for alloc in self.dma_allocations.drain(..) {
-            page_allocator::free_frames(alloc.pa, alloc.order as usize);
-        }
-
-        self.dma_pages_allocated = 0;
-
         // Free owned user pages (code, data, stack).
         for &pa in &self.owned_frames {
             page_allocator::free_frame(pa);
@@ -501,44 +476,6 @@ impl AddressSpace {
 
         Some(va)
     }
-    /// Map a DMA buffer (2^order contiguous pages) into the DMA VA region.
-    ///
-    /// Bump-allocates VA from `DMA_BUFFER_BASE..DMA_BUFFER_END`. The physical
-    /// frames are NOT added to `owned_frames` — they are tracked separately
-    /// in `dma_allocations` and freed via `unmap_dma_buffer` or `free_all`.
-    ///
-    /// Returns the user VA on success, or None if the DMA VA space is full.
-    pub fn map_dma_buffer(&mut self, pa: Pa, order: usize) -> Option<u64> {
-        let num_pages = 1u64 << order;
-        let size = num_pages * PAGE_SIZE;
-        let va = self.next_dma_va;
-
-        if va + size > paging::DMA_BUFFER_END {
-            return None;
-        }
-        // Enforce per-process DMA budget.
-        if self.dma_pages_allocated + num_pages > self.dma_pages_limit {
-            return None;
-        }
-
-        let attrs = PageAttrs::user_rw();
-
-        for i in 0..num_pages {
-            if !self.map_inner(va + i * PAGE_SIZE, pa.as_u64() + i * PAGE_SIZE, &attrs) {
-                return None;
-            }
-        }
-
-        self.next_dma_va = va + size;
-        self.dma_pages_allocated += num_pages;
-        self.dma_allocations.push(DmaAllocation {
-            va,
-            pa,
-            order: order as u8,
-        });
-
-        Some(va)
-    }
     /// Map physical pages at a fixed VA, read-only, without ownership transfer.
     ///
     /// Used to map the service pack into init's address space at
@@ -607,40 +544,6 @@ impl AddressSpace {
 
         true
     }
-    /// Map physical pages into the shared memory region (no ownership transfer).
-    ///
-    /// Bump-allocates VA from `SHARED_MEMORY_BASE..SHARED_MEMORY_END`. The
-    /// physical frames are NOT owned by this address space — the caller (or
-    /// the allocating process) retains ownership.
-    ///
-    /// When `read_only` is true, pages are mapped without write permission
-    /// (hardware-enforced). Used to give editors read-only document access.
-    ///
-    /// Returns the user VA on success, or None if the shared VA space is full.
-    pub fn map_shared_region(&mut self, pa: Pa, page_count: u64, read_only: bool) -> Option<u64> {
-        let size = page_count * PAGE_SIZE;
-        let va = self.next_shared_va;
-
-        if va + size > paging::SHARED_MEMORY_END {
-            return None;
-        }
-
-        let attrs = if read_only {
-            PageAttrs::user_ro()
-        } else {
-            PageAttrs::user_rw()
-        };
-
-        for i in 0..page_count {
-            if !self.map_inner(va + i * PAGE_SIZE, pa.as_u64() + i * PAGE_SIZE, &attrs) {
-                return None;
-            }
-        }
-
-        self.next_shared_va = va + size;
-
-        Some(va)
-    }
     /// Map a VMO region into this address space.
     ///
     /// Bump-allocates VA from the shared memory region. Creates a VMA with
@@ -692,28 +595,6 @@ impl AddressSpace {
     /// a target process but a subsequent step fails.
     pub fn unmap_channel_page(&mut self, va: u64) {
         self.unmap_page_inner(va);
-    }
-    /// Unmap a DMA buffer by its VA. Clears page table entries, invalidates
-    /// TLB, and removes the allocation record.
-    ///
-    /// Returns `(pa, order)` for the caller to free via `page_allocator::free_frames`.
-    /// Returns None if no DMA allocation starts at `va`.
-    pub fn unmap_dma_buffer(&mut self, va: u64) -> Option<(Pa, usize)> {
-        let idx = self.dma_allocations.iter().position(|a| a.va == va)?;
-        let alloc = self.dma_allocations.swap_remove(idx);
-        let num_pages = 1u64 << alloc.order;
-
-        self.dma_pages_allocated -= num_pages;
-
-        // Clear L3 page table entries for each page in the allocation.
-        for i in 0..num_pages {
-            self.unmap_page_inner(va + i * PAGE_SIZE);
-        }
-
-        // Bulk TLB invalidate for this ASID.
-        self.invalidate_tlb();
-
-        Some((alloc.pa, alloc.order as usize))
     }
     /// Free a heap allocation by its start VA.
     ///

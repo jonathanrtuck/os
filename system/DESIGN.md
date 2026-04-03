@@ -73,7 +73,7 @@ Components are always replaceable — that's what interfaces are for. The system
 │  │ fs │ │ store │ │ piecetable │ │ icons │                │
 │  └────┘ └───────┘ └────────────┘ └───────┘                │
 ├───────────────────────────────────────────────────────────┤
-│  Kernel (28 syscalls, see kernel/DESIGN.md)               │  hardened
+│  Kernel (46 syscalls, see kernel/DESIGN.md)               │  hardened
 └───────────────────────────────────────────────────────────┘
 ```
 
@@ -97,7 +97,7 @@ Notification for both: `channel_signal` syscall wakes the consumer from `sys::wa
 
 **Goal:** Safe Rust wrappers for all kernel syscalls.
 
-**Status:** ~710 lines, covers all 28 syscalls with typed errors + `GlobalAlloc` (linked-list first-fit with coalescing). Every userspace binary links against this. Programs opt in to heap allocation with `extern crate alloc;`.
+**Status:** ~710 lines, covers all 46 syscalls with typed errors + `GlobalAlloc` (linked-list first-fit with coalescing). Every userspace binary links against this. Programs opt in to heap allocation with `extern crate alloc;`.
 
 **Interface (stable):**
 

@@ -12,7 +12,7 @@ The questions a systems programmer would ask on first encounter:
 
 | Question                            | Answer                                                                                                                                               |
 | ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| What kind of kernel?                | Microkernel. Rust, `no_std`, arm64. 28 syscalls, ~11K LOC.                                                                                           |
+| What kind of kernel?                | Microkernel. Rust, `no_std`, arm64. 46 syscalls, ~11K LOC.                                                                                           |
 | POSIX?                              | No. Custom syscall ABI designed around documents, handles, and channels.                                                                             |
 | More like Linux, macOS, or Fuchsia? | Microkernel + capabilities like Fuchsia. MIME-aware content model like BeOS. Document-centric data model like none of them.                          |
 | Filesystem?                         | Custom COW with per-document snapshots, metadata queries, and a document store layer.                                                                |
@@ -20,7 +20,7 @@ The questions a systems programmer would ask on first encounter:
 | Can it run existing software?       | No. No POSIX, no libc, no compatibility layer. Everything is `no_std` Rust.                                                                          |
 | Performance?                        | Designed for it (zero-copy IPC, EEVDF scheduler, Metal GPU). Not yet benchmarked against other systems.                                              |
 | How much code?                      | ~64K LOC Rust across kernel (11K), 14 libraries, 12 services, 6 user programs. 2,300+ tests, 15 visual regression tests.                             |
-| Is this serious?                    | It's a design exploration with working code. Pre-alpha (v0.5). Not a product, not a weekend project. Closer to a research OS with an implementation. |
+| Is this serious?                    | It's a design exploration with working code. Pre-alpha (v0.6). Not a product, not a weekend project. Closer to a research OS with an implementation. |
 
 ---
 
@@ -44,38 +44,40 @@ Historical and conceptual systems (Xerox Star, OpenDoc, Mercury OS, Ideal OS) in
 
 ## Kernel & Process Model
 
-**Our approach:** Preemptive microkernel in Rust (`no_std`, `aarch64-unknown-none`). 4 SMP cores, EEVDF scheduler with handle-based scheduling contexts and per-context budgets. 28 syscalls. Kernel spawns only init; init reads service ELFs from a memory-mapped flat archive and spawns everything else. Hardware isolation via ARM EL0/EL1. Full context save/restore including NEON/FP state.
+**Our approach:** Preemptive microkernel in Rust (`no_std`, `aarch64-unknown-none`). 4 SMP cores, per-core EEVDF scheduler with work stealing, handle-based scheduling contexts, and per-context budgets. 46 syscalls. Kernel spawns only init; init reads service ELFs from a memory-mapped flat archive and spawns everything else. Hardware isolation via ARM EL0/EL1. Full context save/restore including NEON/FP state.
 
 |                     | This OS                | Linux                | macOS (XNU)         | Fuchsia (Zircon)  | Redox                    | seL4                         |
 | ------------------- | ---------------------- | -------------------- | ------------------- | ----------------- | ------------------------ | ---------------------------- |
 | Architecture        | Microkernel            | Monolithic           | Hybrid (Mach + BSD) | Microkernel       | Microkernel              | Microkernel                  |
 | Language            | Rust (`no_std`)        | C                    | C/C++               | C++               | Rust                     | C (verified)                 |
-| Syscalls            | 28                     | ~450                 | ~540 (Mach + BSD)   | ~170              | POSIX-like set           | ~12                          |
-| Scheduler           | EEVDF + contexts       | EEVDF (since 6.6)    | Mach decay-usage    | Fair scheduler    | Cooperative + preemptive | Round-robin (minimal)        |
+| Syscalls            | 46                     | ~450                 | ~540 (Mach + BSD)   | ~170              | POSIX-like set           | ~12                          |
+| Scheduler           | Per-core EEVDF + steal | EEVDF (since 6.6)    | Mach decay-usage    | Fair scheduler    | Cooperative + preemptive | Round-robin (minimal)        |
 | SMP                 | 4 cores                | Thousands            | Dozens              | Many              | Single core (WIP)        | Configurable                 |
 | Boot init model     | Init from service pack | PID 1 (systemd/init) | launchd             | component_manager | initfs                   | Root task                    |
 | Formal verification | No                     | No                   | No                  | No                | No                       | Yes (functional correctness) |
 
 **Convergences:** Linux adopted EEVDF in kernel 6.6 (2023) — the same scheduling algorithm, independently chosen. The microkernel + root-task-spawns-everything pattern is shared with Fuchsia and seL4.
 
-**Tradeoffs:** 28 syscalls vs Linux's ~450 reflects scope, not minimalism for its own sake — networking, multi-user, signals, and pipes don't exist yet. The count will grow. Rust prevents memory safety bugs in the kernel (shared with Redox), but the kernel is not formally verified (seL4's advantage). The design bets that Rust's type system, ~2,300 tests, and small codebase provide adequate confidence for a single-user system — a weaker guarantee than seL4's formal proofs, but at a fraction of the engineering cost.
+**Tradeoffs:** 46 syscalls vs Linux's ~450 reflects scope, not minimalism for its own sake — networking, multi-user, and pipes don't exist yet. The count will grow. Rust prevents memory safety bugs in the kernel (shared with Redox), but the kernel is not formally verified (seL4's advantage). The design bets that Rust's type system, ~2,260 tests, and small codebase provide adequate confidence for a single-user system — a weaker guarantee than seL4's formal proofs, but at a fraction of the engineering cost. The per-core EEVDF scheduler with work stealing is novel in two ways: workload-granularity migration (steal by scheduling context group) and a property-tested Concurrent Work Conservation guarantee (CWC) — Linux CFS was shown to violate CWC by Ipanema (EuroSys 2020).
 
 ---
 
 ## Memory & Security
 
-**Our approach:** Capability-based handle table — processes hold handles to channels, memory, and scheduling contexts. No ambient authority (no global PID namespace, no `/proc`, no ambient file access). Split TTBR (kernel TTBR1 / user TTBR0). Demand-paged memory. W^X enforcement on all pages. Three-tier kernel allocator (slab + linked-list + buddy). No dynamic linking, no shared libraries.
+**Our approach:** Capability-based handle table with rights attenuation — processes hold handles to channels, VMOs (virtual memory objects), scheduling contexts, events, and threads. 8 named rights (READ, WRITE, SIGNAL, WAIT, MAP, TRANSFER, CREATE, KILL) monotonically attenuated on transfer. Per-handle u64 badges for endpoint discrimination. No ambient authority (no global PID namespace, no `/proc`, no ambient file access). Split TTBR (kernel TTBR1 / user TTBR0). VMO-backed demand-paged memory with COW snapshots and pager interface. W^X enforcement on all pages. Three-tier kernel allocator (slab + linked-list + buddy). ASLR (per-process user-space + kernel KASLR with 8-bit entropy). PAC (pointer authentication) and BTI (branch target identification) on ARM64. Execute-only code pages. No dynamic linking, no shared libraries.
 
-|                 | This OS                | Linux                        | macOS                       | Fuchsia                 | seL4                             |
-| --------------- | ---------------------- | ---------------------------- | --------------------------- | ----------------------- | -------------------------------- |
-| Isolation       | EL0/EL1 hardware       | Ring 0/3 hardware            | Hardware + SIP + sandbox    | Hardware + capabilities | Hardware + verified capabilities |
-| Capabilities    | Handle table (runtime) | DAC + MAC (SELinux/AppArmor) | Sandbox entitlements        | Handle table (runtime)  | Capabilities (verified)          |
-| Page size       | 16 KiB                 | 4 KiB default                | 16 KiB (Apple Silicon)      | 4 KiB                   | Configurable                     |
-| W^X             | Enforced on all pages  | Optional (mprotect)          | Enforced (hardened runtime) | Enforced                | Enforced                         |
-| ASLR            | No                     | Yes                          | Yes                         | Yes                     | N/A                              |
-| Dynamic linking | None                   | ld.so                        | dyld                        | ELF + vDSO              | None                             |
+|                 | This OS                    | Linux                        | macOS                       | Fuchsia                 | seL4                             |
+| --------------- | -------------------------- | ---------------------------- | --------------------------- | ----------------------- | -------------------------------- |
+| Isolation       | EL0/EL1 hardware           | Ring 0/3 hardware            | Hardware + SIP + sandbox    | Hardware + capabilities | Hardware + verified capabilities |
+| Capabilities    | Handle + 8 rights + badges | DAC + MAC (SELinux/AppArmor) | Sandbox entitlements        | Handle table (runtime)  | Capabilities (verified)          |
+| Memory objects  | VMOs (COW, sealed, pager)  | Anonymous/file mmap          | Mach VM objects             | VMOs                    | Frames + untyped                 |
+| Page size       | 16 KiB                     | 4 KiB default                | 16 KiB (Apple Silicon)      | 4 KiB                   | Configurable                     |
+| W^X             | Enforced on all pages      | Optional (mprotect)          | Enforced (hardened runtime) | Enforced                | Enforced                         |
+| ASLR            | User + kernel (KASLR)      | Yes                          | Yes                         | Yes                     | N/A                              |
+| PAC / BTI       | Yes (per-process keys)     | Yes (since 5.8/5.10)         | Yes (Apple Silicon)         | No                      | N/A                              |
+| Dynamic linking | None                       | ld.so                        | dyld                        | ELF + vDSO              | None                             |
 
-**Tradeoffs:** The handle-based model is structurally similar to Fuchsia's: you cannot access a resource you don't hold a handle to. No ASLR is a gap — but less critical when all binaries are compiled from source with no untrusted code loading. No dynamic linking eliminates GOT/PLT hijacking and LD_PRELOAD-class attacks, at the cost of higher memory usage when multiple processes share library code (each gets its own copy in physical memory).
+**Tradeoffs:** The handle-based model is structurally similar to Fuchsia's: you cannot access a resource you don't hold a handle to. Rights attenuation and per-handle badges go beyond Fuchsia's base model — badges enable userspace servers to identify callers without a global PID namespace. VMOs with versioning (COW snapshot ring), sealing (immutable freeze), content typing (u64 tag), and userspace pagers are architecturally comparable to Fuchsia's VMOs but add several novel features (bounded snapshot ring, compile-time seal enforcement via rights). ASLR covers both userspace (~14 bits per region) and kernel (KASLR, 8-bit entropy, 32 MiB slide). PAC + BTI provide hardware control-flow integrity — strictly superior to stack canaries on ARM64. No dynamic linking eliminates GOT/PLT hijacking and LD_PRELOAD-class attacks, at the cost of higher memory usage when multiple processes share library code (each gets its own copy in physical memory).
 
 ---
 
@@ -258,7 +260,7 @@ This is the most obvious gap relative to any system that ships to users. It is a
 
 |                   | This OS                                    | Linux                       | Fuchsia                   | Redox          | seL4          |
 | ----------------- | ------------------------------------------ | --------------------------- | ------------------------- | -------------- | ------------- |
-| Unit tests        | ~2,300+ (host-side)                        | kselftest, kunit            | Extensive (host + device) | Moderate       | Formal proofs |
+| Unit tests        | ~2,750 (host-side)                         | kselftest, kunit            | Extensive (host + device) | Moderate       | Formal proofs |
 | Integration tests | QEMU boot scripts                          | kselftest, LTP              | CQ bots, emulator         | QEMU boot      | Proof-based   |
 | Visual regression | 15 spec files, verify.py (assertion-based) | None (no OS-level renderer) | Screenshot tests (Scenic) | None           | N/A           |
 | Stress testing    | Fuzz + IPC/scheduler/timer stress, 4 SMP   | Syzkaller, LTP stress       | CQ stress, fuzzing        | Limited        | N/A           |

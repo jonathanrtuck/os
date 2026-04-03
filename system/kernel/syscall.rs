@@ -138,9 +138,6 @@ pub mod nr {
     pub const INTERRUPT_ACK: u64 = 45;
 }
 
-/// Maximum DMA allocation order — matches page_allocator::MAX_ORDER.
-/// Derived from RAM geometry so resolution changes never require kernel updates.
-const MAX_DMA_ORDER: u64 = (paging::RAM_SIZE_MAX / paging::PAGE_SIZE).ilog2() as u64;
 /// Maximum ELF size for process_create (4 MiB).
 /// Increased from 2 MiB to accommodate real HarfBuzz text shaping in core.
 const MAX_ELF_SIZE: u64 = 4 * 1024 * 1024;

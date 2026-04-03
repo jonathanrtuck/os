@@ -1,5 +1,8 @@
 graph TB
     %% System Architecture — Process Layers and IPC
+    %% Updated 2026-04-02 to reflect v0.6 kernel:
+    %%   Capability-based handles, VMOs, channels, per-core EEVDF, ASLR/PAC/BTI
+    %%   46 syscalls (was 28 at v0.4)
     %% Updated 2026-03-30 to reflect v0.5 decomposition:
     %%   "core" decomposed into document + layout + presenter
     %%   cpu-render and virgil-render removed; metal-render is sole backend
@@ -26,11 +29,13 @@ graph TB
         BLK["virtio-blk"]
     end
 
-    subgraph kernel["Kernel (EL1)"]
+    subgraph kernel["Kernel (EL1) — 46 syscalls"]
         direction LR
-        HANDLE["Handle Tables"]
-        MEM["Memory Mgmt"]
-        SCHED["EEVDF Scheduler"]
+        HANDLE["Handle Tables\n(capabilities)"]
+        VMO["VMOs\n(shared memory,\nCOW, pagers)"]
+        CHAN["Channels"]
+        SCHED["Per-core EEVDF\n(work stealing)"]
+        MEM["MMU / ASLR\n(PAC, BTI, XO)"]
     end
 
     E1 <-->|"edit protocol\n(ring buffer)"| PRESENTER
@@ -44,12 +49,13 @@ graph TB
 
     PRESENTER -->|"scene graph\n(shared memory)"| METAL
 
-    editors -->|"syscalls (handles, channels)"| kernel
-    pipeline -->|"syscalls"| kernel
-    services -->|"syscalls"| kernel
+    editors -->|"syscalls\n(handles, channels)"| kernel
+    pipeline -->|"syscalls\n(handles, VMOs)"| kernel
+    services -->|"syscalls\n(handles, VMOs)"| kernel
 
-    MEM -.->|"memory-map\ndocument pages"| editors
-    MEM -.->|"memory-map\ndocument + scene graph"| pipeline
+    VMO -.->|"VMO map\n(read-only)"| editors
+    VMO -.->|"VMO map\n(document + scene graph)"| pipeline
+    VMO -.->|"VMO map\n(scene graph, content)"| services
 
     METAL --- HW["Display"]
     INPUT --- KB["Keyboard / Pointer"]

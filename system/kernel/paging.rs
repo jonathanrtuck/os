@@ -28,9 +28,12 @@ pub const CHANNEL_SHM_END: u64 = USER_STACK_VA; // up to stack region
 pub const DESC_PAGE: u64 = 0b11; // L3 page descriptor (VALID + TABLE)
 pub const DESC_TABLE: u64 = 1 << 1;
 pub const DESC_VALID: u64 = 1 << 0;
+#[allow(dead_code)] // Test-only: used by kernel/test/tests/mem_paging.rs
 pub const DEVICE_MMIO_BASE: u64 = 0x0000_0000_2000_0000; // 512 MiB
 pub const DEVICE_MMIO_END: u64 = 0x0000_0000_4000_0000; // Up to channel SHM
+#[allow(dead_code)] // Test-only: used by kernel/test/tests/{kernel_syscall,mem_paging,stress_*}.rs
 pub const DMA_BUFFER_BASE: u64 = 0x0000_0000_1000_0000; // 256 MiB
+#[allow(dead_code)] // Test-only: used by kernel/test/tests/{kernel_syscall,stress_*}.rs
 pub const DMA_BUFFER_END: u64 = 0x0000_0000_2000_0000; // 512 MiB (abuts device MMIO)
 pub const HEAP_BASE: u64 = 0x0000_0000_0100_0000; // 16 MiB
 pub const HEAP_END: u64 = 0x0000_0000_1000_0000; // 256 MiB (abuts DMA region)

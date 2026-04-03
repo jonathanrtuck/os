@@ -123,17 +123,40 @@ The finished code's module-level docs are the authoritative reference for _what_
 
 ## 0.8 Handle-Based Access Control
 
-**Goal:** OS-mediated access control for kernel objects.
+**Goal:** OS-mediated access control for kernel objects. Capability-grade handle system that supports rights attenuation, badging, and scalable handle counts.
 
-**Approach:** Per-process fixed-size array (256 slots). Each slot holds a kernel object reference + rights bitfield (read/write). Kernel validates handle + rights on every syscall. Handles are indices (not pointers) — user code can't forge access.
+**Approach:** Per-process two-level handle table. Base array of 256 slots (fast path, no allocation) + overflow pages of 256 slots each allocated on demand from the heap. Handle is `u16` (65,536 address space), capped at 4,096 entries per process. Kernel validates handle + rights on every syscall. Handles are indices (not pointers) — user code can't forge access.
+
+**Named rights (u32 backing):**
+
+| Right    | Bit | Gates                                                                          |
+| -------- | --- | ------------------------------------------------------------------------------ |
+| READ     | 0   | `vmo_read`, `vmo_map` readable, channel read                                   |
+| WRITE    | 1   | `vmo_write`, `vmo_map` writable, `vmo_snapshot`, `vmo_restore`, `vmo_op_range` |
+| SIGNAL   | 2   | `channel_signal`                                                               |
+| WAIT     | 3   | `wait` on handle                                                               |
+| MAP      | 4   | `vmo_map` (required for any mapping)                                           |
+| TRANSFER | 5   | `handle_send` (transfer handle to another process)                             |
+| CREATE   | 6   | Reserved for future factory handles                                            |
+| KILL     | 7   | `process_kill`                                                                 |
+| APPEND   | 8   | `vmo_write` at offset >= committed_size only (no overwrite of existing data)   |
+| SEAL     | 9   | `vmo_seal` (consumed on use — irreversible freeze)                             |
+
+`Rights::ALL` = `0x3FF` (bits 0-9). `Rights::from_raw(u32)` masks to defined bits, silently dropping undefined bits. Future rights consume bits 10+ without changing existing code.
+
+**Monotonic attenuation:** `handle_send(target, handle, rights_mask)` creates a new handle in the target process with `original & mask`. Rights can only be removed, never added. A handle with READ+MAP but not WRITE allows read-only mapping — cannot write, cannot snapshot. The `attenuate` method is `const fn`, enabling compile-time rights computation.
+
+**Badges:** Each handle carries an opaque `u64` badge (default 0). `handle_set_badge(handle, badge)` / `handle_get_badge(handle)` syscalls. Badges are preserved through `handle_send` and survive rights attenuation. Use case: init sets badges on handles before sending them to services, so shared servers identify which client a handle was assigned to without needing a global PID namespace. Inspired by seL4's badge mechanism — well-understood, minimal kernel surface.
 
 **Alternatives considered:**
 
-- **Full capability system** (Fuchsia-style): More powerful (capability transfer, rights attenuation) but significantly more complex. Over-engineered for current needs.
 - **Centralized ACLs:** Separate permissions database. Extra indirection, harder to reason about per-process state.
 - **No access control:** Rejected — even a personal OS needs isolation between untrusted editors and trusted OS services.
+- **Fixed 256-slot table (original design):** Simple but insufficient for compound documents with many channels. The two-level scheme preserves O(1) access for the common case (first 256 handles) while growing on demand for handle-heavy processes.
 
-**Why 256 fixed slots:** Simple, no allocation needed. A user process with >256 kernel objects would be doing something unusual. Can grow if needed — the handle API doesn't expose the limit.
+**Why two-level, not a hash table or tree:** The base array covers 99% of processes with zero allocation and zero indirection. Overflow pages are rare and amortize across 256 handles each. A hash table would add per-lookup overhead to every syscall (hash + probe) for a growth property that's rarely needed. A BTreeMap would be O(log n) per lookup — worse than the O(1) direct-index scheme.
+
+**Prior art:** Fuchsia/Zircon (handle-based with rights attenuation, badges for server identification), seL4 (capability-based, badges on endpoints), L4Re (capability IPC with badges).
 
 ---
 
@@ -178,6 +201,71 @@ Lock ordering is documented in `LOCK-ORDERING.md`. Cross-cutting safety invarian
 **Boot/idle thread:** Each core has a single boot/idle thread (`new_boot_idle(core_id)`) that serves dual purpose: represents the initial execution context (kernel_main on core 0, secondary_main on cores 1+), and acts as the idle fallback when no user threads are runnable. Marked with `IDLE_THREAD_ID_MARKER` so the scheduler returns it to the per-core idle slot, never the global ready queue. This prevents cross-core migration — each boot thread stays on its originating core's boot stack.
 
 **Why PSCI over spin-table:** PSCI is the ARM-standard firmware interface. Works on QEMU, real hardware with UEFI/ATF, and most hypervisors. Spin-table is QEMU-specific.
+
+---
+
+## 0.12 Architecture Abstraction (the `arch` Module Contract)
+
+**Goal:** A clean boundary between architecture-specific and generic kernel code. THE reference for anyone porting this kernel to a new ISA. After this extraction, the generic kernel never constructs page table descriptors, never names a CPU register, and never emits inline assembly. All 14 files under `arch/aarch64/` — zero asm outside arch.
+
+**Design principle:** The arch module is a driver. It translates hardware specifics into kernel-internal abstractions — same pattern as a virtio driver translating device registers into OS primitives. The interface is the simplest version that works. Complexity lives inside each arch implementation (leaf node). Compile-time module selection via `#[cfg(target_arch)]`, not trait objects. Zero-overhead: all calls monomorphized/inlined.
+
+**Three settled design decisions:**
+
+**Device discovery -> SEPARATE.** DTB/ACPI is consumed by init (userspace) to find device addresses. On x86 it would be ACPI tables — completely different mechanism. Putting either inside the arch boundary would abstract _platform_, not _architecture_. `device_tree.rs` stays generic. Arch provides minimal boot info (RAM base/size, DTB pointer). Informed by the NT HAL lesson: the HAL's device-enumeration scope was eaten by firmware standardization (ACPI, UEFI). Abstract what genuinely varies between ISAs, nothing more.
+
+**Page tables -> VA/PA/permissions interface.** Walk logic, descriptor format, TLB invalidation are all arch-internal. The generic kernel never constructs descriptors. Arch owns the walk and calls the page allocator directly for intermediate table pages — same pattern as Linux (`arch/arm64/mm/mmu.c` calls `alloc_pages()`), Zircon (`ArmArchVmAspace::MapPages()` calls `AllocPage()`), and Redox. seL4 is the only kernel that externalizes table provisioning to userspace, but that's driven by formal verification constraints (eliminating implicit allocation from the proof), not applicable here.
+
+**Context -> fully arch-defined, generic accessors.** The register set IS the architecture. ARM64 Context has x[31], sp, elr, spsr, q[32]; x86_64 would have rax-r15, rip, rflags, xmm. Zero overlap. The abstraction is method-based: `pc()`, `set_sp()`, `arg(n)`, `set_user_mode()`. On aarch64, `pc()` returns `self.elr`; on x86_64 it would return `self.rip`.
+
+**Additional decisions:**
+
+- **IrqState -> opaque newtype.** Zero-cost `#[repr(transparent)]` wrapper, consistent with the project's existing `Pa` newtype pattern. No production C kernel does this (C lacks zero-cost newtypes), but Rust enables it. `interrupts::mask_all() -> IrqState`, `interrupts::restore(IrqState)`.
+- **Serial -> arch for now, platform later.** PL011 is technically a device (board-specific), not architecture. Linux, Zircon, and seL4 all separate arch from platform. But a platform layer serves zero boards today. Serial (~60 lines) lives in arch with an explicit marker: "platform-specific, extract to `platform::` when a second board target arrives (v0.14)."
+
+**Settled interface:**
+
+```rust
+mod arch {
+    // Boot
+    fn init_boot_cpu(dtb_ptr: *const u8) -> BootInfo;
+    fn init_secondary_cpu(core_id: usize);
+
+    // Context (fully arch-defined, generic accessors)
+    struct Context { /* arch-specific */ }
+    // Methods: new, pc, set_pc, sp, set_sp, arg, set_arg,
+    //          set_user_mode, set_user_tls, user_tls
+
+    // Core identity
+    fn core_id() -> u32;
+    fn set_current_thread(ctx: *mut Context);
+
+    // MMU
+    mod mmu {
+        create, map, unmap, switch, invalidate, destroy,
+        set_kernel_guard, clear_kernel_guard, is_user_accessible
+    }
+
+    // Interrupts
+    mod interrupts {
+        init, enable_irq, disable_irq, acknowledge,
+        end_of_interrupt, send_ipi, mask_all -> IrqState, restore(IrqState)
+    }
+
+    // Timer
+    mod timer { init, set_deadline_ns, now_ns, frequency }
+
+    // Serial (platform-specific; extract to platform:: at v0.14)
+    mod serial { init, put_byte }
+
+    // Power
+    mod power { cpu_on, system_off }
+}
+```
+
+**What stays generic (no arch dependency):** `scheduler.rs` (algorithm + state machine), `scheduling_algorithm.rs` (pure EEVDF math), `scheduling_context.rs` (budget/period accounting), `channel.rs`/`handle.rs`/`waitable.rs` (IPC + capabilities), `process.rs`/`thread.rs` (process model), `executable.rs` (ELF loading), `futex.rs` (PA-keyed wait/wake), `heap.rs`/`slab.rs`/`page_allocator.rs` (allocators), `device_tree.rs` (DTB parsing), `sync.rs` (IrqMutex — generic lock logic, arch for IRQ masking), `metrics.rs`/`syscall.rs` (dispatch logic). Roughly 60-65% of the kernel is architecture-independent.
+
+**Verification:** Full test suite passes. Clippy clean. No `asm!` outside `arch/aarch64/`. No ARM64 register names outside `arch/aarch64/`. Grep audit for leakage.
 
 ---
 
@@ -1702,3 +1790,170 @@ For a new platform, in order:
 7. **Page granule.** If the platform requires 4 KiB pages instead of 16 KiB, this is a significant change: `system_config.rs`, `boot.S` (TCR, block sizes), `link.ld.in`, and all code that uses PAGE_SIZE.
 8. **Test entropy.** Boot twice, verify different KASLR slides in serial output. If slides are identical, the timer counter isn't providing entropy — add RNDR or another source to boot.S.
 9. **Remove nothing.** pvpanic, DTB scan fallback, and HVF MMIO workarounds are all harmless on real hardware. Don't remove code that works everywhere.
+
+---
+
+## 15.0 Virtual Memory Objects (VMOs)
+
+**Goal:** A single memory abstraction for all shared memory. VMO subsumes `memory_share` (syscall #24), `dma_alloc`/`dma_free` (syscalls #17/#18). When you build a new way, kill the old way — no parallel memory abstractions.
+
+**Design principles:**
+
+1. **VMO is THE memory object.** One abstraction for all shared memory. Channels carry messages; VMOs carry data.
+2. **Capability-native.** VMO handles participate fully in the rights system: attenuation (READ, WRITE, MAP, APPEND, SEAL), transfer via `handle_send`, badges. Same model as channels, timers, interrupts.
+3. **Ownership-typed (Theseus-inspired).** The kernel-internal `Vmo` type uses Rust ownership to prevent use-after-free and double-unmap at compile time. `Drop` unmaps all mappings and frees all pages. No manual `freed` flag. No other microkernel can do this — it's a Rust-specific advantage.
+4. **Designed for the general case.** Not "what our OS needs" — "what any consumer of this microkernel needs." Decisions evaluated against the full landscape of microkernel use cases.
+
+### 15.1 Six Settled Decisions
+
+**1. Size: Fixed at creation.** Resize is architecturally wrong in a capability system. Zircon added `ZX_VMO_RESIZABLE` and immediately needed `ZX_VM_ALLOW_FAULTS` and `ZX_VM_REQUIRE_NON_RESIZABLE` — defensive flags that exist solely because resize creates a class of bugs where one process shrinks a VMO mapped in another, causing unexpected faults. seL4, NOVA, L4Re — the kernels optimizing for correctness — all chose fixed.
+
+**2. Backing: Lazy by default (demand-paged, zero-fill on fault).** Pages allocated on first touch, not at creation. A database allocating 1 GiB shouldn't pay for pages it hasn't touched. Explicit commit available via `vmo_op_range(COMMIT, offset, len)` for processes that need deterministic allocation (no faults on hot path).
+
+**3. Contiguity: Non-contiguous default. `VMO_CONTIGUOUS` flag for DMA.** Contiguous VMOs use the buddy allocator for 2^n contiguous frames (eager allocation — contiguity requires all pages allocated together). Restrictions: cannot snapshot (COW copy wouldn't be contiguous), always eager, always pinned. Every OS special-cases contiguous allocation (Zircon `zx_vmo_create_contiguous`, Linux CMA, QNX `MAP_PHYS`).
+
+**4. VA placement: Kernel-picks.** `vmo_map` maps into the process's shared memory region. Kernel picks the next available VA using the existing `VmaList` (sorted list, gap search). Optional `VMO_MAP_FIXED` for specific-VA mapping (fails on overlap, never silently replaces). VMAR extension point documented for future (see §15.4).
+
+**5. Channels remain separate.** Channels and VMOs are distinct IPC primitives: channels are message pipes (ordered, small), VMOs are shared memory (unordered, large). Every microkernel keeps them separate (Zircon channels + VMOs, seL4 endpoints + frames, L4 IPC + dataspaces).
+
+**6. Capability-native.** VMO handles participate fully in the capability system (§0.8). Rights attenuation, transfer, badges — all work.
+
+### 15.2 Four Novel Features (Beyond Existing Microkernels)
+
+**N1. Built-in generation numbers (versioned memory).** Every VMO has a generation counter (u64). `vmo_snapshot()` increments the generation and COW-forks the page list. `vmo_restore(generation)` reverts to a previous snapshot. Bounded snapshot ring (configurable depth, default 64). No other production microkernel offers versioned memory objects. COW is typically a filesystem concern (ZFS, Btrfs) or process-fork mechanism. Making COW a VMO primitive means any consumer gets point-in-time snapshots, undo, and concurrent-read-while-write for free.
+
+Implementation: per-page reference counting (refcount stored alongside Pa in the page list). Write to a page with refcount > 1 triggers COW (allocate new page, copy, update current generation's page list, decrement old page's refcount). Snapshot ring eviction: when the ring wraps, walk the oldest snapshot's page list decrementing refcounts and freeing pages that hit zero.
+
+Interactions: sealed VMOs reject `snapshot` and `restore` (content frozen, existing snapshots remain readable). Contiguous VMOs cannot snapshot (COW would break contiguity). Append-only VMOs snapshot normally (captures the append frontier).
+
+**N2. Append-only permission.** New right: APPEND (bit 8). A handle with APPEND but not WRITE can write at `offset >= committed_size` but cannot overwrite existing data. Enforced in `vmo_write` syscall. Use cases: log-structured stores, audit trails, append-only document history. The document service can hand an APPEND-only VMO to an editor — the editor can add content but never modify or delete previous entries.
+
+**N3. Seal (immutable freeze).** `vmo_seal()` permanently freezes the VMO's content, permissions, and metadata. Irreversible. All subsequent mutating operations return `PermissionDenied`. Existing snapshots survive. Mappings remain valid (read-only — writable PTEs remapped as read-only on seal). Use case: init creates a VMO with font data, seals it, sends READ+MAP handles to services. Services know by construction that the content will never change — no TOCTOU, no races, tamper-proof. Linux has `memfd_create(MFD_ALLOW_SEALING)` + `fcntl(F_ADD_SEALS)` for the same reason (Android uses it to replace ashmem). Seal requires the SEAL right. Once sealed, the SEAL right is consumed (monotonic — can't unseal, can't re-seal).
+
+**N4. Content-type tag.** Each VMO carries an optional `type_tag: u64` set at creation. The kernel doesn't interpret it — opaque metadata. Distinct from badges (which identify the sender). When VMO handles travel via IPC, the receiver checks `vmo_get_info().type_tag` to verify content type matches expectations. Catches version mismatches, corrupted handles, and protocol errors without a side-channel. Inspired by RedLeaf's `RRef<T>` (OSDI '20), reduced to minimum viable form. Type tag is immutable after creation.
+
+**Key insight:** No existing microkernel combines all four novel features (ownership-typed, versioned, permission-rich, content-tagged). Each exists in isolation in research systems. This kernel composes them into a single coherent abstraction.
+
+### 15.3 Page Commitment Tracking
+
+Per-VMO page list: `BTreeMap<u64, (Pa, u32)>` where key = page offset, Pa = physical address, u32 = reference count (for COW snapshot sharing).
+
+- **Uncommitted page:** absent from BTreeMap. Zero-fill on fault (or return zeros for `vmo_read` without allocating).
+- **Committed page, refcount=1:** exclusively owned by current generation. Writes go directly to the page.
+- **Committed page, refcount>1:** shared between current generation and N snapshots. Write triggers COW: allocate new page, copy content, insert at refcount=1, decrement old page's refcount.
+- **Contiguous VMO:** BTreeMap pre-populated at creation with all pages at refcount=1. No faulting.
+
+**Why BTreeMap (not global hash table, not PTE-is-truth):** VMO must be self-contained because it can be mapped into multiple processes. Its page state can't live in any one process's page tables. BTreeMap gives O(log n) lookup, sparse storage (uncommitted ranges cost nothing), and iteration for COW snapshots. Matches Zircon's `VmPageList` architecture. Mach's global hash table creates lock contention under SMP.
+
+### 15.4 VMAR Extension Point (Future)
+
+**What's missing:** `vmo_map` maps into a single flat shared region per process. Any process that can call `vmo_map` can map anywhere in that region. There's no way to confine a component to a sub-region of the VA space.
+
+**What VMARs would add:** `Vmar` kernel object (handle-based, capability-controlled). Every process gets a root VMAR at creation. `vmar_allocate(parent, size, flags)` carves sub-regions. `vmar_map(vmar, vmo, ...)` maps into a specific VMAR. Composable sandboxing — hand a library or plugin a sub-VMAR, and it can only map VMOs within its designated region. The VA-space equivalent of capability confinement. Zircon uses this for component framework isolation.
+
+**Compatibility:** `vmo_map(handle, flags)` continues to work — it maps into the root VMAR. When VMARs arrive, `vmo_map` becomes sugar for `vmar_map(root_vmar, ...)`. No API break.
+
+**Why deferred:** Pure additive change. The VMO API works without VMARs. ~400-600 lines for a feature no consumer needs until in-process sandboxing.
+
+**Research references:** Zircon VMOs (zx_vmo_create, zx_vmar_map), seL4 Untyped/frames, Mach/XNU vm_object, QNX shm_ctl, L4Re dataspaces, Linux mmap/memfd, Redox schemes. Research: Theseus OS (ownership-typed MappedPages — OSDI '20), Twizzler (object-relative pointers — USENIX ATC '20), RedLeaf (RRef<T> typed cross-domain memory — OSDI '20), TreeSLS (capability tree checkpointing — SOSP '23), Asterinas (framework/service safety split — USENIX ATC '25).
+
+---
+
+## 16.0 Pager Interface
+
+**Goal:** VMO-level pagers — a channel attached to a VMO that receives page fault notifications. When an uncommitted page is accessed, the kernel forwards the fault to the pager instead of zero-filling. The pager resolves the fault (reads from disk, decompresses, generates content), commits the page, and tells the kernel to wake blocked threads.
+
+**Design decision: Pager as VMO attribute (Zircon-inspired, not seL4's thread-level model).** Different VMOs can have different pagers — the document service pages document VMOs, the filesystem service pages file VMOs. seL4 attaches fault endpoints to threads, which conflates "what memory should I page" with "which thread faulted." VMO-level attachment keeps concerns separate.
+
+**Exception dispatch priority chain** (designed for future extensibility):
+
+1. Translation fault on pager-backed VMO -> dispatch to VMO pager (this phase)
+2. Any exception + process has exception handler -> dispatch to process handler (future: debuggers, breakpoints, illegal instructions)
+3. Kill the process
+
+The extension point for process-level exception handling is a one-line addition to the fault handler. No refactoring needed.
+
+**Fault deduplication:** `pending_faults: BTreeSet<u64>` in VMO. First fault on page N adds to set + sends to pager. Subsequent faults on page N just block (no duplicate message to pager). `pager_supply` removes from set.
+
+**Pager death:** Channel close -> wake all pager waiters -> re-fault -> no pager + uncommitted -> kill process. Conservative: wrong data is worse than no data. This matches Zircon's behavior — a dead pager means the VMO is irrecoverable.
+
+**Syscalls:**
+
+| Nr  | Syscall       | Args                                     | Returns | Rights       |
+| --- | ------------- | ---------------------------------------- | ------- | ------------ |
+| 25  | vmo_set_pager | x0=vmo_handle, x1=channel_handle         | 0       | WRITE on VMO |
+| 26  | pager_supply  | x0=vmo_handle, x1=offset_pages, x2=count | 0       | WRITE on VMO |
+
+**Thread blocking:** New field `pager_wait: Option<(VmoId, u64)>` on Thread. `block_current_for_pager` marks the thread as blocked. `pager_supply` scans the blocked list for matching (vmo_id, page_offset) and wakes them. Woken threads re-enter the fault handler and find committed pages.
+
+**What this unlocks:** Demand-paged filesystems, memory-mapped files, sandboxed decoders that lazily decode on access.
+
+**Prior art:** Zircon pager (zx_pager_create, zx_pager_supply_pages), seL4 fault endpoints, Mach external memory managers.
+
+---
+
+## 17.0 Security Hardening
+
+Implemented security features and their design rationale. Each feature was chosen because it provides meaningful protection at minimal cost on ARMv8, and because the architecture abstraction (§0.12) concentrates the implementation in a single arch module.
+
+### 17.1 Kernel PRNG
+
+ChaCha20 with fast key erasure (Bernstein 2017). **Novel: type-state seeding** — `EntropyPool -> Prng` transition enforced at compile time via Rust's type system. An uninitialized PRNG cannot be used; a seeded PRNG cannot be re-seeded. No production kernel does this (C lacks the type machinery). The PRNG is the foundation for all randomization: ASLR, PAC keys, future stack cookies.
+
+**Entropy sources:** RNDR instruction (if FEAT_RNG available, probed at runtime via `ID_AA64ISAR0_EL1[63:60]`) + CPU jitter extraction (memory-access timing variation measured via CNTVCT). RNDR provides hardware-quality entropy on Apple M1+ and ARMv8.5+. Jitter provides a universal fallback — quality varies (higher on bare metal, lower on VMs).
+
+**Per-CPU instances, per-process fork:** Each core gets its own PRNG (no lock contention). `fork()` derives a per-process seed, ensuring layout isolation between processes. 28 tests including RFC 8439 test vectors and statistical quality checks. Zero `unsafe` in the PRNG core.
+
+### 17.2 User Address Space Layout Randomization (ASLR)
+
+Per-process randomized bases for heap, DMA, device MMIO, and stack regions. ~14 bits entropy for each region. Per-process PRNG fork (§17.1) ensures layout isolation between processes — compromising one process's layout reveals nothing about another's.
+
+**What's randomized:** Heap base, DMA region base, device MMIO base, stack base. **What's not (yet):** Channel SHM and shared memory remain at fixed VAs (userspace addresses them directly — full ASLR requires a bootstrap protocol). Deterministic fallback when PRNG unavailable (boot proceeds, just without randomization).
+
+### 17.3 Pointer Authentication (PAC)
+
+Per-process PAC keys: 5 x 128-bit keys (APIA, APDA, APIB, APDB, APG) generated from the process's PRNG fork, stored in Process struct, loaded on context switch alongside the TTBR0 swap. `arch::security` module with feature detection (`pac_supported()`, `bti_supported()`). Raw system register encodings for key writes.
+
+**Why PAC replaces stack canaries:** PAC is strictly superior on ARM64. Stack canaries protect one value (return address) with one secret (canary). PAC protects every authenticated pointer with per-process keys, cannot be bypassed by reading the canary from an adjacent stack frame, and costs one instruction per sign/verify (hardware accelerated, ~1 cycle). The only reason to use canaries on ARM64 is if PAC isn't available — and all Apple Silicon and ARMv8.3+ support it.
+
+### 17.4 Branch Target Identification (BTI)
+
+BTI enforcement prevents jumping into the middle of a function (JOP attacks). Enabled alongside PAC in the `arch::security` module. Requires compiler support (`-Zbranch-protection=bti`).
+
+### 17.5 Execute-Only User Code Pages
+
+New `PageAttrs::user_xo()` maps code segments as execute-only (AP=RO, no AP_EL0, UXN=0). EL0 can fetch instructions but load/store on code pages faults. Prevents code disclosure attacks that leak ASLR layout. ~5 lines of page table configuration. A process cannot read its own code section — the only way to discover code addresses is by executing them.
+
+### 17.6 Kernel Address Space Layout Randomization (KASLR)
+
+8-bit entropy (256 possible positions), 32 MiB slide granularity (matches L2 block size with 16 KiB pages). The kernel loads at a random physical offset on each boot.
+
+**Implementation:** PIE binary (`--pie -z notext`) with position-independent code. `boot.S` reads CNTVCT_EL0 before MMU enable, extracts bits [32:25] as the slide index, shifts all TTBR1 L2 entries uniformly (device + RAM). Post-link fixup tool processes `R_AARCH64_RELATIVE` relocations: physical address addends (< KERNEL_VA_OFFSET) are not slid, kernel VA addends (>= KERNEL_VA_OFFSET) are slid. Self-contained: works on any ELF loader.
+
+**Why 8 bits, not more:** 256 positions x 32 MiB = 8 GiB slide range, which fits comfortably in the 64 GiB kernel VA space (T1SZ=28). More bits would require smaller slide granularity (increasing TLB pressure from partial block mappings) or a larger VA range (increasing T1SZ, reducing user VA). 8 bits is the sweet spot for a microkernel where the kernel image is small and the attacker must guess remotely.
+
+---
+
+## 18.0 Spectre/Meltdown Design Story
+
+Not implemented, but the architecture explicitly supports it. Someone building a multi-tenant system on this kernel needs a clear path to adding mitigations. This section documents that path.
+
+### 18.1 Meltdown-Class (Mitigated by Default)
+
+Split TTBR (§0.2) gives kernel/user page table isolation for free. Userspace TTBR0 literally cannot address kernel memory — this is the KPTI mitigation that Linux had to retrofit painfully, and ARM microkernels get it by default. No work needed. No performance cost.
+
+### 18.2 Spectre-Class (Injection Points Documented)
+
+After the architecture abstraction (§0.12), every mitigation injection point is a single function in a single arch module. Adding a speculation barrier to `context_switch` is literally one instruction in one file. Without the arch abstraction, these same barriers would need to be sprinkled across `exception.S`, `scheduler.rs`, `main.rs`, and `syscall.rs` — fragile, easy to miss a path.
+
+| Mitigation                              | Injection point          | ARM64 instruction     | x86_64 equivalent | Notes                                                    |
+| --------------------------------------- | ------------------------ | --------------------- | ----------------- | -------------------------------------------------------- |
+| Speculation barrier on syscall entry    | `arch::syscall_entry()`  | `sb` or `csdb`        | `lfence`          | Prevents speculative execution past privilege transition |
+| Speculation barrier before eret         | `arch::context_switch()` | `sb` or `csdb`        | `lfence`          | Prevents speculative access to new process's data        |
+| Indirect branch prediction invalidation | `arch::context_switch()` | BTI (already enabled) | IBPB              | Per-process branch predictor isolation                   |
+| Speculative store bypass disable        | `arch::init_boot_cpu()`  | SSBS                  | SPEC_CTRL MSR     | One-time configuration at boot                           |
+| Retpoline for indirect calls            | Compiler flag            | N/A (BTI sufficient)  | `-mretpoline`     | Toolchain concern, not kernel code                       |
+
+### 18.3 Porting Guide Implications
+
+The architecture porting guide (future packaging phase) should include a "security hardening" section listing these injection points and what each architecture needs. This turns Spectre/Meltdown from "unsupported" into "supported by design, implement per your threat model." A porter targeting a multi-tenant use case adds five instructions across three functions. A porter targeting a single-user embedded system skips them all — zero cost.

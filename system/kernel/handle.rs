@@ -324,10 +324,12 @@ impl Iterator for DrainHandles<'_> {
 impl Rights {
     pub const ALL: Self = Self(0x3FF);
     pub const APPEND: Self = Self(1 << 8);
+    #[allow(dead_code)] // Test-only: used by kernel/test/tests/kernel_handle_rights.rs
     pub const CREATE: Self = Self(1 << 6);
     pub const KILL: Self = Self(1 << 7);
     pub const MAP: Self = Self(1 << 4);
     pub const NONE: Self = Self(0);
+    #[allow(dead_code)] // Test-only: used by kernel/test/tests/kernel_handle_rights.rs
     pub const READ_WRITE: Self = Self((1 << 0) | (1 << 1));
     pub const READ: Self = Self(1 << 0);
     pub const SEAL: Self = Self(1 << 9);

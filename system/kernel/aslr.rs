@@ -23,14 +23,13 @@
 
 use super::random;
 
-const MIN_CHANNEL_SHM_PAGES: u64 = 128; // 2 MiB
 const MIN_DEVICE_PAGES: u64 = 64; // 1 MiB
 const MIN_DMA_PAGES: u64 = 64; // 1 MiB
 const MIN_HEAP_PAGES: u64 = 256; // 4 MiB
-const MIN_SHARED_PAGES: u64 = 128; // 2 MiB
 const MIN_STACK_PAGES: u64 = 4; // 64 KiB (matches USER_STACK_PAGES)
 const PAGE_SIZE: u64 = 16384;
 
+#[allow(dead_code)] // Test-only: used by kernel/test/tests/kernel_aslr.rs
 pub const CHANNEL_SHM_REGION_END: u64 = 0x0000_0000_7000_0000;
 pub const CHANNEL_SHM_REGION_START: u64 = 0x0000_0000_4000_0000;
 pub const DEVICE_REGION_END: u64 = 0x0000_0000_4000_0000;
@@ -39,6 +38,7 @@ pub const DMA_REGION_END: u64 = 0x0000_0000_2000_0000;
 pub const DMA_REGION_START: u64 = 0x0000_0000_1000_0000;
 pub const HEAP_REGION_END: u64 = 0x0000_0000_1000_0000;
 pub const HEAP_REGION_START: u64 = 0x0000_0000_0100_0000;
+#[allow(dead_code)] // Test-only: used by kernel/test/tests/kernel_aslr.rs
 pub const SHARED_REGION_END: u64 = 0x0000_0001_0000_0000;
 pub const SHARED_REGION_START: u64 = 0x0000_0000_C000_0000;
 pub const STACK_REGION_END: u64 = 0x0000_0000_8000_0000;
@@ -48,6 +48,7 @@ pub const STACK_REGION_START: u64 = 0x0000_0000_7000_0000;
 #[derive(Debug, Clone, Copy)]
 pub struct AslrLayout {
     pub heap_base: u64,
+    #[allow(dead_code)] // Test-only: DMA region randomized but VMOs replaced DMA syscalls
     pub dma_base: u64,
     pub device_base: u64,
     pub channel_shm_base: u64,

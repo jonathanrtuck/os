@@ -1,13 +1,13 @@
 # kernel
 
-Bare-metal aarch64 microkernel. 33 .rs files + 2 .S + link.ld, 28 syscalls, ~5000 lines.
+Bare-metal aarch64 microkernel. 33 .rs files + 2 .S + link.ld, 46 syscalls, ~5000 lines.
 
 ## Build & Test
 
 ```sh
 cd system && cargo build                              # Cross-compile for aarch64-unknown-none
 cd system && cargo clippy                             # Must be zero warnings
-cd system/test && cargo test -- --test-threads=1      # ~2,236 host-side tests
+cd system/kernel/test && cargo test -- --test-threads=1  # 1,216 kernel-only tests
 ```
 
 ## Architecture

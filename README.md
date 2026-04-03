@@ -24,7 +24,7 @@ For the full design landscape, see the [decision register](design/decisions.md) 
 
 ## what’s implemented
 
-**Kernel** — Bare-metal aarch64 microkernel. 28 syscalls, EEVDF scheduler with scheduling contexts, 4 SMP cores (GICv3 interrupt controller, tickless idle with IPI wakeup), demand-paged memory, channel-based IPC with shared memory.
+**Kernel** — Bare-metal aarch64 microkernel. 46 syscalls, EEVDF scheduler with scheduling contexts, 4 SMP cores (GICv3 interrupt controller, tickless idle with IPI wakeup), demand-paged memory, channel-based IPC with shared memory.
 
 **Display pipeline** — Presenter builds a scene graph in shared memory; metal-render reads it, submits Metal GPU commands, and presents to the display via the [hypervisor](https://github.com/jonathanrtuck/hypervisor). Triple-buffered scene graph with mailbox semantics (writer never blocks, reader always gets latest frame). Configurable-cadence frame scheduler (60/30/120fps) with event coalescing, frame budgeting, and idle optimization. Incremental scene graph updates — clock ticks and cursor moves are zero-allocation mutations; only changed nodes are recorded in a change list. Change-list-driven damage tracking with subtree clip skipping. Dirty-rectangle GPU transfers (only changed regions sent to the host).
 
@@ -115,7 +115,7 @@ os/
 │   ├── research/                    # COW filesystems, OS landscape, font rendering
 │   └── *.mermaid                    # Architecture, dependency, pipeline diagrams
 ├── system/                          # OS implementation (Rust, no_std)
-│   ├── kernel/                      # Microkernel (28 syscalls, EEVDF, GICv3, SMP)
+│   ├── kernel/                      # Microkernel (46 syscalls, EEVDF, GICv3, SMP)
 │   ├── services/
 │   │   ├── init/                    # Root task — spawns everything, wires IPC
 │   │   ├── presenter/               # View engine (C) — scene graph builder, input router

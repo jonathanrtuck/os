@@ -20,7 +20,7 @@ For the data model glossary (file, manifest, document, content file, coordinate 
 
 **Init** — the root task. The only process the kernel spawns directly. Init spawns all other processes, orchestrates shared memory allocation, creates IPC channels, and runs the startup handshake. Microkernel pattern (cf. Fuchsia `component_manager`, seL4 root task). Currently scaffolding; the pattern is foundational. See [system/DESIGN.md § 2.1](../system/DESIGN.md).
 
-**Kernel** — manages hardware resources (memory, CPU time, interrupts, process isolation). Semantically ignorant — does not know what a document, mimetype, or pixel is. Provides shared memory pages and doorbells (signals). Does not look inside the data that flows through them. 28 syscalls, 4 SMP cores, EEVDF scheduler, GICv3. See `system/kernel/DESIGN.md`.
+**Kernel** — manages hardware resources (memory, CPU time, interrupts, process isolation). Semantically ignorant — does not know what a document, mimetype, or pixel is. Provides handles to typed objects (channels, VMOs, threads, events, scheduling contexts) with rights attenuation. Does not look inside the data that flows through them. 46 syscalls, 4 SMP cores, per-core EEVDF scheduler with work stealing, GICv3. See `system/kernel/DESIGN.md`.
 
 **Leaf node** — a component at the outermost edge of a pipeline, connecting to nothing downstream. Leaf nodes are where essential complexity lives: a PNG decoder, a font shaper, a device driver, a format translator. Complex inside, simple interface. The complexity is contained and cannot leak inward. "Leaf node" is relative to the system boundary you're looking at — the render service is a leaf of our OS, but from a wider view it's another translator. See [philosophy.md § Push complexity outward to the leaves](philosophy.md#push-complexity-outward-to-the-leaves).
 
@@ -39,6 +39,34 @@ For the data model glossary (file, manifest, document, content file, coordinate 
 **Store service** (`services/store/`) — the process that handles document persistence and undo/redo. Wraps the `store` and `fs` libraries. Receives commit messages from the document service, writes document state to the COW filesystem via virtio-blk, and manages snapshots for undo (64-entry ring). `MSG_DOC_SNAPSHOT` / `MSG_DOC_RESTORE` for undo/redo. See [system/DESIGN.md](../system/DESIGN.md).
 
 **Translator** — a component that converts between the OS's internal representation and an external format. Import translators (`.docx` → manifest + content files) and export translators (manifest + content files → `.pptx`) are leaf nodes — complex inside, simple interface. New format support = new translator; the OS doesn't change. Translation is inherently lossy. See [foundations.md § Interop](foundations.md#interop).
+
+---
+
+## Kernel
+
+**ASLR (Address Space Layout Randomization)** — per-process randomization of heap, DMA, device, and stack region base addresses (~14 bits of entropy each). Defense-in-depth alongside the capability model. **KASLR** randomizes the kernel image load address at boot (8-bit entropy, 32 MiB slide) via PIE + PIC + post-link relocation fixup. See `system/kernel/aslr.rs`, `system/kernel/relocate.rs`.
+
+**Badge** — a u64 value attached to a handle, preserved through transfer and attenuation. Enables userspace servers to identify callers without a global PID namespace — each client gets a unique badge when the server mints their handle. See `system/kernel/handle.rs`.
+
+**Capability (handle)** — the kernel's access control primitive. A process can only interact with a resource (channel, VMO, thread, event, scheduling context) by holding a handle to it. Handles carry rights and a badge. No ambient authority — nothing is accessible without a handle. See `system/kernel/handle.rs`.
+
+**CWC (Concurrent Work Conservation)** — a property of the SMP scheduler: no idle core coexists with an overloaded core after a scheduling round. Property-tested via model tests. Linux CFS was shown to violate CWC (Ipanema, EuroSys 2020). See `system/kernel/scheduler.rs`.
+
+**EEVDF (Earliest Eligible Virtual Deadline First)** — the scheduling algorithm, independently chosen by both this kernel and Linux (6.6+). Per-core ready queues with virtual lag (vlag) tracking for fairness. Threads are placed via cache-affine wake (prefer `last_core`). See `system/kernel/scheduler.rs`.
+
+**Event** — a kernel object with a 64-bit signal bitmask. Threads can wait on events and set/clear bits atomically. Used for lightweight synchronization between processes. See `system/kernel/event.rs`.
+
+**PAC (Pointer Authentication Code)** / **BTI (Branch Target Identification)** — ARM64 hardware control-flow integrity features. PAC signs return addresses with per-process keys (5 × 128-bit, loaded on context switch). BTI enforces that indirect branches land on valid targets. Strictly superior to stack canaries. See `system/kernel/arch/aarch64/context.rs`.
+
+**Pager** — a userspace process that supplies pages to a VMO on demand, via a channel. When a thread faults on an uncommitted VMO page, the kernel sends a fault message to the pager channel; the pager responds with physical memory. Fault deduplication ensures only one request per page. See `system/kernel/vmo.rs`.
+
+**Rights** — a bitmask of 8 named permissions on a handle: READ, WRITE, SIGNAL, WAIT, MAP, TRANSFER, CREATE, KILL. Rights are monotonically attenuated — you can only remove rights on transfer, never add them. Per-syscall enforcement ensures a handle without WRITE cannot be used to write. See `system/kernel/handle.rs`.
+
+**Scheduling context** — a handle-based object that groups threads into a budget. Threads sharing a scheduling context share CPU time allocation. Used by userspace to express workload structure. Work stealing prefers to migrate entire scheduling context groups (workload-granularity migration). See `system/kernel/scheduler.rs`.
+
+**VMO (Virtual Memory Object)** — the kernel's memory primitive. A named collection of pages with five novel features: versioned (COW snapshots with bounded ring), sealed (immutable freeze with PTE invalidation), content-typed (u64 tag for IPC type safety), lazy-backed (demand-paged), and pager-backed (userspace fault handling). Cross-process `vmo_map` replaces the older `memory_share` syscall. 10 syscalls (30–39). See `system/kernel/vmo.rs`.
+
+**Work stealing** — idle SMP cores steal runnable threads from the busiest remote core's ready queue. EEVDF virtual lag is preserved across migration so fairness position is maintained. Budget-aware: only steals threads with scheduling context budget remaining. See `system/kernel/scheduler.rs`.
 
 ---
 

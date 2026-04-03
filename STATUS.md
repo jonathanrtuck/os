@@ -4,7 +4,7 @@
 
 ## Current State
 
-**v0.6 Kernel: IN PROGRESS.** Phases 1-5 complete. Phase 6 (packaging) next.
+**v0.6 Kernel: COMPLETE.** All 6 phases done. 46 syscalls, ~2,260 tests.
 
 - **Phase 1 (Arch Abstraction): COMPLETE.** 14 files under `kernel/arch/aarch64/`, zero asm outside arch, clean `#[cfg(target_arch)]` boundary. Settled interface: MMU, Context, interrupts, timer, serial, power.
 - **Phase 2 (Capability Model): COMPLETE.** Rights attenuation (8 named rights, monotonic AND on transfer, per-syscall enforcement). Dynamic handle table (two-level: 256 base + overflow pages, 4096 cap, Handle u16). Badges (u64 per-handle, set/get syscalls, preserved through transfer). 30 syscalls. 2,425 tests pass.
@@ -14,7 +14,7 @@
   - **Phase 3c (Signals/events): COMPLETE.** Event objects with signal bitmask.
   - **Phase 3d (Thread inspection): COMPLETE.** Read thread state for debugging.
   - **Phase 3e (Clock): COMPLETE.** Monotonic clock syscall.
-- **Phase 4 (Security Hardening): COMPLETE (KASLR deferred).**
+- **Phase 4 (Security Hardening): COMPLETE.**
   - **4a: Kernel PRNG — COMPLETE.** ChaCha20 + fast key erasure. Novel: type-state seeding (`EntropyPool → Prng`) — compile-time enforcement that no production kernel has. RNDR + CPU jitter entropy. Per-process PRNG fork. 28 tests + RFC 8439 vectors.
   - **4b: User ASLR — COMPLETE.** Per-process randomized heap/DMA/device/stack bases (~14 bits each). Channel SHM/shared memory fixed (userspace dependency). 9 tests.
   - **4c: PAC + BTI — COMPLETE.** Per-process PAC keys (5 × 128-bit), loaded on context switch. Replaces stack canaries (strictly superior on ARM64). Feature detection via `arch::security`.
@@ -46,7 +46,7 @@ Input Driver → Presenter → Scene Graph → Render Service → Display
            Document Service → Disk
 ```
 
-The monolithic `core` has been decomposed into three processes: document, layout engine, and presenter (view engine). Protocol library consolidated to 10 modules (init, device, input, edit, layout, view, document, decode, content, metal). 2,313 tests pass.
+The monolithic `core` has been decomposed into three processes: document, layout engine, and presenter (view engine). Protocol library consolidated to 10 modules (init, device, input, edit, layout, view, document, decode, content, metal). 2,745 tests pass (1,216 kernel-only + 1,529 system).
 
 Content types: `None`, `InlineImage` (per-frame scene data), `Image` (Content Region via content_id), `Path`, `Glyphs`. Sole render backend: `metal-render` (native Metal GPU via hypervisor). cpu-render and virgil-render removed (2026-03-30).
 
@@ -76,7 +76,7 @@ Seven-layer fs stack: `BlockDevice` trait → superblock ring → free-extent al
 
 ### System Code
 
-`system/kernel/` (33 .rs + 2 .S), `system/services/{init,document,layout,presenter,store,filesystem,drivers/{metal-render,virtio-blk,virtio-console,virtio-input,virtio-9p},decoders/{png}}/`, `system/libraries/{sys,virtio,drawing,fonts,animation,layout,scene,ipc,protocol,render,piecetable,icons,fs,store}/`, `system/user/{echo,text-editor,rich-editor,stress,fuzz,fuzz-helper}/`, `system/test/`, `tools/mkdisk/`. 28 syscalls. 4 SMP cores, EEVDF scheduler.
+`system/kernel/` (33 .rs + 2 .S), `system/services/{init,document,layout,presenter,store,filesystem,drivers/{metal-render,virtio-blk,virtio-console,virtio-input,virtio-9p},decoders/{png}}/`, `system/libraries/{sys,virtio,drawing,fonts,animation,layout,scene,ipc,protocol,render,piecetable,icons,fs,store}/`, `system/user/{echo,text-editor,rich-editor,stress,fuzz,fuzz-helper}/`, `system/test/`, `tools/mkdisk/`. 46 syscalls. 4 SMP cores, per-core EEVDF scheduler with work stealing.
 
 ## Milestone Roadmap
 

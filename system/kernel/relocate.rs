@@ -21,6 +21,10 @@
 //! (`R_AARCH64_RELATIVE = 0x403`) is ARM64-specific. A RISC-V port would
 //! define `R_RISCV_RELATIVE = 3`.
 
+// Test-only: boot.S handles relocations at runtime in asm. This Rust
+// implementation is used by kernel/test/tests/kernel_kaslr.rs.
+#![allow(dead_code)]
+
 /// Size of one ELF64 Rela entry (r_offset + r_info + r_addend).
 const RELA_ENTRY_SIZE: usize = 24;
 

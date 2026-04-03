@@ -87,6 +87,7 @@ pub fn hardware_random() -> Option<u64> {
 /// for critical seeding operations (e.g., initial PRNG seeding at boot).
 ///
 /// Returns `None` if entropy is unavailable.
+#[allow(dead_code)] // Porting API: listed in PORTING.md §entropy
 pub fn hardware_random_reseeded() -> Option<u64> {
     let val: u64;
     let success: u64;

@@ -331,6 +331,7 @@ pub fn chacha20_block(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u8; 64
 ///
 /// The fundamental operation: 4 additions, 4 XORs, 4 rotations on a
 /// 4-word state. Exposed for direct testing against RFC test vectors.
+#[allow(dead_code)] // Test-only: used by kernel/test/tests/kernel_random.rs
 pub fn quarter_round(a: &mut u32, b: &mut u32, c: &mut u32, d: &mut u32) {
     *a = a.wrapping_add(*b);
     *d ^= *a;

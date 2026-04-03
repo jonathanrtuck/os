@@ -6,7 +6,7 @@ Bare-metal aarch64 system for QEMU `virt`. Microkernel architecture.
 
 ```text
 system/
-├── kernel/        # Microkernel (aarch64-unknown-none) — memory, scheduling, IPC, 28 syscalls
+├── kernel/        # Microkernel (aarch64-unknown-none) — memory, scheduling, IPC, 46 syscalls
 ├── libraries/     # Shared userspace libraries (sys, virtio, drawing, fonts, animation, layout, render, scene, ipc, protocol)
 ├── services/      # Platform services (init, core, drivers, decoders)
 ├── user/          # User programs (text-editor, echo, fuzz, fuzz-helper, stress)
@@ -28,7 +28,8 @@ A single `cargo build` compiles shared libraries, all userspace programs, packs 
 ## Test
 
 ```sh
-cd test && cargo test -- --test-threads=1   # ~2,236 host-side unit tests
+cd test && cargo test -- --test-threads=1   # 1,529 host-side unit tests
+cd kernel/test && cargo test -- --test-threads=1  # 1,216 kernel-only tests
 cd test && ./smoke.sh                        # QEMU boot verification
 cd test && ./integration.sh                  # Full device pipeline test
 cd test && ./stress.sh 45                    # Headless fuzz + stress
