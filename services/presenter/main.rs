@@ -2829,29 +2829,45 @@ pub extern "C" fn _start() -> ! {
                     s.cursor.opacity,
                 );
             } else if changed && is_rich_doc {
-                // Rich text cursor-only update — full rebuild needed because
-                // proportional cursor positioning requires the styled layout.
-                let s = state();
-                let title: &[u8] = if s.animation.active_space != 0 {
-                    b"Image"
+                // Rich text view-state change.
+                //
+                // Distinguish between blink/fade-only frames (opacity change on
+                // an existing scene — lightweight) and cursor-position changes
+                // (require full rebuild for proportional layout).
+                let opacity_only =
+                    !had_user_input && !scroll_changed && !slide_changed && !clock_changed;
+
+                if opacity_only {
+                    // Blink fade or selection fade — just update cursor opacity.
+                    // No heap allocation, no scene rebuild.
+                    scene.update_cursor_blink(state().cursor.opacity);
                 } else {
-                    b"Rich Text"
-                };
-                scene.update_rich_document_content(
-                    &scene_cfg,
-                    documents::rich_buf_ref(),
-                    s.cursor.pos as u32,
-                    s.selection.start as u32,
-                    s.selection.end as u32,
-                    title,
-                    &time_buf,
-                    s.scroll.offset,
-                    clock_changed,
-                    s.cursor.opacity,
-                    s.animation.active_space,
-                );
-                if let Some(header) = read_layout_header() {
-                    refresh_cached_lines(&header);
+                    // Cursor moved or clock changed — full rebuild needed because
+                    // proportional cursor positioning requires the styled layout.
+                    let s = state();
+                    let title: &[u8] = if s.animation.active_space != 0 {
+                        b"Image"
+                    } else {
+                        b"Rich Text"
+                    };
+
+                    scene.update_rich_document_content(
+                        &scene_cfg,
+                        documents::rich_buf_ref(),
+                        s.cursor.pos as u32,
+                        s.selection.start as u32,
+                        s.selection.end as u32,
+                        title,
+                        &time_buf,
+                        s.scroll.offset,
+                        clock_changed,
+                        s.cursor.opacity,
+                        s.animation.active_space,
+                    );
+
+                    if let Some(header) = read_layout_header() {
+                        refresh_cached_lines(&header);
+                    }
                 }
             } else if changed {
                 // Mono text cursor-only update.

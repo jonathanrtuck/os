@@ -181,6 +181,20 @@ impl SceneState {
         tw.publish();
     }
 
+    /// Lightweight cursor opacity update — no scene rebuild, no allocations.
+    /// Used for blink fades and selection opacity changes that don't require
+    /// repositioning the cursor or rebuilding document content.
+    pub fn update_cursor_blink(&mut self, cursor_opacity: u8) {
+        let mut tw = self.triple();
+        {
+            let mut w = tw.acquire_copy();
+            let n = w.node_mut(N_CURSOR);
+            n.opacity = cursor_opacity;
+            w.mark_dirty(N_CURSOR);
+        }
+        tw.publish();
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn update_selection(
         &mut self,
