@@ -11,7 +11,7 @@
 //! | x0..x5   | in        | Arguments (syscall-specific)       |
 //! | x0       | out       | Return value: ≥0 success, <0 error |
 //!
-//! # Syscalls (48 total, grouped by abstraction layer)
+//! # Syscalls (49 total, grouped by abstraction layer)
 //!
 //! See SYSCALLS.md for the full reference. Summary:
 //!
@@ -37,6 +37,9 @@
 //! | 44–45 | interrupt_register/ack     | x0=irq or handle                          | handle / 0                   |
 //! | 46    | handle_dup                 | x0=handle, x1=rights_mask                 | new handle                   |
 //! | 47    | process_get_exit_code      | x0=process_handle                         | exit code (as u64)           |
+//! | 48    | timer_set                  | x0=handle, x1=deadline_ns, x2=flags       | 0                            |
+//! | 49    | timer_cancel               | x0=handle                                 | 0                            |
+//! | 50    | system_info                | x0=info_type                              | value                        |
 //!
 //! # Error codes
 //!
@@ -145,6 +148,8 @@ pub mod nr {
     // --- Timer manipulation (48–49) ---
     pub const TIMER_SET: u64 = 48;
     pub const TIMER_CANCEL: u64 = 49;
+    // --- System information (50) ---
+    pub const SYSTEM_INFO: u64 = 50;
 }
 
 /// Maximum ELF size for process_create (4 MiB).
@@ -158,6 +163,13 @@ const VMO_MAP_WRITE: u64 = 1 << 1;
 const VMO_OP_COMMIT: u64 = 0;
 const VMO_OP_DECOMMIT: u64 = 1;
 const VMO_OP_LOOKUP: u64 = 2;
+
+// system_info info types
+const INFO_TOTAL_MEMORY: u64 = 0;
+const INFO_AVAILABLE_MEMORY: u64 = 1;
+const INFO_CPU_COUNT: u64 = 2;
+const INFO_PAGE_SIZE: u64 = 3;
+const INFO_BOOT_TIME_NS: u64 = 4;
 
 /// Raw WouldBlock error code as u64 (for direct `x[0]` patching in wake path).
 pub const WOULD_BLOCK_RAW: u64 = Error::WouldBlock as i64 as u64;
@@ -408,6 +420,16 @@ fn sys_channel_signal(handle_nr: u64) -> Result<u64, HandleError> {
 }
 fn sys_clock_get() -> Result<u64, Error> {
     Ok(timer::counter_to_ns(timer::counter()))
+}
+fn sys_system_info(info_type: u64) -> Result<u64, Error> {
+    match info_type {
+        INFO_TOTAL_MEMORY => Ok(paging::ram_end() - paging::RAM_START),
+        INFO_AVAILABLE_MEMORY => Ok(page_allocator::free_count() as u64 * paging::PAGE_SIZE),
+        INFO_CPU_COUNT => Ok(super::per_core::MAX_CORES as u64),
+        INFO_PAGE_SIZE => Ok(paging::PAGE_SIZE),
+        INFO_BOOT_TIME_NS => Ok(timer::counter_to_ns(timer::counter())),
+        _ => Err(Error::InvalidArgument),
+    }
 }
 fn sys_device_map(pa: u64, size: u64) -> Result<u64, Error> {
     if size == 0 {
@@ -2336,6 +2358,8 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
 
             dispatch_ok(ctx, result_to_u64!(sys_pager_supply(x0, x1, x2)))
         }
+
+        nr::SYSTEM_INFO => dispatch_ok(ctx, result_to_u64!(sys_system_info(x0))),
 
         _ => dispatch_ok(
             ctx,
