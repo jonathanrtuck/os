@@ -1,0 +1,19 @@
+[package]
+name = "kernel"
+version = "0.3.0"
+edition = "2021"
+description = "A practical Rust microkernel for aarch64: capabilities, VMOs, EEVDF scheduling, SMP work-stealing, KASLR."
+license = "Unlicense"
+readme = "README.md"
+
+[[bin]]
+name = "kernel"
+path = "main.rs"
+test = false
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = 3

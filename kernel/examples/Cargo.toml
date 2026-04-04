@@ -1,0 +1,26 @@
+[package]
+name = "kernel-examples"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Example userspace programs for the standalone kernel"
+
+[[bin]]
+name = "hello"
+path = "src/bin/hello.rs"
+
+[[bin]]
+name = "channels"
+path = "src/bin/channels.rs"
+
+[[bin]]
+name = "threads"
+path = "src/bin/threads.rs"
+
+[[bin]]
+name = "vmo"
+path = "src/bin/vmo.rs"
+
+[[bin]]
+name = "minimal"
+path = "src/bin/minimal.rs"

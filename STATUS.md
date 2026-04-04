@@ -1,12 +1,38 @@
 # Project Status
 
-**Last updated:** 2026-03-30
+**Last updated:** 2026-04-02
 
 ## Current State
 
-**v0.4 Document Store: COMPLETE** (all phases A-G, 2026-03-25-26). Every document has identity (FileId), media type, queryable metadata, and version history (COW snapshots). Document service replaces filesystem service. Undo/redo (Cmd+Z / Cmd+Shift+Z) wired to COW snapshots — 64-entry undo ring, character-level granularity. 2,257 tests pass.
+**v0.6 Kernel: COMPLETE.** All 6 phases done. 46 syscalls, ~2,260 tests.
 
-**v0.5 Rich Text: COMPLETE** (2026-03-30). Piece table library (512 pieces, 32 styles, operation coalescing). Style palette with semantic a11y roles. Rich-editor process for text/rich documents. Content-type-aware edit protocol — document, layout engine, and presenter all dispatch on text/rich vs text/plain. Style shortcuts (Cmd+B/I, Cmd+1/2). Underline and strikethrough decorations. 2,313 tests pass, 15 visual tests pass.
+- **Phase 1 (Arch Abstraction): COMPLETE.** 14 files under `kernel/arch/aarch64/`, zero asm outside arch, clean `#[cfg(target_arch)]` boundary. Settled interface: MMU, Context, interrupts, timer, serial, power.
+- **Phase 2 (Capability Model): COMPLETE.** Rights attenuation (8 named rights, monotonic AND on transfer, per-syscall enforcement). Dynamic handle table (two-level: 256 base + overflow pages, 4096 cap, Handle u16). Badges (u64 per-handle, set/get syscalls, preserved through transfer). 30 syscalls. 2,425 tests pass.
+- **Phase 3 (Core Primitives): COMPLETE.** VMOs, pager interface, signals/events, thread inspection, clock.
+  - **Phase 3a (VMOs): COMPLETE.** 10 new syscalls (30-39). Novel design: versioned (COW snapshots with bounded ring), sealed (immutable freeze with PTE invalidation), content-typed (u64 tag), lazy-backed (demand-paged). Mapping tracking for seal/restore PTE invalidation across processes. Cross-process vmo_map replaces memory_share. VMO_OP_LOOKUP for DMA PA retrieval. `snapshot_count` in VmoInfo (unique — no other microkernel exposes snapshot depth). **Removed:** `dma_alloc`/`dma_free`/`memory_share` kernel syscalls — sys library provides same API via VMOs.
+  - **Phase 3b (Pager interface): COMPLETE.** VMO-level pagers via channel, fault dedup, exception priority chain.
+  - **Phase 3c (Signals/events): COMPLETE.** Event objects with signal bitmask.
+  - **Phase 3d (Thread inspection): COMPLETE.** Read thread state for debugging.
+  - **Phase 3e (Clock): COMPLETE.** Monotonic clock syscall.
+- **Phase 4 (Security Hardening): COMPLETE.**
+  - **4a: Kernel PRNG — COMPLETE.** ChaCha20 + fast key erasure. Novel: type-state seeding (`EntropyPool → Prng`) — compile-time enforcement that no production kernel has. RNDR + CPU jitter entropy. Per-process PRNG fork. 28 tests + RFC 8439 vectors.
+  - **4b: User ASLR — COMPLETE.** Per-process randomized heap/DMA/device/stack bases (~14 bits each). Channel SHM/shared memory fixed (userspace dependency). 9 tests.
+  - **4c: PAC + BTI — COMPLETE.** Per-process PAC keys (5 × 128-bit), loaded on context switch. Replaces stack canaries (strictly superior on ARM64). Feature detection via `arch::security`.
+  - **4d: COW — SUBSUMED** by Phase 3b pager interface.
+  - **4e: Execute-only code pages — COMPLETE.** `PageAttrs::user_xo()` prevents code disclosure.
+  - **KASLR — COMPLETE.** 8-bit entropy, 32 MiB slide, post-link fixup tool, PIE relocations, PIC assembly.
+- **Phase 5 (SMP Scalability): COMPLETE.** Per-core ready queues with work stealing, three novel properties.
+  - **Per-core EEVDF:** Each core has its own `LocalRunQueue` with load tracking. Threads placed via cache-affine wake (prefer `last_core`). `deferred_ready` mechanism eliminated — per-core queues close the stack reuse race by construction.
+  - **Work stealing with vlag normalization:** Idle core steals from busiest remote core. EEVDF virtual lag (vlag) preserved across migration — thread's fairness position maintained. Budget-aware: only steals threads with scheduling context budget remaining.
+  - **Workload-granularity migration (novel):** Steal prefers all threads sharing the same scheduling context (workload co-location). No other microkernel groups migration by scheduling context.
+  - **Concurrent Work Conservation (CWC, novel):** Property-based tests verify: no idle core coexists with overloaded core after scheduling round. Neither Linux, seL4, nor Zircon formally guarantee this (Ipanema, EuroSys 2020 proved Linux CFS violates CWC).
+  - **Latent bug fixed:** `is_idle` flag incorrectly set to `false` when idle thread continued — IPI wake path couldn't find idle cores. Found by TDD model tests before any restructure.
+  - **Lock strategy:** Single `IrqMutex<State>` (Option A, same as seL4 SMP). Per-core lock decomposition (Option B) documented in DESIGN.md §6.3.9 for porters targeting 64+ cores.
+  - 26 new model tests (15 per-core queue + 11 work stealing/CWC).
+
+**v0.5 Rich Text: COMPLETE** (2026-03-30). Piece table library (512 pieces, 32 styles, operation coalescing). Style palette with semantic a11y roles. Rich-editor process for text/rich documents. Content-type-aware edit protocol — document, layout engine, and presenter all dispatch on text/rich vs text/plain. Style shortcuts (Cmd+B/I, Cmd+1/2). Underline and strikethrough decorations.
+
+**v0.4 Document Store: COMPLETE** (2026-03-25-26). Every document has identity (FileId), media type, queryable metadata, and version history (COW snapshots). Document service replaces filesystem service. Undo/redo (Cmd+Z / Cmd+Shift+Z) wired to COW snapshots — 64-entry undo ring, character-level granularity.
 
 ## Architecture (Decomposed 2026-03-29)
 
@@ -20,13 +46,13 @@ Input Driver → Presenter → Scene Graph → Render Service → Display
            Document Service → Disk
 ```
 
-The monolithic `core` has been decomposed into three processes: document, layout engine, and presenter (view engine). Protocol library consolidated to 10 modules (init, device, input, edit, layout, view, document, decode, content, metal). 2,313 tests pass.
+The monolithic `core` has been decomposed into three processes: document, layout engine, and presenter (view engine). Protocol library consolidated to 10 modules (init, device, input, edit, layout, view, document, decode, content, metal). 2,745 tests pass (1,216 kernel-only + 1,529 system).
 
 Content types: `None`, `InlineImage` (per-frame scene data), `Image` (Content Region via content_id), `Path`, `Glyphs`. Sole render backend: `metal-render` (native Metal GPU via hypervisor). cpu-render and virgil-render removed (2026-03-30).
 
 **Service pack (2026-03-30):** Service ELFs packed into flat archive linked as `.services` section in the kernel binary. Init reads ELFs from a memory-mapped pack at `SERVICE_PACK_BASE` (512 MiB) instead of `include_bytes!` statics. Breaks the 19 MB relinking cascade — changing a service now requires only repack + relink. Init shrank from ~5 MB to 904 KB. Pack format: `pack_format.rs` (SSOT), 14 services, page-aligned ELF data. Build: llvm-objcopy converts pack to `.o`, linked via `cargo:rustc-link-arg`.
 
-**IPC:** Two mechanisms, matched to data semantics. Event rings (64-byte SPSC messages over shared memory) for discrete events where order/count matter (keys, clicks, config). State registers (atomic shared memory) for continuous data where only the latest value matters (pointer position). Both signaled via `channel_signal` syscall. **Content Region** (4 MiB shared memory with registry) for persistent decoded content (font TTF data, decoded image pixels) — init allocates, core writes, render services read. **Document IPC** (`protocol::document`): 13 message types. Core sends `MSG_DOC_COMMIT` at operation boundaries; document service reads doc buffer from shared memory. `MSG_DOC_SNAPSHOT`/`MSG_DOC_RESTORE` for undo/redo. `MSG_DOC_QUERY` for media-type/attribute queries. See `system/DESIGN.md` §0 for full details.
+**IPC:** Two mechanisms, matched to data semantics. Event rings (64-byte SPSC messages over shared memory) for discrete events where order/count matter (keys, clicks, config). State registers (atomic shared memory) for continuous data where only the latest value matters (pointer position). Both signaled via `channel_signal` syscall. **Content Region** (4 MiB shared memory with registry) for persistent decoded content (font TTF data, decoded image pixels) — init allocates, core writes, render services read. **Document IPC** (`protocol::document`): 13 message types. Core sends `MSG_DOC_COMMIT` at operation boundaries; document service reads doc buffer from shared memory. `MSG_DOC_SNAPSHOT`/`MSG_DOC_RESTORE` for undo/redo. `MSG_DOC_QUERY` for media-type/attribute queries. See `design/userspace.md` §0 for full details.
 
 **Content Pipeline (2026-03-25):** Three memory regions: File Store (1 MiB, shared with decoder services), Content Region (4 MiB, shared decoded content with registry + free-list allocator + generation-based GC), Scene Graph (per-frame visual primitives). Init allocates both, loads fonts into Content Region + PNG into File Store. Core sends decode requests to sandboxed decoder services via generic IPC protocol (`protocol/decode.rs`). Decoder services read File Store (RO), write decoded BGRA pixels into Content Region (RW). Core manages Content Region registry and allocator. Render services find fonts and images via `protocol::content` registry lookup. Compositor never sees encoded files. Generic decoder harness (`services/decoders/harness.rs`) handles all IPC plumbing; format-specific code is just header + decode functions.
 
@@ -50,7 +76,7 @@ Seven-layer fs stack: `BlockDevice` trait → superblock ring → free-extent al
 
 ### System Code
 
-`system/kernel/` (33 .rs + 2 .S), `system/services/{init,document,layout,presenter,store,filesystem,drivers/{metal-render,virtio-blk,virtio-console,virtio-input,virtio-9p},decoders/{png}}/`, `system/libraries/{sys,virtio,drawing,fonts,animation,layout,scene,ipc,protocol,render,piecetable,icons,fs,store}/`, `system/user/{echo,text-editor,rich-editor,stress,fuzz,fuzz-helper}/`, `system/test/`, `tools/mkdisk/`. 28 syscalls. 4 SMP cores, EEVDF scheduler.
+`kernel/` (33 .rs + 2 .S), `services/{init,document,layout,presenter,store,filesystem,drivers/{metal-render,virtio-blk,virtio-console,virtio-input,virtio-9p},decoders/{png}}/`, `libraries/{sys,virtio,drawing,fonts,animation,layout,scene,ipc,protocol,render,piecetable,icons,fs,store}/`, `user/{echo,text-editor,rich-editor,stress,fuzz,fuzz-helper}/`, `host/`, `tools/mkdisk/`. 46 syscalls. 4 SMP cores, per-core EEVDF scheduler with work stealing.
 
 ## Milestone Roadmap
 

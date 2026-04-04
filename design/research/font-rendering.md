@@ -139,7 +139,7 @@ macOS's philosophy (trust the outlines, don't distort) is correct for HiDPI and 
 
 **Deviation from plan:** Did not extend the custom `truetype.rs` parser. Instead, read-fonts handles all variable font table parsing. The custom parser was removed in Phase 1 (per "kill the old way"). Variable font axis values flow from core service → scene graph (TextRun.axis_hash) → compositor (rasterize_with_axes).
 
-**Fonts:** Variable Nunito Sans (opsz, wght, wdth, YTLC axes, 556 KB) and Variable Source Code Pro (wght axis, ~300 KB) in system/share/.
+**Fonts:** Variable Nunito Sans (opsz, wght, wdth, YTLC axes, 556 KB) and Variable Source Code Pro (wght axis, ~300 KB) in assets/.
 
 ### Phase 5a: Automatic Optical Sizing ✅ COMPLETE
 
@@ -241,6 +241,6 @@ All phases completed across three milestones: text-shaping, unicode-and-fallback
 ## Resolved Questions
 
 1. **HarfBuzz on bare metal:** ✅ Used HarfRust (pure Rust, no_std+alloc) — no porting surface needed. Shaping runs in the core service (OS service); positioned glyph arrays are passed to the compositor via the scene graph.
-2. **Font selection:** ✅ Variable Nunito Sans has opsz+wght+wdth+YTLC axes. Variable Source Code Pro has wght axis. Both integrated into system/share/. Nunito Sans's opsz axis (range 6–12) enables automatic optical sizing.
+2. **Font selection:** ✅ Variable Nunito Sans has opsz+wght+wdth+YTLC axes. Variable Source Code Pro has wght axis. Both integrated into assets/. Nunito Sans's opsz axis (range 6–12) enables automatic optical sizing.
 3. **Glyph cache architecture:** ✅ LRU eviction with configurable max capacity. Key: (glyph_id, font_size, axis_hash) where axis_hash combines font identifier and variable font axis values via FNV-1a.
 4. **Subpixel rendering sunset:** Deferred — kept existing 6× horizontal oversampling. The HiDPI simplification (grayscale-only) is a future optimization, not blocking any functionality.

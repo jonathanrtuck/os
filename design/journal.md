@@ -4,9 +4,128 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Kernel Completeness Audit — SETTLED (2026-04-04)
+
+**Context:** Handle-mediated IPC was identified as a fundamental gap that should have been caught earlier. This prompted a systematic audit: what else is missing from a kernel that claims to be "perfect for anyone"?
+
+**Method:** Walked each capability category (memory, IPC, scheduling, lifecycle, time, security, devices) and checked two conditions: (1) do Zircon AND at least one of seL4/QNX/Mach provide this? (2) Would every userspace need to reinvent it if the kernel didn't? Both yes = fundamental.
+
+**Findings — fundamental gaps (all added to v0.6):**
+
+1. **Exception/fault forwarding.** Unresolvable faults kill the process silently. No supervisor learns what happened. Can't build debuggers, crash reporters, or supervision trees. Extension point already exists (main.rs:1143, DESIGN.md §16.0). Need: `process_set_exception_handler` + `exception_resume` syscalls. Prior art: Zircon exception channels, seL4 fault endpoints, Mach exception ports.
+
+2. **Handle duplication.** `handle_send` has move semantics — sender loses the handle. Init can't keep a process handle while also giving one to a monitor. Multiple services can't share a VMO handle. Need: `handle_dup(handle, rights_mask)` + new DUPLICATE right (bit 10). Prior art: Zircon `zx_handle_duplicate`, seL4 `CNode_Copy/Mint`.
+
+3. **Channel call (synchronous RPC).** Most common IPC pattern requires 4 syscalls (write + signal + wait + read) with a race window. Need: `channel_call(handle, send_buf, recv_buf, timeout)` — atomic send-and-wait-for-reply. One syscall instead of four. Prior art: Zircon `zx_channel_call`, seL4 `seL4_Call`, QNX `MsgSend`.
+
+4. **Timer set/cancel.** Timers are create-only, one-shot. Can't reset or cancel without destroy/recreate churn. Need: `timer_set(handle, deadline, period)` + `timer_cancel(handle)`. Prior art: Zircon `zx_timer_set/cancel`, POSIX `timer_settime`.
+
+5. **Exit code.** `exit` takes no arguments. Supervisor can't distinguish clean shutdown from crash. Need: `exit(code)` with code stored on Process, retrievable after exit notification. Prior art: every OS.
+
+6. **Priority inheritance for futexes.** High-priority display thread blocked on futex held by low-priority background task = unbounded priority inversion = UI freezes. Need: ownership tracking in `futex_wait`, temporary priority boost to holder. Prior art: Linux PI futexes, Zircon futex ownership, QNX `PTHREAD_PRIO_INHERIT`.
+
+7. **Batched channel operations.** `channel_read_many`/`channel_write_many` — one syscall for N messages. Essential optimization for burst scenarios. Ships alongside single-message versions so the API is complete from day one.
+
+8. **Process memory read/write.** Can't build a debugger without it. `process_read_memory`/`process_write_memory` on suspended processes. Prior art: Zircon, Mach, Linux ptrace.
+
+9. **Thread write state.** Kernel has `thread_read_state` but no write counterpart. Debuggers need both. Need: `thread_write_state` for suspended threads. Prior art: Zircon, Mach.
+
+10. **System info.** No way to query total memory, CPU count, page size at runtime. Trivial addition, universally expected. Need: `system_info(type) → value`.
+
+**What was explicitly excluded (deferrable with extension points):**
+
+- **VMARs** — already designed (DESIGN.md §15.4), pure additive, `vmo_map` compatible
+- **Object info/introspection** — convenience, not blocking
+- **Memory pressure signals** — cooperative optimization
+- **Streaming IPC (sockets)** — VMOs + channels cover the cases
+- **Process groups/jobs** — resource management, not primitives
+- **Clock adjustment** — userspace NTP/PTP
+
+**Why this was missed:** The kernel was designed bottom-up ("what do our services need?") rather than top-down ("what would any consumer need?"). Shared-memory channels worked for the current userspace, so the design stopped. The audit applied external completeness criteria (cross-kernel comparison) rather than internal sufficiency criteria (does our userspace work?).
+
+**Outcome:** All 10 items added to `design/v0.6-plan.md` as Phases 5-6. Total: ~12 new syscalls (46 → 58). See plan for implementation details and dependency graph.
+
+---
+
+## Handle-Mediated IPC: No Process Should See Shared Memory Addresses — OPEN-DESIGN (2026-04-04)
+
+**Context:** Phase 3 of the VA layout redesign added a "bootstrap page" — a kernel-mapped read-only page that passes per-process ASLR layout info to userspace. This exists because IPC channel shared memory is mapped at a VA the process needs to know in advance. The bootstrap page replaced the hardcoded constant `CHANNEL_SHM_BASE`, but the real question is: why does the process need to know the address at all?
+
+**Current state:** Three kinds of shared memory, three different access patterns:
+
+- **IPC channels:** Process reads/writes shared pages at a known VA. No syscall for data transfer. Process must know the VA ahead of time (previously hardcoded, now from bootstrap page).
+- **VMOs:** Process calls `vmo_map(handle)`, kernel returns the VA. Process accesses directly. Address learned from syscall return — not hardcoded, but still exposed.
+- **Content Region:** Init allocates shared memory, passes the VA to other processes via IPC config messages. Address communicated at runtime via messaging.
+
+**Problem:** The channel path is the odd one out — the process can't discover its channel VA from any syscall or message. It has to know independently. The bootstrap page patches over this, but it's still a leaked implementation detail.
+
+**Principle:** A process should never hold an address to memory it shares with another process. It should hold a _name_ (a handle) and ask the kernel to operate on it. The kernel is the only entity that knows where things are. Exposing VAs through the API leaks implementation details and constrains future optimization (ASLR, migration, memory compaction).
+
+**Theoretically correct design:** Handle-mediated syscalls for all shared memory access. One path, no exceptions.
+
+- `channel_read(handle, buf)` / `channel_write(handle, buf)` — kernel copies 64 bytes (one cache line, negligible cost)
+- `vmo_read(handle, offset, buf)` / `vmo_write(handle, offset, buf)` — kernel mediates bulk access
+- Content Region becomes a VMO, accessed through its handle
+- No process ever maps shared memory into its address space
+- No process ever learns a VA for memory it shares with another process
+
+Every argument for direct VA mapping is a performance argument. Those are real constraints, but they're implementation constraints, not design constraints. If the copy is too expensive, fix the implementation (faster copy path, kernel-internal zero-copy optimization, DMA) — don't change the API to expose addresses.
+
+**What this means for current work:**
+
+- The bootstrap page is a transitional mechanism. It solves the immediate ASLR problem (Phase 4 can randomize channel SHM) but the long-term fix is handle-mediated IPC that doesn't need it.
+- The `channel_shm_va()` function in protocol should eventually be replaced by `channel_read`/`channel_write` syscalls.
+- The `ipc::Channel::from_base(va, ...)` pattern — constructing a channel from a raw VA — is the anti-pattern to eliminate.
+- VMO direct mapping (`vmo_map` returning a VA) is acceptable as an opt-in optimization, but should not be the default path.
+
+**When to address:** v0.6, Phase 4. Decision made 2026-04-04: handle-mediated IPC belongs in the kernel milestone so the kernel ships complete. Inserted as Phase 4 of `design/v0.6-plan.md`, before ASLR for VMO/shared memory (Phase 5). The bootstrap page's `channel_shm_base` field will be removed; the page itself survives for other layout info.
+
+---
+
+## Hypervisor Frame Counter Decoupling — OPEN-BUG (2026-04-03)
+
+**Problem:** The hypervisor's frame counter (`frameCount` in `VirtioMetal.swift:1113`) only advances on `presentAndCommit` commands from the guest render driver. Event script timing (`wait N`, `capture` at frame N) depends on this counter. When the render driver skips idle frames (nothing changed → no `presentAndCommit`), the counter stalls and event scripts time out.
+
+**Current workaround:** The render driver sends empty `presentAndCommit` heartbeats on idle frames. This works but is the wrong abstraction — the OS shouldn't need to send GPU commands to advance a timer.
+
+**Root cause:** The hypervisor conflates "GPU frame submitted" with "display tick elapsed." These are independent events. The frame counter should advance at display cadence regardless of GPU activity, driven by the hypervisor's own timer.
+
+**Correct fix (in `~/Sites/hypervisor/`):**
+
+1. Add a display-cadence timer in `VirtioMetal` (e.g., `DispatchSource.makeTimerSource` at `1/refreshRate` interval)
+2. Advance `frameCount` on each timer tick, not on `presentAndCommit`
+3. Fire `onFrame` callback (event injection) from the timer, not from the GPU path
+4. Captures trigger on the timer tick, compositing the latest retained frame + cursor
+
+This decouples event script timing from GPU submission, eliminates the heartbeat workaround, and fixes visual test flakiness where the multi-service pipeline needs wall-clock time to settle.
+
+**Impact:** ~20% visual test failure rate in the full suite (15 tests × 5 runs). Individual tests pass reliably. Failures are `caret_skewed`, `cursor_visible_at`, and `baseline_aligned` assertions — all timing-sensitive.
+
+---
+
+## v0.6 Phase 1: Arch Interface — SETTLED (2026-04-01)
+
+**Design session resolving the three open questions from `kernel-v0.6.md` Phase 1.**
+
+Decisions recorded in `kernel-v0.6.md`. Summary:
+
+1. **Device discovery: separate from arch.** DTB/ACPI is platform/userspace, not architecture. Informed by NT HAL analysis — the HAL abstracted board-level variation that firmware standardization (ACPI, UEFI) eventually absorbed. Our arch module abstracts ISA variation (which won't converge), not platform variation.
+
+2. **Page tables: VA/PA/permissions interface, arch owns the walk + allocation.** Every production kernel except seL4 does this. seL4 externalizes table provisioning to userspace to eliminate implicit allocation from the formal proof — a constraint we don't share. Walk logic is inseparable from descriptor format; splitting them leaks internal structure.
+
+3. **Context: fully arch-defined, generic accessor methods.** The register file IS the architecture. `pc()`, `set_sp()`, `arg(n)`, `set_user_mode()` are the generic interface.
+
+Two additional decisions: `IrqState` opaque newtype for saved interrupt state (Rust-idiomatic, matches `Pa` pattern). Serial console lives in arch for now; extract to `platform::` layer when a second board target arrives (v0.14).
+
+**Key reference:** Windows NT HAL was not abandoned — it was scope-reduced by hardware convergence. Our arch module avoids the HAL's mistakes: compile-time (not runtime DLL), ISA-level (not board-level), honestly co-built (not pretending to be independently replaceable).
+
+**Next:** Implementation — 4-step mechanical extraction. See plan in `kernel-v0.6.md`.
+
+---
+
 ## Sole-Writer Scaling Under Compound Documents — OPEN (2026-04-01)
 
-**Context:** Extracted from a deep research review (most findings were wrong, but this userspace concern is real). The kernel-level concerns from the same review (security model, EEVDF tuning) are in `system/kernel/DESIGN.md` §13.1–13.2.
+**Context:** Extracted from a deep research review (most findings were wrong, but this userspace concern is real). The kernel-level concerns from the same review (security model, EEVDF tuning) are in `kernel/DESIGN.md` §13.1–13.2.
 
 The document service is the sole writer to document state — core design principle (Decision #8, #9). Today this is one document, one editor, no contention. But compound documents (v0.8) introduce multiple content parts edited simultaneously, and realtime/streaming (v0.9) adds multiple concurrent writers (local user + remote participants).
 
@@ -219,7 +338,7 @@ Every service is marked "scaffolding" in DESIGN.md. The libraries are "foundatio
 
 **No action needed** — just awareness. When promoting services from scaffolding to foundational, the test is interface stability, not implementation quality.
 
-**Resolution (2026-03-31):** Replaced scaffolding/foundational with a two-axis labeling model. See `system/DESIGN.md` for details.
+**Resolution (2026-03-31):** Replaced scaffolding/foundational with a two-axis labeling model. See `design/userspace.md` for details.
 
 **Axis 1 — Interface change cost** (property of the interface, not the code):
 
@@ -1218,7 +1337,7 @@ The durable content from the v0.4 sprint spec has been extracted into `design/fo
 | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | B1   | virtio-blk driver rewrite: `BlkDevice` struct with `read_block`/`write_block`/`flush`, `VIRTIO_BLK_F_FLUSH` feature negotiation, self-test (read/write/verify cycle)                                   |
 | B2   | Hypervisor file-backed virtio-blk backend: `VirtioBlock.swift`, `--drive` flag, `F_FULLFSYNC` on flush for crash consistency on macOS                                                                  |
-| B3   | Filesystem service port to bare-metal: `no_std` fs library at `system/libraries/fs/`, `VirtioBlockDevice` with `RefCell` for interior mutability, filesystem service at `system/services/filesystem/`  |
+| B3   | Filesystem service port to bare-metal: `no_std` fs library at `libraries/fs/`, `VirtioBlockDevice` with `RefCell` for interior mutability, filesystem service at `services/filesystem/`                |
 | B4   | Core integration via IPC: `protocol::blkfs` boundary, core sends `MSG_FS_COMMIT` at operation boundaries (after draining pending editor messages), doc buffer shared read-only with filesystem service |
 
 ### Design decisions that emerged
@@ -1320,7 +1439,7 @@ Syscall wrappers, GlobalAlloc, spinlocks, timers, atomics all in one file. Every
 
 **Status: DONE** — implemented.
 
-`system/system_config.rs` is the SSOT for 9 root constants (PAGE_SIZE, PAGE_SHIFT, RAM_START, KERNEL_VA_OFFSET, USER_CODE_BASE, CHANNEL_SHM_BASE, USER_STACK_TOP, USER_STACK_PAGES, SHARED_MEMORY_BASE). All `u64`. Consumed by:
+`kernel/system_config.rs` is the SSOT for 9 root constants (PAGE_SIZE, PAGE_SHIFT, RAM_START, KERNEL_VA_OFFSET, USER_CODE_BASE, CHANNEL_SHM_BASE, USER_STACK_TOP, USER_STACK_PAGES, SHARED_MEMORY_BASE). All `u64`. Consumed by:
 
 - **Kernel:** `paging.rs` includes via `mod system_config { include!(...) }; pub use system_config::*`
 - **Userspace libraries:** ipc, sys, protocol, virtio — each includes in a private `mod system_config`
@@ -2252,7 +2371,7 @@ How should the OS store, render, and map icons? Three sub-questions: (1) what fo
 
 1. Add arc, h/v, s, q command support to path pipeline (scene library)
 2. Add runtime stroke rendering to path pipeline (render backends)
-3. Build host-side SVG→path converter tool (`system/tools/svg2path/` or in `build.rs`)
+3. Build host-side SVG→path converter tool (`tools/svg2path/` or in `build.rs`)
 4. Create `libraries/icons/` with compiled-in icon data and mimetype lookup
 5. Integrate into core: document type icon in title bar, baseline-aligned with text
 
@@ -3890,7 +4009,7 @@ All 36 fuzz phases pass. 896 host tests pass. Build clean.
 **Architecture notes:**
 
 - Chose 9P over virtiofs (simpler protocol, no host daemon, confirmed in QEMU).
-- Shared host directory: `system/share/` — contains source-code-pro.ttf (9 KB).
+- Shared host directory: `assets/` — contains source-code-pro.ttf (9 KB).
 - QEMU flags added to all 4 scripts (run, test, integration, crash).
 - This validates the prototype-on-host strategy from Decision #16: implement Files against the host filesystem during prototyping, defer the real COW filesystem.
 
@@ -4086,9 +4205,9 @@ Open questions: system gesture vs shell input boundary, compound editor nesting 
 - **Three components, one interface.** Compositor (above) works with surfaces, calls trait methods. Driver (below) translates trait methods to hardware operations. The trait is the boundary — a contract, not a component. The compositor doesn't know if the driver uses CPU loops, GPU commands, or anything else. Software rendering is a fallback strategy inside the driver, not a separate thing the OS selects.
 - **virtio-gpu overhead is inherent, not architectural.** Performance hit is the VM boundary (guest→host copy). With real hardware, the display controller reads directly from the buffer via DMA scanout — no copy. The abstraction doesn't add overhead; virtio does.
 - **Build plan:** (a) virtio-gpu userspace driver ✅, (b) drawing primitives + bitmap font ✅, (c) toy compositor ✅. All done. Everything above the driver is portable to real hardware.
-- **Step (a) done (2026-03-10):** `system/services/drivers/virtio-gpu/main.rs`. All 6 core 2D commands. Test pattern at 1280x800.
-- **Step (b) done (2026-03-10):** `system/libraries/drawing/` — pure no_std drawing library. Surface abstraction with RGBA canonical format (encode/decode at pixel boundary). Primitives: fill_rect, draw_rect, draw_line (Bresenham), draw_hline/vline, set/get_pixel, blit. Embedded 8×16 VGA bitmap font with draw_glyph/draw_text. 41 host-side tests.
-- **Step (c) done (2026-03-10):** `system/services/compositor/main.rs` — toy compositor draws demo scene (title bar, 3 colored panels with text, status bar) into shared framebuffer. `system/services/init/main.rs` — proto-OS-service that embeds all ELFs, reads device manifest, spawns all processes, orchestrates display pipeline. Kernel `memory_share` syscall (#24) enables zero-copy framebuffer sharing. Full pipeline: init → DMA alloc → share with compositor → compositor draws → signal → GPU driver presents → pixels on screen.
+- **Step (a) done (2026-03-10):** `services/drivers/virtio-gpu/main.rs`. All 6 core 2D commands. Test pattern at 1280x800.
+- **Step (b) done (2026-03-10):** `libraries/drawing/` — pure no_std drawing library. Surface abstraction with RGBA canonical format (encode/decode at pixel boundary). Primitives: fill_rect, draw_rect, draw_line (Bresenham), draw_hline/vline, set/get_pixel, blit. Embedded 8×16 VGA bitmap font with draw_glyph/draw_text. 41 host-side tests.
+- **Step (c) done (2026-03-10):** `services/compositor/main.rs` — toy compositor draws demo scene (title bar, 3 colored panels with text, status bar) into shared framebuffer. `services/init/main.rs` — proto-OS-service that embeds all ELFs, reads device manifest, spawns all processes, orchestrates display pipeline. Kernel `memory_share` syscall (#24) enables zero-copy framebuffer sharing. Full pipeline: init → DMA alloc → share with compositor → compositor draws → signal → GPU driver presents → pixels on screen.
 - **Alignment bug found (2026-03-10):** u64 `read_volatile` from 4-byte-aligned address is UB in Rust. Caused silent process death. Fixed by padding device manifest entries to 8-byte alignment. User fault handler didn't print diagnostic before killing process — known kernel bug.
 
 Open questions: exact surface trait API, double buffering strategy, font choice for production (Spleen PSF2 over hand-rolled VGA font), trait naming.
@@ -4501,7 +4620,7 @@ Active or planned coding explorations. These are learning exercises, not commitm
 **Status:** Complete — all 7 steps done
 **Goal:** Build a minimal kernel on aarch64/QEMU. Learn what's involved in boot, exception handling, context switching, memory management.
 **Informs:** Decision #16 (Technical Foundation) — whether writing our own kernel is tractable and worthwhile vs. building on existing.
-**What exists:** `system/kernel/` — ~2,150 lines across 18 source files (at time of spike completion). boot.S (boot trampoline, coarse 2MB page tables, EL2→EL1 drop, early exception vectors), exception.S (upper-VA vectors, context save/restore, SVC routing), main.rs (Context struct, kernel_main, irq/svc dispatch, ELF loader + user thread spawn), elf.rs (pure functional ELF64 parser), build.rs (compiles user ELFs at build time), memory.rs (TTBR1 L3 refinement for W^X, PA/VA conversion, empty TTBR0 for kernel threads), heap.rs (bump allocator, 16 MiB), page_alloc.rs (free-list 4KB frame allocator), asid.rs (8-bit ASID allocator), addr_space.rs (per-process TTBR0 page tables, 4-level walk_or_create, W^X user page attrs with nG), scheduler.rs (round-robin preemptive, TTBR0 swap on context switch), thread.rs (kernel + user thread creation, separate kernel/user stacks), syscall.rs (exit/write/yield, user VA validation), timer.rs (ARM generic timer at 10 Hz), gic.rs (GICv2 driver), uart.rs (PL011 TX), mmio.rs (volatile helpers). Init later promoted to proto-OS-service at `system/services/init/`. Builds with `cargo run --release` targeting `aarch64-unknown-none` on nightly Rust.
+**What exists:** `kernel/` — ~2,150 lines across 18 source files (at time of spike completion). boot.S (boot trampoline, coarse 2MB page tables, EL2→EL1 drop, early exception vectors), exception.S (upper-VA vectors, context save/restore, SVC routing), main.rs (Context struct, kernel_main, irq/svc dispatch, ELF loader + user thread spawn), elf.rs (pure functional ELF64 parser), build.rs (compiles user ELFs at build time), memory.rs (TTBR1 L3 refinement for W^X, PA/VA conversion, empty TTBR0 for kernel threads), heap.rs (bump allocator, 16 MiB), page_alloc.rs (free-list 4KB frame allocator), asid.rs (8-bit ASID allocator), addr_space.rs (per-process TTBR0 page tables, 4-level walk_or_create, W^X user page attrs with nG), scheduler.rs (round-robin preemptive, TTBR0 swap on context switch), thread.rs (kernel + user thread creation, separate kernel/user stacks), syscall.rs (exit/write/yield, user VA validation), timer.rs (ARM generic timer at 10 Hz), gic.rs (GICv2 driver), uart.rs (PL011 TX), mmio.rs (volatile helpers). Init later promoted to proto-OS-service at `services/init/`. Builds with `cargo run --release` targeting `aarch64-unknown-none` on nightly Rust.
 **Original success criteria:** ~~Something boots and prints to serial console.~~ Done.
 **Next steps (in order):**
 
@@ -4511,7 +4630,7 @@ Active or planned coding explorations. These are learning exercises, not commitm
 4. ~~**Kernel threads + scheduler**~~ — Done. Thread struct with Context at offset 0 (compile-time assertion). Round-robin in `irq_handler` on each timer tick. Boot thread becomes idle thread (`wfe`). Box<Thread> for pointer stability (TPIDR_EL1 holds raw pointers into contexts). IRQ masking around scheduler state mutations.
 5. ~~**Syscall interface**~~ — Done. SVC handler with ESR check, syscall table (exit/write/yield), user VA validation. EL0 test stub proves full EL0→SVC→EL1→eret path.
 6. ~~**Per-process address spaces**~~ — Done. Kernel at upper VA (TTBR1), per-process TTBR0 with 8-bit ASID, 4-level page tables (walk_or_create), W^X user pages with nG bit, frame allocator for dynamic page table allocation, scheduler swaps TTBR0 on context switch, empty TTBR0 for kernel threads.
-7. ~~**First real userspace process**~~ — Done. Standalone init binary compiled to ELF64 by build.rs, embedded in kernel via `include_bytes!`. Pure functional ELF parser extracts PT_LOAD segments. Loader allocates frames, copies data, maps with W^X permissions. Entry point from ELF header. Init later promoted to proto-OS-service at `system/services/init/`.
+7. ~~**First real userspace process**~~ — Done. Standalone init binary compiled to ELF64 by build.rs, embedded in kernel via `include_bytes!`. Pure functional ELF parser extracts PT_LOAD segments. Loader allocates frames, copies data, maps with W^X permissions. Entry point from ELF header. Init later promoted to proto-OS-service at `services/init/`.
 
 **Known simplifications (intentional, revisit later):** Single-core only (multi-core after userspace works). Bump allocator never frees (replace when threads are created/destroyed). No per-CPU IRQ stack (not needed — EL0→EL1 transitions use SP_EL1 automatically). 10 Hz timer (increase when scheduling granularity matters). No ASID recycling (255 max user address spaces). Coarse TTBR0 identity map from boot.S still loaded but unused after transition to upper VA.
 

@@ -8,6 +8,6 @@ name = "mkdisk"
 path = "main.rs"
 
 [dependencies]
-fs = { path = "../../system/libraries/fs" }
-piecetable = { path = "../../system/libraries/piecetable" }
-store = { path = "../../system/libraries/store" }
+fs = { path = "../../libraries/fs" }
+piecetable = { path = "../../libraries/piecetable" }
+store = { path = "../../libraries/store" }

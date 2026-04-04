@@ -38,7 +38,14 @@ These rules govern how you work on this project. They are not preferences — th
 - When fixing a bug, check for the same class of bug in related code
 - If an interface is confusing enough to cause a bug, STOP and flag it — interfaces are architectural decisions in this project. Propose the fix, don't silently apply it.
 
-### 5. Update reference docs at milestone boundaries
+### 5. Present the design space, not a default answer
+
+- When suggesting kernel or OS design approaches, never default to a single system's patterns (especially Zircon/Fuchsia). Present the design space across multiple systems.
+- Name which systems you're drawing from and why. "Zircon does it this way" is not a justification — "This approach is correct because [reason], and [system] chose it for [their reason]" is.
+- Give extra weight to systems aligned with this project's unique goals (document-centric, content-type aware, personal workstation). Zircon was designed for phones; seL4 for safety-critical; Plan 9 for distributed computing. Different goals produce different correct answers.
+- Reference landscape: seL4, L4 family, EROS/Coyotos, Genode, QNX, Plan 9, Barrelfish, Redox, Minix 3 — not just Zircon.
+
+### 6. Update reference docs at milestone boundaries
 
 When completing a milestone (version tag), verify these files reflect the current architecture:
 
@@ -77,7 +84,7 @@ Read these before making any design suggestions:
 - `design/architecture.md` — The system's architectural narrative: one-way pipeline, what each component understands, where responsibilities live, decision checklist
 - `design/architecture.mermaid` — System architecture diagram (process layers, IPC, memory mapping)
 - `design/journal.md` — Open threads, discussion backlog, insights log, research spikes. The "pick up where you left off" document.
-- `system/DESIGN.md` — Userspace architecture: libraries, services, drivers. Component status (foundational vs scaffolding), constraints, gaps, dependency map. Companion to `system/kernel/DESIGN.md`.
+- `design/userspace.md` — Userspace architecture: libraries, services, drivers. Component status (foundational vs scaffolding), constraints, gaps, dependency map. Companion to `kernel/DESIGN.md`.
 
 ## Settled Decisions
 
@@ -140,7 +147,7 @@ Read these before making any design suggestions:
 
 ### Testing requirements
 
-- `cargo test -- --test-threads=1` in `system/test/` MUST pass (all ~2,236 tests).
+- `cargo test -- --test-threads=1` in `host/` MUST pass (all ~2,236 tests).
 - Any change touching syscall handlers, scheduling, IPC (channel/timer/interrupt/futex), or thread lifecycle MUST be stress tested:
   ```sh
   # Boot QEMU with full display pipeline and send sustained input for 60+ seconds
@@ -156,13 +163,13 @@ Read these before making any design suggestions:
 
 ## Rust Formatting Convention (MANDATORY)
 
-All `.rs` files follow standard Rust community conventions. Mechanical formatting is handled by `rustfmt` (config in `system/rustfmt.toml`); file layout is enforced by convention.
+All `.rs` files follow standard Rust community conventions. Mechanical formatting is handled by `rustfmt` (config in `rustfmt.toml`); file layout is enforced by convention.
 
 ### Mechanical formatting (rustfmt)
 
-A PostToolUse hook (`.claude/hooks/rustfmt-post-edit.sh`) runs `rustfmt --edition 2021` on every `.rs` file after Edit or Write. Manual runs: `rustfmt --edition 2021 <file>` or `cargo +nightly fmt` from `system/`.
+A PostToolUse hook (`.claude/hooks/rustfmt-post-edit.sh`) runs `rustfmt --edition 2021` on every `.rs` file after Edit or Write. Manual runs: `rustfmt --edition 2021 <file>` or `cargo +nightly fmt` from the repo root.
 
-`system/rustfmt.toml` enables two nightly features:
+`rustfmt.toml` enables two nightly features:
 
 - `group_imports = "StdExternalCrate"` — separates std, external, and local imports with blank lines
 - `imports_granularity = "Crate"` — merges imports from the same crate into one `use` statement
@@ -199,9 +206,9 @@ Every `.rs` file follows this order:
 # Without it, the document store has no content → nothing renders → no captures.
 # (cargo run -r handles this automatically via run.sh)
 
-# Automated: capture frame 30 as PNG, then exit
-cd system && cargo build --release
-hypervisor target/aarch64-unknown-none/release/kernel --drive disk.img --background --capture 30 /tmp/screenshot.png
+# Automated: capture frame 150 as PNG, then exit
+cargo build --release
+hypervisor target/aarch64-unknown-none/release/kernel --drive disk.img --background --capture 150 /tmp/screenshot.png
 # Then Read /tmp/screenshot.png
 
 # Multi-frame: capture frames 30, 60, 90 in a single boot
@@ -209,12 +216,15 @@ hypervisor target/aarch64-unknown-none/release/kernel --drive disk.img --backgro
 # Produces /tmp/test-030.png, /tmp/test-060.png, /tmp/test-090.png
 
 # Event script: type text, edit, capture result (deterministic visual test)
+# Frame 0 = first rendered frame. wait gives the scene time to settle.
 cat > /tmp/test.events << 'SCRIPT'
+wait 150
 type hello world
 key left left left
 key backspace
 wait 5
 capture /tmp/after-edit.png
+exit
 SCRIPT
 hypervisor target/aarch64-unknown-none/release/kernel --drive disk.img --background --events /tmp/test.events
 # Then Read /tmp/after-edit.png
@@ -238,30 +248,31 @@ kill -USR1 $(pgrep hypervisor)
 - `drag 100 200 300 200` — drag from (x1, y1) to (x2, y2) over ~10 frames
 - `wait 10` — wait 10 extra frames
 - `capture /tmp/out.png` — screenshot at this point
+- `exit` — exit the hypervisor cleanly
 
 **Background mode:** Always use `--background` for automated invocations (captures, event scripts, CI). Renders to an offscreen `MTLTexture` — no window, no CAMetalLayer, no interaction with the macOS window server. Zero focus disruption. Previously background mode was implicit with `--events`; now it's an explicit flag.
 
 ### Visual assertion tool (verify.py) — MANDATORY
 
-**Never eyeball screenshots to judge correctness.** Downscaled images in the conversation are unreliable — you WILL hallucinate pixel differences. Use `system/test/verify.py` for PASS/FAIL verdicts. **Never interpret raw measurements** — the tool makes the judgment call, not you.
+**Never eyeball screenshots to judge correctness.** Downscaled images in the conversation are unreliable — you WILL hallucinate pixel differences. Use `host/verify.py` for PASS/FAIL verdicts. **Never interpret raw measurements** — the tool makes the judgment call, not you.
 
 ```sh
-PYTHON=system/test/.venv/bin/python3
+PYTHON=host/.venv/bin/python3
 
 # Run assertions against a capture — returns PASS or FAIL with evidence
-$PYTHON system/test/verify.py /tmp/screenshot.png \
+$PYTHON host/verify.py /tmp/screenshot.png \
   --assert 'frame_not_blank' \
   --assert 'page_centered tol=5' \
   --assert 'cursor_visible_at x=400 y=400 size=32 tol=15'
 
 # Run from a spec file (one assertion per line, # comments)
-$PYTHON system/test/verify.py /tmp/screenshot.png --spec system/test/visual/boot-idle.spec
+$PYTHON host/verify.py /tmp/screenshot.png --spec host/visual/boot-idle.spec
 
 # SSIM comparison against a baseline
-$PYTHON system/test/verify.py /tmp/after.png --assert 'ssim_above ref=/tmp/before.png threshold=0.99'
+$PYTHON host/verify.py /tmp/after.png --assert 'ssim_above ref=/tmp/before.png threshold=0.99'
 
 # Specific pixel check
-$PYTHON system/test/verify.py /tmp/screenshot.png --assert 'pixel_is x=100 y=100 r=32 g=32 b=32 tol=5'
+$PYTHON host/verify.py /tmp/screenshot.png --assert 'pixel_is x=100 y=100 r=32 g=32 b=32 tol=5'
 ```
 
 **Available assertions:**
@@ -282,7 +293,7 @@ $PYTHON system/test/verify.py /tmp/screenshot.png --assert 'pixel_is x=100 y=100
 
 **Cursor compositing:** Captures always include the cursor (composited via GPU onto the staging texture). Event scripts can position the cursor with `move x y`.
 
-**Visual test suite:** Run `cd system/test && ./visual-test.sh` to execute all visual regression tests (boot-idle, cursor-dark, cursor-page, after-type). Each test boots the hypervisor, runs a scenario, captures, and asserts. All tests must pass before shipping display changes.
+**Visual test suite:** Run `cd host && ./visual-test.sh` to execute all visual regression tests (boot-idle, cursor-dark, cursor-page, after-type). Each test boots the hypervisor, runs a scenario, captures, and asserts. All tests must pass before shipping display changes.
 
 **Visual TDD workflow:**
 
@@ -296,7 +307,7 @@ $PYTHON system/test/verify.py /tmp/screenshot.png --assert 'pixel_is x=100 y=100
 
 **Legacy tool (imgdiff.py):** Still available for raw measurements, but prefer verify.py for all verification. imgdiff.py returns numbers for you to interpret; verify.py returns verdicts.
 
-Launch: `cd system && cargo run -r` (default, no env vars needed).
+Launch: `cargo run -r` (default, no env vars needed).
 
 ### When to use this
 

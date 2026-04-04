@@ -9,6 +9,17 @@
 *~
 design/drafts/
 docs/
-reference/
 target/
 .venv/
+
+# Build artifacts
+*.bin
+*.dtb
+*.img
+rustc-ice-*.txt
+
+# Visual test failure archives
+host/visual/failures/
+
+# Vendored binaries (untracked)
+/vendor/
