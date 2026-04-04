@@ -47,6 +47,7 @@ Handles carry a rights bitmask (u32). Rights attenuate monotonically — a deriv
 | 7   | KILL     | process_kill                                                                                                         |
 | 8   | SEAL     | vmo_seal                                                                                                             |
 | 9   | APPEND   | vmo_write (append-only mode: APPEND without WRITE)                                                                   |
+| 10  | DUPLICATE| handle_dup (gate: source must have DUPLICATE)                                                                        |
 
 ---
 
@@ -690,6 +691,24 @@ Errors: InvalidHandle, InsufficientRights
 ```
 
 Clears the pending state and re-enables interrupt delivery via the interrupt controller.
+
+---
+
+## Capability Duplication
+
+### 46 — handle_dup
+
+Duplicate a handle within the caller's handle table. The new handle references the same kernel object with optionally attenuated rights. The original handle's badge is copied to the duplicate.
+
+```text
+x8 = 46
+x0 = handle       (source handle, requires DUPLICATE)
+x1 = rights_mask  (0 = preserve all rights, non-zero = attenuate via AND)
+Returns: x0 = new handle number
+Errors: InvalidHandle, InsufficientRights, TableFull
+```
+
+The source handle must have the DUPLICATE right (bit 10). The new handle's rights are `original_rights AND rights_mask` when `rights_mask != 0`, or `original_rights` when `rights_mask == 0`. Rights can only be reduced (attenuated), never escalated.
 
 ---
 

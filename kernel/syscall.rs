@@ -11,7 +11,7 @@
 //! | x0..x5   | in        | Arguments (syscall-specific)       |
 //! | x0       | out       | Return value: ≥0 success, <0 error |
 //!
-//! # Syscalls (46 total, grouped by abstraction layer)
+//! # Syscalls (47 total, grouped by abstraction layer)
 //!
 //! See SYSCALLS.md for the full reference. Summary:
 //!
@@ -35,6 +35,7 @@
 //! | 39–42 | scheduling_context_*       | x0=budget/handle, x1=period               | handle / 0                   |
 //! | 43    | device_map                 | x0=phys_addr, x1=size                     | user VA                      |
 //! | 44–45 | interrupt_register/ack     | x0=irq or handle                          | handle / 0                   |
+//! | 46    | handle_dup                 | x0=handle, x1=rights_mask                 | new handle                   |
 //!
 //! # Error codes
 //!
@@ -136,6 +137,8 @@ pub mod nr {
     pub const DEVICE_MAP: u64 = 43;
     pub const INTERRUPT_REGISTER: u64 = 44;
     pub const INTERRUPT_ACK: u64 = 45;
+    // --- Capability duplication (46) ---
+    pub const HANDLE_DUP: u64 = 46;
 }
 
 /// Maximum ELF size for process_create (4 MiB).
@@ -609,6 +612,22 @@ fn sys_handle_get_badge(handle_nr: u64) -> Result<u64, HandleError> {
     }
 
     scheduler::current_process_do(|process| process.handles.get_badge(Handle(handle_nr as u16)))
+}
+fn sys_handle_dup(handle_nr: u64, rights_mask: u64) -> Result<u64, HandleError> {
+    if handle_nr > u16::MAX as u64 {
+        return Err(HandleError::InvalidHandle);
+    }
+
+    let mask = if rights_mask == 0 {
+        Rights::NONE
+    } else {
+        Rights::from_raw(rights_mask as u32)
+    };
+
+    scheduler::current_process_do(|process| {
+        let new_handle = process.handles.duplicate(Handle(handle_nr as u16), mask)?;
+        Ok(new_handle.0 as u64)
+    })
 }
 fn sys_handle_send(
     target_handle_nr: u64,
@@ -2162,6 +2181,7 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
         }
         nr::HANDLE_SET_BADGE => dispatch_ok(ctx, result_to_u64!(sys_handle_set_badge(x0, x1))),
         nr::HANDLE_GET_BADGE => dispatch_ok(ctx, result_to_u64!(sys_handle_get_badge(x0))),
+        nr::HANDLE_DUP => dispatch_ok(ctx, result_to_u64!(sys_handle_dup(x0, x1))),
         nr::VMO_CREATE => {
             // SAFETY: ctx is valid, register 2 is within bounds.
             let x2 = unsafe { ctx_reg(ctx, 2) };

@@ -38,7 +38,14 @@ These rules govern how you work on this project. They are not preferences — th
 - When fixing a bug, check for the same class of bug in related code
 - If an interface is confusing enough to cause a bug, STOP and flag it — interfaces are architectural decisions in this project. Propose the fix, don't silently apply it.
 
-### 5. Update reference docs at milestone boundaries
+### 5. Present the design space, not a default answer
+
+- When suggesting kernel or OS design approaches, never default to a single system's patterns (especially Zircon/Fuchsia). Present the design space across multiple systems.
+- Name which systems you're drawing from and why. "Zircon does it this way" is not a justification — "This approach is correct because [reason], and [system] chose it for [their reason]" is.
+- Give extra weight to systems aligned with this project's unique goals (document-centric, content-type aware, personal workstation). Zircon was designed for phones; seL4 for safety-critical; Plan 9 for distributed computing. Different goals produce different correct answers.
+- Reference landscape: seL4, L4 family, EROS/Coyotos, Genode, QNX, Plan 9, Barrelfish, Redox, Minix 3 — not just Zircon.
+
+### 6. Update reference docs at milestone boundaries
 
 When completing a milestone (version tag), verify these files reflect the current architecture:
 

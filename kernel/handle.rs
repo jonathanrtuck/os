@@ -119,6 +119,34 @@ impl HandleTable {
         }
     }
 
+    /// Duplicate a handle: create a new entry referencing the same kernel object,
+    /// with optionally attenuated rights. The source handle must have DUPLICATE right.
+    /// If `rights_mask` is NONE, all original rights are preserved.
+    pub fn duplicate(
+        &mut self,
+        handle: Handle,
+        rights_mask: Rights,
+    ) -> Result<Handle, HandleError> {
+        let entry = self
+            .slot(handle.0 as usize)
+            .and_then(|s| s.as_ref())
+            .ok_or(HandleError::InvalidHandle)?;
+
+        if !entry.rights.contains(Rights::DUPLICATE) {
+            return Err(HandleError::InsufficientRights);
+        }
+
+        let mask = if rights_mask == Rights::NONE {
+            entry.rights
+        } else {
+            entry.rights.attenuate(rights_mask)
+        };
+        let object = entry.object;
+        let badge = entry.badge;
+
+        self.insert_with_badge(object, mask, badge)
+    }
+
     /// Close a handle (clear the slot). Returns the object, rights, and badge.
     pub fn close(&mut self, handle: Handle) -> Result<(HandleObject, Rights, u64), HandleError> {
         let slot = self
@@ -327,10 +355,11 @@ impl Iterator for DrainHandles<'_> {
 }
 
 impl Rights {
-    pub const ALL: Self = Self(0x3FF);
+    pub const ALL: Self = Self(0x7FF);
     pub const APPEND: Self = Self(1 << 8);
     #[allow(dead_code)] // Test-only: used by kernel/test/tests/kernel_handle_rights.rs
     pub const CREATE: Self = Self(1 << 6);
+    pub const DUPLICATE: Self = Self(1 << 10);
     pub const KILL: Self = Self(1 << 7);
     pub const MAP: Self = Self(1 << 4);
     pub const NONE: Self = Self(0);
@@ -355,7 +384,7 @@ impl Rights {
     /// Construct from a raw u32 (e.g., from a syscall argument). Masks to
     /// defined bits only — undefined bits are silently dropped.
     pub const fn from_raw(raw: u32) -> Self {
-        Self(raw & 0x3FF)
+        Self(raw & 0x7FF)
     }
     /// Combine two rights sets (bitwise OR).
     pub const fn union(self, other: Self) -> Self {
