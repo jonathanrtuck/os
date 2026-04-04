@@ -56,13 +56,25 @@ static CNTFRQ: AtomicU64 = AtomicU64::new(0);
 /// the TIMERS lock on every schedule_inner call.
 static EARLIEST_DEADLINE: AtomicU64 = AtomicU64::new(0);
 static TIMERS: IrqMutex<TimerTable> = IrqMutex::new(TimerTable {
-    slots: [const { None }; MAX_TIMERS],
+    slots: [const { TimerSlot::Free }; MAX_TIMERS],
     waiters: WaitableRegistry::new(),
 });
 
+/// State of a timer slot.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TimerSlot {
+    /// Slot is available for allocation.
+    Free,
+    /// Timer is armed with a deadline in counter ticks.
+    Armed(u64),
+    /// Timer handle exists but is disarmed (cancelled). Will not fire,
+    /// but the slot is not available for reuse until the handle is closed.
+    Disarmed,
+}
+
 struct TimerTable {
-    /// Deadline in counter ticks. Slot index = TimerId. `None` = free slot.
-    slots: [Option<u64>; MAX_TIMERS],
+    /// Timer slot state. Slot index = TimerId.
+    slots: [TimerSlot; MAX_TIMERS],
     /// Readiness + waiter tracking for each timer.
     waiters: WaitableRegistry<TimerId>,
 }
@@ -100,7 +112,7 @@ fn update_earliest_deadline_locked(table: &TimerTable) {
     let mut earliest: u64 = 0; // 0 = sentinel for "no timers"
 
     for (i, slot) in table.slots.iter().enumerate() {
-        if let Some(&deadline) = slot.as_ref() {
+        if let TimerSlot::Armed(deadline) = *slot {
             // Skip timers that have already fired (ready=true). Their expired
             // deadlines are in the past and would poison EARLIEST_DEADLINE,
             // causing reprogram_next_deadline to program TVAL=1 repeatedly
@@ -137,7 +149,7 @@ pub fn check_expired() {
         let mut table = TIMERS.lock();
 
         for i in 0..MAX_TIMERS {
-            if let Some(&deadline_ticks) = table.slots[i].as_ref() {
+            if let TimerSlot::Armed(deadline_ticks) = table.slots[i] {
                 if now >= deadline_ticks {
                     any_expired = true;
 
@@ -216,10 +228,10 @@ pub fn create(timeout_ns: u64) -> Option<TimerId> {
         let mut found = None;
 
         for i in 0..MAX_TIMERS {
-            if table.slots[i].is_none() {
+            if table.slots[i] == TimerSlot::Free {
                 let id = TimerId(i as u8);
 
-                table.slots[i] = Some(deadline_ticks);
+                table.slots[i] = TimerSlot::Armed(deadline_ticks);
 
                 table.waiters.create(id);
 
@@ -262,7 +274,7 @@ pub fn destroy(id: TimerId) {
     let waiter = {
         let mut table = TIMERS.lock();
 
-        table.slots[id.0 as usize] = None;
+        table.slots[id.0 as usize] = TimerSlot::Free;
 
         update_earliest_deadline_locked(&table);
         table.waiters.destroy(id)
@@ -272,6 +284,44 @@ pub fn destroy(id: TimerId) {
         scheduler::wake_for_handle(waiter_id, HandleObject::Timer(id));
     }
 }
+/// Re-arm a timer with a new deadline. Returns `false` if the timer slot
+/// has been destroyed (Free). Works on both Armed and Disarmed timers.
+/// Clears the fired state so the timer can be waited on again.
+pub fn set(id: TimerId, deadline_ticks: u64) -> bool {
+    let mut table = TIMERS.lock();
+    let slot = &mut table.slots[id.0 as usize];
+
+    match *slot {
+        TimerSlot::Free => return false,
+        TimerSlot::Armed(_) | TimerSlot::Disarmed => {
+            *slot = TimerSlot::Armed(deadline_ticks);
+            table.waiters.clear_ready(id);
+            update_earliest_deadline_locked(&table);
+        }
+    }
+
+    true
+}
+
+/// Disarm a timer without destroying it. The handle remains valid and can
+/// be re-armed with `set`. Returns `false` if the timer slot has been
+/// destroyed (Free).
+pub fn cancel(id: TimerId) -> bool {
+    let mut table = TIMERS.lock();
+    let slot = &mut table.slots[id.0 as usize];
+
+    match *slot {
+        TimerSlot::Free => return false,
+        TimerSlot::Armed(_) | TimerSlot::Disarmed => {
+            *slot = TimerSlot::Disarmed;
+            table.waiters.clear_ready(id);
+            update_earliest_deadline_locked(&table);
+        }
+    }
+
+    true
+}
+
 /// Handle a timer interrupt: check timer objects for expiry.
 ///
 /// Note: `reprogram_next_deadline` is NOT called here. The caller (irq_handler)

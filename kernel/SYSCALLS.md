@@ -347,6 +347,34 @@ Returns: x0 = nanoseconds since boot
 
 Derived from the hardware counter. Resolution depends on counter frequency (24 MHz on Apple Silicon, 62.5 MHz on QEMU).
 
+### 48 — timer_set
+
+Reprogram an existing timer's deadline.
+
+```text
+x8 = 48
+x0 = handle        (timer handle, requires WRITE right)
+x1 = deadline_ns   (nanoseconds from now)
+x2 = period_ns     (reserved for periodic timers, stored but not acted on)
+Returns: x0 = 0
+Errors: InvalidArgument, InvalidHandle, InsufficientRights
+```
+
+Clears the timer's fired state so it can be waited on again. Updates EARLIEST_DEADLINE cache and reprograms hardware timer if needed.
+
+### 49 — timer_cancel
+
+Disarm a timer without destroying it.
+
+```text
+x8 = 49
+x0 = handle        (timer handle, requires WRITE right)
+Returns: x0 = 0
+Errors: InvalidArgument, InvalidHandle, InsufficientRights
+```
+
+The timer handle remains valid and can be re-armed with timer_set. Clears the fired state.
+
 ---
 
 ## Memory

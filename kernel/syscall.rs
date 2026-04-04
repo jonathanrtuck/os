@@ -142,6 +142,9 @@ pub mod nr {
     pub const HANDLE_DUP: u64 = 46;
     // --- Process inspection (47) ---
     pub const PROCESS_GET_EXIT_CODE: u64 = 47;
+    // --- Timer manipulation (48–49) ---
+    pub const TIMER_SET: u64 = 48;
+    pub const TIMER_CANCEL: u64 = 49;
 }
 
 /// Maximum ELF size for process_create (4 MiB).
@@ -1234,6 +1237,66 @@ fn sys_timer_create(timeout_ns: u64) -> Result<u64, HandleError> {
         }
     }
 }
+fn sys_timer_set(handle_nr: u64, deadline_ns: u64, _period_ns: u64) -> Result<u64, Error> {
+    if handle_nr > u16::MAX as u64 {
+        return Err(Error::InvalidArgument);
+    }
+
+    let timer_id = scheduler::current_process_do(|process| {
+        let obj = process
+            .handles
+            .get(Handle(handle_nr as u16), Rights::WRITE)?;
+
+        match obj {
+            HandleObject::Timer(id) => Ok(id),
+            _ => Err(HandleError::InvalidHandle),
+        }
+    })?;
+
+    // Convert deadline_ns to counter ticks (same formula as timer::create).
+    let now = timer::counter();
+    let freq = timer::counter_freq();
+    let deadline_ticks = if deadline_ns == 0 {
+        now
+    } else {
+        let delta = (deadline_ns as u128 * freq as u128 / 1_000_000_000) as u64;
+
+        now.saturating_add(delta)
+    };
+
+    if timer::set(timer_id, deadline_ticks) {
+        // Reprogram hardware timer if the new deadline is meaningfully in the future.
+        if deadline_ticks > now + (freq / 10_000) {
+            timer::reprogram_next_deadline(None);
+        }
+
+        Ok(0)
+    } else {
+        Err(Error::InvalidArgument)
+    }
+}
+fn sys_timer_cancel(handle_nr: u64) -> Result<u64, Error> {
+    if handle_nr > u16::MAX as u64 {
+        return Err(Error::InvalidArgument);
+    }
+
+    let timer_id = scheduler::current_process_do(|process| {
+        let obj = process
+            .handles
+            .get(Handle(handle_nr as u16), Rights::WRITE)?;
+
+        match obj {
+            HandleObject::Timer(id) => Ok(id),
+            _ => Err(HandleError::InvalidHandle),
+        }
+    })?;
+
+    if timer::cancel(timer_id) {
+        Ok(0)
+    } else {
+        Err(Error::InvalidArgument)
+    }
+}
 fn sys_vmo_create(size_pages: u64, flags: u64, type_tag: u64) -> Result<u64, Error> {
     if size_pages == 0 {
         return Err(Error::InvalidArgument);
@@ -2191,6 +2254,13 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
         }
         nr::FUTEX_WAKE => dispatch_ok(ctx, result_to_u64!(sys_futex_wake(x0, x1))),
         nr::TIMER_CREATE => dispatch_ok(ctx, result_to_u64!(sys_timer_create(x0))),
+        nr::TIMER_SET => {
+            // SAFETY: ctx is valid, register 2 is within bounds.
+            let x2 = unsafe { ctx_reg(ctx, 2) };
+
+            dispatch_ok(ctx, result_to_u64!(sys_timer_set(x0, x1, x2)))
+        }
+        nr::TIMER_CANCEL => dispatch_ok(ctx, result_to_u64!(sys_timer_cancel(x0))),
         nr::INTERRUPT_REGISTER => dispatch_ok(ctx, result_to_u64!(sys_interrupt_register(x0))),
         nr::INTERRUPT_ACK => dispatch_ok(ctx, result_to_u64!(sys_interrupt_ack(x0))),
         nr::DEVICE_MAP => dispatch_ok(ctx, result_to_u64!(sys_device_map(x0, x1))),
