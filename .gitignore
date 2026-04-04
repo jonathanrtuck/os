@@ -18,5 +18,8 @@ target/
 *.img
 rustc-ice-*.txt
 
+# Visual test failure archives
+host/visual/failures/
+
 # Vendored binaries (untracked)
 /vendor/

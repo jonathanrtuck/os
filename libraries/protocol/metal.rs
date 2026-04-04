@@ -69,6 +69,12 @@ pub const CMD_SET_CURSOR_VISIBLE: u16 = 0x0F12;
 /// The host reads the texture directly and creates an NSCursor from it.
 pub const CMD_SET_CURSOR_FROM_TEXTURE: u16 = 0x0F13;
 
+/// Signal that the scene is ready for interaction (loading complete).
+/// Sent once when the root node's STATE_BUSY flag clears. The host uses
+/// this as frame origin for event scripts — frame 0 is this frame.
+/// Payload: (none)
+pub const CMD_SCENE_READY: u16 = 0x0F20;
+
 // ── Special handles ─────────────────────────────────────────────────────
 
 /// When used as a texture handle in `begin_render_pass`, the host acquires
@@ -593,5 +599,10 @@ impl CommandBuffer {
         self.push_u16(height);
         self.data.extend_from_slice(&hotspot_x.to_le_bytes());
         self.data.extend_from_slice(&hotspot_y.to_le_bytes());
+    }
+
+    /// Signal that the scene is ready for interaction.
+    pub fn scene_ready(&mut self) {
+        self.push_header(CMD_SCENE_READY, 0);
     }
 }

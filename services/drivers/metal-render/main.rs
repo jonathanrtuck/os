@@ -605,6 +605,9 @@ pub extern "C" fn _start() -> ! {
     let mut cursor_x: f32 = 0.0;
     let mut cursor_y: f32 = 0.0;
 
+    // Track root node STATE_BUSY to emit CMD_SCENE_READY on transition.
+    let mut scene_was_busy = true;
+
     loop {
         // Fixed cadence: wake at display refresh rate, sample latest scene.
         // The presenter writes to the triple buffer at its own pace; we read
@@ -703,6 +706,11 @@ pub extern "C" fn _start() -> ! {
             drop(reader);
             continue;
         }
+
+        // Detect STATE_BUSY → not-busy transition on root node.
+        let root_busy = nodes[root as usize].state & scene::STATE_BUSY != 0;
+        let scene_became_ready = scene_was_busy && !root_busy;
+        scene_was_busy = root_busy;
 
         // ── Pre-scan: rasterize any missing glyphs into the atlas ─────
         // Walk all visible Glyphs nodes and check for atlas misses. If any
@@ -1453,6 +1461,10 @@ pub extern "C" fn _start() -> ! {
 
         if cursor_visible && cursor_moved {
             cmdbuf.set_cursor_position(cursor_x, cursor_y);
+        }
+
+        if scene_became_ready {
+            cmdbuf.scene_ready();
         }
 
         cmdbuf.present_and_commit();

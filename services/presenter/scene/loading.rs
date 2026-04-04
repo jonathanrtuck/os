@@ -11,7 +11,7 @@
 
 use alloc::{vec, vec::Vec};
 
-use scene::{fnv1a, path_cubic_to, path_move_to, Color, Content, NodeFlags};
+use scene::{fnv1a, path_cubic_to, path_move_to, Color, Content, NodeFlags, STATE_BUSY};
 
 // ── Spinner constants ──────────────────────────────────────────────
 
@@ -191,6 +191,7 @@ pub fn build_loading_scene(w: &mut scene::SceneWriter<'_>, fb_width: u32, fb_hei
         n.height = scene::upt(fb_height);
         n.background = LOADING_BG;
         n.flags = NodeFlags::VISIBLE;
+        n.state = STATE_BUSY;
     }
     w.set_root(root);
 

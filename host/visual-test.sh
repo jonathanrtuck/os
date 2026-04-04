@@ -20,35 +20,46 @@ VERIFY="$SCRIPT_DIR/verify.py"
 SPEC_DIR="$SCRIPT_DIR/visual"
 CAPTURE_DIR="/tmp/visual-tests"
 KERNEL="$SYSTEM_DIR/target/aarch64-unknown-none/release/kernel"
-DISK_ORIG="$SYSTEM_DIR/disk.img"
-# Each test boots the OS which can mutate disk.img (document edits persist).
-# Use a temporary copy so the original stays clean across test runs.
-# The factory disk.img (built by mkdisk) includes the "Style Stress Test"
-# rich text document with 32 styles — the visual tests depend on it.
+MKDISK="$SYSTEM_DIR/tools/mkdisk/target/aarch64-apple-darwin/release/mkdisk"
+ASSETS="$SYSTEM_DIR/assets"
+# Factory disk built fresh by mkdisk at test start — never uses the working
+# disk.img which may have been modified by manual runs.
+DISK_FACTORY="$CAPTURE_DIR/disk-factory.img"
+# Each test gets a copy of the factory disk (the OS persists edits).
 DISK="$CAPTURE_DIR/disk-test.img"
 
-# Boot wait: frames to wait before injecting events.
-# Frame 0 is the first rendered frame (timer starts on first presentAndCommit),
-# but the full scene (fonts, document, PNG) takes additional frames to settle.
-# 150 frames at display cadence gives comfortable margin.
-BOOT_WAIT=150
+# Post-ready settle: frames to wait after scene ready before capture.
+# Frame 0 is the first frame after the scene reports ready (STATE_BUSY cleared).
+# A few frames of settle time ensures layout/rendering is fully flushed.
+POST_READY_WAIT=5
 # Post-event wait: frames to wait after events before capture.
 POST_WAIT=30
 # Outer safety net: if the hypervisor hasn't exited in this many seconds,
 # something is fundamentally broken (kernel panic, deadlock, boot failure).
 # The event scripts control normal exit via the `exit` command.
-TIMEOUT=10
+# This is not a timing mechanism — it's a kill switch for hung processes.
+TIMEOUT=30
+
+# Persistent archive for failure artifacts — survives across runs.
+FAILURE_BASE="$SCRIPT_DIR/visual/failures"
 
 # ── Helpers ───────────────────────────────────────────────────────
 
 die() { echo "FATAL: $*" >&2; exit 2; }
 info() { echo "  $*"; }
 
+archive_failure() {
+    local test_name="$1"
+    mkdir -p "$FAILURE_ARCHIVE"
+    cp "$CAPTURE_DIR"/${test_name}*.png "$FAILURE_ARCHIVE/" 2>/dev/null || true
+}
+
 check_deps() {
     command -v hypervisor >/dev/null 2>&1 || die "hypervisor not in PATH"
     [ -x "$VENV_PYTHON" ] || die "Python venv not found at $VENV_PYTHON (run: python3 -m venv $SCRIPT_DIR/.venv && $SCRIPT_DIR/.venv/bin/pip install numpy scikit-image Pillow)"
     [ -f "$KERNEL" ] || die "Kernel not found at $KERNEL (run: cargo build --release)"
-    [ -f "$DISK_ORIG" ] || die "disk.img not found at $DISK_ORIG"
+    [ -x "$MKDISK" ] || die "mkdisk not found at $MKDISK (run: cd tools/mkdisk && cargo build --release)"
+    [ -d "$ASSETS" ] || die "assets dir not found at $ASSETS"
 }
 
 run_hypervisor() {
@@ -59,7 +70,7 @@ run_hypervisor() {
     fi
     local hv_output
     hv_output=$(hypervisor "$KERNEL" --drive "$DISK" --background \
-        $extra_args --timeout "$TIMEOUT" 2>&1)
+        $extra_args --timeout "$TIMEOUT" 2>&1 | tee -a "$HV_LOG")
     local hv_exit=$?
     if [ $hv_exit -ne 0 ]; then
         echo "hypervisor exited with code $hv_exit" >&2
@@ -80,8 +91,8 @@ run_verify() {
 test_boot_idle() {
     info "Test: boot-idle (no input, verify basic rendering)"
     hypervisor "$KERNEL" --drive "$DISK" --background \
-        --capture 150 "$CAPTURE_DIR/boot-idle.png" \
-        --timeout "$TIMEOUT" >/dev/null 2>&1
+        --capture 5 "$CAPTURE_DIR/boot-idle.png" \
+        --timeout "$TIMEOUT" >>"$HV_LOG" 2>&1
 
     run_verify "$CAPTURE_DIR/boot-idle.png" "$SPEC_DIR/boot-idle.spec"
 }
@@ -89,39 +100,36 @@ test_boot_idle() {
 test_cursor_dark() {
     info "Test: cursor-dark (cursor on dark background)"
     cat > "$CAPTURE_DIR/cursor-dark.events" << 'EVENTS'
-wait 150
 move 400 400
 wait 60
 capture /tmp/visual-tests/cursor-dark.png
 exit
 EVENTS
-    run_hypervisor "$CAPTURE_DIR/cursor-dark.events" >/dev/null 2>&1
+    run_hypervisor "$CAPTURE_DIR/cursor-dark.events" >>"$HV_LOG" 2>&1
     run_verify "$CAPTURE_DIR/cursor-dark.png" "$SPEC_DIR/cursor-dark.spec"
 }
 
 test_cursor_page() {
     info "Test: cursor-page (cursor on white page)"
     cat > "$CAPTURE_DIR/cursor-page.events" << 'EVENTS'
-wait 150
 move 2000 2000
 wait 60
 capture /tmp/visual-tests/cursor-page.png
 exit
 EVENTS
-    run_hypervisor "$CAPTURE_DIR/cursor-page.events" >/dev/null 2>&1
+    run_hypervisor "$CAPTURE_DIR/cursor-page.events" >>"$HV_LOG" 2>&1
     run_verify "$CAPTURE_DIR/cursor-page.png" "$SPEC_DIR/cursor-page.spec"
 }
 
 test_after_type() {
     info "Test: after-type (keyboard input reaches document)"
     cat > "$CAPTURE_DIR/after-type.events" << 'EVENTS'
-wait 150
 type x
 wait 30
 capture /tmp/visual-tests/after-type.png
 exit
 EVENTS
-    run_hypervisor "$CAPTURE_DIR/after-type.events" >/dev/null 2>&1
+    run_hypervisor "$CAPTURE_DIR/after-type.events" >>"$HV_LOG" 2>&1
     run_verify "$CAPTURE_DIR/after-type.png" "$SPEC_DIR/after-type.spec"
 }
 
@@ -131,7 +139,6 @@ test_click_placement() {
     # Click mid-word, type 'Z', verify 'Z' appears in the title region.
     # Uses move+wait before click so pointer register is fresh.
     cat > "$CAPTURE_DIR/click-placement.events" << 'EVENTS'
-wait 150
 move 330 68
 wait 5
 click 330 68
@@ -144,7 +151,7 @@ EVENTS
     hypervisor "$KERNEL" --drive "$DISK" --background \
         --resolution 800x600 \
         --events "$CAPTURE_DIR/click-placement.events" \
-        --timeout "$TIMEOUT" >/dev/null 2>&1
+        --timeout "$TIMEOUT" >>"$HV_LOG" 2>&1
     run_verify "$CAPTURE_DIR/click-placement.png" "$SPEC_DIR/click-placement.spec"
 }
 
@@ -153,7 +160,6 @@ test_dblclick_select() {
     # Double-click on "Style" at (280,60) in 800x600.
     # Selection highlight = blue-tinted pixels in the word region.
     cat > "$CAPTURE_DIR/dblclick-select.events" << 'EVENTS'
-wait 150
 move 280 60
 wait 5
 dblclick 280 60
@@ -164,7 +170,7 @@ EVENTS
     hypervisor "$KERNEL" --drive "$DISK" --background \
         --resolution 800x600 \
         --events "$CAPTURE_DIR/dblclick-select.events" \
-        --timeout "$TIMEOUT" >/dev/null 2>&1
+        --timeout "$TIMEOUT" >>"$HV_LOG" 2>&1
     run_verify "$CAPTURE_DIR/dblclick-select.png" "$SPEC_DIR/dblclick-select.spec"
 }
 
@@ -174,7 +180,6 @@ test_tripleclick_line() {
     # After replacing selection with 'Z', the line content changes.
     # Verifies triple-click selects the full line (not just byte 0..0).
     cat > "$CAPTURE_DIR/tripleclick-line.events" << 'EVENTS'
-wait 150
 move 300 115
 wait 5
 click 300 115
@@ -191,7 +196,7 @@ EVENTS
     hypervisor "$KERNEL" --drive "$DISK" --background \
         --resolution 800x600 \
         --events "$CAPTURE_DIR/tripleclick-line.events" \
-        --timeout "$TIMEOUT" >/dev/null 2>&1
+        --timeout "$TIMEOUT" >>"$HV_LOG" 2>&1
     run_verify "$CAPTURE_DIR/tripleclick-line.png" "$SPEC_DIR/tripleclick-line.spec"
 }
 
@@ -200,7 +205,6 @@ test_drag_select() {
     # At 800x600, drag across part of the title "Style Stress Test".
     # Drag from (250,60) to (400,60) to select "Stress Test" region.
     cat > "$CAPTURE_DIR/drag-select.events" << 'EVENTS'
-wait 150
 move 250 60
 wait 5
 drag 250 60 400 60
@@ -211,7 +215,7 @@ EVENTS
     hypervisor "$KERNEL" --drive "$DISK" --background \
         --resolution 800x600 \
         --events "$CAPTURE_DIR/drag-select.events" \
-        --timeout "$TIMEOUT" >/dev/null 2>&1
+        --timeout "$TIMEOUT" >>"$HV_LOG" 2>&1
     run_verify "$CAPTURE_DIR/drag-select.png" "$SPEC_DIR/drag-select.spec"
 }
 
@@ -221,8 +225,8 @@ test_font_weights() {
     # Verifies that different weight variants render with different stroke densities.
     hypervisor "$KERNEL" --drive "$DISK" --background \
         --resolution 1600x1200 \
-        --capture 150 "$CAPTURE_DIR/font-weights.png" \
-        --timeout "$TIMEOUT" >/dev/null 2>&1
+        --capture 5 "$CAPTURE_DIR/font-weights.png" \
+        --timeout "$TIMEOUT" >>"$HV_LOG" 2>&1
     run_verify "$CAPTURE_DIR/font-weights.png" "$SPEC_DIR/font-weights.spec"
 }
 
@@ -232,10 +236,9 @@ test_caret_height() {
     # At 1600x1200, subtitle at y~120. Caret should be 15-65px tall (font metrics).
     hypervisor "$KERNEL" --drive "$DISK" --background \
         --resolution 1600x1200 \
-        --capture 150 "$CAPTURE_DIR/caret-baseline.png" \
-        --timeout "$TIMEOUT" >/dev/null 2>&1
+        --capture 5 "$CAPTURE_DIR/caret-baseline.png" \
+        --timeout "$TIMEOUT" >>"$HV_LOG" 2>&1
     cat > "$CAPTURE_DIR/caret-height.events" << 'EVENTS'
-wait 150
 move 600 120
 wait 5
 click 600 120
@@ -246,7 +249,7 @@ EVENTS
     hypervisor "$KERNEL" --drive "$DISK" --background \
         --resolution 1600x1200 \
         --events "$CAPTURE_DIR/caret-height.events" \
-        --timeout "$TIMEOUT" >/dev/null 2>&1
+        --timeout "$TIMEOUT" >>"$HV_LOG" 2>&1
     run_verify "$CAPTURE_DIR/caret-height.png" "$SPEC_DIR/caret-height.spec"
 }
 
@@ -254,8 +257,8 @@ test_italic_slant() {
     info "Test: italic-slant (italic text has visual slant vs roman)"
     hypervisor "$KERNEL" --drive "$DISK" --background \
         --resolution 1600x1200 \
-        --capture 150 "$CAPTURE_DIR/italic-slant.png" \
-        --timeout "$TIMEOUT" >/dev/null 2>&1
+        --capture 5 "$CAPTURE_DIR/italic-slant.png" \
+        --timeout "$TIMEOUT" >>"$HV_LOG" 2>&1
     run_verify "$CAPTURE_DIR/italic-slant.png" "$SPEC_DIR/italic-slant.spec"
 }
 
@@ -263,8 +266,8 @@ test_baseline_mixed() {
     info "Test: baseline-mixed (mixed-size text baseline alignment)"
     hypervisor "$KERNEL" --drive "$DISK" --background \
         --resolution 1600x1200 \
-        --capture 150 "$CAPTURE_DIR/baseline-mixed.png" \
-        --timeout "$TIMEOUT" >/dev/null 2>&1
+        --capture 5 "$CAPTURE_DIR/baseline-mixed.png" \
+        --timeout "$TIMEOUT" >>"$HV_LOG" 2>&1
     run_verify "$CAPTURE_DIR/baseline-mixed.png" "$SPEC_DIR/baseline-mixed.spec"
 }
 
@@ -272,8 +275,8 @@ test_underline_below() {
     info "Test: underline-below (underline decoration below baseline)"
     hypervisor "$KERNEL" --drive "$DISK" --background \
         --resolution 1600x1200 \
-        --capture 150 "$CAPTURE_DIR/underline-below.png" \
-        --timeout "$TIMEOUT" >/dev/null 2>&1
+        --capture 5 "$CAPTURE_DIR/underline-below.png" \
+        --timeout "$TIMEOUT" >>"$HV_LOG" 2>&1
     run_verify "$CAPTURE_DIR/underline-below.png" "$SPEC_DIR/underline-below.spec"
 }
 
@@ -282,7 +285,6 @@ test_cursor_mixed() {
     # At 1600x1200, click on small text in right side of line 1.
     # The small text follows the large "Sans 36pt Bold Green".
     cat > "$CAPTURE_DIR/cursor-mixed.events" << 'EVENTS'
-wait 150
 move 850 160
 wait 5
 click 850 160
@@ -295,7 +297,7 @@ EVENTS
     hypervisor "$KERNEL" --drive "$DISK" --background \
         --resolution 1600x1200 \
         --events "$CAPTURE_DIR/cursor-mixed.events" \
-        --timeout "$TIMEOUT" >/dev/null 2>&1
+        --timeout "$TIMEOUT" >>"$HV_LOG" 2>&1
     run_verify "$CAPTURE_DIR/cursor-mixed.png" "$SPEC_DIR/cursor-mixed.spec"
 }
 
@@ -309,7 +311,6 @@ test_cursor_italic() {
     # frame number) and cursor (higher frame number).
     rm -f "$CAPTURE_DIR"/cursor-italic-*.png
     cat > "$CAPTURE_DIR/cursor-italic.events" << 'EVENTS'
-wait 150
 capture /tmp/visual-tests/italic-baseline.png
 move 500 400
 wait 5
@@ -321,7 +322,7 @@ EVENTS
     hypervisor "$KERNEL" --drive "$DISK" --background \
         --resolution 1600x1200 \
         --events "$CAPTURE_DIR/cursor-italic.events" \
-        --timeout "$TIMEOUT" >/dev/null 2>&1
+        --timeout "$TIMEOUT" >>"$HV_LOG" 2>&1
     # Map frame-numbered outputs to expected filenames.
     local baseline cursor
     baseline=$(ls "$CAPTURE_DIR"/cursor-italic-*.png 2>/dev/null | sort | head -1)
@@ -361,6 +362,15 @@ fi
 rm -rf "$CAPTURE_DIR"
 mkdir -p "$CAPTURE_DIR"
 
+# Hypervisor log — all invocations append here for post-mortem diagnosis.
+HV_LOG="$CAPTURE_DIR/hypervisor.log"
+
+# Failure archive for this run — created on first failure.
+FAILURE_ARCHIVE="$FAILURE_BASE/$(date +%Y%m%d-%H%M%S)"
+
+# Build factory disk from mkdisk — deterministic, never tainted by manual runs.
+"$MKDISK" "$DISK_FACTORY" "$ASSETS" >/dev/null || die "mkdisk failed"
+
 passed=0
 failed=0
 failed_names=""
@@ -376,9 +386,9 @@ for test_name in $tests_to_run; do
         continue
     fi
 
-    # Fresh disk copy for each test — the OS persists edits to disk.img,
+    # Fresh disk copy for each test — the OS persists edits,
     # so each test must start from the factory state.
-    cp "$DISK_ORIG" "$DISK"
+    cp "$DISK_FACTORY" "$DISK"
 
     output=$("$fn" 2>&1) && result=0 || result=$?
 
@@ -388,6 +398,7 @@ for test_name in $tests_to_run; do
     else
         echo "  [FAIL] $test_name"
         echo "$output" | sed 's/^/         /'
+        archive_failure "$test_name"
         failed=$((failed + 1))
         failed_names="$failed_names $test_name"
     fi
@@ -401,6 +412,6 @@ if [ $failed -eq 0 ]; then
 else
     echo "FAILED — $failed/$total test(s) failed:$failed_names"
     echo ""
-    echo "Captures saved in $CAPTURE_DIR/"
+    echo "Screenshots archived to $FAILURE_ARCHIVE/"
     exit 1
 fi
