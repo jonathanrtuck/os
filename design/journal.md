@@ -4,6 +4,84 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Kernel Completeness Audit — SETTLED (2026-04-04)
+
+**Context:** Handle-mediated IPC was identified as a fundamental gap that should have been caught earlier. This prompted a systematic audit: what else is missing from a kernel that claims to be "perfect for anyone"?
+
+**Method:** Walked each capability category (memory, IPC, scheduling, lifecycle, time, security, devices) and checked two conditions: (1) do Zircon AND at least one of seL4/QNX/Mach provide this? (2) Would every userspace need to reinvent it if the kernel didn't? Both yes = fundamental.
+
+**Findings — fundamental gaps (all added to v0.6):**
+
+1. **Exception/fault forwarding.** Unresolvable faults kill the process silently. No supervisor learns what happened. Can't build debuggers, crash reporters, or supervision trees. Extension point already exists (main.rs:1143, DESIGN.md §16.0). Need: `process_set_exception_handler` + `exception_resume` syscalls. Prior art: Zircon exception channels, seL4 fault endpoints, Mach exception ports.
+
+2. **Handle duplication.** `handle_send` has move semantics — sender loses the handle. Init can't keep a process handle while also giving one to a monitor. Multiple services can't share a VMO handle. Need: `handle_dup(handle, rights_mask)` + new DUPLICATE right (bit 10). Prior art: Zircon `zx_handle_duplicate`, seL4 `CNode_Copy/Mint`.
+
+3. **Channel call (synchronous RPC).** Most common IPC pattern requires 4 syscalls (write + signal + wait + read) with a race window. Need: `channel_call(handle, send_buf, recv_buf, timeout)` — atomic send-and-wait-for-reply. One syscall instead of four. Prior art: Zircon `zx_channel_call`, seL4 `seL4_Call`, QNX `MsgSend`.
+
+4. **Timer set/cancel.** Timers are create-only, one-shot. Can't reset or cancel without destroy/recreate churn. Need: `timer_set(handle, deadline, period)` + `timer_cancel(handle)`. Prior art: Zircon `zx_timer_set/cancel`, POSIX `timer_settime`.
+
+5. **Exit code.** `exit` takes no arguments. Supervisor can't distinguish clean shutdown from crash. Need: `exit(code)` with code stored on Process, retrievable after exit notification. Prior art: every OS.
+
+6. **Priority inheritance for futexes.** High-priority display thread blocked on futex held by low-priority background task = unbounded priority inversion = UI freezes. Need: ownership tracking in `futex_wait`, temporary priority boost to holder. Prior art: Linux PI futexes, Zircon futex ownership, QNX `PTHREAD_PRIO_INHERIT`.
+
+7. **Batched channel operations.** `channel_read_many`/`channel_write_many` — one syscall for N messages. Essential optimization for burst scenarios. Ships alongside single-message versions so the API is complete from day one.
+
+8. **Process memory read/write.** Can't build a debugger without it. `process_read_memory`/`process_write_memory` on suspended processes. Prior art: Zircon, Mach, Linux ptrace.
+
+9. **Thread write state.** Kernel has `thread_read_state` but no write counterpart. Debuggers need both. Need: `thread_write_state` for suspended threads. Prior art: Zircon, Mach.
+
+10. **System info.** No way to query total memory, CPU count, page size at runtime. Trivial addition, universally expected. Need: `system_info(type) → value`.
+
+**What was explicitly excluded (deferrable with extension points):**
+
+- **VMARs** — already designed (DESIGN.md §15.4), pure additive, `vmo_map` compatible
+- **Object info/introspection** — convenience, not blocking
+- **Memory pressure signals** — cooperative optimization
+- **Streaming IPC (sockets)** — VMOs + channels cover the cases
+- **Process groups/jobs** — resource management, not primitives
+- **Clock adjustment** — userspace NTP/PTP
+
+**Why this was missed:** The kernel was designed bottom-up ("what do our services need?") rather than top-down ("what would any consumer need?"). Shared-memory channels worked for the current userspace, so the design stopped. The audit applied external completeness criteria (cross-kernel comparison) rather than internal sufficiency criteria (does our userspace work?).
+
+**Outcome:** All 10 items added to `design/v0.6-plan.md` as Phases 5-6. Total: ~12 new syscalls (46 → 58). See plan for implementation details and dependency graph.
+
+---
+
+## Handle-Mediated IPC: No Process Should See Shared Memory Addresses — OPEN-DESIGN (2026-04-04)
+
+**Context:** Phase 3 of the VA layout redesign added a "bootstrap page" — a kernel-mapped read-only page that passes per-process ASLR layout info to userspace. This exists because IPC channel shared memory is mapped at a VA the process needs to know in advance. The bootstrap page replaced the hardcoded constant `CHANNEL_SHM_BASE`, but the real question is: why does the process need to know the address at all?
+
+**Current state:** Three kinds of shared memory, three different access patterns:
+
+- **IPC channels:** Process reads/writes shared pages at a known VA. No syscall for data transfer. Process must know the VA ahead of time (previously hardcoded, now from bootstrap page).
+- **VMOs:** Process calls `vmo_map(handle)`, kernel returns the VA. Process accesses directly. Address learned from syscall return — not hardcoded, but still exposed.
+- **Content Region:** Init allocates shared memory, passes the VA to other processes via IPC config messages. Address communicated at runtime via messaging.
+
+**Problem:** The channel path is the odd one out — the process can't discover its channel VA from any syscall or message. It has to know independently. The bootstrap page patches over this, but it's still a leaked implementation detail.
+
+**Principle:** A process should never hold an address to memory it shares with another process. It should hold a _name_ (a handle) and ask the kernel to operate on it. The kernel is the only entity that knows where things are. Exposing VAs through the API leaks implementation details and constrains future optimization (ASLR, migration, memory compaction).
+
+**Theoretically correct design:** Handle-mediated syscalls for all shared memory access. One path, no exceptions.
+
+- `channel_read(handle, buf)` / `channel_write(handle, buf)` — kernel copies 64 bytes (one cache line, negligible cost)
+- `vmo_read(handle, offset, buf)` / `vmo_write(handle, offset, buf)` — kernel mediates bulk access
+- Content Region becomes a VMO, accessed through its handle
+- No process ever maps shared memory into its address space
+- No process ever learns a VA for memory it shares with another process
+
+Every argument for direct VA mapping is a performance argument. Those are real constraints, but they're implementation constraints, not design constraints. If the copy is too expensive, fix the implementation (faster copy path, kernel-internal zero-copy optimization, DMA) — don't change the API to expose addresses.
+
+**What this means for current work:**
+
+- The bootstrap page is a transitional mechanism. It solves the immediate ASLR problem (Phase 4 can randomize channel SHM) but the long-term fix is handle-mediated IPC that doesn't need it.
+- The `channel_shm_va()` function in protocol should eventually be replaced by `channel_read`/`channel_write` syscalls.
+- The `ipc::Channel::from_base(va, ...)` pattern — constructing a channel from a raw VA — is the anti-pattern to eliminate.
+- VMO direct mapping (`vmo_map` returning a VA) is acceptable as an opt-in optimization, but should not be the default path.
+
+**When to address:** v0.6, Phase 4. Decision made 2026-04-04: handle-mediated IPC belongs in the kernel milestone so the kernel ships complete. Inserted as Phase 4 of `design/v0.6-plan.md`, before ASLR for VMO/shared memory (Phase 5). The bootstrap page's `channel_shm_base` field will be removed; the page itself survives for other layout info.
+
+---
+
 ## Hypervisor Frame Counter Decoupling — OPEN-BUG (2026-04-03)
 
 **Problem:** The hypervisor's frame counter (`frameCount` in `VirtioMetal.swift:1113`) only advances on `presentAndCommit` commands from the guest render driver. Event script timing (`wait N`, `capture` at frame N) depends on this counter. When the render driver skips idle frames (nothing changed → no `presentAndCommit`), the counter stalls and event scripts time out.
