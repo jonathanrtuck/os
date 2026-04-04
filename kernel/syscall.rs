@@ -748,7 +748,10 @@ fn sys_memory_alloc(page_count: u64) -> Result<u64, Error> {
     })
 }
 fn sys_memory_free(va: u64, _page_count: u64) -> Result<u64, Error> {
-    if !(paging::HEAP_BASE..paging::HEAP_END).contains(&va) {
+    // Fast reject: VA must be within the heap outer region. The per-process
+    // ceiling varies by ASLR, but the outer bound contains all possible
+    // per-process heaps. Exact ownership is checked by unmap_heap().
+    if !(super::aslr::HEAP_REGION_START..super::aslr::HEAP_REGION_END).contains(&va) {
         return Err(Error::InvalidArgument);
     }
     if va & (paging::PAGE_SIZE - 1) != 0 {

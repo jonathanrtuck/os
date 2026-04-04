@@ -19,6 +19,7 @@ use alloc::vec::Vec;
 
 use super::{
     address_space_id::Asid,
+    aslr,
     memory::{self, Pa},
     memory_region::{Backing, Vma, VmaList},
     page_allocator,
@@ -27,6 +28,27 @@ use super::{
         PAGE_SIZE, PA_MASK, PXN, SH_INNER, UXN,
     },
 };
+
+const DEFAULT_HEAP_PAGE_LIMIT: u64 = paging::RAM_SIZE_MAX / paging::PAGE_SIZE / 4;
+
+// Compile-time: paging.rs outer-bound constants must match aslr.rs derived
+// values. This prevents the two from drifting — if a spec changes, these fire.
+const _: () = assert!(
+    paging::HEAP_BASE == aslr::HEAP_REGION_START,
+    "paging::HEAP_BASE ≠ aslr::HEAP_REGION_START"
+);
+const _: () = assert!(
+    paging::HEAP_END == aslr::HEAP_REGION_END,
+    "paging::HEAP_END ≠ aslr::HEAP_REGION_END"
+);
+const _: () = assert!(
+    paging::DEVICE_MMIO_END == aslr::DEVICE_REGION_END,
+    "paging::DEVICE_MMIO_END ≠ aslr::DEVICE_REGION_END"
+);
+const _: () = assert!(
+    paging::DEVICE_MMIO_BASE == aslr::DEVICE_REGION_START,
+    "paging::DEVICE_MMIO_BASE ≠ aslr::DEVICE_REGION_START"
+);
 
 /// Result of a page fault handling attempt.
 pub enum FaultResult {
@@ -46,8 +68,6 @@ pub enum FaultResult {
     Unhandled,
 }
 
-const DEFAULT_HEAP_PAGE_LIMIT: u64 = paging::RAM_SIZE_MAX / paging::PAGE_SIZE / 4;
-
 pub struct AddressSpace {
     root_pa: Pa,
     asid: Asid,
@@ -55,12 +75,16 @@ pub struct AddressSpace {
     pub(crate) vmas: VmaList,
     /// Next available VA in the device MMIO region. Bump-allocated.
     next_device_va: u64,
+    /// Per-process device VA ceiling (from ASLR layout).
+    device_va_end: u64,
     /// Next available VA in the channel shared memory region. Bump-allocated.
     next_channel_shm_va: u64,
     /// Next available VA in the shared memory region. Bump-allocated.
     next_shared_va: u64,
     /// Next available VA in the heap region. Bump-allocated.
     next_heap_va: u64,
+    /// Per-process heap VA ceiling (from ASLR layout).
+    heap_va_end: u64,
     /// Active heap allocations (for memory_free and process exit cleanup).
     heap_allocations: Vec<HeapAllocation>,
     /// Number of heap pages currently allocated by this process.
@@ -93,9 +117,11 @@ impl AddressSpace {
             owned_frames: Vec::new(),
             vmas: VmaList::new(),
             next_device_va: layout.device_base,
+            device_va_end: layout.device_end,
             next_channel_shm_va: layout.channel_shm_base,
             next_shared_va: layout.shared_base,
             next_heap_va: layout.heap_base,
+            heap_va_end: layout.heap_end,
             heap_allocations: Vec::new(),
             heap_pages_allocated: 0,
             heap_pages_limit: DEFAULT_HEAP_PAGE_LIMIT,
@@ -457,7 +483,7 @@ impl AddressSpace {
         let aligned_size = paging::align_up_u64(size, PAGE_SIZE);
         let va = self.next_device_va;
 
-        if va + aligned_size > paging::DEVICE_MMIO_END {
+        if va + aligned_size > self.device_va_end {
             return None;
         }
 
@@ -500,7 +526,7 @@ impl AddressSpace {
         let size = page_count * PAGE_SIZE;
         let va = self.next_heap_va;
 
-        if va + size > paging::HEAP_END {
+        if va + size > self.heap_va_end {
             return None;
         }
         if self.heap_pages_allocated + page_count > self.heap_pages_limit {
