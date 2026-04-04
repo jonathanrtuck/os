@@ -11,13 +11,13 @@
 //! | x0..x5   | in        | Arguments (syscall-specific)       |
 //! | x0       | out       | Return value: ≥0 success, <0 error |
 //!
-//! # Syscalls (47 total, grouped by abstraction layer)
+//! # Syscalls (48 total, grouped by abstraction layer)
 //!
 //! See SYSCALLS.md for the full reference. Summary:
 //!
 //! | Nr    | Name                       | Args                                      | Returns                      |
 //! |-------|----------------------------|-------------------------------------------|------------------------------|
-//! | 0     | exit                       | —                                         | does not return              |
+//! | 0     | exit                       | x0=exit_code                              | does not return              |
 //! | 1     | write                      | x0=buf_ptr, x1=len                        | bytes written                |
 //! | 2     | yield                      | —                                         | 0                            |
 //! | 3     | handle_close               | x0=handle                                 | 0                            |
@@ -36,6 +36,7 @@
 //! | 43    | device_map                 | x0=phys_addr, x1=size                     | user VA                      |
 //! | 44–45 | interrupt_register/ack     | x0=irq or handle                          | handle / 0                   |
 //! | 46    | handle_dup                 | x0=handle, x1=rights_mask                 | new handle                   |
+//! | 47    | process_get_exit_code      | x0=process_handle                         | exit code (as u64)           |
 //!
 //! # Error codes
 //!
@@ -139,6 +140,8 @@ pub mod nr {
     pub const INTERRUPT_ACK: u64 = 45;
     // --- Capability duplication (46) ---
     pub const HANDLE_DUP: u64 = 46;
+    // --- Process inspection (47) ---
+    pub const PROCESS_GET_EXIT_CODE: u64 = 47;
 }
 
 /// Maximum ELF size for process_create (4 MiB).
@@ -479,6 +482,14 @@ fn sys_event_signal(handle_nr: u64) -> Result<u64, Error> {
 // dma_alloc and dma_free REMOVED — replaced by VMO syscalls (30-39).
 // Userspace sys library provides the same API via VMO-backed implementation.
 fn sys_exit(ctx: *mut Context) -> *const Context {
+    // SAFETY: ctx is valid (set by exception.S from TPIDR_EL1), register 0
+    // is within bounds. Read x0 as the user-provided exit code.
+    let code = unsafe { ctx_reg(ctx, 0) } as i64;
+
+    scheduler::current_process_do(|process| {
+        process.exit_code = code;
+    });
+
     scheduler::exit_current_from_syscall(ctx)
 }
 #[inline(never)]
@@ -866,7 +877,7 @@ fn sys_process_create(elf_ptr: u64, elf_len: u64) -> Result<u64, Error> {
                 thread_exit::notify_exit(tid);
             }
 
-            process_exit::notify_exit(process_id);
+            process_exit::notify_exit(process_id, i64::MIN);
 
             for &tid in &kill_info.thread_ids {
                 futex::remove_thread(tid);
@@ -931,7 +942,7 @@ fn sys_process_kill(handle_nr: u64) -> Result<u64, Error> {
         super::thread_exit::notify_exit(tid);
     }
 
-    super::process_exit::notify_exit(target_pid);
+    super::process_exit::notify_exit(target_pid, i64::MIN);
 
     // Phase 2a: remove killed threads from futex wait queues.
     for &tid in &kill_info.thread_ids {
@@ -970,6 +981,27 @@ fn sys_process_kill(handle_nr: u64) -> Result<u64, Error> {
     }
 
     Ok(0)
+}
+fn sys_process_get_exit_code(handle_nr: u64) -> Result<u64, Error> {
+    if handle_nr > u16::MAX as u64 {
+        return Err(Error::InvalidArgument);
+    }
+
+    let target_pid = scheduler::current_process_do(|process| {
+        match process.handles.get(Handle(handle_nr as u16), Rights::READ) {
+            Ok(HandleObject::Process(id)) => Ok(id),
+            Ok(_) => Err(Error::InvalidArgument),
+            Err(_) => Err(Error::InvalidArgument),
+        }
+    })?;
+
+    if !process_exit::check_exited(target_pid) {
+        return Err(Error::InvalidArgument);
+    }
+
+    let code = process_exit::get_exit_code(target_pid).ok_or(Error::InvalidArgument)?;
+
+    Ok(code as u64)
 }
 fn sys_process_set_syscall_filter(handle_nr: u64, mask: u64) -> Result<u64, Error> {
     if handle_nr > u16::MAX as u64 {
@@ -2173,6 +2205,9 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
             dispatch_ok(ctx, result_to_u64!(sys_handle_send(x0, x1, x2)))
         }
         nr::PROCESS_KILL => dispatch_ok(ctx, result_to_u64!(sys_process_kill(x0))),
+        nr::PROCESS_GET_EXIT_CODE => {
+            dispatch_ok(ctx, result_to_u64!(sys_process_get_exit_code(x0)))
+        }
         // 24 (MEMORY_SHARE) removed — VMO cross-process mapping replaces it.
         nr::MEMORY_ALLOC => dispatch_ok(ctx, result_to_u64!(sys_memory_alloc(x0))),
         nr::MEMORY_FREE => dispatch_ok(ctx, result_to_u64!(sys_memory_free(x0, x1))),

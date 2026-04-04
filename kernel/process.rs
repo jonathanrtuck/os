@@ -50,6 +50,10 @@ pub struct Process {
     /// All threads in a process share the same keys (same address space
     /// → same code → same pointer authentication domain).
     pub(crate) pac_keys: super::arch::security::PacKeys,
+    /// Exit code set by the `exit` syscall (x0). Defaults to `i64::MIN`
+    /// (sentinel for involuntary termination / not yet exited). Voluntary
+    /// exit stores the user-provided value; `process_kill` leaves the sentinel.
+    pub(crate) exit_code: i64,
 }
 /// Unique process identifier. Index into the scheduler's process table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,6 +69,7 @@ impl Process {
             killed: false,
             syscall_mask: u64::MAX,
             pac_keys,
+            exit_code: i64::MIN,
         }
     }
 }

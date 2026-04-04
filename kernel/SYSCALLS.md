@@ -1,6 +1,6 @@
 # Syscall Reference
 
-46 syscalls. Invoke via `svc #0`. Syscall number in `x8`, arguments in `x0`–`x5`, result in `x0`. Registers other than `x0` are preserved across the call.
+48 syscalls. Invoke via `svc #0`. Syscall number in `x8`, arguments in `x0`–`x5`, result in `x0`. Registers other than `x0` are preserved across the call.
 
 Success: `x0 >= 0`. Error: `x0 < 0` (signed, see [Error Codes](#error-codes)).
 
@@ -55,13 +55,14 @@ Handles carry a rights bitmask (u32). Rights attenuate monotonically — a deriv
 
 ### 0 — exit
 
-Terminate the calling thread.
+Terminate the calling thread with an exit code.
 
 ```text
 x8 = 0
+x0 = exit_code    (i64, stored on the process)
 ```
 
-Does not return. The thread's resources are cleaned up. If this is the last thread in a process, the process exits.
+Does not return. The exit code is stored on the process and can be retrieved via `process_get_exit_code` (syscall 47) after the process exits. If this is the last thread in a process, the process exits. Involuntary termination (process_kill) stores `i64::MIN` as a distinguishable sentinel.
 
 ### 2 — yield
 
@@ -709,6 +710,23 @@ Errors: InvalidHandle, InsufficientRights, TableFull
 ```
 
 The source handle must have the DUPLICATE right (bit 10). The new handle's rights are `original_rights AND rights_mask` when `rights_mask != 0`, or `original_rights` when `rights_mask == 0`. Rights can only be reduced (attenuated), never escalated.
+
+---
+
+## Process Inspection
+
+### 47 — process_get_exit_code
+
+Retrieve the exit code of an exited process.
+
+```text
+x8 = 47
+x0 = process_handle  (requires READ)
+Returns: x0 = exit code (i64 reinterpreted as u64)
+Errors: InvalidArgument (still running or invalid handle), InvalidHandle
+```
+
+Only valid after the process has exited (its exit notification has fired). Returns `InvalidArgument` if the process is still running. Voluntary exit stores the value from the `exit` syscall's x0; involuntary termination (process_kill) stores `i64::MIN` (-9223372036854775808).
 
 ---
 

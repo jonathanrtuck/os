@@ -244,6 +244,12 @@ impl ExitInfo {
             ExitInfo::Last { thread_id, .. } | ExitInfo::NonLast { thread_id, .. } => *thread_id,
         }
     }
+    fn exit_code(&self) -> i64 {
+        match self {
+            ExitInfo::Last { process, .. } => process.exit_code,
+            ExitInfo::NonLast { .. } => i64::MIN,
+        }
+    }
 }
 
 impl LocalRunQueue {
@@ -1536,7 +1542,7 @@ pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
     super::thread_exit::notify_exit(thread_id);
 
     if is_last {
-        super::process_exit::notify_exit(process_id);
+        super::process_exit::notify_exit(process_id, exit_info.exit_code());
 
         if super::process::is_init(process_id) {
             super::serial::puts("init exited — shutting down\n");
