@@ -119,6 +119,25 @@ impl HandleTable {
         }
     }
 
+    /// Close a handle (clear the slot). Returns the object, rights, and badge.
+    pub fn close(&mut self, handle: Handle) -> Result<(HandleObject, Rights, u64), HandleError> {
+        let slot = self
+            .slot_mut(handle.0 as usize)
+            .ok_or(HandleError::InvalidHandle)?;
+        let entry = slot.ok_or(HandleError::InvalidHandle)?;
+        let result = (entry.object, entry.rights, entry.badge);
+
+        *slot = None;
+
+        Ok(result)
+    }
+    /// Iterate over all occupied handles (for cleanup on process exit).
+    pub fn drain(&mut self) -> DrainHandles<'_> {
+        DrainHandles {
+            table: self,
+            index: 0,
+        }
+    }
     /// Duplicate a handle: create a new entry referencing the same kernel object,
     /// with optionally attenuated rights. The source handle must have DUPLICATE right.
     /// If `rights_mask` is NONE, all original rights are preserved.
@@ -145,26 +164,6 @@ impl HandleTable {
         let badge = entry.badge;
 
         self.insert_with_badge(object, mask, badge)
-    }
-
-    /// Close a handle (clear the slot). Returns the object, rights, and badge.
-    pub fn close(&mut self, handle: Handle) -> Result<(HandleObject, Rights, u64), HandleError> {
-        let slot = self
-            .slot_mut(handle.0 as usize)
-            .ok_or(HandleError::InvalidHandle)?;
-        let entry = slot.ok_or(HandleError::InvalidHandle)?;
-        let result = (entry.object, entry.rights, entry.badge);
-
-        *slot = None;
-
-        Ok(result)
-    }
-    /// Iterate over all occupied handles (for cleanup on process exit).
-    pub fn drain(&mut self) -> DrainHandles<'_> {
-        DrainHandles {
-            table: self,
-            index: 0,
-        }
     }
     /// Look up a handle and verify it has the required rights.
     pub fn get(&self, handle: Handle, required: Rights) -> Result<HandleObject, HandleError> {

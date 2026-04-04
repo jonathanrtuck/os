@@ -22,6 +22,8 @@ use super::{
     waitable::WaitableRegistry,
 };
 
+static STATE: IrqMutex<ExitState> = IrqMutex::new(ExitState::new());
+
 struct ExitState {
     registry: WaitableRegistry<ProcessId>,
     /// Exit codes indexed by ProcessId. Populated by `notify_exit` when a
@@ -37,8 +39,6 @@ impl ExitState {
         }
     }
 }
-
-static STATE: IrqMutex<ExitState> = IrqMutex::new(ExitState::new());
 
 /// Check if a process has exited (for `sys_wait` readiness check).
 pub fn check_exited(process_id: ProcessId) -> bool {
@@ -79,6 +79,17 @@ pub fn destroy(process_id: ProcessId) {
         scheduler::wake_for_handle(waiter_id, HandleObject::Process(process_id));
     }
 }
+/// Retrieve the exit code of an exited process.
+///
+/// Returns `Some(code)` if the process has exited and its exit notification
+/// state hasn't been destroyed yet. Returns `None` if the process is still
+/// running or has already been fully cleaned up.
+pub fn get_exit_code(process_id: ProcessId) -> Option<i64> {
+    let s = STATE.lock();
+    let idx = process_id.0 as usize;
+
+    s.exit_codes.get(idx).copied().flatten()
+}
 /// Notify that a process's last thread has exited. Two-phase wake.
 ///
 /// `exit_code` is the value from the process's `exit_code` field — set by
@@ -100,17 +111,6 @@ pub fn notify_exit(process_id: ProcessId, exit_code: i64) {
     if let Some(waiter_id) = waiter {
         scheduler::wake_for_handle(waiter_id, HandleObject::Process(process_id));
     }
-}
-/// Retrieve the exit code of an exited process.
-///
-/// Returns `Some(code)` if the process has exited and its exit notification
-/// state hasn't been destroyed yet. Returns `None` if the process is still
-/// running or has already been fully cleaned up.
-pub fn get_exit_code(process_id: ProcessId) -> Option<i64> {
-    let s = STATE.lock();
-    let idx = process_id.0 as usize;
-
-    s.exit_codes.get(idx).copied().flatten()
 }
 /// Register a thread as the waiter for a process exit.
 pub fn register_waiter(process_id: ProcessId, waiter: ThreadId) {

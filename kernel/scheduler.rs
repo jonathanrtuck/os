@@ -234,6 +234,12 @@ pub struct KillInfo {
 }
 
 impl ExitInfo {
+    fn exit_code(&self) -> i64 {
+        match self {
+            ExitInfo::Last { process, .. } => process.exit_code,
+            ExitInfo::NonLast { .. } => i64::MIN,
+        }
+    }
     fn process_id(&self) -> ProcessId {
         match self {
             ExitInfo::Last { process_id, .. } | ExitInfo::NonLast { process_id, .. } => *process_id,
@@ -242,12 +248,6 @@ impl ExitInfo {
     fn thread_id(&self) -> ThreadId {
         match self {
             ExitInfo::Last { thread_id, .. } | ExitInfo::NonLast { thread_id, .. } => *thread_id,
-        }
-    }
-    fn exit_code(&self) -> i64 {
-        match self {
-            ExitInfo::Last { process, .. } => process.exit_code,
-            ExitInfo::NonLast { .. } => i64::MIN,
         }
     }
 }
@@ -1079,7 +1079,6 @@ fn steal_from(s: &mut State, my_core: usize, victim_core: usize) -> bool {
 
     // Remove stolen threads from victim and add to my_core.
     for &slot in &steal_buf[..steal_count] {
-
         s.local_queues[victim_core].ready.remove(slot, &mut s.slots);
 
         let thread = s.slots.get_mut(slot).expect("steal: empty slot");
@@ -2365,7 +2364,11 @@ pub fn wake_pager_waiters(vmo_id: super::vmo::VmoId, offset: u64, count: u64) {
         let thread = s.slots.get(slot).expect("wake_pager: empty slot");
 
         if let Some((wait_vmo, wait_page)) = thread.pager_wait {
-            if wait_vmo == vmo_id && wait_page >= offset && wait_page < range_end && wake_count < to_wake.len() {
+            if wait_vmo == vmo_id
+                && wait_page >= offset
+                && wait_page < range_end
+                && wake_count < to_wake.len()
+            {
                 to_wake[wake_count] = slot;
                 wake_count += 1;
             }

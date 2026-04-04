@@ -134,6 +134,25 @@ fn update_earliest_deadline_locked(table: &TimerTable) {
     EARLIEST_DEADLINE.store(earliest, Ordering::Release);
 }
 
+/// Disarm a timer without destroying it. The handle remains valid and can
+/// be re-armed with `set`. Returns `false` if the timer slot has been
+/// destroyed (Free).
+pub fn cancel(id: TimerId) -> bool {
+    let mut table = TIMERS.lock();
+    let slot = &mut table.slots[id.0 as usize];
+
+    match *slot {
+        TimerSlot::Free => return false,
+        TimerSlot::Armed(_) | TimerSlot::Disarmed => {
+            *slot = TimerSlot::Disarmed;
+
+            table.waiters.clear_ready(id);
+            update_earliest_deadline_locked(&table);
+        }
+    }
+
+    true
+}
 /// Check all timers for expiry. Called from the timer IRQ handler.
 ///
 /// Two-phase design: collect fired timers under the timer lock, then wake
@@ -284,44 +303,6 @@ pub fn destroy(id: TimerId) {
         scheduler::wake_for_handle(waiter_id, HandleObject::Timer(id));
     }
 }
-/// Re-arm a timer with a new deadline. Returns `false` if the timer slot
-/// has been destroyed (Free). Works on both Armed and Disarmed timers.
-/// Clears the fired state so the timer can be waited on again.
-pub fn set(id: TimerId, deadline_ticks: u64) -> bool {
-    let mut table = TIMERS.lock();
-    let slot = &mut table.slots[id.0 as usize];
-
-    match *slot {
-        TimerSlot::Free => return false,
-        TimerSlot::Armed(_) | TimerSlot::Disarmed => {
-            *slot = TimerSlot::Armed(deadline_ticks);
-            table.waiters.clear_ready(id);
-            update_earliest_deadline_locked(&table);
-        }
-    }
-
-    true
-}
-
-/// Disarm a timer without destroying it. The handle remains valid and can
-/// be re-armed with `set`. Returns `false` if the timer slot has been
-/// destroyed (Free).
-pub fn cancel(id: TimerId) -> bool {
-    let mut table = TIMERS.lock();
-    let slot = &mut table.slots[id.0 as usize];
-
-    match *slot {
-        TimerSlot::Free => return false,
-        TimerSlot::Armed(_) | TimerSlot::Disarmed => {
-            *slot = TimerSlot::Disarmed;
-            table.waiters.clear_ready(id);
-            update_earliest_deadline_locked(&table);
-        }
-    }
-
-    true
-}
-
 /// Handle a timer interrupt: check timer objects for expiry.
 ///
 /// Note: `reprogram_next_deadline` is NOT called here. The caller (irq_handler)
@@ -404,6 +385,25 @@ pub fn reprogram_next_deadline(scheduler_deadline_ticks: Option<u64>) {
             program_tval(tval);
         }
     }
+}
+/// Re-arm a timer with a new deadline. Returns `false` if the timer slot
+/// has been destroyed (Free). Works on both Armed and Disarmed timers.
+/// Clears the fired state so the timer can be waited on again.
+pub fn set(id: TimerId, deadline_ticks: u64) -> bool {
+    let mut table = TIMERS.lock();
+    let slot = &mut table.slots[id.0 as usize];
+
+    match *slot {
+        TimerSlot::Free => return false,
+        TimerSlot::Armed(_) | TimerSlot::Disarmed => {
+            *slot = TimerSlot::Armed(deadline_ticks);
+
+            table.waiters.clear_ready(id);
+            update_earliest_deadline_locked(&table);
+        }
+    }
+
+    true
 }
 /// Unregister a thread from a timer (cleanup when `wait` returns).
 ///

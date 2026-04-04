@@ -152,6 +152,12 @@ pub mod nr {
     pub const SYSTEM_INFO: u64 = 50;
 }
 
+// system_info info types
+const INFO_TOTAL_MEMORY: u64 = 0;
+const INFO_AVAILABLE_MEMORY: u64 = 1;
+const INFO_CPU_COUNT: u64 = 2;
+const INFO_PAGE_SIZE: u64 = 3;
+const INFO_BOOT_TIME_NS: u64 = 4;
 /// Maximum ELF size for process_create (4 MiB).
 /// Increased from 2 MiB to accommodate real HarfBuzz text shaping in core.
 const MAX_ELF_SIZE: u64 = 4 * 1024 * 1024;
@@ -163,13 +169,6 @@ const VMO_MAP_WRITE: u64 = 1 << 1;
 const VMO_OP_COMMIT: u64 = 0;
 const VMO_OP_DECOMMIT: u64 = 1;
 const VMO_OP_LOOKUP: u64 = 2;
-
-// system_info info types
-const INFO_TOTAL_MEMORY: u64 = 0;
-const INFO_AVAILABLE_MEMORY: u64 = 1;
-const INFO_CPU_COUNT: u64 = 2;
-const INFO_PAGE_SIZE: u64 = 3;
-const INFO_BOOT_TIME_NS: u64 = 4;
 
 /// Raw WouldBlock error code as u64 (for direct `x[0]` patching in wake path).
 pub const WOULD_BLOCK_RAW: u64 = Error::WouldBlock as i64 as u64;
@@ -421,16 +420,6 @@ fn sys_channel_signal(handle_nr: u64) -> Result<u64, HandleError> {
 fn sys_clock_get() -> Result<u64, Error> {
     Ok(timer::counter_to_ns(timer::counter()))
 }
-fn sys_system_info(info_type: u64) -> Result<u64, Error> {
-    match info_type {
-        INFO_TOTAL_MEMORY => Ok(paging::ram_end() - paging::RAM_START),
-        INFO_AVAILABLE_MEMORY => Ok(page_allocator::free_count() as u64 * paging::PAGE_SIZE),
-        INFO_CPU_COUNT => Ok(super::per_core::MAX_CORES as u64),
-        INFO_PAGE_SIZE => Ok(paging::PAGE_SIZE),
-        INFO_BOOT_TIME_NS => Ok(timer::counter_to_ns(timer::counter())),
-        _ => Err(Error::InvalidArgument),
-    }
-}
 fn sys_device_map(pa: u64, size: u64) -> Result<u64, Error> {
     if size == 0 {
         return Err(Error::InvalidArgument);
@@ -514,7 +503,6 @@ fn sys_exit(ctx: *mut Context) -> *const Context {
     scheduler::current_process_do(|process| {
         process.exit_code = code;
     });
-
     scheduler::exit_current_from_syscall(ctx)
 }
 #[inline(never)]
@@ -941,6 +929,27 @@ fn sys_process_create(elf_ptr: u64, elf_len: u64) -> Result<u64, Error> {
 
     Ok(handle.0 as u64)
 }
+fn sys_process_get_exit_code(handle_nr: u64) -> Result<u64, Error> {
+    if handle_nr > u16::MAX as u64 {
+        return Err(Error::InvalidArgument);
+    }
+
+    let target_pid = scheduler::current_process_do(|process| {
+        match process.handles.get(Handle(handle_nr as u16), Rights::READ) {
+            Ok(HandleObject::Process(id)) => Ok(id),
+            Ok(_) => Err(Error::InvalidArgument),
+            Err(_) => Err(Error::InvalidArgument),
+        }
+    })?;
+
+    if !process_exit::check_exited(target_pid) {
+        return Err(Error::InvalidArgument);
+    }
+
+    let code = process_exit::get_exit_code(target_pid).ok_or(Error::InvalidArgument)?;
+
+    Ok(code as u64)
+}
 fn sys_process_kill(handle_nr: u64) -> Result<u64, Error> {
     if handle_nr > u16::MAX as u64 {
         return Err(Error::InvalidArgument);
@@ -1006,27 +1015,6 @@ fn sys_process_kill(handle_nr: u64) -> Result<u64, Error> {
     }
 
     Ok(0)
-}
-fn sys_process_get_exit_code(handle_nr: u64) -> Result<u64, Error> {
-    if handle_nr > u16::MAX as u64 {
-        return Err(Error::InvalidArgument);
-    }
-
-    let target_pid = scheduler::current_process_do(|process| {
-        match process.handles.get(Handle(handle_nr as u16), Rights::READ) {
-            Ok(HandleObject::Process(id)) => Ok(id),
-            Ok(_) => Err(Error::InvalidArgument),
-            Err(_) => Err(Error::InvalidArgument),
-        }
-    })?;
-
-    if !process_exit::check_exited(target_pid) {
-        return Err(Error::InvalidArgument);
-    }
-
-    let code = process_exit::get_exit_code(target_pid).ok_or(Error::InvalidArgument)?;
-
-    Ok(code as u64)
 }
 fn sys_process_set_syscall_filter(handle_nr: u64, mask: u64) -> Result<u64, Error> {
     if handle_nr > u16::MAX as u64 {
@@ -1130,6 +1118,16 @@ fn sys_scheduling_context_return() -> Result<u64, Error> {
         Ok(0)
     } else {
         Err(Error::NotBorrowing)
+    }
+}
+fn sys_system_info(info_type: u64) -> Result<u64, Error> {
+    match info_type {
+        INFO_TOTAL_MEMORY => Ok(paging::ram_end() - paging::RAM_START),
+        INFO_AVAILABLE_MEMORY => Ok(page_allocator::free_count() as u64 * paging::PAGE_SIZE),
+        INFO_CPU_COUNT => Ok(super::per_core::MAX_CORES as u64),
+        INFO_PAGE_SIZE => Ok(paging::PAGE_SIZE),
+        INFO_BOOT_TIME_NS => Ok(timer::counter_to_ns(timer::counter())),
+        _ => Err(Error::InvalidArgument),
     }
 }
 fn sys_thread_create(entry_va: u64, stack_top: u64) -> Result<u64, Error> {
@@ -1242,6 +1240,28 @@ fn sys_thread_suspend(handle_nr: u64) -> Result<u64, Error> {
         Err(Error::InvalidArgument)
     }
 }
+fn sys_timer_cancel(handle_nr: u64) -> Result<u64, Error> {
+    if handle_nr > u16::MAX as u64 {
+        return Err(Error::InvalidArgument);
+    }
+
+    let timer_id = scheduler::current_process_do(|process| {
+        let obj = process
+            .handles
+            .get(Handle(handle_nr as u16), Rights::WRITE)?;
+
+        match obj {
+            HandleObject::Timer(id) => Ok(id),
+            _ => Err(HandleError::InvalidHandle),
+        }
+    })?;
+
+    if timer::cancel(timer_id) {
+        Ok(0)
+    } else {
+        Err(Error::InvalidArgument)
+    }
+}
 fn sys_timer_create(timeout_ns: u64) -> Result<u64, HandleError> {
     let timer_id = timer::create(timeout_ns).ok_or(HandleError::TableFull)?;
 
@@ -1274,7 +1294,6 @@ fn sys_timer_set(handle_nr: u64, deadline_ns: u64, _period_ns: u64) -> Result<u6
             _ => Err(HandleError::InvalidHandle),
         }
     })?;
-
     // Convert deadline_ns to counter ticks (same formula as timer::create).
     let now = timer::counter();
     let freq = timer::counter_freq();
@@ -1292,28 +1311,6 @@ fn sys_timer_set(handle_nr: u64, deadline_ns: u64, _period_ns: u64) -> Result<u6
             timer::reprogram_next_deadline(None);
         }
 
-        Ok(0)
-    } else {
-        Err(Error::InvalidArgument)
-    }
-}
-fn sys_timer_cancel(handle_nr: u64) -> Result<u64, Error> {
-    if handle_nr > u16::MAX as u64 {
-        return Err(Error::InvalidArgument);
-    }
-
-    let timer_id = scheduler::current_process_do(|process| {
-        let obj = process
-            .handles
-            .get(Handle(handle_nr as u16), Rights::WRITE)?;
-
-        match obj {
-            HandleObject::Timer(id) => Ok(id),
-            _ => Err(HandleError::InvalidHandle),
-        }
-    })?;
-
-    if timer::cancel(timer_id) {
         Ok(0)
     } else {
         Err(Error::InvalidArgument)
