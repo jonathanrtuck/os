@@ -279,8 +279,8 @@ pub extern "C" fn _start() -> ! {
 
     // ── Phase 1: Receive config from init ────────────────────────────
 
-    // SAFETY: CHANNEL_SHM_BASE points to init-allocated shared memory pages.
-    let ch = unsafe { ipc::Channel::from_base(protocol::CHANNEL_SHM_BASE, ipc::PAGE_SIZE, 1) };
+    // SAFETY: channel_shm_base() points to init-allocated shared memory pages.
+    let ch = unsafe { ipc::Channel::from_base(protocol::channel_shm_base(), ipc::PAGE_SIZE, 1) };
     let mut msg = ipc::Message::new(0);
 
     if !ch.try_recv(&mut msg) || msg.msg_type != MSG_STORE_CONFIG {

@@ -269,7 +269,7 @@ fn format_u64(mut n: u64, buf: &mut [u8]) -> usize {
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     // Read device config from init (first message on channel 0).
-    let ch = unsafe { ipc::Channel::from_base(protocol::CHANNEL_SHM_BASE, ipc::PAGE_SIZE, 1) };
+    let ch = unsafe { ipc::Channel::from_base(protocol::channel_shm_base(), ipc::PAGE_SIZE, 1) };
     let mut msg = ipc::Message::new(0);
 
     if !ch.try_recv(&mut msg) || msg.msg_type != MSG_DEVICE_CONFIG {

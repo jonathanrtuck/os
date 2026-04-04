@@ -41,21 +41,57 @@ unsafe fn decode_payload<T: Copy>(payload: &[u8; PAYLOAD_SIZE]) -> T {
     unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const T) }
 }
 
-/// Base virtual address where channel shared memory pages are mapped.
-/// The kernel's channel is at page 0. Channels created by init start
-/// at subsequent 2-page pairs. Must match `kernel/paging.rs`.
+/// System-wide constants (PAGE_SIZE, BOOTSTRAP_PAGE_VA, BootstrapLayout, etc.).
 mod system_config {
     #![allow(dead_code)]
     include!(env!("SYSTEM_CONFIG"));
 }
 
-pub const CHANNEL_SHM_BASE: usize = system_config::CHANNEL_SHM_BASE as usize;
+/// Read the bootstrap layout from the kernel-mapped page.
+///
+/// # Safety
+///
+/// The kernel maps the bootstrap page at `BOOTSTRAP_PAGE_VA` before starting
+/// any userspace process. This function must only be called from userspace
+/// after the process has been started (always true — `_start` is the earliest
+/// userspace entry point, and the page is mapped before the thread runs).
+#[inline]
+unsafe fn bootstrap() -> &'static system_config::BootstrapLayout {
+    let ptr = system_config::BOOTSTRAP_PAGE_VA as *const system_config::BootstrapLayout;
+    // SAFETY: The kernel maps a single physical page at BOOTSTRAP_PAGE_VA with
+    // user-RO permissions before starting the process. The page contains a
+    // valid BootstrapLayout (72 bytes, well within one 16 KiB page). The
+    // pointer is aligned (page-aligned VA, repr(C) struct). The page is
+    // read-only and never deallocated, so the reference is valid for 'static.
+    unsafe { &*ptr }
+}
+
+/// Base VA where channel shared memory pages are mapped for this process.
+#[inline]
+pub fn channel_shm_base() -> usize {
+    // SAFETY: bootstrap page is always mapped before userspace runs.
+    unsafe { bootstrap().channel_shm_base as usize }
+}
+
+/// Base VA of the service pack (init only; 0 for other processes).
+#[inline]
+pub fn service_pack_base() -> usize {
+    // SAFETY: bootstrap page is always mapped before userspace runs.
+    unsafe { bootstrap().service_pack_base as usize }
+}
+
+/// Base VA of the shared memory region for this process.
+#[inline]
+pub fn shared_memory_base() -> usize {
+    // SAFETY: bootstrap page is always mapped before userspace runs.
+    unsafe { bootstrap().shared_base as usize }
+}
 
 /// Compute the base VA of channel N's shared pages.
 /// Each channel occupies 2 consecutive pages (one per direction).
 #[inline]
 pub fn channel_shm_va(idx: usize) -> usize {
-    CHANNEL_SHM_BASE + idx * 2 * system_config::PAGE_SIZE as usize
+    channel_shm_base() + idx * 2 * system_config::PAGE_SIZE as usize
 }
 
 /// A rectangular region of pixels that has been modified.

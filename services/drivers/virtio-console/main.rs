@@ -13,7 +13,7 @@ const VIRTQ_TX: u32 = 1;
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     // Read device config from ring buffer (first message, sent by init).
-    let ch = unsafe { ipc::Channel::from_base(protocol::CHANNEL_SHM_BASE, ipc::PAGE_SIZE, 1) };
+    let ch = unsafe { ipc::Channel::from_base(protocol::channel_shm_base(), ipc::PAGE_SIZE, 1) };
     let mut msg = ipc::Message::new(0);
 
     if !ch.try_recv(&mut msg) || msg.msg_type != MSG_DEVICE_CONFIG {

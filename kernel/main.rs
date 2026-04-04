@@ -950,7 +950,8 @@ pub extern "C" fn kernel_main(dtb_pa: u64, kaslr_slide: u64) -> ! {
 
     // Spawn init (suspended) — the only process the kernel creates directly.
     // Microkernel pattern: kernel provides mechanism, init provides policy.
-    let (init_pid, _) = process::create_from_user_elf(INIT_ELF).expect("failed to create init");
+    let (init_pid, _) = process::create_from_user_elf(INIT_ELF, paging::SERVICE_PACK_BASE)
+        .expect("failed to create init");
 
     process::set_init_pid(init_pid);
 

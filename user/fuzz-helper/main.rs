@@ -13,12 +13,11 @@
 #![no_std]
 #![no_main]
 
-mod system_config {
-    #![allow(dead_code)]
-    include!(env!("SYSTEM_CONFIG"));
-}
+extern crate protocol;
 
-const SHARED_MEMORY_BASE: usize = system_config::SHARED_MEMORY_BASE as usize;
+fn shared_memory_base() -> usize {
+    protocol::shared_memory_base()
+}
 
 extern "C" fn blocking_thread(_: u64) -> ! {
     // Block on a timer that won't fire for a very long time.
@@ -50,7 +49,7 @@ fn alloc_stack() -> u64 {
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     // Read command from shared memory region (parent wrote via dma_alloc + memory_share).
-    let shm = SHARED_MEMORY_BASE as *const u8;
+    let shm = shared_memory_base() as *const u8;
     let cmd = unsafe { core::ptr::read_volatile(shm) };
 
     match cmd {

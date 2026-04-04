@@ -11,14 +11,16 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-const SHM: *mut u8 = protocol::CHANNEL_SHM_BASE as *mut u8;
+fn shm() -> *mut u8 {
+    protocol::channel_shm_base() as *mut u8
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     // Wait for init's message.
     let _ = sys::wait(&[0], u64::MAX);
     // Read message from shared memory (incoming region: offset 0).
-    let msg = unsafe { core::slice::from_raw_parts(SHM, 4) };
+    let msg = unsafe { core::slice::from_raw_parts(shm(), 4) };
 
     sys::print(b"echo recv: ");
     sys::print(msg);
@@ -40,7 +42,7 @@ pub extern "C" fn _start() -> ! {
     let reply = b"pong";
 
     unsafe {
-        core::ptr::copy_nonoverlapping(reply.as_ptr(), SHM.add(128), reply.len());
+        core::ptr::copy_nonoverlapping(reply.as_ptr(), shm().add(128), reply.len());
     }
 
     let _ = sys::channel_signal(sys::ChannelHandle(0));

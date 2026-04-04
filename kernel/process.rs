@@ -111,6 +111,51 @@ fn copy_segment_page(file_data: &[u8], file_size: u64, seg_offset: u64, pa: memo
         unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len()) };
     }
 }
+/// Map the bootstrap page into the process's address space.
+///
+/// The bootstrap page is a single read-only page at a fixed VA that passes
+/// per-process ASLR layout information from the kernel to userspace. This
+/// replaces hardcoded VA constants — userspace reads region bases from this
+/// page at startup instead of compiling them in.
+fn setup_bootstrap_page(
+    addr_space: &mut AddressSpace,
+    layout: &AslrLayout,
+    service_pack_base: u64,
+) -> Result<(), &'static str> {
+    use super::paging::{BootstrapLayout, BOOTSTRAP_MAGIC, BOOTSTRAP_PAGE_VA};
+
+    let pa = page_allocator::alloc_frame().ok_or("out of frames for bootstrap page")?;
+    let kva = memory::phys_to_virt(pa) as *mut BootstrapLayout;
+
+    // SAFETY: `pa` was just allocated by alloc_frame (zeroed). `kva` is the
+    // kernel VA for that frame, valid for PAGE_SIZE bytes. BootstrapLayout is
+    // 72 bytes (9 × u64), well within one page. No other code has access to
+    // this frame yet (it was just allocated and not yet mapped anywhere).
+    unsafe {
+        core::ptr::write(
+            kva,
+            BootstrapLayout {
+                magic: BOOTSTRAP_MAGIC,
+                channel_shm_base: layout.channel_shm_base,
+                shared_base: layout.shared_base,
+                service_pack_base,
+                heap_base: layout.heap_base,
+                heap_end: layout.heap_end,
+                device_base: layout.device_base,
+                device_end: layout.device_end,
+                stack_top: layout.stack_top,
+            },
+        );
+    }
+
+    if !addr_space.map_page(BOOTSTRAP_PAGE_VA, pa.as_u64(), &PageAttrs::user_ro()) {
+        page_allocator::free_frame(pa);
+        return Err("out of page table frames for bootstrap page");
+    }
+
+    Ok(())
+}
+
 /// Set up the user stack VMA and eagerly map the top page.
 ///
 /// Uses the ASLR layout's stack_top for the stack position. The stack
@@ -146,7 +191,10 @@ fn setup_stack(addr_space: &mut AddressSpace, layout: &AslrLayout) -> Result<(),
 /// Eagerly maps ALL segment pages (the ELF data is temporary and can't be
 /// stored for demand paging). The initial thread is suspended — call
 /// `scheduler::start_suspended_threads` to make it runnable.
-pub fn create_from_user_elf(elf_bytes: &[u8]) -> Result<(ProcessId, ThreadId), &'static str> {
+pub fn create_from_user_elf(
+    elf_bytes: &[u8],
+    service_pack_base: u64,
+) -> Result<(ProcessId, ThreadId), &'static str> {
     let header = executable::parse_header(elf_bytes).map_err(|_| "bad ELF header")?;
     let (asid, _generation) = address_space_id::alloc();
     // Per-process ASLR layout. Fork a PRNG for this process's address space
@@ -157,16 +205,10 @@ pub fn create_from_user_elf(elf_bytes: &[u8]) -> Result<(ProcessId, ThreadId), &
         None => AslrLayout::deterministic(),
     };
     let mut addr_space = match AddressSpace::new(asid, &layout) {
-        Some(a) => match Box::try_new(a) {
-            Ok(b) => b,
-            Err(_) => {
-                address_space_id::free(asid);
-                return Err("out of memory for address space");
-            }
-        },
+        Some(b) => b,
         None => {
             address_space_id::free(asid);
-            return Err("out of frames for L0 page table");
+            return Err("out of frames for address space");
         }
     };
 
@@ -209,6 +251,7 @@ pub fn create_from_user_elf(elf_bytes: &[u8]) -> Result<(ProcessId, ThreadId), &
     }
 
     setup_stack(&mut addr_space, &layout)?;
+    setup_bootstrap_page(&mut addr_space, &layout, service_pack_base)?;
 
     // Generate per-process PAC keys for pointer authentication.
     let pac_keys = match super::fork_prng() {

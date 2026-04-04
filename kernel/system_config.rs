@@ -69,6 +69,9 @@ pub const RAM_START: u64 = 0x4000_0000;
 /// Base VA for the service pack mapped into init's address space (512 MiB).
 /// Read-only. Between USER_CODE_BASE (4 MiB) and CHANNEL_SHM_BASE (1 GiB).
 pub const SERVICE_PACK_BASE: u64 = 0x0000_0000_2000_0000;
+/// Fixed VA for the bootstrap page — the kernel-userspace layout contract.
+/// Page 1 (16 KiB offset). Page 0 remains unmapped as a null-guard.
+pub const BOOTSTRAP_PAGE_VA: u64 = 0x0000_0000_0000_4000;
 /// Base VA for shared memory regions (memory_share syscall) (3 GiB).
 pub const SHARED_MEMORY_BASE: u64 = 0x0000_0000_C000_0000;
 /// Base VA for userspace ELF code. libraries/link.ld.in has `. = @USER_CODE_BASE@`.
@@ -77,3 +80,20 @@ pub const USER_CODE_BASE: u64 = 0x0000_0000_0040_0000; // 4 MiB
 pub const USER_STACK_PAGES: u64 = 4;
 /// Top of user stack (stack grows downward from here) (2 GiB).
 pub const USER_STACK_TOP: u64 = 0x0000_0000_8000_0000;
+
+/// Per-process layout passed from kernel to userspace via the bootstrap page.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct BootstrapLayout {
+    pub magic: u64,
+    pub channel_shm_base: u64,
+    pub shared_base: u64,
+    pub service_pack_base: u64,
+    pub heap_base: u64,
+    pub heap_end: u64,
+    pub device_base: u64,
+    pub device_end: u64,
+    pub stack_top: u64,
+}
+
+pub const BOOTSTRAP_MAGIC: u64 = 0x424F_4F54_5354_5250; // "BOOTSTRP"

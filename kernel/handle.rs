@@ -74,16 +74,18 @@ pub struct DrainHandles<'a> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Handle(pub u16);
 pub struct HandleTable {
-    base: [Option<HandleEntry>; BASE_SIZE],
+    /// First-level table: 256 inline slots, heap-allocated to avoid placing
+    /// ~8 KiB on the kernel stack during Process construction.
+    base: Box<[Option<HandleEntry>; BASE_SIZE]>,
     overflow: Vec<OverflowPage>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rights(u32);
 
 impl HandleTable {
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
-            base: [None; BASE_SIZE],
+            base: Box::new([None; BASE_SIZE]),
             overflow: Vec::new(),
         }
     }

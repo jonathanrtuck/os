@@ -90,8 +90,7 @@ impl HeapVaAllocator {
             .unwrap_or(self.free_list.len());
 
         // Check for coalescing with the right neighbor.
-        let coalesce_right = pos < self.free_list.len()
-            && range_end == self.free_list[pos].va;
+        let coalesce_right = pos < self.free_list.len() && range_end == self.free_list[pos].va;
 
         // Check for coalescing with the left neighbor.
         let coalesce_left = pos > 0 && {

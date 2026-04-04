@@ -83,26 +83,22 @@ mod pack_format {
     include!(env!("PACK_FORMAT"));
 }
 
-// System-wide constants (SERVICE_PACK_BASE).
-mod system_config {
-    #![allow(dead_code)]
-    include!(env!("SYSTEM_CONFIG"));
-}
-
 /// Look up an ELF in the service pack by role ID.
 ///
-/// The service pack is mapped read-only at `SERVICE_PACK_BASE` by the kernel.
-/// Returns a byte slice pointing directly into the mapped region.
+/// The service pack is mapped read-only at the address provided by the
+/// bootstrap page. Returns a byte slice pointing directly into the mapped
+/// region.
 ///
 /// # Safety
 ///
 /// Reads from the pack region which must be mapped before init runs.
 /// The kernel maps it during init creation (before start).
 fn pack_elf(role_id: u32) -> &'static [u8] {
-    let base = system_config::SERVICE_PACK_BASE as usize as *const u8;
+    let base = protocol::service_pack_base() as *const u8;
 
-    // SAFETY: The kernel maps the pack at SERVICE_PACK_BASE before starting
-    // init. The region is read-only and persists for init's lifetime.
+    // SAFETY: The kernel maps the pack at the bootstrap-provided address
+    // before starting init. The region is read-only and persists for init's
+    // lifetime.
     let magic = unsafe { core::ptr::read(base as *const u32) };
     let version = unsafe { core::ptr::read(base.add(4) as *const u32) };
     let count = unsafe { core::ptr::read(base.add(8) as *const u32) };
@@ -382,7 +378,7 @@ fn spawn_with_channel(
 /// input, block, 9P) are deferred — they need cross-process channels and
 /// shared memory before they can start.
 fn parse_device_manifest(next_channel: &mut usize) -> DeviceManifest {
-    let kernel_shm = protocol::CHANNEL_SHM_BASE as *const u8;
+    let kernel_shm = protocol::channel_shm_base() as *const u8;
     // SAFETY: kernel_shm points to kernel channel SHM; volatile ensures visibility of kernel writes.
     let device_count = unsafe { core::ptr::read_volatile(kernel_shm as *const u32) };
 

@@ -15,7 +15,7 @@
 //! `map_page()` walks/creates the 2-level page table (L2→L3) using frames
 //! from the page frame allocator. 16 KiB granule, T0SZ=28 (64 GiB VA).
 
-use alloc::vec::Vec;
+use alloc::{boxed::Box, vec::Vec};
 
 use super::{
     address_space_id::Asid,
@@ -106,24 +106,51 @@ impl AddressSpace {
     /// the ASLR layout. Otherwise, fixed bases are used (deterministic fallback).
     ///
     /// Returns `None` if the L2 page table cannot be allocated (OOM).
-    pub fn new(asid: Asid, layout: &super::aslr::AslrLayout) -> Option<Self> {
+    ///
+    /// # Why `Box<Self>` via `try_new_uninit`
+    ///
+    /// `AddressSpace` is large (~200+ bytes with Vec/HeapVaAllocator).
+    /// Constructing it on the stack and then boxing would overflow the
+    /// 16 KiB kernel stack on the deep `process_create` syscall path
+    /// (exception entry + syscall dispatch + ELF loading + this function).
+    /// `try_new_uninit` allocates the box first and initializes in-place.
+    pub fn new(asid: Asid, layout: &super::aslr::AslrLayout) -> Option<Box<Self>> {
         let root_pa = page_allocator::alloc_frame()?;
 
-        Some(Self {
-            root_pa,
-            asid,
-            owned_frames: Vec::new(),
-            vmas: VmaList::new(),
-            next_device_va: layout.device_base,
-            device_va_end: layout.device_end,
-            next_channel_shm_va: layout.channel_shm_base,
-            next_shared_va: layout.shared_base,
-            heap_va: super::heap_va::HeapVaAllocator::new(layout.heap_base, layout.heap_end),
-            heap_allocations: Vec::new(),
-            heap_pages_allocated: 0,
-            heap_pages_limit: DEFAULT_HEAP_PAGE_LIMIT,
-            freed: false,
-        })
+        let mut b = match Box::<Self>::try_new_uninit() {
+            Ok(b) => b,
+            Err(_) => {
+                page_allocator::free_frame(root_pa);
+                return None;
+            }
+        };
+        let ptr = b.as_mut_ptr();
+        // SAFETY: `ptr` is a valid, properly aligned pointer to an
+        // uninitialized `AddressSpace` allocated by `try_new_uninit`.
+        // We write every field exactly once before calling `assume_init`.
+        // No field is read before being written. The order of writes does
+        // not matter because all target addresses are within the same
+        // allocation and no field depends on another during construction.
+        unsafe {
+            core::ptr::addr_of_mut!((*ptr).root_pa).write(root_pa);
+            core::ptr::addr_of_mut!((*ptr).asid).write(asid);
+            core::ptr::addr_of_mut!((*ptr).owned_frames).write(Vec::new());
+            core::ptr::addr_of_mut!((*ptr).vmas).write(VmaList::new());
+            core::ptr::addr_of_mut!((*ptr).next_device_va).write(layout.device_base);
+            core::ptr::addr_of_mut!((*ptr).device_va_end).write(layout.device_end);
+            core::ptr::addr_of_mut!((*ptr).next_channel_shm_va).write(layout.channel_shm_base);
+            core::ptr::addr_of_mut!((*ptr).next_shared_va).write(layout.shared_base);
+            core::ptr::addr_of_mut!((*ptr).heap_va).write(super::heap_va::HeapVaAllocator::new(
+                layout.heap_base,
+                layout.heap_end,
+            ));
+            core::ptr::addr_of_mut!((*ptr).heap_allocations).write(Vec::new());
+            core::ptr::addr_of_mut!((*ptr).heap_pages_allocated).write(0);
+            core::ptr::addr_of_mut!((*ptr).heap_pages_limit).write(DEFAULT_HEAP_PAGE_LIMIT);
+            core::ptr::addr_of_mut!((*ptr).freed).write(false);
+        }
+        // SAFETY: Every field of `AddressSpace` has been initialized above.
+        Some(unsafe { b.assume_init() })
     }
 
     /// Handle a page fault for an anonymous (zero-fill) VMA.

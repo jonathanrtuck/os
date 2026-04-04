@@ -829,7 +829,7 @@ fn sys_process_create(elf_ptr: u64, elf_len: u64) -> Result<u64, Error> {
     };
     // Create process with suspended initial thread.
     let (process_id, _thread_id) =
-        process::create_from_user_elf(&elf_data).map_err(|_| Error::InvalidArgument)?;
+        process::create_from_user_elf(&elf_data, 0).map_err(|_| Error::InvalidArgument)?;
 
     // Create process exit notification state.
     process_exit::create(process_id);
