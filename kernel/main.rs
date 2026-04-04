@@ -90,6 +90,7 @@ mod executable;
 mod futex;
 mod handle;
 mod heap;
+mod heap_va;
 mod interrupt;
 mod interrupt_controller;
 mod intrusive_list;

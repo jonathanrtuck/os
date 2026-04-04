@@ -81,10 +81,8 @@ pub struct AddressSpace {
     next_channel_shm_va: u64,
     /// Next available VA in the shared memory region. Bump-allocated.
     next_shared_va: u64,
-    /// Next available VA in the heap region. Bump-allocated.
-    next_heap_va: u64,
-    /// Per-process heap VA ceiling (from ASLR layout).
-    heap_va_end: u64,
+    /// Heap VA allocator: bump + free list with coalescing.
+    heap_va: super::heap_va::HeapVaAllocator,
     /// Active heap allocations (for memory_free and process exit cleanup).
     heap_allocations: Vec<HeapAllocation>,
     /// Number of heap pages currently allocated by this process.
@@ -120,8 +118,7 @@ impl AddressSpace {
             device_va_end: layout.device_end,
             next_channel_shm_va: layout.channel_shm_base,
             next_shared_va: layout.shared_base,
-            next_heap_va: layout.heap_base,
-            heap_va_end: layout.heap_end,
+            heap_va: super::heap_va::HeapVaAllocator::new(layout.heap_base, layout.heap_end),
             heap_allocations: Vec::new(),
             heap_pages_allocated: 0,
             heap_pages_limit: DEFAULT_HEAP_PAGE_LIMIT,
@@ -372,8 +369,9 @@ impl AddressSpace {
     /// Caller must call `invalidate_tlb()` before this. Freeing frames while
     /// stale TLB entries reference them produces use-after-free.
     pub fn free_all(&mut self) {
-        // Clear heap allocations (physical frames are in owned_frames, freed below).
+        // Clear heap allocations and VA free list (physical frames are in owned_frames, freed below).
         self.heap_allocations.clear();
+        self.heap_va.clear();
 
         self.heap_pages_allocated = 0;
 
@@ -523,15 +521,13 @@ impl AddressSpace {
     /// Returns the user VA on success, or None if the heap VA space or budget
     /// is exhausted.
     pub fn map_heap(&mut self, page_count: u64) -> Option<u64> {
-        let size = page_count * PAGE_SIZE;
-        let va = self.next_heap_va;
-
-        if va + size > self.heap_va_end {
-            return None;
-        }
         if self.heap_pages_allocated + page_count > self.heap_pages_limit {
             return None;
         }
+
+        // Allocate VA from the heap VA allocator (free list first, then bump).
+        let va = self.heap_va.alloc(page_count)?;
+        let size = page_count * PAGE_SIZE;
 
         // Create an anonymous VMA so the demand paging fault handler knows
         // this range is valid and should be zero-filled on first touch.
@@ -543,7 +539,6 @@ impl AddressSpace {
             backing: super::memory_region::Backing::Anonymous,
         });
 
-        self.next_heap_va = va + size;
         self.heap_pages_allocated += page_count;
 
         self.heap_allocations
@@ -648,6 +643,9 @@ impl AddressSpace {
                 page_allocator::free_frame(pa);
             }
         }
+
+        // Return the freed VA range to the heap VA allocator for reuse.
+        self.heap_va.free(va, alloc.page_count);
 
         self.invalidate_tlb();
 
