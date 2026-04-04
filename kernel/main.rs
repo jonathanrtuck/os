@@ -965,7 +965,7 @@ pub extern "C" fn kernel_main(dtb_pa: u64, kaslr_slide: u64) -> ! {
 
     if pack_size > 0 {
         let pack_pa = pack_start_kva - (memory::KERNEL_VA_OFFSET + memory::kaslr_slide()) as u64;
-        let page_count = (pack_size + paging::PAGE_SIZE - 1) / paging::PAGE_SIZE;
+        let page_count = pack_size.div_ceil(paging::PAGE_SIZE);
 
         scheduler::with_process(init_pid, |process| {
             assert!(

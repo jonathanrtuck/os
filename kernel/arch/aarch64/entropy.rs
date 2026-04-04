@@ -35,11 +35,11 @@ pub fn collect_jitter(scratch: &mut [u8; 64]) -> [u8; 8] {
     // on the previous value to prevent optimization.
     let mut acc: u64 = start;
 
-    for i in 0..64 {
-        scratch[i] = scratch[i].wrapping_add(acc as u8);
+    for byte in scratch.iter_mut() {
+        *byte = byte.wrapping_add(acc as u8);
         acc = acc
             .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(scratch[i] as u64);
+            .wrapping_add(*byte as u64);
     }
 
     let end = timing_counter();

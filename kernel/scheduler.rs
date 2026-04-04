@@ -354,20 +354,18 @@ fn charge_thread(thread: &mut Thread, contexts: &mut [Option<SchedulingContextSl
 fn find_busiest_core(local_queues: &[LocalRunQueue], my_core: usize) -> Option<usize> {
     let mut best: Option<(usize, u32)> = None;
 
-    for i in 0..per_core::MAX_CORES {
+    for (i, lq) in local_queues.iter().enumerate().take(per_core::MAX_CORES) {
         if i == my_core {
             continue;
         }
 
-        let load = local_queues[i].load;
+        let load = lq.load;
 
         // Steal from any core with ready threads. The previous threshold
         // of `load > 1` prevented stealing a single queued thread, causing
         // starvation when only one thread existed (e.g., standalone init).
-        if load > 0 {
-            if best.is_none_or(|(_, l)| load > l) {
-                best = Some((i, load));
-            }
+        if load > 0 && best.is_none_or(|(_, l)| load > l) {
+            best = Some((i, load));
         }
     }
 
@@ -462,9 +460,9 @@ fn pick_target_core(
     let mut best_core = preferred_core.min(per_core::MAX_CORES - 1);
     let mut best_load = u32::MAX;
 
-    for i in 0..per_core::MAX_CORES {
-        if local_queues[i].load < best_load {
-            best_load = local_queues[i].load;
+    for (i, lq) in local_queues.iter().enumerate().take(per_core::MAX_CORES) {
+        if lq.load < best_load {
+            best_load = lq.load;
             best_core = i;
         }
     }
@@ -490,9 +488,7 @@ fn reap_exited(s: &mut State, core: usize) {
         }
     }
 
-    for i in 0..reap_count {
-        let slot = to_reap[i];
-
+    for &slot in &to_reap[..reap_count] {
         s.local_queues[core].ready.remove(slot, &mut s.slots);
         s.pool.free(&mut s.slots, slot);
     }
@@ -511,9 +507,7 @@ fn reap_exited(s: &mut State, core: usize) {
         }
     }
 
-    for i in 0..reap_count {
-        let slot = to_reap[i];
-
+    for &slot in &to_reap[..reap_count] {
         s.blocked.remove(slot, &mut s.slots);
         s.pool.free(&mut s.slots, slot);
     }
@@ -535,7 +529,7 @@ fn release_context_inner(s: &mut State, ctx_id: SchedulingContextId) {
 /// Decrement ref count on a scheduling context (standalone version that takes
 /// the individual fields rather than &mut State, for use in borrow-split code).
 fn release_context_slot(
-    scheduling_contexts: &mut Vec<Option<SchedulingContextSlot>>,
+    scheduling_contexts: &mut [Option<SchedulingContextSlot>],
     free_context_ids: &mut Vec<u32>,
     ctx_id: SchedulingContextId,
 ) {
@@ -557,7 +551,7 @@ fn release_context_slot(
 /// decrements the corresponding ref counts. Used by both thread exit and
 /// process kill paths.
 fn release_thread_context_ids(
-    scheduling_contexts: &mut Vec<Option<SchedulingContextSlot>>,
+    scheduling_contexts: &mut [Option<SchedulingContextSlot>],
     free_context_ids: &mut Vec<u32>,
     thread: &mut Thread,
 ) {
@@ -1084,8 +1078,7 @@ fn steal_from(s: &mut State, my_core: usize, victim_core: usize) -> bool {
     let dest_avg = s.local_queues[my_core].avg_vruntime(&s.slots);
 
     // Remove stolen threads from victim and add to my_core.
-    for i in 0..steal_count {
-        let slot = steal_buf[i];
+    for &slot in &steal_buf[..steal_count] {
 
         s.local_queues[victim_core].ready.remove(slot, &mut s.slots);
 
@@ -1691,11 +1684,12 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
         count
     }
     // Helper: remove collected slots from a list, release context refs, free.
+    #[allow(clippy::too_many_arguments)]
     fn remove_and_free(
         list: &mut IntrusiveList,
         slots: &mut ThreadSlots,
         pool: &mut PoolMeta,
-        scheduling_contexts: &mut Vec<Option<SchedulingContextSlot>>,
+        scheduling_contexts: &mut [Option<SchedulingContextSlot>],
         free_context_ids: &mut Vec<u32>,
         buf: &[u16],
         count: usize,
@@ -1704,9 +1698,7 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
     ) -> u32 {
         let mut removed: u32 = 0;
 
-        for i in 0..count {
-            let slot = buf[i];
-
+        for &slot in &buf[..count] {
             list.remove(slot, slots);
 
             let thread = slots.get_mut(slot).expect("kill: empty slot after remove");
@@ -2212,9 +2204,7 @@ pub fn start_suspended_threads(process_id: ProcessId) -> bool {
         }
     }
 
-    for i in 0..start_count {
-        let slot = to_start[i];
-
+    for &slot in &to_start[..start_count] {
         {
             let State {
                 ref mut suspended,
@@ -2375,18 +2365,14 @@ pub fn wake_pager_waiters(vmo_id: super::vmo::VmoId, offset: u64, count: u64) {
         let thread = s.slots.get(slot).expect("wake_pager: empty slot");
 
         if let Some((wait_vmo, wait_page)) = thread.pager_wait {
-            if wait_vmo == vmo_id && wait_page >= offset && wait_page < range_end {
-                if wake_count < to_wake.len() {
-                    to_wake[wake_count] = slot;
-                    wake_count += 1;
-                }
+            if wait_vmo == vmo_id && wait_page >= offset && wait_page < range_end && wake_count < to_wake.len() {
+                to_wake[wake_count] = slot;
+                wake_count += 1;
             }
         }
     }
 
-    for i in 0..wake_count {
-        let slot = to_wake[i];
-
+    for &slot in &to_wake[..wake_count] {
         {
             let State {
                 ref mut blocked,

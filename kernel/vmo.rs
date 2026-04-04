@@ -332,7 +332,7 @@ impl Vmo {
     /// Check if a page needs COW (refcount > 1).
     #[allow(dead_code)] // Test-only: used by kernel/test/tests/kernel_vmo.rs
     pub fn page_needs_cow(&self, offset: u64) -> bool {
-        self.pages.get(&offset).map_or(false, |&(_, rc)| rc > 1)
+        self.pages.get(&offset).is_some_and(|&(_, rc)| rc > 1)
     }
     /// Return the pager channel, if set.
     pub fn pager_channel(&self) -> Option<ChannelId> {

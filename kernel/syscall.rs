@@ -1560,7 +1560,7 @@ fn sys_vmo_op_range(
 
             // The base PA is the PA of page 0.
             match vmo_obj.lookup_page(0) {
-                Some((pa, _)) => Ok(pa.as_u64() as u64),
+                Some((pa, _)) => Ok(pa.as_u64()),
                 None => Err(Error::InvalidArgument), // Not committed (shouldn't happen for contiguous)
             }
         }
