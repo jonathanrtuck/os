@@ -10,6 +10,10 @@
 // - boot.S has manual copies of PAGE_SIZE and RAM_START — the kernel
 //   enforces consistency via `const_assert!` (see kernel/paging.rs).
 
+pub const BOOTSTRAP_MAGIC: u64 = 0x424F_4F54_5354_5250; // "BOOTSTRP"
+/// Fixed VA for the bootstrap page — the kernel-userspace layout contract.
+/// Page 1 (16 KiB offset). Page 0 remains unmapped as a null-guard.
+pub const BOOTSTRAP_PAGE_VA: u64 = 0x0000_0000_0000_4000;
 /// Base VA for IPC channel shared memory pages (1 GiB).
 pub const CHANNEL_SHM_BASE: u64 = 0x0000_0000_4000_0000;
 /// Default scheduling context budget (ns). CPU time granted per period.
@@ -69,9 +73,6 @@ pub const RAM_START: u64 = 0x4000_0000;
 /// Base VA for the service pack mapped into init's address space (512 MiB).
 /// Read-only. Between USER_CODE_BASE (4 MiB) and CHANNEL_SHM_BASE (1 GiB).
 pub const SERVICE_PACK_BASE: u64 = 0x0000_0000_2000_0000;
-/// Fixed VA for the bootstrap page — the kernel-userspace layout contract.
-/// Page 1 (16 KiB offset). Page 0 remains unmapped as a null-guard.
-pub const BOOTSTRAP_PAGE_VA: u64 = 0x0000_0000_0000_4000;
 /// Base VA for shared memory regions (memory_share syscall) (3 GiB).
 pub const SHARED_MEMORY_BASE: u64 = 0x0000_0000_C000_0000;
 /// Base VA for userspace ELF code. libraries/link.ld.in has `. = @USER_CODE_BASE@`.
@@ -95,5 +96,3 @@ pub struct BootstrapLayout {
     pub device_end: u64,
     pub stack_top: u64,
 }
-
-pub const BOOTSTRAP_MAGIC: u64 = 0x424F_4F54_5354_5250; // "BOOTSTRP"

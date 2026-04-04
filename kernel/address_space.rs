@@ -116,7 +116,6 @@ impl AddressSpace {
     /// `try_new_uninit` allocates the box first and initializes in-place.
     pub fn new(asid: Asid, layout: &super::aslr::AslrLayout) -> Option<Box<Self>> {
         let root_pa = page_allocator::alloc_frame()?;
-
         let mut b = match Box::<Self>::try_new_uninit() {
             Ok(b) => b,
             Err(_) => {
@@ -125,6 +124,7 @@ impl AddressSpace {
             }
         };
         let ptr = b.as_mut_ptr();
+
         // SAFETY: `ptr` is a valid, properly aligned pointer to an
         // uninitialized `AddressSpace` allocated by `try_new_uninit`.
         // We write every field exactly once before calling `assume_init`.
@@ -149,6 +149,7 @@ impl AddressSpace {
             core::ptr::addr_of_mut!((*ptr).heap_pages_limit).write(DEFAULT_HEAP_PAGE_LIMIT);
             core::ptr::addr_of_mut!((*ptr).freed).write(false);
         }
+
         // SAFETY: Every field of `AddressSpace` has been initialized above.
         Some(unsafe { b.assume_init() })
     }

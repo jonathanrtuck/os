@@ -150,12 +150,12 @@ fn setup_bootstrap_page(
 
     if !addr_space.map_page(BOOTSTRAP_PAGE_VA, pa.as_u64(), &PageAttrs::user_ro()) {
         page_allocator::free_frame(pa);
+
         return Err("out of page table frames for bootstrap page");
     }
 
     Ok(())
 }
-
 /// Set up the user stack VMA and eagerly map the top page.
 ///
 /// Uses the ASLR layout's stack_top for the stack position. The stack
