@@ -3,23 +3,13 @@
 .factory/
 .missions/
 .superpowers/
-.vscode/
-*.swo
-*.swp
-*~
-design/drafts/
-docs/
-target/
 .venv/
-
-# Build artifacts
+.vscode/
 *.bin
 *.dtb
 *.img
+*.swo
+*.swp
+*~
 rustc-ice-*.txt
-
-# Visual test failure archives
-host/visual/failures/
-
-# Vendored binaries (untracked)
-/vendor/
+target/
