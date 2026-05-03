@@ -1,3 +1,0 @@
-# Override the root config — tools are host-side programs, not bare-metal.
-[build]
-target = "aarch64-apple-darwin"

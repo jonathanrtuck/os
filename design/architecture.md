@@ -33,15 +33,15 @@ The core architectural rule: **each component is ignorant of everything outside 
 
 The kernel manages hardware resources: memory, CPU time, interrupts, process isolation. It is **semantically ignorant** — it does not know what a document is, what a mimetype is, or what pixels look like. It does not look inside the data that flows through its primitives.
 
-**Access control: capability handles.** Every kernel object (channel, VMO, event, thread, process) is accessed through a handle — a per-process index into a handle table. Each handle carries a bitmask of rights (READ, WRITE, SIGNAL, WAIT, MAP, TRANSFER, CREATE, KILL, plus APPEND and SEAL for VMOs). Rights are attenuated monotonically: when a handle is transferred over a channel, the receiver gets at most the rights the sender had. Per-handle badges (u64) allow endpoints to discriminate callers without trusting them. There are no ambient authorities — if a process doesn't hold a handle with the right rights, the syscall fails.
+The full kernel interface is specified in `design/research/kernel-userspace-interface.md`. Summary:
 
-**Shared memory: VMOs (Virtual Memory Objects).** VMOs are the primary memory abstraction beyond the process's own address space. A process creates a VMO, maps it into its address space, and transfers a handle to another process via a channel. The receiver maps the same VMO into its own address space — shared memory with explicit, auditable provenance. VMOs have four novel properties: _versioned_ (COW snapshots form a bounded ring for undo), _sealed_ (an immutable freeze that invalidates writable PTEs across all mappers), _content-typed_ (a u64 tag the kernel preserves but never interprets), and _lazy-backed_ (pages can be supplied on demand by a userspace pager). VMOs replace the older `memory_share` syscall — all shared memory now flows through capability-controlled VMO handles.
+**Five kernel objects:** VMO (memory), Channel (messages), Event (signals), Thread (execution), Address Space (isolation). Each traces back to a hardware restriction — there's no sixth object because there's no sixth hardware reason.
 
-**Pager interface.** A VMO can be backed by a userspace pager — a process that supplies pages on demand via a channel. When a thread faults on an uncommitted VMO page, the kernel suspends the faulting thread, deduplicates concurrent faults on the same page, and forwards the request to the pager. The pager commits the page (from disk, from a decoder, from anywhere) and the kernel resumes the faulter. This is how demand-paged filesystems and lazy content decoders work without kernel involvement in content semantics.
+**25 syscalls.** Capability-based access control: every kernel object is accessed through a handle with attenuated rights. No ambient authority.
 
-**Scheduling.** A per-core EEVDF scheduler with work stealing provides the Concurrent Work Conservation (CWC) guarantee: no idle core coexists with an overloaded core after a scheduling round. Threads have cache-affine placement (prefer the core they last ran on). Idle cores steal from the busiest remote core, preserving the stolen thread's EEVDF virtual lag so its fairness position survives migration.
+**Data/control plane split.** Bulk data (scene graph, document content, decoded pixels) flows through shared memory VMOs with no kernel involvement after initial setup. Control messages (edit requests, input events) flow through channels. Events unify all asynchronous notifications (interrupts, timers, channel readability, thread exit).
 
-**Security hardening.** User and kernel ASLR randomize address layouts per process and per boot. PAC (pointer authentication) keys are per-process, loaded on context switch. BTI (branch target identification) restricts indirect branch targets. Execute-only code pages prevent code disclosure. A ChaCha20 PRNG with type-state seeding provides kernel randomness.
+**The hot path is invisible to the kernel.** On the render path, the OS service writes to a shared VMO, bumps a generation counter (atomic store), and the compositor reads it (atomic load). Zero syscalls. The kernel only participates when a thread needs to sleep or wake.
 
 ### Editors
 
@@ -165,9 +165,8 @@ Every content type the OS natively understands gets a layout handler in the OS s
 ```text
 ┌─────────────────────────────────────────────────┐
 │                    Kernel (EL1)                  │
-│   Handle tables (capabilities) · VMOs · Channels │
-│   Per-core EEVDF · MMU/ASLR · Interrupts         │
-│   46 syscalls                                    │
+│   VMO · Channel · Event · Thread · Address Space │
+│   Capability handles · 25 syscalls               │
 └─────────────────────────────────────────────────┘
         ▲               ▲               ▲
         │               │               │
@@ -192,9 +191,9 @@ Every content type the OS natively understands gets a layout handler in the OS s
          generation swap
 ```
 
-The scene graph lives in shared memory backed by a VMO — the OS service holds a read-write handle, the compositor holds a read-only handle. The OS service writes to the back buffer, swaps (bumps generation counter with a release fence), and signals the compositor. The compositor reads the front buffer (acquires, reads generation, reads data). They never touch the same buffer. No locks.
+The scene graph lives in shared memory backed by a VMO — the OS service holds a read-write handle, the compositor holds a read-only handle. The OS service writes to the back buffer, swaps (bumps generation counter with a release fence), and signals the compositor via an event. The compositor reads the front buffer (acquires, reads generation, reads data). They never touch the same buffer. No locks.
 
-All cross-process shared memory regions (scene graph, document buffers, content region, edit protocol ring buffers) are VMOs transferred as capability handles over channels. The kernel enforces rights at the handle level — a compositor that holds a read-only VMO handle cannot write to the scene graph even if it maps the memory. This is the structural guarantee behind the one-way data flow: the pipeline's directionality is enforced by capability attenuation, not convention.
+All cross-process shared memory is VMOs transferred as capability handles over channels. The kernel enforces rights at the handle level — a compositor that holds a read-only VMO handle cannot write to the scene graph even if it maps the memory. This is the structural guarantee behind the one-way data flow: the pipeline's directionality is enforced by capability attenuation, not convention.
 
 ---
 
