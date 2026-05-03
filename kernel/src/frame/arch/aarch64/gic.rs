@@ -93,7 +93,7 @@ fn redist_base_for_core(core_id: usize) -> usize {
 /// the INTID is spurious.
 #[inline]
 pub fn acknowledge() -> u32 {
-    (sysreg::icc_iar1_el1() & 0xFFFF_FF) as u32
+    (sysreg::icc_iar1_el1() & 0x00FF_FFFF) as u32
 }
 
 /// Signal end-of-interrupt for the given INTID. Must be called after

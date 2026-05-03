@@ -1,0 +1,48 @@
+#!/bin/bash
+# Pre-commit verification gate.
+#
+# Checks:
+#   1. cargo clippy  — warnings as errors
+#   2. host tests    — kernel #[cfg(test)] modules
+#   3. framekernel   — no unsafe outside frame/
+#
+# Install as git pre-commit hook:
+#   ln -sf ../../scripts/verify .git/hooks/pre-commit
+
+set -eo pipefail
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+DIM='\033[2m'
+RESET='\033[0m'
+
+pass() { printf "${GREEN}pass${RESET}  %s\n" "$1"; }
+fail() { printf "${RED}FAIL${RESET}  %s\n" "$1"; exit 1; }
+info() { printf "${DIM}info${RESET}  %s\n" "$1"; }
+
+# 1. Clippy — warnings as errors.
+cargo clippy -p kernel -- -D warnings 2>&1 | tail -1
+pass "clippy clean"
+
+# 2. Host tests.
+TEST_OUTPUT=$(cargo test -p kernel --target aarch64-apple-darwin 2>&1)
+TEST_LINE=$(echo "$TEST_OUTPUT" | grep "^test result:" | head -1)
+
+if echo "$TEST_LINE" | grep -q "0 failed"; then
+    pass "host: $TEST_LINE"
+else
+    fail "host: $TEST_LINE"
+fi
+
+# 3. Framekernel discipline — all unsafe confined to frame/.
+UNSAFE_IN_FRAME=$(grep -r 'unsafe' kernel/src/frame/ --include='*.rs' 2>/dev/null | grep -c 'unsafe {' || true)
+UNSAFE_TOTAL=$(grep -r 'unsafe' kernel/src/ --include='*.rs' 2>/dev/null | grep -c 'unsafe {' || true)
+UNSAFE_OUTSIDE=$((UNSAFE_TOTAL - UNSAFE_IN_FRAME))
+info "unsafe blocks: $UNSAFE_IN_FRAME in frame/, $UNSAFE_OUTSIDE outside"
+
+if [ "$UNSAFE_OUTSIDE" -gt 0 ]; then
+    echo ""
+    grep -rn 'unsafe {' kernel/src/ --include='*.rs' | grep -v 'kernel/src/frame/' || true
+    fail "framekernel violation: unsafe block outside frame/"
+fi
+pass "framekernel boundary"

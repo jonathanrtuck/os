@@ -136,6 +136,7 @@ struct KernelLayout {
 ///
 /// Returns `None` for addresses beyond `kernel_end` (left unmapped).
 /// Every mapped page is either writable or executable, never both.
+#[allow(clippy::if_same_then_else)]
 fn page_attrs(pa: usize, layout: &KernelLayout) -> Option<u64> {
     if pa >= layout.text_start && pa < layout.text_end {
         Some(ATTR_NORMAL | AP_RO_EL1 | UXN)
@@ -152,6 +153,7 @@ fn page_attrs(pa: usize, layout: &KernelLayout) -> Option<u64> {
 
 /// Populate the L2 root table: device MMIO blocks, kernel L3 table descriptor,
 /// and remaining RAM blocks.
+#[allow(clippy::needless_range_loop)]
 fn build_l2(table: &mut [u64; ENTRIES_PER_TABLE], l3_pa: usize, ram_base: usize, ram_size: usize) {
     let device_attrs = ATTR_DEVICE | AP_RW_EL1 | PXN | UXN;
 
@@ -171,6 +173,7 @@ fn build_l2(table: &mut [u64; ENTRIES_PER_TABLE], l3_pa: usize, ram_base: usize,
 }
 
 /// Populate the L3 table for the kernel's 32 MiB block using [`page_attrs`].
+#[allow(clippy::needless_range_loop)]
 fn build_l3(table: &mut [u64; ENTRIES_PER_TABLE], block_base: usize, layout: &KernelLayout) {
     for i in 0..ENTRIES_PER_TABLE {
         let pa = block_base + i * PAGE_SIZE;
@@ -239,6 +242,7 @@ fn configure_and_enable() {
     // 48, or 52 bits). We use this directly as TCR_EL1.IPS — the encodings
     // are identical by design.
     let pa_range = sysreg::id_aa64mmfr0_el1() & 0xF;
+    #[allow(clippy::identity_op)]
     #[rustfmt::skip]
     let tcr: u64 =
           (28      <<  0)  // T0SZ = 28: 36-bit VA (64 GiB)
