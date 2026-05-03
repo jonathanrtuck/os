@@ -21,10 +21,18 @@ pub mod timer;
 
 /// Mask all maskable interrupts.
 ///
-/// Prevents async hardware events (timer ticks, device IRQs) from
+/// Prevents async hardware events (timer deadlines, device IRQs) from
 /// interrupting the current execution.
 pub fn disable_interrupts() {
     sysreg::disable_irqs();
+}
+
+/// Unmask all maskable interrupts.
+///
+/// Enables delivery of async hardware events. Call only after exception
+/// vectors and interrupt controllers are initialized.
+pub fn enable_interrupts() {
+    sysreg::enable_irqs();
 }
 
 /// Print a register dump to the console for crash diagnostics.

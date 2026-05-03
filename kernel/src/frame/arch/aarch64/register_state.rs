@@ -1,14 +1,14 @@
-//! Saved register context for Observer context switches.
+//! Saved register context for thread context switches.
 //!
 //! Distinct from [`super::exception::TrapFrame`] which captures
-//! exception-specific registers (ESR, FAR) not part of the Observer's
+//! exception-specific registers (ESR, FAR) not part of a thread's
 //! persistent identity.
 
-/// Full saved register context for an Observer (AArch64).
+/// Full saved register context for a thread (AArch64).
 ///
-/// Lives in the consumed Space's structural backing (D35). The Observer
-/// metadata struct holds a pointer to this (D43: too large for root-Space
-/// metadata per D32).
+/// Stored per-thread, referenced from the thread's kernel metadata.
+/// Separate from the address space — threads sharing an address space
+/// each have their own RegisterState.
 #[repr(C)]
 pub struct RegisterState {
     /// General-purpose registers x0–x30.

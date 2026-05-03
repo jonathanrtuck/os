@@ -7,5 +7,9 @@
 /// Kernel stack size per core. — link.ld sync: `.bss.stack`
 pub const KERNEL_STACK_SIZE: usize = 64 * 1024;
 
-/// Maximum number of CPU cores.
+/// Maximum number of CPU cores supported by this kernel build.
+///
+/// Compile-time upper bound for per-core array sizing (stacks, per-CPU
+/// data). Must be >= the actual core count discovered from the DTB at
+/// runtime. The current value targets QEMU virt / Apple HVF configurations.
 pub const MAX_CORES: usize = 8;

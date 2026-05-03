@@ -19,6 +19,7 @@ extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
     arch::entropy::init();
     arch::interrupts::init();
     arch::timer::init();
+    arch::enable_interrupts();
 
     println!("alive");
 

@@ -88,11 +88,14 @@ pub fn init() {
 #[unsafe(no_mangle)]
 extern "C" fn exception_handler(frame: &mut TrapFrame, source: u64) {
     match source {
-        // EL1h IRQ — timer and device interrupts.
-        // Returns to let assembly eret resume the interrupted code.
+        // EL1h IRQ — timer deadlines and device interrupts.
         5 => irq_handler(frame),
-
-        // Everything else is unhandled — print diagnostics and halt.
+        // EL0/64 Sync — syscalls (SVC) and faults from userspace.
+        8 => el0_sync_handler(frame),
+        // EL0/64 IRQ — device interrupt while running userspace code.
+        // Same GIC path as EL1h IRQ; only the interrupted context differs.
+        9 => irq_handler(frame),
+        // Everything else is unhandled.
         _ => fatal_exception(frame, source),
     }
 }
@@ -110,7 +113,7 @@ fn irq_handler(_frame: &mut TrapFrame) {
 
     match intid {
         super::gic::INTID_VTIMER => {
-            super::timer::tick();
+            super::timer::handle_deadline();
         }
         // BUG: println! here will deadlock if this IRQ preempted a println!
         // on the same core (serial lock is not interrupt-aware). Acceptable
@@ -122,6 +125,47 @@ fn irq_handler(_frame: &mut TrapFrame) {
     }
 
     super::gic::end_of_interrupt(intid);
+}
+
+// ---------------------------------------------------------------------------
+// EL0 sync handler — syscalls and userspace faults
+// ---------------------------------------------------------------------------
+
+/// Decode and dispatch synchronous exceptions from EL0 (userspace).
+///
+/// NOTE: SP_EL0 is not yet saved in the TrapFrame (tracked in exception.S
+/// checklist). Adding SP_EL0 save/restore is required before any handler
+/// here returns to EL0 rather than halting.
+fn el0_sync_handler(frame: &mut TrapFrame) {
+    let ec = (frame.esr >> 26) & 0x3F;
+
+    match ec {
+        // SVC — syscall entry point for the 25 syscalls in the kernel spec.
+        0x15 => unimplemented_el0(frame, "SVC (syscall)"),
+        // Data abort from EL0 — will handle COW faults (vmo_snapshot) and
+        // pager requests (vmo_set_pager).
+        0x24 => unimplemented_el0(frame, "data abort"),
+        // Instruction abort from EL0.
+        0x20 => unimplemented_el0(frame, "instruction abort"),
+        _ => fatal_exception(frame, 8),
+    }
+}
+
+fn unimplemented_el0(frame: &TrapFrame, kind: &str) -> ! {
+    sysreg::disable_irqs();
+
+    crate::println!();
+    crate::println!("EL0 {kind} — not yet implemented");
+    crate::println!("  ELR:  0x{:016x}", frame.elr);
+    crate::println!("  ESR:  0x{:016x}", frame.esr);
+    crate::println!("  FAR:  0x{:016x}", frame.far);
+    crate::println!();
+
+    super::signal_panic();
+
+    loop {
+        crate::frame::arch::halt();
+    }
 }
 
 // ---------------------------------------------------------------------------

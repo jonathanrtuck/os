@@ -1,65 +1,83 @@
-//! ARM generic timer — virtual timer (CNTV_*) for periodic ticks.
+//! ARM generic timer — one-shot deadline support.
 //!
-//! Configures the EL1 virtual timer to fire at a fixed interval (10 ms by
-//! default). Each tick increments a monotonic counter. The timer interrupt
-//! (INTID 27) is routed through the GIC and handled in the exception handler.
+//! Provides deadline-based timing for the kernel. The timer fires only when
+//! explicitly armed with [`set_deadline`] and does not re-arm itself — this
+//! matches the spec's event-driven scheduler model where `event_wait`
+//! timeouts and preemption quanta are one-shot deadlines, not periodic ticks.
 //!
 //! ## HVF interaction
 //!
 //! When the virtual timer fires, Apple's Hypervisor.framework masks the timer
 //! (sets IMASK in CNTV_CTL_EL0) and injects an IRQ to the guest. Writing
-//! CNTV_TVAL_EL0 in the handler re-arms the timer — HVF detects the
+//! CNTV_TVAL_EL0 via [`set_deadline`] re-arms the timer — HVF detects the
 //! CNTV_CVAL change and unmasks automatically.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use super::sysreg;
 
-/// Tick rate in Hz (100 Hz = 10 ms interval).
-const TICK_HZ: u64 = 100;
+/// Whether a deadline has expired but not yet been consumed.
+static DEADLINE_EXPIRED: AtomicBool = AtomicBool::new(false);
 
-/// Monotonic tick counter, incremented by each timer interrupt.
-static TICK_COUNT: AtomicU64 = AtomicU64::new(0);
-
-/// Compute the timer interval in counter ticks from the hardware frequency.
-#[inline]
-fn interval() -> u64 {
-    sysreg::cntfrq_el0() / TICK_HZ
-}
-
-/// Configure the virtual timer and unmask IRQs.
+/// Ensure the timer starts in a known disarmed state.
 ///
 /// The GIC must be initialized before calling this — INTID 27 (virtual timer
-/// PPI) must be enabled in the redistributor.
+/// PPI) must be enabled in the redistributor so that future [`set_deadline`]
+/// calls can deliver interrupts.
 pub fn init() {
-    // Arm the timer: fire in `interval` ticks from now.
-    sysreg::set_cntv_tval_el0(interval());
-
-    // Enable the timer, unmask its interrupt.
-    // Bit 0 (ENABLE) = 1, Bit 1 (IMASK) = 0.
-    sysreg::set_cntv_ctl_el0(1);
-
-    // Ensure the timer is fully configured before unmasking IRQs.
+    sysreg::set_cntv_ctl_el0(0);
     sysreg::isb();
-
-    // Unmask IRQs in PSTATE. From this point, the CPU will take IRQ
-    // exceptions when the timer (or any enabled interrupt) fires.
-    sysreg::enable_irqs();
 }
 
-/// Handle a timer tick. Called from the IRQ handler on INTID 27.
+/// Read the current monotonic counter value.
 ///
-/// Re-arms the timer for the next interval. Writing CNTV_TVAL_EL0
-/// automatically clears IMASK and ISTATUS. ISB ensures the re-arm is
-/// committed before returning to the exception handler.
-pub fn tick() {
-    TICK_COUNT.fetch_add(1, Ordering::Relaxed);
+/// Maps to the spec's `clock_read()` syscall. Returns a value in timer
+/// ticks — divide by [`frequency`] to get seconds.
+#[inline]
+pub fn now() -> u64 {
+    sysreg::cntvct_el0()
+}
 
-    sysreg::set_cntv_tval_el0(interval());
+/// Return the timer frequency in Hz.
+#[inline]
+pub fn frequency() -> u64 {
+    sysreg::cntfrq_el0()
+}
+
+/// Arm a one-shot deadline `ticks_from_now` timer ticks in the future.
+///
+/// The timer will fire exactly once (INTID 27), calling [`handle_deadline`]
+/// through the IRQ handler. After firing, the timer remains disarmed until
+/// explicitly re-armed.
+pub fn set_deadline(ticks_from_now: u64) {
+    DEADLINE_EXPIRED.store(false, Ordering::Relaxed);
+
+    sysreg::set_cntv_tval_el0(ticks_from_now);
+    sysreg::set_cntv_ctl_el0(1); // ENABLE=1, IMASK=0
     sysreg::isb();
 }
 
-/// Return the number of timer ticks since boot.
-pub fn tick_count() -> u64 {
-    TICK_COUNT.load(Ordering::Relaxed)
+/// Disarm the timer. No interrupt will fire until the next [`set_deadline`].
+pub fn clear_deadline() {
+    sysreg::set_cntv_ctl_el0(0);
+    sysreg::isb();
+}
+
+/// Handle a timer deadline expiry. Called from the IRQ handler on INTID 27.
+///
+/// Masks the timer interrupt (one-shot: does not re-arm) and sets the
+/// expired flag for the scheduler to consume via [`deadline_elapsed`].
+pub fn handle_deadline() {
+    sysreg::set_cntv_ctl_el0(0b11); // ENABLE=1, IMASK=1
+    sysreg::isb();
+
+    DEADLINE_EXPIRED.store(true, Ordering::Release);
+}
+
+/// Check and clear the deadline-expired flag.
+///
+/// Returns `true` exactly once after each deadline expiry. The scheduler
+/// calls this to decide whether to preempt or wake a timed-out thread.
+pub fn deadline_elapsed() -> bool {
+    DEADLINE_EXPIRED.swap(false, Ordering::Acquire)
 }

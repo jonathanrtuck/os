@@ -290,9 +290,5 @@ pub fn rndr() -> Option<u64> {
         );
     }
 
-    if success != 0 {
-        Some(val)
-    } else {
-        None
-    }
+    if success != 0 { Some(val) } else { None }
 }
