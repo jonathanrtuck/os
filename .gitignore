@@ -11,5 +11,6 @@
 *.swo
 *.swp
 *~
+docs/
 rustc-ice-*.txt
 target/
