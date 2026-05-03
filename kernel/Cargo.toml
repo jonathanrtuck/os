@@ -12,4 +12,3 @@ path = "src/lib.rs"
 name = "kernel"
 path = "src/main.rs"
 test = false
-

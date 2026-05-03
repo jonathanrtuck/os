@@ -8,7 +8,7 @@
 
 use core::panic::PanicInfo;
 
-use kernel::{arch, println};
+use kernel::{frame::arch, println};
 
 #[unsafe(no_mangle)]
 extern "C" fn kernel_main(dtb_ptr: usize) -> ! {

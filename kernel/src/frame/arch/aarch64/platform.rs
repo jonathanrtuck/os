@@ -57,7 +57,7 @@ pub fn ram_size() -> usize {
 /// these values. Falls back to compiled defaults if the DTB is absent
 /// or malformed.
 pub fn init(dtb_ptr: usize) {
-    match crate::firmware::dtb::scan(dtb_ptr) {
+    match crate::frame::firmware::dtb::scan(dtb_ptr) {
         Some(info) => {
             if info.ram_base != 0 {
                 // The kernel binary is position-dependent (linked at

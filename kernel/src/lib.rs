@@ -4,12 +4,18 @@
 //! 25 syscalls, capability-based access control.
 //!
 //! See `design/research/kernel-userspace-interface.md` for the full spec.
+//!
+//! ## Framekernel discipline
+//!
+//! All `unsafe` is confined to the `frame` module. The `deny(unsafe_code)`
+//! lint enforces this at compile time — any `unsafe` outside `frame/` is a
+//! build error.
 
 #![no_std]
+#![deny(unsafe_code)]
 
-#[cfg(any(target_os = "none", test))]
-pub mod arch;
 pub mod config;
-pub mod firmware;
+#[allow(unsafe_code)]
+pub mod frame;
 #[cfg(any(target_os = "none", test))]
 pub mod print;

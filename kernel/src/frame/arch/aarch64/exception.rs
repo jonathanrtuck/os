@@ -166,7 +166,7 @@ fn fatal_exception(frame: &TrapFrame, source: u64) -> ! {
     super::signal_panic();
 
     loop {
-        crate::arch::halt();
+        crate::frame::arch::halt();
     }
 }
 
