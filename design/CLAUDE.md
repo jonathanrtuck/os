@@ -5,6 +5,7 @@ Design documents for the document-centric OS. This is the primary artifact of th
 ## Key Files
 
 - `philosophy.md` — **Read first.** Two root principles and their consequences. If you internalize these, you can predict why any component is structured the way it is.
+- `microkernel-principles.md` — First-principles reasoning about what a microkernel must do and why. The general framework that produces kernel design decisions.
 - `foundations.md` — The core idea, guiding beliefs, glossary, content model (3-layer type system), viewer-first design, editor augmentation model, edit protocol, undo/history architecture
 - `decisions.md` — 17 tiered decisions with tradeoffs, implementation readiness, dependency chains
 - `landscape.md` — Technical comparison against 9 other operating systems (Linux, macOS, Fuchsia, etc.)

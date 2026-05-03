@@ -4,6 +4,143 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Microkernel First Principles — CAPTURED (2026-04-04)
+
+**Context:** Deep first-principles session examining what a microkernel IS, independent of any specific kernel's patterns. Started from "what must the kernel do because userspace can't?" and built up from hardware constraints.
+
+**Key results:**
+- Three irreducible responsibilities: multiplex CPU/RAM (MMU + timer), route interrupts/faults (exception vectors), manage the privilege boundary (save/restore + eret)
+- CPU multiplexing is temporal (time-slicing), RAM multiplexing is spatial (partitioning). Different sharing models, different enforcement mechanisms.
+- Kernel owns scheduling — mechanism AND policy. Userspace M:N threading for lightweight concurrency.
+- Memory objects as the abstraction: byte-sized, two-step create/map model, page size hidden.
+- Slab packing within address spaces (same trust boundary), page-align for cross-address-space sharing.
+- Hardware MMU is the sole isolation enforcer — kernel never tries sub-page isolation boundaries.
+- "IPC" reframed as cross-isolation-boundary communication. A consequence of isolation, not an independent concept.
+- Thread / address space / process decomposed: threads are schedulable entities, address spaces are isolation boundaries, processes are a userspace convention.
+
+**Captured in:** `design/microkernel-principles.md`
+
+**Open threads for future sessions:**
+- Cross-boundary communication mechanism design (deferred until memory model is fully settled)
+- Lazy allocation policy (what happens when physical RAM is exhausted?)
+- Whether the kernel exposes threads and address spaces independently (seL4-style) or bundled as processes
+
+---
+
+## Zircon Bias Audit — OPEN-DESIGN (2026-04-04)
+
+**Context:** After noticing that kernel design suggestions consistently converged on Zircon/Fuchsia patterns, a systematic audit was performed against the full microkernel landscape: seL4, L4 family, EROS/Coyotos, Genode, QNX, Plan 9, Barrelfish, Redox, Minix 3. The question: where did Zircon's gravitational pull lead to suboptimal choices for a document-centric personal workstation OS?
+
+**Meta-finding: The completeness audit (below) was Zircon-anchored.** Its method — "does Zircon AND at least one of seL4/QNX/Mach provide this?" — guarantees convergence toward Zircon's feature set. Features that exist in seL4, Plan 9, or EROS but NOT in Zircon are structurally invisible. The exclusion list (VMARs, object info, memory pressure, sockets, jobs) is Zircon features being deferred, not features from other kernels being evaluated. Future completeness checks should start from principles ("what properties must a capability microkernel guarantee?") rather than feature comparison against any single kernel.
+
+### Finding 1: Asynchronous-first IPC — strongest concern
+
+**The decision (§0.7):** Shared-memory ring buffers for channels. Synchronous L4-style IPC rejected because "blocks the sender until the receiver is ready — can't deliver input to a busy editor."
+
+**The problem:** This is the Zircon worldview. Fuchsia uses async channels because Google's component model needs non-blocking communication across untrusted component boundaries (phones, embedded). But this kernel targets a document-centric personal workstation where the dominant IPC pattern is **request/reply**: editor sends operation → OS processes → editor gets acknowledgment.
+
+**What other kernels do:**
+
+- **seL4:** Synchronous `seL4_Call` as the primitive. Async via notification objects (bitmask signals — lightweight, no message body). The receiver decides how long to wait. Two primitives, both minimal.
+- **L4:** Synchronous IPC is the core primitive. "Busy receiver" is handled by the receiver running a receive-loop — the sender blocks until the receiver calls receive. This is exactly how our document service works (event loop that processes messages).
+- **QNX:** Synchronous `MsgSend`/`MsgReceive`/`MsgReply`. "Busy receiver" handled by pulse notifications (lightweight async signals into a blocking receive). QNX built an entire real-time OS ecosystem on this.
+
+**The "busy editor" argument examined:** Editors in this design are thin plugins that delegate to the OS. They are almost always waiting for the next event. The scenario "sender blocks because editor is computing" is rare. And when it does happen, the solution in L4/QNX is a dedicated receiver thread that enqueues — not a fundamental shift to async-first IPC.
+
+**What async-first costs:**
+
+1. The kernel maintains ring buffer state per channel (memory overhead)
+2. The kernel manages full/empty conditions (complexity in the TCB)
+3. Phase 4 copies messages through kernel memory (latency vs. register-based transfer)
+4. Phase 6a builds `channel_call` (synchronous RPC) on top of async — backwards from seL4/L4 where async is built on synchronous
+5. Phase 6b adds batched operations — another layer of complexity
+
+seL4 achieves the same 64-byte message transfer with direct register transfer: zero kernel state per endpoint, zero copy, zero ring buffer management. The kernel is thinner.
+
+**The counter-argument for async:** Batched writes (`channel_write_many` + explicit signal) matter for high-throughput paths like the rendering pipeline. A synchronous-only model would need a separate batching mechanism — possibly VMO-based bulk transfer alongside synchronous control messages.
+
+**Assessment:** This deserves explicit re-evaluation before the IPC model ossifies. Phase 4 (handle-mediated channels) is the right _principle_ — processes should never see shared addresses. The question is the _mechanism_: should messages flow through kernel-managed ring buffers (current, Zircon-derived), or through register-based synchronous transfer (seL4/L4) with async notifications as a separate primitive?
+
+**Key design question:** If starting from scratch with the handle-mediated principle already settled, would you choose:
+
+- **(A) Current:** Async ring buffers with `channel_call` layered on top. Batch-friendly. Ring buffer complexity in kernel.
+- **(B) seL4-style:** Synchronous register-based IPC (`call`/`reply`) + notification objects (bitmask, no data). Batch via VMOs. Thinner kernel, but two IPC primitives instead of one.
+- **(C) QNX-style:** Synchronous `MsgSend`/`MsgReceive`/`MsgReply` with pulse notifications. Similar to B but with explicit reply identity.
+
+**When to resolve:** Before v0.7 planning. This is deep enough that changing it later would be a rewrite. If the current async model is confirmed, document WHY it's correct despite the alternatives. If sync is chosen, it replaces Phase 4's ring buffer approach.
+
+### Finding 2: Kernel-managed ring buffers (Phase 4)
+
+**Related to Finding 1.** Phase 4 moves ~100 lines of ring buffer read/write logic into the kernel. The kernel allocates and manages per-channel shared pages, handles full/empty state, copies 64-byte messages.
+
+**seL4 comparison:** For 64-byte messages, seL4 uses register-based IPC. The sender loads message registers (x0–x7 on aarch64 = 64 bytes), traps to kernel, kernel copies registers to receiver's context during thread switch. Zero kernel state per endpoint. Zero memory allocation. Zero ring buffer management.
+
+**What this would look like here:** `channel_write(handle, buf)` → kernel copies 64 bytes from user buffer into kernel registers → on receiver's `channel_read` or `wait`, kernel copies registers into receiver's buffer. No ring. No shared pages for channels. Channel becomes a pure rendezvous point.
+
+**Trade-off:** Rendezvous IPC requires sender and receiver to synchronize. If the receiver isn't waiting, the sender blocks. This is the same sync-vs-async question as Finding 1.
+
+**If async is retained:** The ring buffer mechanism is the correct implementation — it provides the buffering that async requires. The concern shifts to "is async the right choice?" not "are ring buffers the right implementation of async?"
+
+### Finding 3: Missing primitives invisible to Zircon-anchored audit
+
+Features from non-Zircon kernels that the completeness audit didn't consider:
+
+**Notification objects (seL4).** Lightweight bitmask-based async signaling. No message body. A process `Signal`s a notification; the receiver `Wait`s and gets a bitmask of accumulated signals. Cheaper than a full channel for "something changed, check your state" patterns. The rendering pipeline (presenter signals metal-render that the scene changed) would be more efficient with a notification than a 64-byte channel message that carries no meaningful data.
+
+**Capability revocation (seL4, EROS).** `Revoke` recursively deletes all capabilities derived from a given capability. Without it, once a handle is sent, the recipient has it forever. A supervisor cannot withdraw delegated access. This becomes critical at v0.11 (network) when sandboxing untrusted decoders — a compromised process retains all handles it was ever given. Zircon also lacks general revocation; this is Zircon's weakness, not a feature to copy.
+
+**Self-healing restart (Minix 3, QNX).** If a service crashes, the supervisor (exception forwarding, Phase 5d) learns about it. But restarting the service means: re-create process, re-create channels, re-transfer handles, re-establish all connections. There's no "restart with the same handle configuration." Minix 3 and QNX kernel-level restart primitives make service recovery transparent. For a personal workstation where a document service crash shouldn't require a reboot, this matters.
+
+**Recursive resource accounting (Genode).** Resources are organized in a tree. A parent allocates quota from its own resources, hands it to a child. The child can subdivide further. Exhaustion is bounded — a child never exceeds its parent's allocation. The current design has flat per-process budgets. If a service spawns sub-processes, it can't subdivide its own quota.
+
+**Assessment:** None of these are urgent for v0.6. But they should be evaluated during v0.7 design decisions planning, explicitly and independently of what Zircon does or doesn't have.
+
+### Finding 4: Exception forwarding is process-level only (Phase 5d)
+
+The design puts the exception channel on Process, not Thread.
+
+**Mach** has two-level exception ports: task-level (process) and thread-level. Thread-level takes precedence; task-level is fallback. This is more general — a debugger can set a breakpoint on one thread without intercepting faults from unrelated threads.
+
+**seL4** has per-thread fault endpoints — even more general.
+
+**For "the most perfect microkernel for anyone":** Per-thread exception channels with process-level fallback would be more correct. Cost: one extra `Option<ChannelId>` on Thread and a two-line dispatch check in the fault handler.
+
+**Assessment:** Small change, high generality payoff. Could be added to Phase 5d without disruption.
+
+### Finding 5: Priority inheritance + scheduling context interaction (Phase 5e)
+
+PI for futexes is standard. But the interaction with scheduling contexts and EEVDF is under-specified:
+
+- EEVDF uses weight (vruntime scaling), not strict priority. PI needs to boost the holder's weight temporarily, not a separate priority number.
+- If the holder and waiter are in different scheduling contexts, PI boosts weight but can't increase the holder's budget. A boosted thread whose scheduling context is exhausted still can't run until replenishment.
+- **seL4 MCS solves this elegantly:** `seL4_Call` transfers scheduling context authority along with the call. The receiver runs on the caller's budget. No separate PI mechanism needed — the budget travels with the work.
+
+**Design question:** When a PI-boosted thread's scheduling context is exhausted, does PI override budget? (Dangerous — defeats temporal isolation.) Or not? (Then PI is incomplete — the high-weight thread still starves.)
+
+**Assessment:** The Phase 5e design needs an explicit answer to this question before implementation. The seL4 MCS approach of transferring budget via `seL4_Call` is worth studying as an alternative to PI.
+
+### Findings confirmed correct
+
+The following design choices were audited and found to be well-reasoned regardless of Zircon influence:
+
+- **VMOs** (§15.0) — Novel features (versioning, seal, content-type, append-only) diverge meaningfully from Zircon. Fixed size explicitly anti-Zircon.
+- **Handle capabilities** (§0.8) — Sound pragmatic design. Badges are seL4-inspired.
+- **Pager as VMO attribute** (§16.0) — Correct for document-centric content-type-aware paging.
+- **EEVDF + scheduling contexts** (§6.1, §6.3) — Draws from 6+ sources, genuinely novel CWC guarantee.
+- **Architecture abstraction** (§0.12) — Well-reasoned, cites NT HAL as anti-pattern.
+- **Security hardening** (§17) — ARM-specific, original work.
+- **Handle-mediated principle** (Phase 4 motivation) — Processes should never see shared addresses. The principle is correct even if the mechanism (ring buffers vs. register transfer) is debatable.
+
+### Action items
+
+1. **Before Phase 4 ships:** Explicitly decide whether ring buffer IPC or register-based IPC is correct. If async ring buffers are confirmed, document the reasoning against sync alternatives. This is the highest-leverage decision.
+2. **Phase 5d (exception forwarding):** Add per-thread exception channels with process-level fallback. Minimal change, high generality.
+3. **Phase 5e (PI):** Resolve the PI + scheduling context budget interaction. Document what happens when a boosted thread's budget is exhausted.
+4. **Before v0.7 planning:** Evaluate notification objects, capability revocation, self-healing restart, and recursive resource accounting independently of Zircon. Use principles-based criteria, not feature comparison.
+5. **Future completeness audits:** Start from "what properties must this kernel guarantee?" not "what does [any kernel] have that we don't?"
+
+---
+
 ## Kernel Completeness Audit — SETTLED (2026-04-04)
 
 **Context:** Handle-mediated IPC was identified as a fundamental gap that should have been caught earlier. This prompted a systematic audit: what else is missing from a kernel that claims to be "perfect for anyone"?
