@@ -4,6 +4,10 @@
 //! recvs the highest-priority call, processes it, and replies via a one-shot
 //! reply cap. Handle transfer is staged in the PendingCall and installed by
 //! the syscall layer.
+//!
+//! The send queue uses per-priority inline ring buffers — 4 levels × 4 slots
+//! = 16 total. O(1) enqueue, O(4) dequeue (check each level). No heap
+//! allocation on the IPC path.
 
 use alloc::vec::Vec;
 
@@ -12,6 +16,119 @@ use crate::{
     handle::Handle,
     types::{EndpointId, EventId, Priority, SyscallError, ThreadId},
 };
+
+const NUM_PRIORITY_LEVELS: usize = 4;
+const SLOTS_PER_PRIORITY: usize = config::MAX_PENDING_PER_ENDPOINT / NUM_PRIORITY_LEVELS;
+
+struct PriorityRing {
+    slots: [Option<PendingCall>; SLOTS_PER_PRIORITY],
+    head: u8,
+    len: u8,
+}
+
+impl PriorityRing {
+    const fn new() -> Self {
+        PriorityRing {
+            slots: [const { None }; SLOTS_PER_PRIORITY],
+            head: 0,
+            len: 0,
+        }
+    }
+
+    fn push(&mut self, item: PendingCall) -> Result<(), SyscallError> {
+        if self.len as usize >= SLOTS_PER_PRIORITY {
+            return Err(SyscallError::BufferFull);
+        }
+
+        let tail = (self.head as usize + self.len as usize) % SLOTS_PER_PRIORITY;
+        self.slots[tail] = Some(item);
+        self.len += 1;
+
+        Ok(())
+    }
+
+    fn pop(&mut self) -> Option<PendingCall> {
+        if self.len == 0 {
+            return None;
+        }
+
+        let item = self.slots[self.head as usize].take();
+        self.head = ((self.head as usize + 1) % SLOTS_PER_PRIORITY) as u8;
+        self.len -= 1;
+
+        item
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+struct PrioritySendQueue {
+    rings: [PriorityRing; NUM_PRIORITY_LEVELS],
+    total: u16,
+}
+
+impl PrioritySendQueue {
+    const fn new() -> Self {
+        PrioritySendQueue {
+            rings: [const { PriorityRing::new() }; NUM_PRIORITY_LEVELS],
+            total: 0,
+        }
+    }
+
+    fn enqueue(&mut self, call: PendingCall) -> Result<(), SyscallError> {
+        let level = call.priority as usize;
+        self.rings[level].push(call)?;
+        self.total += 1;
+
+        Ok(())
+    }
+
+    fn dequeue_highest(&mut self) -> Option<PendingCall> {
+        for level in (0..NUM_PRIORITY_LEVELS).rev() {
+            if let Some(call) = self.rings[level].pop() {
+                self.total -= 1;
+                return Some(call);
+            }
+        }
+
+        None
+    }
+
+    fn is_empty(&self) -> bool {
+        self.total == 0
+    }
+
+    fn len(&self) -> usize {
+        self.total as usize
+    }
+
+    fn highest_priority(&self) -> Option<Priority> {
+        for level in (0..NUM_PRIORITY_LEVELS).rev() {
+            if !self.rings[level].is_empty() {
+                return match level {
+                    3 => Some(Priority::High),
+                    2 => Some(Priority::Medium),
+                    1 => Some(Priority::Low),
+                    0 => Some(Priority::Idle),
+                    _ => None,
+                };
+            }
+        }
+
+        None
+    }
+
+    fn drain_callers(&mut self, out: &mut impl FnMut(ThreadId)) {
+        for level in 0..NUM_PRIORITY_LEVELS {
+            while let Some(call) = self.rings[level].pop() {
+                out(call.caller);
+            }
+        }
+        self.total = 0;
+    }
+}
 
 /// Inline storage for drained recv waiters — no heap allocation on the IPC hot path.
 #[derive(Debug)]
@@ -124,7 +241,7 @@ struct ActiveReply {
 /// for calls). Thread blocking/waking is the syscall layer's concern.
 pub struct Endpoint {
     pub id: EndpointId,
-    send_queue: Vec<PendingCall>,
+    send_queue: PrioritySendQueue,
     active_replies: Vec<ActiveReply>,
     recv_waiters: [Option<ThreadId>; config::MAX_RECV_WAITERS],
     recv_waiter_count: usize,
@@ -139,7 +256,7 @@ impl Endpoint {
     pub fn new(id: EndpointId) -> Self {
         Endpoint {
             id,
-            send_queue: Vec::with_capacity(4),
+            send_queue: PrioritySendQueue::new(),
             active_replies: Vec::with_capacity(4),
             recv_waiters: [None; config::MAX_RECV_WAITERS],
             recv_waiter_count: 0,
@@ -160,6 +277,10 @@ impl Endpoint {
 
     pub fn pending_call_count(&self) -> usize {
         self.send_queue.len()
+    }
+
+    pub fn is_full(&self) -> bool {
+        self.send_queue.len() >= config::MAX_PENDING_PER_ENDPOINT
     }
 
     pub fn pending_reply_count(&self) -> usize {
@@ -194,11 +315,8 @@ impl Endpoint {
         if self.peer_closed {
             return Err(SyscallError::PeerClosed);
         }
-        if self.send_queue.len() >= config::MAX_PENDING_PER_ENDPOINT {
-            return Err(SyscallError::BufferFull);
-        }
 
-        self.send_queue.push(call);
+        self.send_queue.enqueue(call)?;
 
         Ok(self
             .bound_event
@@ -207,18 +325,7 @@ impl Endpoint {
 
     /// Dequeue the highest-priority pending call and issue a reply cap.
     pub fn dequeue_call(&mut self) -> Option<(PendingCall, ReplyCapId)> {
-        if self.send_queue.is_empty() {
-            return None;
-        }
-
-        let best_idx = self
-            .send_queue
-            .iter()
-            .enumerate()
-            .max_by_key(|(_, c)| c.priority)
-            .map(|(i, _)| i)
-            .unwrap();
-        let call = self.send_queue.swap_remove(best_idx);
+        let call = self.send_queue.dequeue_highest()?;
         let cap_id = ReplyCapId(self.next_reply_id);
 
         self.next_reply_id += 1;
@@ -246,7 +353,7 @@ impl Endpoint {
 
     /// Highest priority among pending callers (for priority inheritance).
     pub fn highest_caller_priority(&self) -> Option<Priority> {
-        self.send_queue.iter().map(|c| c.priority).max()
+        self.send_queue.highest_priority()
     }
 
     /// Add a server thread to the recv waiters list.
@@ -307,9 +414,7 @@ impl Endpoint {
 
         let mut blocked = Vec::new();
 
-        for call in self.send_queue.drain(..) {
-            blocked.push(call.caller);
-        }
+        self.send_queue.drain_callers(&mut |tid| blocked.push(tid));
         for reply in self.active_replies.drain(..) {
             blocked.push(reply.caller);
         }
@@ -537,8 +642,25 @@ mod tests {
     #[test]
     fn send_queue_exhaustion() {
         let mut ep = make_endpoint(0);
+        let priorities = [Priority::Idle, Priority::Low, Priority::Medium, Priority::High];
 
-        for i in 0..config::MAX_PENDING_PER_ENDPOINT {
+        for (i, &pri) in (0..config::MAX_PENDING_PER_ENDPOINT)
+            .zip(priorities.iter().cycle())
+        {
+            ep.enqueue_call(make_call(i as u32, pri, 0)).unwrap();
+        }
+
+        assert_eq!(
+            ep.enqueue_call(make_call(999, Priority::Medium, 0)),
+            Err(SyscallError::BufferFull)
+        );
+    }
+
+    #[test]
+    fn per_priority_ring_exhaustion() {
+        let mut ep = make_endpoint(0);
+
+        for i in 0..SLOTS_PER_PRIORITY {
             ep.enqueue_call(make_call(i as u32, Priority::Medium, 0))
                 .unwrap();
         }
@@ -547,6 +669,10 @@ mod tests {
             ep.enqueue_call(make_call(999, Priority::Medium, 0)),
             Err(SyscallError::BufferFull)
         );
+
+        ep.enqueue_call(make_call(100, Priority::High, 0)).unwrap();
+
+        assert_eq!(ep.pending_call_count(), SLOTS_PER_PRIORITY + 1);
     }
 
     // -- Recv waiters --
