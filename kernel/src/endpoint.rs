@@ -9,8 +9,6 @@
 //! = 16 total. O(1) enqueue, O(4) dequeue (check each level). No heap
 //! allocation on the IPC path.
 
-use alloc::vec::Vec;
-
 use crate::{
     config,
     handle::Handle,
@@ -228,10 +226,52 @@ pub struct PendingCall {
 }
 
 /// Tracks a reply cap issued to a server, linking it to the blocked caller.
+#[derive(Clone, Copy)]
 struct ActiveReply {
     cap_id: ReplyCapId,
     caller: ThreadId,
     reply_buf: usize,
+}
+
+const MAX_CLOSE_LIST: usize =
+    config::MAX_PENDING_PER_ENDPOINT + config::MAX_PENDING_PER_ENDPOINT + config::MAX_RECV_WAITERS;
+
+/// Stack-allocated list of thread IDs returned by close_peer.
+pub struct CloseList {
+    items: [ThreadId; MAX_CLOSE_LIST],
+    len: usize,
+}
+
+impl CloseList {
+    fn new() -> Self {
+        CloseList {
+            items: [ThreadId(0); MAX_CLOSE_LIST],
+            len: 0,
+        }
+    }
+
+    fn push(&mut self, tid: ThreadId) {
+        if self.len < MAX_CLOSE_LIST {
+            self.items[self.len] = tid;
+            self.len += 1;
+        }
+    }
+
+    pub fn as_slice(&self) -> &[ThreadId] {
+        &self.items[..self.len]
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn contains(&self, tid: &ThreadId) -> bool {
+        self.as_slice().contains(tid)
+    }
 }
 
 /// A synchronous IPC endpoint.
@@ -242,7 +282,8 @@ struct ActiveReply {
 pub struct Endpoint {
     pub id: EndpointId,
     send_queue: PrioritySendQueue,
-    active_replies: Vec<ActiveReply>,
+    active_replies: [Option<ActiveReply>; config::MAX_PENDING_PER_ENDPOINT],
+    active_reply_count: u8,
     recv_waiters: [Option<ThreadId>; config::MAX_RECV_WAITERS],
     recv_waiter_count: usize,
     next_reply_id: u32,
@@ -257,7 +298,8 @@ impl Endpoint {
         Endpoint {
             id,
             send_queue: PrioritySendQueue::new(),
-            active_replies: Vec::with_capacity(4),
+            active_replies: [None; config::MAX_PENDING_PER_ENDPOINT],
+            active_reply_count: 0,
             recv_waiters: [None; config::MAX_RECV_WAITERS],
             recv_waiter_count: 0,
             next_reply_id: 0,
@@ -284,7 +326,7 @@ impl Endpoint {
     }
 
     pub fn pending_reply_count(&self) -> usize {
-        self.active_replies.len()
+        self.active_reply_count as usize
     }
 
     pub fn recv_waiter_count(&self) -> usize {
@@ -330,25 +372,39 @@ impl Endpoint {
 
         self.next_reply_id += 1;
 
-        self.active_replies.push(ActiveReply {
+        let reply = ActiveReply {
             cap_id,
             caller: call.caller,
             reply_buf: call.reply_buf,
-        });
+        };
+
+        for slot in &mut self.active_replies {
+            if slot.is_none() {
+                *slot = Some(reply);
+                self.active_reply_count += 1;
+
+                return Some((call, cap_id));
+            }
+        }
 
         Some((call, cap_id))
     }
 
     /// Consume a reply cap, returning (caller_thread_id, caller_reply_buf).
     pub fn consume_reply(&mut self, cap_id: ReplyCapId) -> Result<(ThreadId, usize), SyscallError> {
-        let pos = self
-            .active_replies
-            .iter()
-            .position(|r| r.cap_id == cap_id)
-            .ok_or(SyscallError::InvalidHandle)?;
-        let reply = self.active_replies.swap_remove(pos);
+        for slot in &mut self.active_replies {
+            if let Some(r) = slot
+                && r.cap_id == cap_id
+            {
+                let reply = *r;
+                *slot = None;
+                self.active_reply_count -= 1;
 
-        Ok((reply.caller, reply.reply_buf))
+                return Ok((reply.caller, reply.reply_buf));
+            }
+        }
+
+        Err(SyscallError::InvalidHandle)
     }
 
     /// Highest priority among pending callers (for priority inheritance).
@@ -409,15 +465,18 @@ impl Endpoint {
 
     /// Close the peer end. Returns all blocked thread IDs:
     /// callers in send queue + callers awaiting reply + recv waiters.
-    pub fn close_peer(&mut self) -> Vec<ThreadId> {
+    pub fn close_peer(&mut self) -> CloseList {
         self.peer_closed = true;
 
-        let mut blocked = Vec::new();
+        let mut blocked = CloseList::new();
 
         self.send_queue.drain_callers(&mut |tid| blocked.push(tid));
-        for reply in self.active_replies.drain(..) {
-            blocked.push(reply.caller);
+        for slot in &mut self.active_replies {
+            if let Some(reply) = slot.take() {
+                blocked.push(reply.caller);
+            }
         }
+        self.active_reply_count = 0;
         for slot in &mut self.recv_waiters {
             if let Some(tid) = slot.take() {
                 blocked.push(tid);
