@@ -1,23 +1,24 @@
-//! Flat-array object table with free-list allocation.
+//! Flat-array object table with lock-free allocation.
 //!
 //! Each kernel object type (VMO, Event, Endpoint, Thread, AddressSpace)
 //! is stored in an ObjectTable. Objects are accessed by ID (array index).
 //! Storage is heap-backed (Vec) so composite tables don't overflow the stack.
 //!
-//! Allocation uses an intrusive Treiber stack through empty slots: O(1)
-//! alloc, O(1) dealloc, O(1) lookup. Per-slot generation counters
-//! increment on dealloc for handle revocation.
+//! The free list and generation counters use atomics for SMP-ready alloc/dealloc.
+//! Alloc pops from a Treiber stack (CAS on free_head), dealloc pushes back.
+//! Single-threaded CAS degenerates to unconditional success.
 
-use alloc::{vec, vec::Vec};
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 const EMPTY: u32 = u32::MAX;
 
 pub struct ObjectTable<T, const MAX: usize> {
     entries: Vec<Option<T>>,
-    generations: Vec<u64>,
-    free_head: u32,
-    free_next: Vec<u32>,
-    count: usize,
+    generations: Vec<AtomicU64>,
+    free_head: AtomicU32,
+    free_next: Vec<AtomicU32>,
+    count: AtomicUsize,
 }
 
 #[allow(clippy::new_without_default)]
@@ -26,35 +27,50 @@ impl<T, const MAX: usize> ObjectTable<T, MAX> {
         let mut entries = Vec::with_capacity(MAX);
         entries.resize_with(MAX, || None);
 
-        let generations = vec![0u64; MAX];
+        let generations: Vec<AtomicU64> = (0..MAX).map(|_| AtomicU64::new(0)).collect();
 
-        let mut free_next = vec![EMPTY; MAX];
-        for (i, slot) in free_next.iter_mut().enumerate().take(MAX.saturating_sub(1)) {
-            *slot = (i + 1) as u32;
-        }
+        let free_next: Vec<AtomicU32> = (0..MAX)
+            .map(|i| {
+                AtomicU32::new(if i + 1 < MAX {
+                    (i + 1) as u32
+                } else {
+                    EMPTY
+                })
+            })
+            .collect();
 
         Self {
             entries,
             generations,
-            free_head: if MAX > 0 { 0 } else { EMPTY },
+            free_head: AtomicU32::new(if MAX > 0 { 0 } else { EMPTY }),
             free_next,
-            count: 0,
+            count: AtomicUsize::new(0),
         }
     }
 
     pub fn alloc(&mut self, value: T) -> Option<(u32, u64)> {
-        if self.free_head == EMPTY {
-            return None;
+        loop {
+            let head = self.free_head.load(Ordering::Acquire);
+
+            if head == EMPTY {
+                return None;
+            }
+
+            let next = self.free_next[head as usize].load(Ordering::Relaxed);
+
+            if self
+                .free_head
+                .compare_exchange_weak(head, next, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                self.free_next[head as usize].store(EMPTY, Ordering::Relaxed);
+                self.entries[head as usize] = Some(value);
+                self.count.fetch_add(1, Ordering::Relaxed);
+                let generation = self.generations[head as usize].load(Ordering::Acquire);
+
+                return Some((head, generation));
+            }
         }
-
-        let idx = self.free_head as usize;
-        self.free_head = self.free_next[idx];
-        self.free_next[idx] = EMPTY;
-        self.entries[idx] = Some(value);
-        self.count += 1;
-        let generation = self.generations[idx];
-
-        Some((idx as u32, generation))
     }
 
     pub fn dealloc(&mut self, idx: u32) -> Option<T> {
@@ -65,10 +81,23 @@ impl<T, const MAX: usize> ObjectTable<T, MAX> {
         }
 
         let value = self.entries[i].take()?;
-        self.generations[i] += 1;
-        self.free_next[i] = self.free_head;
-        self.free_head = idx;
-        self.count -= 1;
+        self.generations[i].fetch_add(1, Ordering::Release);
+
+        loop {
+            let head = self.free_head.load(Ordering::Relaxed);
+
+            self.free_next[i].store(head, Ordering::Relaxed);
+
+            if self
+                .free_head
+                .compare_exchange_weak(head, idx, Ordering::Release, Ordering::Relaxed)
+                .is_ok()
+            {
+                break;
+            }
+        }
+
+        self.count.fetch_sub(1, Ordering::Relaxed);
 
         Some(value)
     }
@@ -82,13 +111,13 @@ impl<T, const MAX: usize> ObjectTable<T, MAX> {
     }
 
     pub fn count(&self) -> usize {
-        self.count
+        self.count.load(Ordering::Relaxed)
     }
 
     pub fn generation(&self, idx: u32) -> u64 {
         self.generations
             .get(idx as usize)
-            .copied()
+            .map(|g| g.load(Ordering::Acquire))
             .unwrap_or(0)
     }
 
