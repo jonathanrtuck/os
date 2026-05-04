@@ -20,6 +20,7 @@ extern crate alloc;
 #[macro_use]
 extern crate std;
 
+pub mod address_space;
 pub mod config;
 #[allow(unsafe_code)]
 pub mod frame;
