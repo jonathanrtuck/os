@@ -47,6 +47,8 @@ pub struct Thread {
     fp_dirty: bool,
     wait_events: [u32; 3],
     wait_count: u8,
+    space_next: Option<u32>,
+    space_prev: Option<u32>,
     #[cfg(any(target_os = "none", test))]
     register_state: Option<Box<RegisterState>>,
 }
@@ -78,6 +80,8 @@ impl Thread {
             fp_dirty: false,
             wait_events: [0; 3],
             wait_count: 0,
+            space_next: None,
+            space_prev: None,
             #[cfg(any(target_os = "none", test))]
             register_state: None,
         }
@@ -105,6 +109,22 @@ impl Thread {
 
     pub fn exit_event(&self) -> Option<EventId> {
         self.exit_event
+    }
+
+    pub fn space_next(&self) -> Option<u32> {
+        self.space_next
+    }
+
+    pub fn set_space_next(&mut self, next: Option<u32>) {
+        self.space_next = next;
+    }
+
+    pub fn space_prev(&self) -> Option<u32> {
+        self.space_prev
+    }
+
+    pub fn set_space_prev(&mut self, prev: Option<u32>) {
+        self.space_prev = prev;
     }
 
     pub fn entry_point(&self) -> usize {
@@ -321,6 +341,22 @@ impl Scheduler {
 
     pub fn pick_next(&mut self, core_id: usize) -> Option<ThreadId> {
         self.cores[core_id].pick_next()
+    }
+
+    /// Remove a thread from any core's run queue (for teardown).
+    pub fn remove(&mut self, thread: ThreadId) {
+        for core in &mut self.cores {
+            if core.current == Some(thread) {
+                core.current = None;
+                return;
+            }
+            for q in &mut core.queues {
+                if let Some(pos) = q.iter().position(|&t| t == thread) {
+                    q.remove(pos);
+                    return;
+                }
+            }
+        }
     }
 
     /// Find the core with the fewest ready threads.

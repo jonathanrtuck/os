@@ -165,6 +165,7 @@ pub struct AddressSpace {
     handles: HandleTable,
     mappings: Vec<MappingRecord>,
     va_allocator: VaAllocator,
+    thread_head: Option<u32>,
 }
 
 #[allow(clippy::new_without_default)]
@@ -177,6 +178,7 @@ impl AddressSpace {
             handles: HandleTable::new(),
             mappings: Vec::new(),
             va_allocator: VaAllocator::new(USER_VA_BASE, USER_VA_SIZE),
+            thread_head: None,
         }
     }
 
@@ -199,6 +201,14 @@ impl AddressSpace {
 
     pub fn handles_mut(&mut self) -> &mut HandleTable {
         &mut self.handles
+    }
+
+    pub fn thread_head(&self) -> Option<u32> {
+        self.thread_head
+    }
+
+    pub fn set_thread_head(&mut self, head: Option<u32>) {
+        self.thread_head = head;
     }
 
     pub fn mappings(&self) -> &[MappingRecord] {

@@ -105,6 +105,58 @@ impl Kernel {
         Err(SyscallError::OutOfMemory)
     }
 
+    fn link_thread_to_space(&mut self, thread_idx: u32, space_id: AddressSpaceId) {
+        let old_head = self
+            .spaces
+            .get(space_id.0)
+            .and_then(|s| s.thread_head());
+
+        if let Some(t) = self.threads.get_mut(thread_idx) {
+            t.set_space_next(old_head);
+            t.set_space_prev(None);
+        }
+
+        if let Some(old) = old_head
+            && let Some(t) = self.threads.get_mut(old)
+        {
+            t.set_space_prev(Some(thread_idx));
+        }
+
+        if let Some(s) = self.spaces.get_mut(space_id.0) {
+            s.set_thread_head(Some(thread_idx));
+        }
+    }
+
+    fn unlink_thread_from_space(&mut self, thread_idx: u32, space_id: AddressSpaceId) {
+        let prev = self
+            .threads
+            .get(thread_idx)
+            .and_then(|t| t.space_prev());
+        let next = self
+            .threads
+            .get(thread_idx)
+            .and_then(|t| t.space_next());
+
+        if let Some(p) = prev {
+            if let Some(t) = self.threads.get_mut(p) {
+                t.set_space_next(next);
+            }
+        } else if let Some(s) = self.spaces.get_mut(space_id.0) {
+            s.set_thread_head(next);
+        }
+
+        if let Some(n) = next
+            && let Some(t) = self.threads.get_mut(n)
+        {
+            t.set_space_prev(prev);
+        }
+
+        if let Some(t) = self.threads.get_mut(thread_idx) {
+            t.set_space_next(None);
+            t.set_space_prev(None);
+        }
+    }
+
     pub fn thread_space_id(&self, thread: ThreadId) -> Result<AddressSpaceId, SyscallError> {
         self.threads
             .get(thread.0)
@@ -1058,6 +1110,7 @@ impl Kernel {
             .ok_or(SyscallError::OutOfMemory)?;
 
         self.threads.get_mut(idx).unwrap().id = ThreadId(idx);
+        self.link_thread_to_space(idx, space_id);
 
         let core = self.scheduler.least_loaded_core();
 
@@ -1075,6 +1128,7 @@ impl Kernel {
         {
             Ok(hid) => Ok(hid.0 as u64),
             Err(e) => {
+                self.unlink_thread_from_space(idx, space_id);
                 self.threads.dealloc(idx);
 
                 Err(e)
@@ -1129,6 +1183,7 @@ impl Kernel {
             .ok_or(SyscallError::OutOfMemory)?;
 
         self.threads.get_mut(idx).unwrap().id = ThreadId(idx);
+        self.link_thread_to_space(idx, target_space);
 
         if handles_count > 0 {
             let mut cloned = [const { None }; config::MAX_IPC_HANDLES];
@@ -1155,6 +1210,7 @@ impl Kernel {
                         target.handles_mut().close(HandleId(j as u32)).ok();
                     }
 
+                    self.unlink_thread_from_space(idx, target_space);
                     self.threads.dealloc(idx);
 
                     return Err(e);
@@ -1178,6 +1234,7 @@ impl Kernel {
         {
             Ok(hid) => Ok(hid.0 as u64),
             Err(e) => {
+                self.unlink_thread_from_space(idx, target_space);
                 self.threads.dealloc(idx);
 
                 Err(e)
@@ -1273,10 +1330,35 @@ impl Kernel {
             return Err(SyscallError::InvalidArgument);
         }
 
+        if self.spaces.get(target_id.0).is_none() {
+            return Err(SyscallError::InvalidHandle);
+        }
+
+        // 1. Walk the thread list and kill all threads in the target space.
+        let mut thread_cursor = self
+            .spaces
+            .get(target_id.0)
+            .and_then(|s| s.thread_head());
+
+        while let Some(tid) = thread_cursor {
+            thread_cursor = self.threads.get(tid).and_then(|t| t.space_next());
+
+            if let Some(t) = self.threads.get_mut(tid) {
+                t.exit(0);
+            }
+
+            self.scheduler.remove(ThreadId(tid));
+            self.threads.dealloc(tid);
+        }
+
+        // 2. Dealloc the space (drops handle table, mappings, VA allocator).
+        // VMO refcount decrement and endpoint peer-closed signaling would go
+        // here in a production kernel. For now, the space is simply dropped.
         self.spaces
             .dealloc(target_id.0)
             .ok_or(SyscallError::InvalidHandle)?;
 
+        // 3. Close caller's handle.
         let caller_space = self
             .spaces
             .get_mut(caller_space_id.0)
@@ -1764,6 +1846,48 @@ mod tests {
     fn space_destroy_invalid_handle() {
         let mut k = setup_kernel();
         let (err, _) = call(&mut k, num::SPACE_DESTROY, &[999, 0, 0, 0, 0, 0]);
+
+        assert_ne!(err, 0);
+    }
+
+    #[test]
+    fn space_destroy_kills_threads() {
+        let mut k = setup_kernel();
+        let (_, space_hid) = call(&mut k, num::SPACE_CREATE, &[0; 6]);
+
+        assert_eq!(k.spaces.count(), 2);
+
+        let space_id = k
+            .spaces
+            .get(0)
+            .unwrap()
+            .handles()
+            .lookup(HandleId(space_hid as u32))
+            .unwrap()
+            .object_id;
+
+        let (_, _tid_hid) = call(
+            &mut k,
+            num::THREAD_CREATE_IN,
+            &[space_hid, 0x1000, 0x2000, 0, 0, 0],
+        );
+
+        let initial_threads = k.threads.count();
+        let (err, _) = call(&mut k, num::SPACE_DESTROY, &[space_hid, 0, 0, 0, 0, 0]);
+
+        assert_eq!(err, 0);
+        assert_eq!(k.spaces.count(), 1);
+        assert!(k.threads.get(space_id).is_none() || k.threads.count() < initial_threads);
+    }
+
+    #[test]
+    fn space_destroy_double_returns_error() {
+        let mut k = setup_kernel();
+        let (_, space_hid) = call(&mut k, num::SPACE_CREATE, &[0; 6]);
+
+        call(&mut k, num::SPACE_DESTROY, &[space_hid, 0, 0, 0, 0, 0]);
+
+        let (err, _) = call(&mut k, num::SPACE_DESTROY, &[space_hid, 0, 0, 0, 0, 0]);
 
         assert_ne!(err, 0);
     }
