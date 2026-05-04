@@ -23,6 +23,7 @@ extern crate std;
 pub mod address_space;
 #[cfg(target_os = "none")]
 pub mod bench;
+pub mod bootstrap;
 pub mod config;
 pub mod endpoint;
 pub mod event;

@@ -40,6 +40,14 @@ extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
         println!("page_table: create/map/destroy ok");
     }
 
+    // Bootstrap the init service.
+    let init_binary = include_bytes!(concat!(env!("OUT_DIR"), "/init.bin"));
+    let mut kern = kernel::syscall::Kernel::new(arch::platform::core_count());
+    match kernel::bootstrap::create_init(&mut kern, init_binary) {
+        Ok(tid) => println!("init: bootstrapped as thread {}", tid.0),
+        Err(e) => println!("init: bootstrap failed: {:?}", e),
+    }
+
     kernel::bench::run();
 
     println!("alive");

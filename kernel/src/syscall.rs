@@ -80,7 +80,7 @@ impl Kernel {
         }
     }
 
-    fn alloc_asid(&mut self) -> Result<u8, SyscallError> {
+    pub fn alloc_asid(&mut self) -> Result<u8, SyscallError> {
         if self.next_asid as usize >= config::MAX_ADDRESS_SPACES {
             return Err(SyscallError::OutOfMemory);
         }
