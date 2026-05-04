@@ -95,6 +95,8 @@ pub fn init() {
 #[unsafe(no_mangle)]
 extern "C" fn exception_handler(frame: &mut TrapFrame, source: u64) {
     match source {
+        // EL1h Sync — SVC from kernel mode (benchmarks) or unexpected fault.
+        4 => el1_sync_handler(frame),
         // EL1h IRQ — timer deadlines and device interrupts.
         5 => irq_handler(frame),
         // EL0/64 Sync — syscalls (SVC) and faults from userspace.
@@ -214,6 +216,48 @@ extern "C" fn svc_fast_handler(
     };
 
     kernel.dispatch(current_thread, syscall_num, &args)
+}
+
+// ---------------------------------------------------------------------------
+// EL1 sync handler — SVC from kernel mode (benchmarks)
+// ---------------------------------------------------------------------------
+
+fn el1_sync_handler(frame: &mut TrapFrame) {
+    let ec = (frame.esr >> 26) & 0x3F;
+
+    match ec {
+        // SVC from EL1 — kernel benchmarks use this to measure trap overhead.
+        0x15 => {
+            let syscall_num = frame.gprs[8];
+            let args: [u64; 6] = [
+                frame.gprs[0],
+                frame.gprs[1],
+                frame.gprs[2],
+                frame.gprs[3],
+                frame.gprs[4],
+                frame.gprs[5],
+            ];
+
+            #[cfg(target_os = "none")]
+            {
+                let (kernel, current) = unsafe {
+                    let pc = super::cpu::percpu();
+                    let kernel = &mut *(pc.kernel_ptr as *mut crate::syscall::Kernel);
+                    (kernel, crate::types::ThreadId(pc.current_thread))
+                };
+                let (error, value) = kernel.dispatch(current, syscall_num, &args);
+                frame.gprs[0] = error;
+                frame.gprs[1] = value;
+            }
+
+            #[cfg(not(target_os = "none"))]
+            {
+                frame.gprs[0] = crate::types::SyscallError::InvalidArgument as u64;
+                frame.gprs[1] = 0;
+            }
+        }
+        _ => fatal_exception(frame, 4),
+    }
 }
 
 // ---------------------------------------------------------------------------

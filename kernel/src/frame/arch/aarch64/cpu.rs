@@ -157,6 +157,19 @@ pub fn set_kernel_ptr(ptr: *mut u8) {
     }
 }
 
+/// Set the current thread ID on this core's PerCpu data.
+///
+/// Called during boot to set the init thread as current before
+/// entering userspace.
+#[cfg(target_os = "none")]
+pub fn set_current_thread(thread_id: u32) {
+    // SAFETY: percpu_mut requires init_percpu to have been called.
+    // Single-threaded context during boot.
+    unsafe {
+        percpu_mut().current_thread = thread_id;
+    }
+}
+
 /// Extract the linear core ID from an MPIDR_EL1 value.
 ///
 /// On QEMU virt and Apple HVF, Aff0 (bits [7:0]) gives a linear core index.

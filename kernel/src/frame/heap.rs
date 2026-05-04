@@ -9,7 +9,7 @@ mod inner {
 
     use crate::frame::arch::sync::RawTicketLock;
 
-    const HEAP_SIZE: usize = 4 * 16 * 1024; // 64 KiB
+    const HEAP_SIZE: usize = 4 * 1024 * 1024; // 4 MiB
 
     #[global_allocator]
     static ALLOCATOR: talc::TalcLock<RawTicketLock, Claim> = {

@@ -46,19 +46,44 @@ extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
     let mut kern = kernel::syscall::Kernel::new(arch::platform::core_count());
     arch::set_kernel_ptr(&mut kern as *mut _ as *mut u8);
 
-    match kernel::bootstrap::create_init(&mut kern, init_binary) {
-        Ok(tid) => println!("init: bootstrapped as thread {}", tid.0),
-        Err(e) => println!("init: bootstrap failed: {:?}", e),
-    }
-
     kernel::bench::run();
 
-    println!("alive");
+    match kernel::bootstrap::create_init(&mut kern, init_binary) {
+        Ok(tid) => {
+            println!("init: bootstrapped as thread {}", tid.0);
 
-    arch::cpu::activate_secondaries();
+            // Set init as current thread on core 0.
+            arch::cpu::set_current_thread(tid.0);
 
-    loop {
-        arch::halt();
+            // Initialize RegisterState for EL0 entry.
+            let thread = kern.threads.get(tid.0).unwrap();
+            let entry = thread.entry_point() as u64;
+            let stack = thread.stack_top() as u64;
+            let arg = thread.arg() as u64;
+
+            let rs = kern.threads.get_mut(tid.0).unwrap().init_register_state();
+            rs.pc = entry;
+            rs.sp = stack;
+            rs.gprs[0] = arg;
+            rs.pstate = 0; // EL0t
+
+            println!("alive");
+
+            arch::cpu::activate_secondaries();
+
+            // Enter userspace — never returns.
+            let rs = kern.threads.get(tid.0).unwrap().register_state().unwrap();
+            arch::context::enter_userspace(rs);
+        }
+        Err(e) => {
+            println!("init: bootstrap failed: {:?}", e);
+            println!("alive");
+            arch::cpu::activate_secondaries();
+
+            loop {
+                arch::halt();
+            }
+        }
     }
 }
 
