@@ -13,6 +13,7 @@ use kernel::{frame::arch, println};
 #[unsafe(no_mangle)]
 extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
     arch::exception::init();
+    arch::init_percpu_bsp();
     arch::platform::init(dtb_ptr);
     arch::mmu::init();
     arch::serial::enable_lock();
@@ -43,6 +44,8 @@ extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
     // Bootstrap the init service.
     let init_binary = include_bytes!(concat!(env!("OUT_DIR"), "/init.bin"));
     let mut kern = kernel::syscall::Kernel::new(arch::platform::core_count());
+    arch::set_kernel_ptr(&mut kern as *mut _ as *mut u8);
+
     match kernel::bootstrap::create_init(&mut kern, init_binary) {
         Ok(tid) => println!("init: bootstrapped as thread {}", tid.0),
         Err(e) => println!("init: bootstrap failed: {:?}", e),

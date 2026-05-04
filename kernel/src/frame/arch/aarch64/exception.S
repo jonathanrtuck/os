@@ -83,7 +83,17 @@ __vectors:
     VECTOR_ENTRY 7      // SError
 
     // Lower EL, AArch64 (EL0 — future userspace)
-    VECTOR_ENTRY 8      // Synchronous
+    // Source 8: Synchronous — SVC fast path or full save.
+    // Check EC before committing to a save path. Save x0-x1 first
+    // (needed to recover user args after the ESR check).
+.align 7
+    stp     x0, x1, [sp, #-16]!    // Save x0-x1 on kernel stack (temporary)
+    mrs     x0, esr_el1
+    lsr     x0, x0, #26            // EC field [31:26]
+    cmp     x0, #0x15              // SVC from AArch64?
+    b.ne    __el0_sync_slow_from_fast
+    b       __svc_fast
+
     VECTOR_ENTRY 9      // IRQ
     VECTOR_ENTRY 10     // FIQ
     VECTOR_ENTRY 11     // SError
@@ -219,3 +229,69 @@ __exception_common:
     // Deallocate frame and return from exception.
     add     sp, sp, #832
     eret
+
+// ---------------------------------------------------------------------------
+// SVC fast path — minimal register save for syscalls.
+//
+// On entry: x0-x1 saved at [sp], ESR already checked (EC = SVC).
+// User registers: x0-x5 = args (x0-x1 saved, need to reload), x8 = syscall num.
+//
+// Save only what's needed:
+//   - ELR_EL1 + SPSR_EL1 (for ERET)
+//   - SP_EL0 (for EL0 return)
+//   - x29 + x30 (ABI: frame pointer + link register for bl)
+//   - User x0-x1 (already on stack)
+//
+// Callee-saved x19-x28 are preserved by the Rust calling convention.
+// ---------------------------------------------------------------------------
+__svc_fast:
+    // Allocate mini-frame: 48 bytes (already have 16 from x0-x1 push).
+    sub     sp, sp, #48
+
+    // Save ELR, SPSR.
+    mrs     x0, elr_el1
+    mrs     x1, spsr_el1
+    stp     x0, x1, [sp, #0]       // [sp+0] = ELR, [sp+8] = SPSR
+
+    // Save SP_EL0.
+    mrs     x0, sp_el0
+    str     x0, [sp, #16]          // [sp+16] = SP_EL0
+
+    // Save x29, x30 (needed for bl to Rust).
+    stp     x29, x30, [sp, #24]    // [sp+24] = x29, [sp+32] = x30
+
+    // Reload user's x0-x1 from temporary save area.
+    ldp     x0, x1, [sp, #48]      // x0-x1 were pushed at [sp+48]
+
+    // Now: x0-x5 = user args, x8 = syscall number.
+    // Call Rust: svc_fast_handler(a0, a1, a2, a3, a4, a5, syscall_num)
+    mov     x6, x8                  // x6 = syscall number
+    bl      svc_fast_handler
+
+    // x0 = error, x1 = value (returned from Rust).
+
+    // Restore x29, x30.
+    ldp     x29, x30, [sp, #24]
+
+    // Restore SP_EL0.
+    ldr     x9, [sp, #16]
+    msr     sp_el0, x9
+
+    // Restore ELR, SPSR.
+    ldp     x9, x10, [sp, #0]
+    msr     elr_el1, x9
+    msr     spsr_el1, x10
+
+    // Deallocate mini-frame + temporary x0-x1 save.
+    add     sp, sp, #64
+
+    eret
+
+// Slow path entry when EC != SVC. Undo the x0-x1 save and enter full path.
+__el0_sync_slow_from_fast:
+    ldp     x0, x1, [sp], #16      // Restore x0-x1
+    sub     sp, sp, #832            // Allocate full TrapFrame
+    stp     x0, x1, [sp, #0]       // Save x0-x1 into TrapFrame
+    mov     x0, #8                  // source = 8 (EL0/64 Sync)
+    str     x0, [sp, #280]
+    b       __exception_common

@@ -182,6 +182,41 @@ pub enum FaultAction {
 }
 
 // ---------------------------------------------------------------------------
+// SVC fast path handler (called from minimal-save assembly entry)
+// ---------------------------------------------------------------------------
+
+/// SVC fast path handler — called directly from the minimal-save assembly.
+///
+/// Arguments arrive in the AArch64 calling convention positions:
+/// x0-x5 = syscall args, x6 = syscall number.
+/// Returns (error, value) in x0-x1.
+#[cfg(target_os = "none")]
+#[unsafe(no_mangle)]
+#[allow(improper_ctypes_definitions)]
+extern "C" fn svc_fast_handler(
+    a0: u64,
+    a1: u64,
+    a2: u64,
+    a3: u64,
+    a4: u64,
+    a5: u64,
+    syscall_num: u64,
+) -> (u64, u64) {
+    let args = [a0, a1, a2, a3, a4, a5];
+
+    // SAFETY: percpu() requires init_percpu_bsp to have been called.
+    // kernel_ptr was set during boot via set_kernel_ptr.
+    let (kernel, current_thread) = unsafe {
+        let pc = super::cpu::percpu();
+        let kernel = &mut *(pc.kernel_ptr as *mut crate::syscall::Kernel);
+        let current = crate::types::ThreadId(pc.current_thread);
+        (kernel, current)
+    };
+
+    kernel.dispatch(current_thread, syscall_num, &args)
+}
+
+// ---------------------------------------------------------------------------
 // EL0 sync handler — syscalls and userspace faults
 // ---------------------------------------------------------------------------
 
