@@ -27,12 +27,10 @@ pub fn handle_data_abort(
         Ok(id) => id,
         Err(_) => return FaultAction::Kill,
     };
-
     let mapping = match kernel.spaces.get(space_id.0) {
         Some(space) => space.find_mapping(fault_addr).cloned(),
         None => return FaultAction::Kill,
     };
-
     let mapping = match mapping {
         Some(m) => m,
         None => return FaultAction::Kill,
@@ -46,7 +44,6 @@ pub fn handle_data_abort(
         Some(v) => v,
         None => return FaultAction::Kill,
     };
-
     let page_idx = (fault_addr - mapping.va_start) / crate::config::PAGE_SIZE;
 
     if vmo.is_sealed() && is_write {
@@ -61,6 +58,7 @@ pub fn handle_data_abort(
             let asid = crate::frame::arch::page_table::Asid(space.asid());
             let page_addr = vmo.page_at(page_idx).unwrap();
             let old_pa = crate::frame::arch::page_alloc::PhysAddr(page_addr);
+
             if !crate::frame::fault_resolve::resolve_cow(root, asid, fault_addr, old_pa) {
                 return FaultAction::Kill;
             }
@@ -78,10 +76,12 @@ pub fn handle_data_abort(
             } else {
                 crate::frame::arch::page_table::Perms::RO
             };
+
             if !crate::frame::fault_resolve::resolve_lazy(root, fault_addr, perms) {
                 return FaultAction::Kill;
             }
         }
+
         return FaultAction::Resolved;
     }
 
@@ -111,7 +111,9 @@ mod tests {
     fn setup() -> Box<Kernel> {
         let mut k = Box::new(Kernel::new(1));
         let space = AddressSpace::new(AddressSpaceId(0), 1, 0);
+
         k.spaces.alloc(space);
+
         let thread = Thread::new(
             ThreadId(0),
             Some(AddressSpaceId(0)),
@@ -120,7 +122,9 @@ mod tests {
             0,
             0,
         );
+
         k.threads.alloc(thread);
+
         k
     }
 
@@ -128,6 +132,7 @@ mod tests {
     fn unmapped_address_kills() {
         let mut k = setup();
         let action = handle_data_abort(&mut k, ThreadId(0), 0xDEAD_0000, false);
+
         assert_eq!(action, FaultAction::Kill);
     }
 
@@ -136,13 +141,12 @@ mod tests {
         let mut k = setup();
         let vmo = Vmo::new(VmoId(0), config::PAGE_SIZE, VmoFlags::NONE);
         let idx = k.vmos.alloc(vmo).unwrap();
-
         let space = k.spaces.get_mut(0).unwrap();
         let va = space
             .map_vmo(VmoId(idx), config::PAGE_SIZE, Rights::READ, 0)
             .unwrap();
-
         let action = handle_data_abort(&mut k, ThreadId(0), va, true);
+
         assert_eq!(action, FaultAction::Kill);
     }
 
@@ -151,12 +155,11 @@ mod tests {
         let mut k = setup();
         let vmo = Vmo::new(VmoId(0), config::PAGE_SIZE, VmoFlags::NONE);
         let idx = k.vmos.alloc(vmo).unwrap();
-
         let rw = Rights(Rights::READ.0 | Rights::WRITE.0);
         let space = k.spaces.get_mut(0).unwrap();
         let va = space.map_vmo(VmoId(idx), config::PAGE_SIZE, rw, 0).unwrap();
-
         let action = handle_data_abort(&mut k, ThreadId(0), va, true);
+
         assert_eq!(action, FaultAction::Resolved);
     }
 
@@ -164,6 +167,7 @@ mod tests {
     fn invalid_thread_kills() {
         let mut k = setup();
         let action = handle_data_abort(&mut k, ThreadId(999), 0x1000, false);
+
         assert_eq!(action, FaultAction::Kill);
     }
 }

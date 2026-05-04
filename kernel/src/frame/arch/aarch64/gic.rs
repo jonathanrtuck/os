@@ -220,22 +220,27 @@ fn init_cpu_interface() {
 fn spi_reg_bit(intid: u32) -> (usize, u32) {
     let reg_offset = (intid / 32) as usize * 4;
     let bit = intid % 32;
+
     (reg_offset, bit)
 }
 
 /// Mask (disable) an SPI. Only valid for INTID >= 32.
 pub fn mask_spi(intid: u32) {
     debug_assert!(intid >= 32, "mask_spi: PPIs/SGIs not supported");
+
     let dist = DIST_BASE.load(Ordering::Relaxed);
     let (reg_off, bit) = spi_reg_bit(intid);
+
     mmio::write32(dist + GICD_ICENABLER + reg_off, 1 << bit);
 }
 
 /// Unmask (enable) an SPI. Only valid for INTID >= 32.
 pub fn unmask_spi(intid: u32) {
     debug_assert!(intid >= 32, "unmask_spi: PPIs/SGIs not supported");
+
     let dist = DIST_BASE.load(Ordering::Relaxed);
     let (reg_off, bit) = spi_reg_bit(intid);
+
     mmio::write32(dist + GICD_ISENABLER + reg_off, 1 << bit);
 }
 
@@ -266,6 +271,7 @@ mod tests {
     #[test]
     fn spi_reg_bit_intid_32() {
         let (reg_off, bit) = spi_reg_bit(32);
+
         assert_eq!(reg_off, 0x4);
         assert_eq!(bit, 0);
     }
@@ -273,6 +279,7 @@ mod tests {
     #[test]
     fn spi_reg_bit_intid_63() {
         let (reg_off, bit) = spi_reg_bit(63);
+
         assert_eq!(reg_off, 0x4);
         assert_eq!(bit, 31);
     }
@@ -280,6 +287,7 @@ mod tests {
     #[test]
     fn spi_reg_bit_intid_64() {
         let (reg_off, bit) = spi_reg_bit(64);
+
         assert_eq!(reg_off, 0x8);
         assert_eq!(bit, 0);
     }

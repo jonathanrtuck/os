@@ -6,11 +6,7 @@
 //! blocking condition is met, the waker calls `wake()` which marks the thread
 //! as Ready and enqueues it.
 
-use crate::{
-    syscall::Kernel,
-    thread::ThreadRunState,
-    types::ThreadId,
-};
+use crate::{syscall::Kernel, thread::ThreadRunState, types::ThreadId};
 
 /// Block the current thread and switch to the next runnable thread.
 ///
@@ -19,8 +15,8 @@ use crate::{
 /// back to.
 pub fn block_current(kernel: &mut Kernel, current: ThreadId, core_id: usize) {
     let thread = kernel.threads.get_mut(current.0).unwrap();
-    thread.set_state(ThreadRunState::Blocked);
 
+    thread.set_state(ThreadRunState::Blocked);
     switch_away(kernel, current, core_id);
 }
 
@@ -36,6 +32,7 @@ pub fn wake(kernel: &mut Kernel, thread_id: ThreadId, core_id: usize) {
     }
 
     let priority = thread.effective_priority();
+
     thread.set_state(ThreadRunState::Ready);
     kernel.scheduler.enqueue(core_id, thread_id, priority);
 }
@@ -45,6 +42,7 @@ pub fn wake(kernel: &mut Kernel, thread_id: ThreadId, core_id: usize) {
 pub fn yield_current(kernel: &mut Kernel, current: ThreadId, core_id: usize) {
     let thread = kernel.threads.get(current.0).unwrap();
     let priority = thread.effective_priority();
+
     kernel.scheduler.core_mut(core_id).rotate_current(priority);
 
     switch_away(kernel, current, core_id);
@@ -54,6 +52,7 @@ pub fn yield_current(kernel: &mut Kernel, current: ThreadId, core_id: usize) {
 /// on bare metal (context switches to a different thread).
 pub fn exit_current(kernel: &mut Kernel, current: ThreadId, core_id: usize, code: u32) {
     let thread = kernel.threads.get_mut(current.0).unwrap();
+
     thread.exit(code);
 
     switch_away(kernel, current, core_id);
@@ -69,8 +68,8 @@ fn switch_away(kernel: &mut Kernel, _current: ThreadId, core_id: usize) {
         Some(id) => id,
         None => return,
     };
-
     let next = kernel.threads.get_mut(next_id.0).unwrap();
+
     next.set_state(ThreadRunState::Running);
 
     #[cfg(target_os = "none")]
@@ -95,7 +94,6 @@ fn do_context_switch(kernel: &mut Kernel, old_id: ThreadId, new_id: ThreadId) {
         .threads
         .get_pair_mut(old_id.0, new_id.0)
         .expect("context switch: both threads must exist");
-
     let old_rs = old_thread.init_register_state();
     let new_rs = new_thread
         .register_state()
@@ -118,7 +116,9 @@ mod tests {
     fn setup() -> Box<Kernel> {
         let mut k = Box::new(Kernel::new(1));
         let space = AddressSpace::new(AddressSpaceId(0), 1, 0);
+
         k.spaces.alloc(space);
+
         k
     }
 
@@ -132,11 +132,13 @@ mod tests {
             0,
         );
         let idx = k.threads.alloc(thread).unwrap();
+
         k.threads.get_mut(idx).unwrap().id = ThreadId(idx);
         k.threads
             .get_mut(idx)
             .unwrap()
             .set_state(ThreadRunState::Running);
+
         ThreadId(idx)
     }
 
@@ -145,9 +147,11 @@ mod tests {
         let mut k = setup();
         let tid = add_thread(&mut k, Priority::Medium);
         let t2 = add_thread(&mut k, Priority::Medium);
+
         k.scheduler.enqueue(0, t2, Priority::Medium);
 
         block_current(&mut k, tid, 0);
+
         assert_eq!(
             k.threads.get(tid.0).unwrap().state(),
             ThreadRunState::Blocked
@@ -158,12 +162,14 @@ mod tests {
     fn wake_marks_thread_ready_and_enqueues() {
         let mut k = setup();
         let tid = add_thread(&mut k, Priority::Medium);
+
         k.threads
             .get_mut(tid.0)
             .unwrap()
             .set_state(ThreadRunState::Blocked);
 
         wake(&mut k, tid, 0);
+
         assert_eq!(k.threads.get(tid.0).unwrap().state(), ThreadRunState::Ready);
         assert_eq!(k.scheduler.core(0).total_ready(), 1);
     }
@@ -171,6 +177,7 @@ mod tests {
     #[test]
     fn wake_nonexistent_thread_is_noop() {
         let mut k = setup();
+
         wake(&mut k, ThreadId(999), 0);
     }
 
@@ -178,7 +185,9 @@ mod tests {
     fn wake_non_blocked_thread_is_noop() {
         let mut k = setup();
         let tid = add_thread(&mut k, Priority::Medium);
+
         wake(&mut k, tid, 0);
+
         assert_eq!(k.scheduler.core(0).total_ready(), 0);
     }
 
@@ -188,7 +197,9 @@ mod tests {
         let tid = add_thread(&mut k, Priority::Medium);
 
         exit_current(&mut k, tid, 0, 42);
+
         let thread = k.threads.get(tid.0).unwrap();
+
         assert_eq!(thread.state(), ThreadRunState::Exited);
         assert_eq!(thread.exit_code(), Some(42));
     }
@@ -198,15 +209,18 @@ mod tests {
         let mut k = setup();
         let t1 = add_thread(&mut k, Priority::Medium);
         let t2 = add_thread(&mut k, Priority::Medium);
+
         k.scheduler.enqueue(0, t2, Priority::Medium);
 
         block_current(&mut k, t1, 0);
+
         assert_eq!(
             k.threads.get(t1.0).unwrap().state(),
             ThreadRunState::Blocked
         );
 
         wake(&mut k, t1, 0);
+
         assert_eq!(k.threads.get(t1.0).unwrap().state(), ThreadRunState::Ready);
     }
 }

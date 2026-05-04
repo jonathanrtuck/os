@@ -41,9 +41,11 @@ pub struct VaAllocator {
 impl VaAllocator {
     pub fn new(base: usize, size: usize) -> Self {
         let mut free_list = Vec::new();
+
         if size > 0 {
             free_list.push((base, size));
         }
+
         VaAllocator { free_list }
     }
 
@@ -51,27 +53,32 @@ impl VaAllocator {
     /// Size is page-aligned internally.
     pub fn allocate(&mut self, size: usize, hint: usize) -> Result<usize, SyscallError> {
         let aligned = size.next_multiple_of(config::PAGE_SIZE);
+
         if aligned == 0 {
             return Err(SyscallError::InvalidArgument);
         }
         if hint != 0 {
             return self.allocate_fixed(hint, aligned);
         }
+
         self.allocate_first_fit(aligned)
     }
 
     fn allocate_first_fit(&mut self, size: usize) -> Result<usize, SyscallError> {
         for i in 0..self.free_list.len() {
             let (start, len) = self.free_list[i];
+
             if len >= size {
                 if len == size {
                     self.free_list.remove(i);
                 } else {
                     self.free_list[i] = (start + size, len - size);
                 }
+
                 return Ok(start);
             }
         }
+
         Err(SyscallError::OutOfMemory)
     }
 
@@ -86,37 +93,43 @@ impl VaAllocator {
         for i in 0..self.free_list.len() {
             let (start, len) = self.free_list[i];
             let region_end = start + len;
+
             if addr >= start && end <= region_end {
                 self.free_list.remove(i);
+
                 if end < region_end {
                     self.insert_sorted(end, region_end - end);
                 }
                 if addr > start {
                     self.insert_sorted(start, addr - start);
                 }
+
                 return Ok(addr);
             }
         }
+
         Err(SyscallError::InvalidArgument)
     }
 
     /// Free a VA range, coalescing with adjacent free regions.
     pub fn free(&mut self, addr: usize, size: usize) {
         let pos = self.free_list.partition_point(|&(s, _)| s < addr);
+
         self.free_list.insert(pos, (addr, size));
 
         if pos + 1 < self.free_list.len() {
             let (cur_start, cur_len) = self.free_list[pos];
             let (next_start, next_len) = self.free_list[pos + 1];
+
             if cur_start + cur_len == next_start {
                 self.free_list[pos] = (cur_start, cur_len + next_len);
                 self.free_list.remove(pos + 1);
             }
         }
-
         if pos > 0 {
             let (prev_start, prev_len) = self.free_list[pos - 1];
             let (cur_start, cur_len) = self.free_list[pos];
+
             if prev_start + prev_len == cur_start {
                 self.free_list[pos - 1] = (prev_start, prev_len + cur_len);
                 self.free_list.remove(pos);
@@ -126,6 +139,7 @@ impl VaAllocator {
 
     fn insert_sorted(&mut self, start: usize, len: usize) {
         let pos = self.free_list.partition_point(|&(s, _)| s < start);
+
         self.free_list.insert(pos, (start, len));
     }
 
@@ -214,17 +228,22 @@ impl AddressSpace {
         if self.mappings.len() >= config::MAX_MAPPINGS {
             return Err(SyscallError::OutOfMemory);
         }
+
         let aligned_size = size.next_multiple_of(config::PAGE_SIZE);
+
         if aligned_size == 0 {
             return Err(SyscallError::InvalidArgument);
         }
+
         let va = self.va_allocator.allocate(aligned_size, addr_hint)?;
+
         self.mappings.push(MappingRecord {
             vmo_id,
             va_start: va,
             size: aligned_size,
             rights,
         });
+
         Ok(va)
     }
 
@@ -236,7 +255,9 @@ impl AddressSpace {
             .position(|m| m.va_start == addr)
             .ok_or(SyscallError::NotFound)?;
         let record = self.mappings.swap_remove(pos);
+
         self.va_allocator.free(record.va_start, record.size);
+
         Ok(record)
     }
 
@@ -257,6 +278,7 @@ impl AddressSpace {
     /// and trigger peer-closed events.
     pub fn destroy(self, callback: &mut dyn DestroyCallback) -> (Vec<MappingRecord>, HandleTable) {
         callback.kill_threads_in_space(self.id);
+
         (self.mappings, self.handles)
     }
 }
@@ -280,6 +302,7 @@ mod tests {
     #[test]
     fn create_and_inspect() {
         let space = make_space(0);
+
         assert_eq!(space.id, AddressSpaceId(0));
         assert_eq!(space.asid(), 1);
         assert_eq!(space.page_table_root(), 0xDEAD_0000);
@@ -293,9 +316,12 @@ mod tests {
         let va = space
             .map_vmo(VmoId(0), config::PAGE_SIZE, Rights::READ, 0)
             .unwrap();
+
         assert_eq!(va, USER_VA_BASE);
         assert_eq!(space.mapping_count(), 1);
+
         let m = &space.mappings()[0];
+
         assert_eq!(m.vmo_id, VmoId(0));
         assert_eq!(m.rights, Rights::READ);
     }
@@ -307,12 +333,14 @@ mod tests {
         let va = space
             .map_vmo(VmoId(0), config::PAGE_SIZE, Rights::READ, hint)
             .unwrap();
+
         assert_eq!(va, hint);
     }
 
     #[test]
     fn map_vmo_hint_unaligned() {
         let mut space = make_space(0);
+
         assert_eq!(
             space.map_vmo(VmoId(0), config::PAGE_SIZE, Rights::READ, 0x1234),
             Err(SyscallError::InvalidArgument)
@@ -322,6 +350,7 @@ mod tests {
     #[test]
     fn map_vmo_zero_size() {
         let mut space = make_space(0);
+
         assert_eq!(
             space.map_vmo(VmoId(0), 0, Rights::READ, 0),
             Err(SyscallError::InvalidArgument)
@@ -335,18 +364,21 @@ mod tests {
             .map_vmo(VmoId(0), config::PAGE_SIZE, Rights::READ, 0)
             .unwrap();
         let record = space.unmap(va).unwrap();
+
         assert_eq!(record.vmo_id, VmoId(0));
         assert_eq!(space.mapping_count(), 0);
 
         let va2 = space
             .map_vmo(VmoId(1), config::PAGE_SIZE, Rights::READ, 0)
             .unwrap();
+
         assert_eq!(va2, va);
     }
 
     #[test]
     fn unmap_nonexistent() {
         let mut space = make_space(0);
+
         assert_eq!(space.unmap(0x1_0000), Err(SyscallError::NotFound));
     }
 
@@ -373,12 +405,14 @@ mod tests {
             .allocate(ObjectType::Vmo, 42, Rights::READ, 0)
             .unwrap();
         let h = space.handles().lookup(hid).unwrap();
+
         assert_eq!(h.object_id, 42);
     }
 
     #[test]
     fn destroy_returns_mappings_and_handles() {
         let mut space = make_space(0);
+
         space
             .map_vmo(VmoId(0), config::PAGE_SIZE, Rights::READ, 0)
             .unwrap();
@@ -392,6 +426,7 @@ mod tests {
 
         let mut cb = NoopCallback;
         let (mappings, handles) = space.destroy(&mut cb);
+
         assert_eq!(mappings.len(), 2);
         assert_eq!(handles.count(), 1);
     }
@@ -399,40 +434,53 @@ mod tests {
     #[test]
     fn destroy_invokes_callback() {
         let space = make_space(7);
+
         struct Recorder(Option<AddressSpaceId>);
+
         impl DestroyCallback for Recorder {
             fn kill_threads_in_space(&mut self, id: AddressSpaceId) {
                 self.0 = Some(id);
             }
         }
+
         let mut cb = Recorder(None);
+
         space.destroy(&mut cb);
+
         assert_eq!(cb.0, Some(AddressSpaceId(7)));
     }
 
     #[test]
     fn generation_revoke() {
         let mut space = make_space(0);
+
         assert_eq!(space.generation(), 0);
+
         space.revoke();
+
         assert_eq!(space.generation(), 1);
     }
 
     #[test]
     fn mapping_limit_exhaustion() {
         let mut space = make_space(0);
+
         for i in 0..config::MAX_MAPPINGS {
             space
                 .map_vmo(VmoId(i as u32), config::PAGE_SIZE, Rights::READ, 0)
                 .unwrap();
         }
+
         assert_eq!(
             space.map_vmo(VmoId(999), config::PAGE_SIZE, Rights::READ, 0),
             Err(SyscallError::OutOfMemory)
         );
+
         // Free one, remap
         let va = space.mappings()[0].va_start;
+
         space.unmap(va).unwrap();
+
         assert!(
             space
                 .map_vmo(VmoId(999), config::PAGE_SIZE, Rights::READ, 0)
@@ -447,6 +495,7 @@ mod tests {
         let mut va = VaAllocator::new(0x1_0000, 0x10_0000);
         let a = va.allocate(0x4000, 0).unwrap();
         let b = va.allocate(0x4000, 0).unwrap();
+
         assert_eq!(a, 0x1_0000);
         assert_eq!(b, 0x1_4000);
     }
@@ -455,9 +504,12 @@ mod tests {
     fn va_hint_reserves_exact() {
         let mut va = VaAllocator::new(0x1_0000, 0x10_0000);
         let a = va.allocate(0x4000, 0x5_0000).unwrap();
+
         assert_eq!(a, 0x5_0000);
+
         // Region before and after the hint should still be free
         let b = va.allocate(0x4000, 0).unwrap();
+
         assert_eq!(b, 0x1_0000);
     }
 
@@ -472,6 +524,7 @@ mod tests {
         va.free(a, 0x4_0000);
 
         let regions = va.free_regions();
+
         assert_eq!(regions.len(), 1);
         assert_eq!(regions[0], (0x1_0000, 0x8_0000));
     }
@@ -482,6 +535,7 @@ mod tests {
         let a = va.allocate(0x4_0000, 0).unwrap();
         let b = va.allocate(0x4_0000, 0).unwrap();
         let c = va.allocate(0x4_0000, 0).unwrap();
+
         assert!(va.allocate(0x4_0000, 0).is_err());
 
         va.free(a, 0x4_0000);
@@ -489,6 +543,7 @@ mod tests {
         va.free(b, 0x4_0000); // bridges a and c
 
         let regions = va.free_regions();
+
         assert_eq!(regions.len(), 1);
         assert_eq!(regions[0], (0x1_0000, 0xC_0000));
     }
@@ -496,13 +551,16 @@ mod tests {
     #[test]
     fn va_exhaustion() {
         let mut va = VaAllocator::new(0x1_0000, 0x4_0000);
+
         va.allocate(0x4_0000, 0).unwrap();
+
         assert_eq!(va.allocate(0x4_0000, 0), Err(SyscallError::OutOfMemory));
     }
 
     #[test]
     fn va_hint_out_of_range() {
         let mut va = VaAllocator::new(0x1_0000, 0x4_0000);
+
         assert_eq!(
             va.allocate(0x4_0000, 0x10_0000),
             Err(SyscallError::InvalidArgument)
@@ -512,7 +570,9 @@ mod tests {
     #[test]
     fn va_hint_overlaps_allocated() {
         let mut va = VaAllocator::new(0x1_0000, 0x10_0000);
+
         va.allocate(0x4_0000, 0x1_0000).unwrap();
+
         assert_eq!(
             va.allocate(0x4_0000, 0x1_0000),
             Err(SyscallError::InvalidArgument)

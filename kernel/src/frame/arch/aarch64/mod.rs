@@ -97,6 +97,7 @@ pub fn isb() {
 pub fn svc_null() -> (u64, u64) {
     let error: u64;
     let value: u64;
+
     // SAFETY: SVC #0 traps to EL1 via the installed exception vector.
     // x8=255 is an invalid syscall number, so the handler returns
     // immediately with an error. No memory side effects.
@@ -110,6 +111,7 @@ pub fn svc_null() -> (u64, u64) {
             options(nostack),
         );
     }
+
     (error, value)
 }
 

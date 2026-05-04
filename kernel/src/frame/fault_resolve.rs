@@ -22,6 +22,7 @@ pub fn resolve_cow(
         Some(pa) => pa,
         None => return false,
     };
+
     // SAFETY: both old_pa and new_pa are valid physical addresses from the
     // page allocator. Identity-mapped, so PA == VA for kernel access.
     unsafe {
@@ -31,6 +32,7 @@ pub fn resolve_cow(
             crate::config::PAGE_SIZE,
         );
     }
+
     page_table::map_page(
         root,
         page_table::VirtAddr(vaddr),
@@ -39,6 +41,7 @@ pub fn resolve_cow(
     );
     page_table::invalidate_page(asid, page_table::VirtAddr(vaddr));
     page_alloc::release(old_pa);
+
     true
 }
 
@@ -49,7 +52,9 @@ pub fn resolve_lazy(root: page_alloc::PhysAddr, vaddr: usize, perms: page_table:
         Some(pa) => pa,
         None => return false,
     };
+
     user_mem::zero_phys(pa.0, crate::config::PAGE_SIZE);
     page_table::map_page(root, page_table::VirtAddr(vaddr), pa, perms);
+
     true
 }

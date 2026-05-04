@@ -59,9 +59,11 @@ impl HandleTable {
                     badge,
                 });
                 self.count += 1;
+
                 return Ok(HandleId(i as u32));
             }
         }
+
         Err(SyscallError::OutOfMemory)
     }
 
@@ -73,8 +75,10 @@ impl HandleTable {
         if self.entries[index].is_some() {
             return Err(SyscallError::InvalidArgument);
         }
+
         self.entries[index] = Some(handle);
         self.count += 1;
+
         Ok(HandleId(index as u32))
     }
 
@@ -82,9 +86,11 @@ impl HandleTable {
     /// against the object's current generation).
     pub fn lookup(&self, id: HandleId) -> Result<&Handle, SyscallError> {
         let idx = id.as_usize();
+
         if idx >= config::MAX_HANDLES {
             return Err(SyscallError::InvalidHandle);
         }
+
         self.entries[idx]
             .as_ref()
             .ok_or(SyscallError::InvalidHandle)
@@ -98,9 +104,11 @@ impl HandleTable {
         new_rights: Rights,
     ) -> Result<HandleId, SyscallError> {
         let original = self.lookup(id)?.clone();
+
         if !new_rights.is_subset_of(original.rights) {
             return Err(SyscallError::InsufficientRights);
         }
+
         self.allocate_with_badge(
             original.object_type,
             original.object_id,
@@ -113,9 +121,11 @@ impl HandleTable {
     /// Close a handle, freeing the slot.
     pub fn close(&mut self, id: HandleId) -> Result<Handle, SyscallError> {
         let idx = id.as_usize();
+
         if idx >= config::MAX_HANDLES {
             return Err(SyscallError::InvalidHandle);
         }
+
         self.entries[idx]
             .take()
             .ok_or(SyscallError::InvalidHandle)
@@ -127,6 +137,7 @@ impl HandleTable {
     /// Get handle info (type, rights) without cloning the full handle.
     pub fn info(&self, id: HandleId) -> Result<(ObjectType, Rights), SyscallError> {
         let h = self.lookup(id)?;
+
         Ok((h.object_type, h.rights))
     }
 
@@ -164,6 +175,7 @@ mod tests {
         let mut t = make_table();
         let id = t.allocate(ObjectType::Vmo, 42, Rights::ALL, 0).unwrap();
         let h = t.lookup(id).unwrap();
+
         assert_eq!(h.object_type, ObjectType::Vmo);
         assert_eq!(h.object_id, 42);
     }
@@ -172,8 +184,11 @@ mod tests {
     fn close_frees_slot() {
         let mut t = make_table();
         let id = t.allocate(ObjectType::Vmo, 0, Rights::ALL, 0).unwrap();
+
         assert_eq!(t.count(), 1);
+
         t.close(id).unwrap();
+
         assert_eq!(t.count(), 0);
         assert_eq!(t.lookup(id), Err(SyscallError::InvalidHandle));
     }
@@ -185,6 +200,7 @@ mod tests {
         let id = t.allocate(ObjectType::Vmo, 0, rw, 0).unwrap();
         let dup = t.duplicate(id, Rights::READ).unwrap();
         let h = t.lookup(dup).unwrap();
+
         assert!(h.rights.contains(Rights::READ));
         assert!(!h.rights.contains(Rights::WRITE));
     }
@@ -194,28 +210,34 @@ mod tests {
         let mut t = make_table();
         let id = t.allocate(ObjectType::Vmo, 0, Rights::READ, 0).unwrap();
         let rw = Rights(Rights::READ.0 | Rights::WRITE.0);
+
         assert_eq!(t.duplicate(id, rw), Err(SyscallError::InsufficientRights));
     }
 
     #[test]
     fn exhaustion() {
         let mut t = make_table();
+
         for i in 0..config::MAX_HANDLES {
             t.allocate(ObjectType::Vmo, i as u32, Rights::ALL, 0)
                 .unwrap();
         }
+
         assert_eq!(
             t.allocate(ObjectType::Vmo, 0, Rights::ALL, 0),
             Err(SyscallError::OutOfMemory),
         );
+
         // Free one, reallocate.
         t.close(HandleId(0)).unwrap();
+
         assert!(t.allocate(ObjectType::Vmo, 0, Rights::ALL, 0).is_ok());
     }
 
     #[test]
     fn invalid_handle_id() {
         let t = make_table();
+
         assert_eq!(t.lookup(HandleId(999)), Err(SyscallError::InvalidHandle));
     }
 
@@ -224,11 +246,14 @@ mod tests {
         let mut t = make_table();
         let id = t.allocate(ObjectType::Event, 7, Rights::SIGNAL, 0).unwrap();
         let handle = t.remove(id).unwrap();
+
         assert_eq!(handle.object_type, ObjectType::Event);
         assert_eq!(handle.object_id, 7);
         assert_eq!(t.lookup(id), Err(SyscallError::InvalidHandle));
+
         let new_id = t.install(handle).unwrap();
         let h = t.lookup(new_id).unwrap();
+
         assert_eq!(h.object_type, ObjectType::Event);
     }
 
@@ -237,6 +262,7 @@ mod tests {
         let mut t = make_table();
         let id = t.allocate(ObjectType::Thread, 3, Rights::READ, 5).unwrap();
         let (typ, rights) = t.info(id).unwrap();
+
         assert_eq!(typ, ObjectType::Thread);
         assert_eq!(rights, Rights::READ);
     }

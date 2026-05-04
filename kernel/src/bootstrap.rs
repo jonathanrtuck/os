@@ -30,6 +30,7 @@ pub fn create_init(kernel: &mut Kernel, init_binary: &[u8]) -> Result<ThreadId, 
         .spaces
         .alloc(space)
         .ok_or(SyscallError::OutOfMemory)?;
+
     kernel.spaces.get_mut(space_idx).unwrap().id = AddressSpaceId(space_idx);
 
     let code_size = init_binary.len().next_multiple_of(config::PAGE_SIZE);
@@ -38,6 +39,7 @@ pub fn create_init(kernel: &mut Kernel, init_binary: &[u8]) -> Result<ThreadId, 
         .vmos
         .alloc(code_vmo)
         .ok_or(SyscallError::OutOfMemory)?;
+
     kernel.vmos.get_mut(code_idx).unwrap().id = VmoId(code_idx);
 
     let stack_vmo = Vmo::new(VmoId(0), INIT_STACK_SIZE, VmoFlags::NONE);
@@ -45,19 +47,17 @@ pub fn create_init(kernel: &mut Kernel, init_binary: &[u8]) -> Result<ThreadId, 
         .vmos
         .alloc(stack_vmo)
         .ok_or(SyscallError::OutOfMemory)?;
+
     kernel.vmos.get_mut(stack_idx).unwrap().id = VmoId(stack_idx);
 
     let rx = Rights(Rights::READ.0 | Rights::EXECUTE.0);
     let rw = Rights(Rights::READ.0 | Rights::WRITE.0);
-
     let space = kernel
         .spaces
         .get_mut(space_idx)
         .ok_or(SyscallError::InvalidArgument)?;
-
     let code_va = space.map_vmo(VmoId(code_idx), code_size, rx, INIT_CODE_VA)?;
     let stack_va = space.map_vmo(VmoId(stack_idx), INIT_STACK_SIZE, rw, INIT_STACK_VA)?;
-
     let space_gen = kernel
         .spaces
         .get(space_idx)
@@ -68,7 +68,6 @@ pub fn create_init(kernel: &mut Kernel, init_binary: &[u8]) -> Result<ThreadId, 
         .get(code_idx)
         .ok_or(SyscallError::InvalidArgument)?
         .generation();
-
     let space = kernel
         .spaces
         .get_mut(space_idx)
@@ -93,13 +92,16 @@ pub fn create_init(kernel: &mut Kernel, init_binary: &[u8]) -> Result<ThreadId, 
             .spaces
             .get_mut(space_idx)
             .ok_or(SyscallError::InvalidArgument)?;
+
         space.set_page_table(root.0, asid.0);
 
         for offset in (0..code_size).step_by(config::PAGE_SIZE) {
             let pa = page_alloc::alloc_page().ok_or(SyscallError::OutOfMemory)?;
             let chunk_end = (offset + config::PAGE_SIZE).min(init_binary.len());
+
             if offset < init_binary.len() {
                 user_mem::write_phys(pa.0, 0, &init_binary[offset..chunk_end]);
+
                 if chunk_end - offset < config::PAGE_SIZE {
                     user_mem::zero_phys(
                         pa.0 + (chunk_end - offset),
@@ -109,6 +111,7 @@ pub fn create_init(kernel: &mut Kernel, init_binary: &[u8]) -> Result<ThreadId, 
             } else {
                 user_mem::zero_phys(pa.0, config::PAGE_SIZE);
             }
+
             page_table::map_page(
                 root,
                 page_table::VirtAddr(INIT_CODE_VA + offset),
@@ -119,6 +122,7 @@ pub fn create_init(kernel: &mut Kernel, init_binary: &[u8]) -> Result<ThreadId, 
 
         for offset in (0..INIT_STACK_SIZE).step_by(config::PAGE_SIZE) {
             let pa = page_alloc::alloc_page().ok_or(SyscallError::OutOfMemory)?;
+
             user_mem::zero_phys(pa.0, config::PAGE_SIZE);
             page_table::map_page(
                 root,
@@ -142,9 +146,11 @@ pub fn create_init(kernel: &mut Kernel, init_binary: &[u8]) -> Result<ThreadId, 
         .threads
         .alloc(thread)
         .ok_or(SyscallError::OutOfMemory)?;
+
     kernel.threads.get_mut(thread_idx).unwrap().id = ThreadId(thread_idx);
 
     let core = kernel.scheduler.least_loaded_core();
+
     kernel
         .scheduler
         .enqueue(core, ThreadId(thread_idx), Priority::Medium);
@@ -171,15 +177,20 @@ mod tests {
         let mut k = setup_kernel();
         let tid = create_init(&mut k, fake_init_binary()).unwrap();
         let thread = k.threads.get(tid.0).unwrap();
+
         assert!(thread.address_space().is_some());
+
         let space_id = thread.address_space().unwrap();
+
         assert!(k.spaces.get(space_id.0).is_some());
     }
 
     #[test]
     fn bootstrap_creates_code_and_stack_vmos() {
         let mut k = setup_kernel();
+
         create_init(&mut k, fake_init_binary()).unwrap();
+
         assert_eq!(k.vmos.count(), 2);
     }
 
@@ -188,6 +199,7 @@ mod tests {
         let mut k = setup_kernel();
         let tid = create_init(&mut k, fake_init_binary()).unwrap();
         let thread = k.threads.get(tid.0).unwrap();
+
         assert_eq!(thread.entry_point(), INIT_CODE_VA);
     }
 
@@ -196,6 +208,7 @@ mod tests {
         let mut k = setup_kernel();
         let tid = create_init(&mut k, fake_init_binary()).unwrap();
         let thread = k.threads.get(tid.0).unwrap();
+
         assert_eq!(thread.stack_top(), INIT_STACK_VA + INIT_STACK_SIZE);
     }
 
@@ -205,27 +218,34 @@ mod tests {
         let tid = create_init(&mut k, fake_init_binary()).unwrap();
         let space_id = k.threads.get(tid.0).unwrap().address_space().unwrap();
         let space = k.spaces.get(space_id.0).unwrap();
+
         assert!(space.handles().count() >= 2);
     }
 
     #[test]
     fn bootstrap_enqueues_thread() {
         let mut k = setup_kernel();
+
         create_init(&mut k, fake_init_binary()).unwrap();
+
         assert_eq!(k.scheduler.core(0).total_ready(), 1);
     }
 
     #[test]
     fn bootstrap_rejects_empty_binary() {
         let mut k = setup_kernel();
+
         assert_eq!(create_init(&mut k, &[]), Err(SyscallError::InvalidArgument));
     }
 
     #[test]
     fn bootstrap_code_size_page_aligned() {
         let mut k = setup_kernel();
+
         create_init(&mut k, &[0u8; 100]).unwrap();
+
         let code_vmo = k.vmos.get(0).unwrap();
+
         assert!(code_vmo.size().is_multiple_of(config::PAGE_SIZE));
     }
 }

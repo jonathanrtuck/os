@@ -274,6 +274,7 @@ pub fn tlbi_vae1is(asid_va: u64) {
 #[inline(always)]
 pub fn tlbi_aside1is(asid: u64) {
     let val = asid << 48;
+
     // SAFETY: TLBI invalidates all TLB entries for the given ASID.
     unsafe {
         core::arch::asm!("tlbi aside1is, {val}", val = in(reg) val, options(nostack));

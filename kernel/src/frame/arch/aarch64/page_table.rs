@@ -97,12 +97,14 @@ pub fn alloc_asid() -> Option<Asid> {
             return Some(Asid((i + 1) as u8)); // ASID 0 is reserved for kernel
         }
     }
+
     None
 }
 
 /// Release an ASID back to the pool.
 pub fn free_asid(asid: Asid) {
     let idx = asid.0 as usize - 1;
+
     ASID_MAP[idx].store(0, Ordering::Release);
 }
 
@@ -123,6 +125,7 @@ pub fn create_page_table() -> Option<(PhysAddr, Asid)> {
     // SAFETY: We just allocated this page; no other reference exists.
     unsafe {
         let ptr = root.as_usize() as *mut u8;
+
         core::ptr::write_bytes(ptr, 0, PAGE_SIZE);
     }
 
@@ -136,10 +139,13 @@ pub fn destroy_page_table(root: PhysAddr, asid: Asid) {
     // SAFETY: root is a valid page table root we own.
     unsafe {
         let l2 = root.as_usize() as *const u64;
+
         for i in 0..ENTRIES_PER_TABLE {
             let entry = core::ptr::read_volatile(l2.add(i));
+
             if entry & VALID != 0 && entry & TABLE != 0 {
                 let l3_pa = PhysAddr((entry & PA_MASK) as usize);
+
                 page_alloc::release(l3_pa);
             }
         }
@@ -149,7 +155,6 @@ pub fn destroy_page_table(root: PhysAddr, asid: Asid) {
     sysreg::tlbi_aside1is(asid.0 as u64);
     sysreg::dsb_ish();
     sysreg::isb();
-
     page_alloc::release(root);
     free_asid(asid);
 }
@@ -173,14 +178,19 @@ pub fn map_page(root: PhysAddr, vaddr: VirtAddr, paddr: PhysAddr, perms: Perms) 
             (l2_entry & PA_MASK) as usize
         } else {
             let new_l3 = page_alloc::alloc_page().expect("OOM: page table page");
+
             core::ptr::write_bytes(new_l3.as_usize() as *mut u8, 0, PAGE_SIZE);
+
             let desc = (new_l3.as_usize() as u64) | TABLE | VALID;
+
             core::ptr::write_volatile(l2.add(l2_idx), desc);
+
             new_l3.as_usize()
         };
 
         // Build L3 page descriptor.
         let mut attrs = ATTR_NORMAL | SH_ISH | AF | PAGE | VALID;
+
         if perms.write {
             attrs |= AP_RW_ALL;
         } else {
@@ -189,10 +199,12 @@ pub fn map_page(root: PhysAddr, vaddr: VirtAddr, paddr: PhysAddr, perms: Perms) 
         if !perms.execute {
             attrs |= UXN;
         }
+
         attrs |= PXN; // User pages are never kernel-executable.
 
         let desc = (paddr.as_usize() as u64) | attrs;
         let l3 = l3_pa as *mut u64;
+
         core::ptr::write_volatile(l3.add(l3_idx), desc);
     }
 }
@@ -221,6 +233,7 @@ pub fn unmap_page(root: PhysAddr, vaddr: VirtAddr) -> Option<PhysAddr> {
         }
 
         let paddr = PhysAddr((l3_entry & PA_MASK) as usize);
+
         core::ptr::write_volatile(l3.add(l3_idx), 0);
 
         Some(paddr)
@@ -253,6 +266,7 @@ pub fn set_cow(root: PhysAddr, vaddr: VirtAddr) {
         // Clear write, set read-only + COW marker.
         entry &= !AP_RW_ALL;
         entry |= AP_RO_ALL | SW_COW;
+
         core::ptr::write_volatile(l3.add(l3_idx), entry);
     }
 }
@@ -282,6 +296,7 @@ pub fn clear_write(root: PhysAddr, vaddr: VirtAddr) {
 
         entry &= !AP_RW_ALL;
         entry |= AP_RO_ALL;
+
         core::ptr::write_volatile(l3.add(l3_idx), entry);
     }
 }
@@ -290,6 +305,7 @@ pub fn clear_write(root: PhysAddr, vaddr: VirtAddr) {
 #[cfg(target_os = "none")]
 pub fn switch_table(root: PhysAddr, asid: Asid) {
     let val = (root.as_usize() as u64) | ((asid.0 as u64) << 48);
+
     sysreg::set_ttbr0_el1(val);
     sysreg::isb();
 }
@@ -299,6 +315,7 @@ pub fn switch_table(root: PhysAddr, asid: Asid) {
 pub fn invalidate_page(asid: Asid, vaddr: VirtAddr) {
     // TLBI VAE1IS format: ASID[63:48] | VA[43:12]
     let val = ((asid.0 as u64) << 48) | ((vaddr.0 as u64) >> 12);
+
     sysreg::tlbi_vae1is(val);
     sysreg::dsb_ish();
     sysreg::isb();
@@ -350,13 +367,17 @@ mod tests {
         }
 
         let a1 = alloc_asid().unwrap();
+
         assert_eq!(a1.0, 1);
 
         let a2 = alloc_asid().unwrap();
+
         assert_eq!(a2.0, 2);
 
         free_asid(a1);
+
         let a3 = alloc_asid().unwrap();
+
         assert_eq!(a3.0, 1); // Reuses slot 0.
     }
 
@@ -370,6 +391,7 @@ mod tests {
         for _ in 0..config::MAX_ADDRESS_SPACES {
             assert!(alloc_asid().is_some());
         }
+
         assert!(alloc_asid().is_none());
 
         // Cleanup.
@@ -385,6 +407,7 @@ mod tests {
             write: true,
             execute: true,
         };
+
         assert!(bad_perms.write && bad_perms.execute); // Would panic in map_page.
     }
 

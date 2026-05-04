@@ -25,15 +25,19 @@ pub fn read_user_message(ptr: usize, len: usize) -> Result<Message, SyscallError
     }
 
     let mut msg = Message::empty();
+
     // SAFETY: On host tests, ptr is a valid pointer to the caller's buffer in
     // the same address space. On bare metal, the kernel has verified the VA is
     // mapped in the current address space before reaching this point.
     unsafe {
         let src = ptr as *const u8;
         let dst = msg.data_mut().as_mut_ptr();
+
         core::ptr::copy_nonoverlapping(src, dst, len);
     }
+
     msg.set_len(len);
+
     Ok(msg)
 }
 
@@ -53,8 +57,10 @@ pub fn write_user_bytes(ptr: usize, data: &[u8]) -> Result<(), SyscallError> {
     // read_user_message). data.len() <= MSG_SIZE enforced by caller.
     unsafe {
         let dst = ptr as *mut u8;
+
         core::ptr::copy_nonoverlapping(data.as_ptr(), dst, data.len());
     }
+
     Ok(())
 }
 
@@ -66,11 +72,14 @@ pub fn read_user_u32s(ptr: usize, count: usize, buf: &mut [u32]) -> Result<(), S
     if ptr == 0 || count > buf.len() {
         return Err(SyscallError::InvalidArgument);
     }
+
     // SAFETY: same VA argument as read_user_message.
     unsafe {
         let src = ptr as *const u32;
+
         core::ptr::copy_nonoverlapping(src, buf.as_mut_ptr(), count);
     }
+
     Ok(())
 }
 
@@ -82,11 +91,14 @@ pub fn write_user_u32s(ptr: usize, data: &[u32]) -> Result<(), SyscallError> {
     if ptr == 0 {
         return Err(SyscallError::InvalidArgument);
     }
+
     // SAFETY: same VA argument as write_user_bytes.
     unsafe {
         let dst = ptr as *mut u32;
+
         core::ptr::copy_nonoverlapping(data.as_ptr(), dst, data.len());
     }
+
     Ok(())
 }
 
@@ -97,6 +109,7 @@ pub fn write_phys(pa: usize, offset: usize, data: &[u8]) {
     // With identity-mapped kernel memory, PA == VA for RAM pages.
     unsafe {
         let dst = (pa + offset) as *mut u8;
+
         core::ptr::copy_nonoverlapping(data.as_ptr(), dst, data.len());
     }
 }
@@ -107,6 +120,7 @@ pub fn zero_phys(pa: usize, len: usize) {
     // SAFETY: same identity-map argument as write_phys.
     unsafe {
         let dst = pa as *mut u8;
+
         core::ptr::write_bytes(dst, 0, len);
     }
 }
@@ -119,22 +133,27 @@ mod tests {
     fn read_write_roundtrip() {
         let src_data = b"hello kernel";
         let msg = read_user_message(src_data.as_ptr() as usize, src_data.len()).unwrap();
+
         assert_eq!(msg.as_bytes(), src_data);
 
         let mut out_buf = [0u8; MSG_SIZE];
+
         write_user_bytes(out_buf.as_mut_ptr() as usize, msg.as_bytes()).unwrap();
+
         assert_eq!(&out_buf[..src_data.len()], src_data);
     }
 
     #[test]
     fn read_empty_message() {
         let msg = read_user_message(0, 0).unwrap();
+
         assert_eq!(msg.as_bytes().len(), 0);
     }
 
     #[test]
     fn read_oversized_rejected() {
         let big = [0u8; MSG_SIZE + 1];
+
         assert_eq!(
             read_user_message(big.as_ptr() as usize, big.len()),
             Err(SyscallError::InvalidArgument)

@@ -15,6 +15,7 @@ use core::{
 #[inline(always)]
 fn daif_save_and_disable() -> u64 {
     let daif: u64;
+
     // SAFETY: MRS reads DAIF (no side effects). MSR DAIFSet disables IRQs.
     // Not nomem: MSR writes a system register.
     unsafe {
@@ -25,6 +26,7 @@ fn daif_save_and_disable() -> u64 {
             options(nostack),
         );
     }
+
     daif
 }
 
@@ -78,14 +80,17 @@ impl TicketLock {
     pub fn lock(&self) -> u64 {
         let daif = daif_save_and_disable();
         let ticket = self.next_ticket.fetch_add(1, Ordering::AcqRel);
+
         while self.now_serving.load(Ordering::Acquire) != ticket {
             core::hint::spin_loop();
         }
+
         daif
     }
 
     pub fn unlock(&self, daif: u64) {
         self.now_serving.fetch_add(1, Ordering::Release);
+
         daif_restore(daif);
     }
 }
@@ -111,6 +116,7 @@ impl<T> SpinLock<T> {
 
     pub fn lock(&self) -> SpinGuard<'_, T> {
         let daif = self.lock.lock();
+
         SpinGuard {
             lock: &self.lock,
             data: self.data.get(),
@@ -176,6 +182,7 @@ unsafe impl lock_api::RawMutex for RawTicketLock {
 
     fn lock(&self) {
         let daif = self.inner.lock();
+
         // SAFETY: We hold the lock, so no concurrent access to saved_daif.
         unsafe { *self.saved_daif.get() = daif };
     }
@@ -187,6 +194,7 @@ unsafe impl lock_api::RawMutex for RawTicketLock {
     unsafe fn unlock(&self) {
         // SAFETY: Caller guarantees the lock is held.
         let daif = unsafe { *self.saved_daif.get() };
+
         self.inner.unlock(daif);
     }
 }
@@ -204,19 +212,24 @@ mod tests {
     fn ticket_lock_basic() {
         let lock = TicketLock::new();
         let daif = lock.lock();
+
         lock.unlock(daif);
     }
 
     #[test]
     fn spinlock_guard_provides_mut() {
         let lock = SpinLock::new(42u64);
+
         {
             let mut guard = lock.lock();
+
             assert_eq!(*guard, 42);
+
             *guard = 99;
         }
         {
             let guard = lock.lock();
+
             assert_eq!(*guard, 99);
         }
     }
@@ -224,9 +237,11 @@ mod tests {
     #[test]
     fn spinlock_drop_releases() {
         let lock = SpinLock::new(0u32);
+
         {
             let _g = lock.lock();
         }
+
         // If drop didn't unlock, this would deadlock.
         let _g = lock.lock();
     }

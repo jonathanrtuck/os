@@ -56,6 +56,7 @@ pub fn info(handle: Handle) -> Result<HandleInfo, SyscallError> {
         4 => ObjectType::AddressSpace,
         _ => return Err(SyscallError::InvalidArgument),
     };
+
     Ok(HandleInfo {
         object_type,
         rights: Rights(rights_val),

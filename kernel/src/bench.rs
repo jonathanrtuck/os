@@ -20,10 +20,15 @@ impl BenchResult {
 
 fn measure<F: FnOnce()>(f: F) -> u64 {
     arch::isb();
+
     let start = arch::read_cycle_counter();
+
     f();
+
     arch::isb();
+
     let end = arch::read_cycle_counter();
+
     end - start
 }
 
@@ -33,9 +38,11 @@ fn bench_n<F: Fn()>(name: &'static str, iterations: usize, expected: u64, f: F) 
     }
 
     let mut total = 0u64;
+
     for _ in 0..iterations {
         total += measure(&f);
     }
+
     let avg = total / iterations as u64;
 
     BenchResult {
@@ -51,8 +58,8 @@ pub fn run() {
     let results = [bench_n("null syscall", 10000, 200, || {
         let _ = arch::svc_null();
     })];
-
     let mut all_pass = true;
+
     for r in &results {
         let status = if r.passed() {
             "PASS"
@@ -60,6 +67,7 @@ pub fn run() {
             all_pass = false;
             "FAIL"
         };
+
         crate::println!("  {:30} {:>6} cycles  [{}]", r.name, r.cycles, status);
     }
 

@@ -112,6 +112,7 @@ impl Event {
     /// bits, or None if no match (caller should block the thread).
     pub fn check(&self, mask: u64) -> Option<u64> {
         let fired = self.bits & mask;
+
         if fired != 0 { Some(fired) } else { None }
     }
 
@@ -119,16 +120,19 @@ impl Event {
     /// Returns the list of threads to wake with their fired bits (inline, no heap).
     pub fn signal(&mut self, bits: u64) -> WakeList {
         self.bits |= bits;
+
         let mut woken = WakeList::new();
 
         for slot in &mut self.waiters {
             if let Some(waiter) = slot {
                 let fired = self.bits & waiter.mask;
+
                 if fired != 0 {
                     woken.push(WakeInfo {
                         thread_id: waiter.thread_id,
                         fired_bits: fired,
                     });
+
                     *slot = None;
                     self.waiter_count -= 1;
                 }
@@ -149,9 +153,11 @@ impl Event {
             if slot.is_none() {
                 *slot = Some(Waiter { thread_id, mask });
                 self.waiter_count += 1;
+
                 return Ok(());
             }
         }
+
         Err(SyscallError::BufferFull)
     }
 
@@ -163,9 +169,11 @@ impl Event {
             {
                 *slot = None;
                 self.waiter_count -= 1;
+
                 return true;
             }
         }
+
         false
     }
 
@@ -174,7 +182,9 @@ impl Event {
         if self.bound_endpoint.is_some() {
             return Err(SyscallError::InvalidArgument);
         }
+
         self.bound_endpoint = Some(endpoint);
+
         Ok(())
     }
 
@@ -200,6 +210,7 @@ mod tests {
     #[test]
     fn new_event_has_no_bits() {
         let e = make_event(0);
+
         assert_eq!(e.bits(), 0);
         assert!(e.check(u64::MAX).is_none());
     }
@@ -207,7 +218,9 @@ mod tests {
     #[test]
     fn signal_before_wait_is_immediate() {
         let mut e = make_event(0);
+
         e.signal(0b101);
+
         assert_eq!(e.check(0b100), Some(0b100));
         assert!(e.check(0b010).is_none());
     }
@@ -215,9 +228,11 @@ mod tests {
     #[test]
     fn wait_then_signal_wakes() {
         let mut e = make_event(0);
+
         e.add_waiter(ThreadId(1), 0b11).unwrap();
 
         let woken = e.signal(0b01);
+
         assert_eq!(woken.len(), 1);
         assert_eq!(woken.as_slice()[0].thread_id, ThreadId(1));
         assert_eq!(woken.as_slice()[0].fired_bits, 0b01);
@@ -227,10 +242,12 @@ mod tests {
     #[test]
     fn signal_only_wakes_matching_waiters() {
         let mut e = make_event(0);
+
         e.add_waiter(ThreadId(1), 0b01).unwrap();
         e.add_waiter(ThreadId(2), 0b10).unwrap();
 
         let woken = e.signal(0b01);
+
         assert_eq!(woken.len(), 1);
         assert_eq!(woken.as_slice()[0].thread_id, ThreadId(1));
         assert_eq!(e.waiter_count(), 1);
@@ -239,11 +256,13 @@ mod tests {
     #[test]
     fn multi_waiter_signal_wakes_all_matching() {
         let mut e = make_event(0);
+
         e.add_waiter(ThreadId(1), 0b01).unwrap();
         e.add_waiter(ThreadId(2), 0b11).unwrap();
         e.add_waiter(ThreadId(3), 0b10).unwrap();
 
         let woken = e.signal(0b01);
+
         assert_eq!(woken.len(), 2);
         assert!(woken.as_slice().iter().any(|w| w.thread_id == ThreadId(1)));
         assert!(woken.as_slice().iter().any(|w| w.thread_id == ThreadId(2)));
@@ -253,8 +272,10 @@ mod tests {
     #[test]
     fn coalescing_signal_same_bit_twice() {
         let mut e = make_event(0);
+
         e.signal(0b01);
         e.signal(0b01);
+
         assert_eq!(e.bits(), 0b01);
         assert_eq!(e.check(0b01), Some(0b01));
     }
@@ -262,8 +283,10 @@ mod tests {
     #[test]
     fn clear_resets_bits() {
         let mut e = make_event(0);
+
         e.signal(0b11);
         e.clear(0b01);
+
         assert_eq!(e.bits(), 0b10);
         assert!(e.check(0b01).is_none());
         assert_eq!(e.check(0b10), Some(0b10));
@@ -272,21 +295,26 @@ mod tests {
     #[test]
     fn clear_then_check_blocks() {
         let mut e = make_event(0);
+
         e.signal(0b11);
         e.clear(0b01);
+
         assert!(e.check(0b01).is_none());
     }
 
     #[test]
     fn check_returns_none_when_no_bits_match() {
         let e = make_event(0);
+
         assert!(e.check(0b11).is_none());
     }
 
     #[test]
     fn remove_waiter() {
         let mut e = make_event(0);
+
         e.add_waiter(ThreadId(5), 0b1).unwrap();
+
         assert_eq!(e.waiter_count(), 1);
         assert!(e.remove_waiter(ThreadId(5)));
         assert_eq!(e.waiter_count(), 0);
@@ -296,9 +324,11 @@ mod tests {
     #[test]
     fn waiter_queue_exhaustion() {
         let mut e = make_event(0);
+
         for i in 0..config::MAX_WAITERS_PER_EVENT {
             e.add_waiter(ThreadId(i as u32), 0b1).unwrap();
         }
+
         assert_eq!(
             e.add_waiter(ThreadId(999), 0b1),
             Err(SyscallError::BufferFull)
@@ -308,6 +338,7 @@ mod tests {
     #[test]
     fn bind_endpoint() {
         let mut e = make_event(0);
+
         assert!(e.bind_endpoint(EndpointId(7)).is_ok());
         assert_eq!(e.bound_endpoint(), Some(EndpointId(7)));
         assert_eq!(
@@ -319,8 +350,10 @@ mod tests {
     #[test]
     fn unbind_and_rebind_endpoint() {
         let mut e = make_event(0);
+
         e.bind_endpoint(EndpointId(7)).unwrap();
         e.unbind_endpoint();
+
         assert!(e.bound_endpoint().is_none());
         assert!(e.bind_endpoint(EndpointId(8)).is_ok());
     }
@@ -328,8 +361,11 @@ mod tests {
     #[test]
     fn generation_revoke() {
         let mut e = make_event(0);
+
         assert_eq!(e.generation(), 0);
+
         e.revoke();
+
         assert_eq!(e.generation(), 1);
     }
 }

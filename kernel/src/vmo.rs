@@ -34,6 +34,7 @@ pub struct Vmo {
 impl Vmo {
     pub fn new(id: VmoId, size: usize, flags: VmoFlags) -> Self {
         let page_count = size.div_ceil(crate::config::PAGE_SIZE);
+
         Vmo {
             id,
             pages: vec![None; page_count],
@@ -99,12 +100,16 @@ impl Vmo {
         if page_idx >= self.pages.len() {
             return Err(SyscallError::InvalidArgument);
         }
+
         if let Some(addr) = self.pages[page_idx] {
             return Ok(addr);
         }
+
         let addr = alloc_fn().ok_or(SyscallError::OutOfMemory)?;
+
         self.pages[page_idx] = Some(addr);
         self.has_pages = true;
+
         Ok(addr)
     }
 
@@ -135,7 +140,9 @@ impl Vmo {
         if self.sealed {
             return Err(SyscallError::AlreadySealed);
         }
+
         self.sealed = true;
+
         Ok(())
     }
 
@@ -144,6 +151,7 @@ impl Vmo {
         if self.sealed {
             return Err(SyscallError::AlreadySealed);
         }
+
         let new_page_count = new_size.div_ceil(crate::config::PAGE_SIZE);
         let old_page_count = self.pages.len();
         let mut freed = Vec::new();
@@ -157,6 +165,7 @@ impl Vmo {
         }
 
         self.size = new_size;
+
         Ok(freed)
     }
 
@@ -165,7 +174,9 @@ impl Vmo {
         if self.has_pages {
             return Err(SyscallError::InvalidArgument);
         }
+
         self.pager = Some(endpoint);
+
         Ok(())
     }
 
@@ -194,6 +205,7 @@ mod tests {
     #[test]
     fn new_vmo_has_correct_size() {
         let vmo = make_vmo(4);
+
         assert_eq!(vmo.size(), 4 * PAGE_SIZE);
         assert_eq!(vmo.page_count(), 4);
     }
@@ -201,6 +213,7 @@ mod tests {
     #[test]
     fn new_vmo_has_no_pages_allocated() {
         let vmo = make_vmo(4);
+
         for i in 0..4 {
             assert!(vmo.page_at(i).is_none());
         }
@@ -210,6 +223,7 @@ mod tests {
     fn alloc_page_at_succeeds() {
         let mut vmo = make_vmo(4);
         let addr = vmo.alloc_page_at(0, || Some(0xDEAD_0000)).unwrap();
+
         assert_eq!(addr, 0xDEAD_0000);
         assert_eq!(vmo.page_at(0), Some(0xDEAD_0000));
     }
@@ -217,14 +231,18 @@ mod tests {
     #[test]
     fn alloc_page_at_idempotent() {
         let mut vmo = make_vmo(4);
+
         vmo.alloc_page_at(0, || Some(0xDEAD_0000)).unwrap();
+
         let mut called = false;
         let addr = vmo
             .alloc_page_at(0, || {
                 called = true;
+
                 Some(0xBEEF_0000)
             })
             .unwrap();
+
         assert!(!called);
         assert_eq!(addr, 0xDEAD_0000);
     }
@@ -232,6 +250,7 @@ mod tests {
     #[test]
     fn alloc_page_out_of_range() {
         let mut vmo = make_vmo(2);
+
         assert_eq!(
             vmo.alloc_page_at(5, || Some(0x1000)),
             Err(SyscallError::InvalidArgument)
@@ -241,6 +260,7 @@ mod tests {
     #[test]
     fn alloc_page_oom() {
         let mut vmo = make_vmo(2);
+
         assert_eq!(
             vmo.alloc_page_at(0, || None),
             Err(SyscallError::OutOfMemory)
@@ -250,10 +270,12 @@ mod tests {
     #[test]
     fn snapshot_shares_pages() {
         let mut vmo = make_vmo(2);
+
         vmo.alloc_page_at(0, || Some(0xAAAA)).unwrap();
         vmo.alloc_page_at(1, || Some(0xBBBB)).unwrap();
 
         let snap = vmo.snapshot(VmoId(1));
+
         assert_eq!(snap.page_at(0), Some(0xAAAA));
         assert_eq!(snap.page_at(1), Some(0xBBBB));
         assert_eq!(snap.cow_parent(), Some(VmoId(0)));
@@ -262,14 +284,18 @@ mod tests {
     #[test]
     fn seal_prevents_resize() {
         let mut vmo = make_vmo(2);
+
         vmo.seal().unwrap();
+
         assert_eq!(vmo.resize(PAGE_SIZE), Err(SyscallError::AlreadySealed));
     }
 
     #[test]
     fn seal_is_idempotent_error() {
         let mut vmo = make_vmo(2);
+
         vmo.seal().unwrap();
+
         assert_eq!(vmo.seal(), Err(SyscallError::AlreadySealed));
     }
 
@@ -277,6 +303,7 @@ mod tests {
     fn resize_grow() {
         let mut vmo = make_vmo(2);
         let freed = vmo.resize(4 * PAGE_SIZE).unwrap();
+
         assert!(freed.is_empty());
         assert_eq!(vmo.page_count(), 4);
     }
@@ -284,9 +311,12 @@ mod tests {
     #[test]
     fn resize_shrink_frees_pages() {
         let mut vmo = make_vmo(4);
+
         vmo.alloc_page_at(2, || Some(0xCC)).unwrap();
         vmo.alloc_page_at(3, || Some(0xDD)).unwrap();
+
         let freed = vmo.resize(2 * PAGE_SIZE).unwrap();
+
         assert_eq!(freed, vec![0xCC, 0xDD]);
         assert_eq!(vmo.page_count(), 2);
     }
@@ -294,6 +324,7 @@ mod tests {
     #[test]
     fn set_pager_before_pages() {
         let mut vmo = make_vmo(2);
+
         assert!(vmo.set_pager(EndpointId(5)).is_ok());
         assert_eq!(vmo.pager(), Some(EndpointId(5)));
     }
@@ -301,7 +332,9 @@ mod tests {
     #[test]
     fn set_pager_after_pages_fails() {
         let mut vmo = make_vmo(2);
+
         vmo.alloc_page_at(0, || Some(0x1000)).unwrap();
+
         assert_eq!(
             vmo.set_pager(EndpointId(5)),
             Err(SyscallError::InvalidArgument)
@@ -311,18 +344,26 @@ mod tests {
     #[test]
     fn generation_revoke() {
         let mut vmo = make_vmo(1);
+
         assert_eq!(vmo.generation(), 0);
+
         vmo.revoke();
+
         assert_eq!(vmo.generation(), 1);
+
         vmo.revoke();
+
         assert_eq!(vmo.generation(), 2);
     }
 
     #[test]
     fn refcount_lifecycle() {
         let mut vmo = make_vmo(1);
+
         assert_eq!(vmo.refcount(), 1);
+
         vmo.add_ref();
+
         assert_eq!(vmo.refcount(), 2);
         assert!(!vmo.release_ref());
         assert_eq!(vmo.refcount(), 1);

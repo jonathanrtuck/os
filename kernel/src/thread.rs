@@ -187,8 +187,10 @@ impl Thread {
 
     pub fn take_wait_events(&mut self) -> ([u32; 3], u8) {
         let result = (self.wait_events, self.wait_count);
+
         self.wait_events = [0; 3];
         self.wait_count = 0;
+
         result
     }
 
@@ -250,8 +252,10 @@ impl RunQueue {
     /// Remove a specific thread from its priority queue (for blocking).
     pub fn dequeue(&mut self, thread: ThreadId, priority: Priority) -> bool {
         let q = &mut self.queues[priority_index(priority)];
+
         if let Some(pos) = q.iter().position(|&t| t == thread) {
             q.remove(pos);
+
             true
         } else {
             false
@@ -278,6 +282,7 @@ impl RunQueue {
     /// Check if any thread at higher priority than `threshold` is ready.
     pub fn has_higher_priority_than(&self, threshold: Priority) -> bool {
         let idx = priority_index(threshold);
+
         self.queues[idx + 1..].iter().any(|q| !q.is_empty())
     }
 
@@ -294,9 +299,11 @@ pub struct Scheduler {
 impl Scheduler {
     pub fn new(num_cores: usize) -> Self {
         let mut cores = Vec::with_capacity(num_cores);
+
         for _ in 0..num_cores {
             cores.push(RunQueue::new());
         }
+
         Scheduler { cores }
     }
 
@@ -355,6 +362,7 @@ mod tests {
     #[test]
     fn thread_created_in_ready_state() {
         let t = make_thread(0, Priority::Medium);
+
         assert_eq!(t.state(), ThreadRunState::Ready);
         assert_eq!(t.priority(), Priority::Medium);
         assert_eq!(t.address_space(), Some(AddressSpaceId(0)));
@@ -364,8 +372,10 @@ mod tests {
     #[test]
     fn thread_exit_sets_code() {
         let mut t = make_thread(0, Priority::Medium);
+
         t.set_state(ThreadRunState::Running);
         t.exit(42);
+
         assert_eq!(t.state(), ThreadRunState::Exited);
         assert_eq!(t.exit_code(), Some(42));
     }
@@ -373,28 +383,35 @@ mod tests {
     #[test]
     fn thread_exit_event_stored() {
         let mut t = make_thread(0, Priority::Medium);
+
         t.set_exit_event(EventId(7));
+
         assert_eq!(t.exit_event(), Some(EventId(7)));
     }
 
     #[test]
     fn thread_state_transitions() {
         let mut t = make_thread(0, Priority::Medium);
+
         assert_eq!(t.state(), ThreadRunState::Ready);
 
         t.set_state(ThreadRunState::Running);
+
         assert_eq!(t.state(), ThreadRunState::Running);
 
         t.set_state(ThreadRunState::Blocked);
+
         assert_eq!(t.state(), ThreadRunState::Blocked);
 
         t.set_state(ThreadRunState::Ready);
+
         assert_eq!(t.state(), ThreadRunState::Ready);
     }
 
     #[test]
     fn idle_thread_properties() {
         let t = make_idle_thread(0);
+
         assert!(t.is_idle());
         assert!(t.address_space().is_none());
         assert_eq!(t.priority(), Priority::Idle);
@@ -403,7 +420,9 @@ mod tests {
     #[test]
     fn kernel_stack_tracking() {
         let mut t = make_thread(0, Priority::Medium);
+
         t.set_kernel_stack(0xDEAD_0000, 0xDEAD_8000);
+
         assert_eq!(t.kernel_stack_base(), 0xDEAD_0000);
         assert_eq!(t.kernel_sp(), 0xDEAD_8000);
     }
@@ -411,19 +430,23 @@ mod tests {
     #[test]
     fn priority_boost_and_release() {
         let mut t = make_thread(0, Priority::Low);
+
         assert_eq!(t.effective_priority(), Priority::Low);
 
         t.boost_priority(Priority::High);
+
         assert_eq!(t.effective_priority(), Priority::High);
         assert_eq!(t.priority(), Priority::Low);
 
         t.release_boost();
+
         assert_eq!(t.effective_priority(), Priority::Low);
     }
 
     #[test]
     fn thread_register_state_starts_none() {
         let t = make_thread(0, Priority::Medium);
+
         assert!(t.register_state().is_none());
     }
 
@@ -431,9 +454,11 @@ mod tests {
     fn thread_init_register_state() {
         let mut t = make_thread(0, Priority::Medium);
         let rs = t.init_register_state();
+
         rs.pc = 0x1000;
         rs.sp = 0x2000;
         rs.pstate = 0;
+
         assert_eq!(t.register_state().unwrap().pc, 0x1000);
         assert_eq!(t.register_state().unwrap().sp, 0x2000);
     }
@@ -441,13 +466,16 @@ mod tests {
     #[test]
     fn thread_generation_is_zero() {
         let t = make_thread(0, Priority::Medium);
+
         assert_eq!(t.generation(), 0);
     }
 
     #[test]
     fn set_priority_updates_effective_if_higher() {
         let mut t = make_thread(0, Priority::Low);
+
         t.set_priority(Priority::High);
+
         assert_eq!(t.priority(), Priority::High);
         assert_eq!(t.effective_priority(), Priority::High);
     }
@@ -457,6 +485,7 @@ mod tests {
     #[test]
     fn pick_next_returns_highest_priority() {
         let mut sched = Scheduler::new(1);
+
         sched.enqueue(0, ThreadId(1), Priority::Low);
         sched.enqueue(0, ThreadId(2), Priority::High);
         sched.enqueue(0, ThreadId(3), Priority::Medium);
@@ -472,20 +501,25 @@ mod tests {
     #[test]
     fn round_robin_same_priority() {
         let mut sched = Scheduler::new(1);
+
         sched.enqueue(0, ThreadId(1), Priority::Medium);
         sched.enqueue(0, ThreadId(2), Priority::Medium);
         sched.enqueue(0, ThreadId(3), Priority::Medium);
 
         let first = sched.pick_next(0).unwrap();
+
         assert_eq!(first, ThreadId(1));
+
         sched.core_mut(0).set_current(Some(first));
-
         sched.core_mut(0).rotate_current(Priority::Medium);
+
         let second = sched.pick_next(0).unwrap();
-        assert_eq!(second, ThreadId(2));
-        sched.core_mut(0).set_current(Some(second));
 
+        assert_eq!(second, ThreadId(2));
+
+        sched.core_mut(0).set_current(Some(second));
         sched.core_mut(0).rotate_current(Priority::Medium);
+
         assert_eq!(sched.pick_next(0), Some(ThreadId(3)));
 
         // Thread 1 wraps back to front after 3 rotates
@@ -496,6 +530,7 @@ mod tests {
     #[test]
     fn idle_thread_selected_last() {
         let mut sched = Scheduler::new(1);
+
         sched.enqueue(0, ThreadId(100), Priority::Idle);
         sched.enqueue(0, ThreadId(1), Priority::Low);
 
@@ -506,7 +541,9 @@ mod tests {
     #[test]
     fn idle_thread_when_all_empty() {
         let mut sched = Scheduler::new(1);
+
         sched.enqueue(0, ThreadId(100), Priority::Idle);
+
         assert_eq!(sched.pick_next(0), Some(ThreadId(100)));
     }
 
@@ -515,7 +552,9 @@ mod tests {
     #[test]
     fn detects_higher_priority_ready() {
         let mut sched = Scheduler::new(1);
+
         sched.enqueue(0, ThreadId(2), Priority::High);
+
         assert!(sched.core(0).has_higher_priority_than(Priority::Low));
         assert!(!sched.core(0).has_higher_priority_than(Priority::High));
     }
@@ -525,6 +564,7 @@ mod tests {
     #[test]
     fn dequeue_removes_thread() {
         let mut sched = Scheduler::new(1);
+
         sched.enqueue(0, ThreadId(1), Priority::Medium);
         sched.enqueue(0, ThreadId(2), Priority::Medium);
 
@@ -538,6 +578,7 @@ mod tests {
     #[test]
     fn multi_core_isolation() {
         let mut sched = Scheduler::new(2);
+
         sched.enqueue(0, ThreadId(1), Priority::Medium);
         sched.enqueue(1, ThreadId(2), Priority::Medium);
 
@@ -550,10 +591,13 @@ mod tests {
     #[test]
     fn least_loaded_core_picks_empty() {
         let mut sched = Scheduler::new(4);
+
         sched.enqueue(0, ThreadId(1), Priority::Medium);
         sched.enqueue(0, ThreadId(2), Priority::Medium);
         sched.enqueue(1, ThreadId(3), Priority::Medium);
+
         let least = sched.least_loaded_core();
+
         assert!(least == 2 || least == 3);
     }
 }

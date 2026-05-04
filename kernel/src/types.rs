@@ -124,6 +124,7 @@ mod tests {
     #[test]
     fn rights_contains() {
         let rw = Rights(Rights::READ.0 | Rights::WRITE.0);
+
         assert!(rw.contains(Rights::READ));
         assert!(rw.contains(Rights::WRITE));
         assert!(!rw.contains(Rights::EXECUTE));
@@ -134,6 +135,7 @@ mod tests {
         let rw = Rights(Rights::READ.0 | Rights::WRITE.0);
         let rx = Rights(Rights::READ.0 | Rights::EXECUTE.0);
         let r = rw.intersection(rx);
+
         assert!(r.contains(Rights::READ));
         assert!(!r.contains(Rights::WRITE));
         assert!(!r.contains(Rights::EXECUTE));
@@ -143,6 +145,7 @@ mod tests {
     fn rights_subset() {
         let r = Rights::READ;
         let rw = Rights(Rights::READ.0 | Rights::WRITE.0);
+
         assert!(r.is_subset_of(rw));
         assert!(!rw.is_subset_of(r));
     }

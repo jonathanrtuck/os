@@ -99,8 +99,11 @@ impl Kernel {
         if self.next_asid as usize >= config::MAX_ADDRESS_SPACES {
             return Err(SyscallError::OutOfMemory);
         }
+
         let asid = self.next_asid;
+
         self.next_asid += 1;
+
         Ok(asid)
     }
 
@@ -121,6 +124,7 @@ impl Kernel {
             .spaces
             .get(space_id.0)
             .ok_or(SyscallError::InvalidHandle)?;
+
         Ok(space.handles().lookup(handle_id)?.clone())
     }
 
@@ -131,10 +135,13 @@ impl Kernel {
         count: usize,
     ) -> Result<StagedHandles, SyscallError> {
         let mut staged = StagedHandles::new();
+
         if count == 0 {
             return Ok(staged);
         }
+
         let mut ids = [0u32; config::MAX_IPC_HANDLES];
+
         user_mem::read_user_u32s(handles_ptr, count, &mut ids)?;
 
         let space = self
@@ -159,6 +166,7 @@ impl Kernel {
                 }
             }
         }
+
         Ok(staged)
     }
 
@@ -170,20 +178,26 @@ impl Kernel {
         out_cap: usize,
     ) -> Result<usize, SyscallError> {
         let count = staged.count as usize;
+
         if count > out_cap {
             return Err(SyscallError::BufferFull);
         }
+
         let space = self
             .spaces
             .get_mut(space_id.0)
             .ok_or(SyscallError::InvalidHandle)?;
         let ht = space.handles_mut();
         let mut new_ids = [0u32; config::MAX_IPC_HANDLES];
+
         for (slot, out_id) in staged.handles[..count].iter_mut().zip(new_ids.iter_mut()) {
             let h = slot.take().unwrap();
+
             *out_id = ht.install(h)?.0;
         }
+
         user_mem::write_user_u32s(out_ptr, &new_ids[..count])?;
+
         Ok(count)
     }
 
@@ -234,6 +248,7 @@ impl Kernel {
     fn sys_vmo_create(&mut self, current: ThreadId, args: &[u64; 6]) -> Result<u64, SyscallError> {
         let size = args[0] as usize;
         let flags = args[1] as u32;
+
         if size == 0 || size > config::MAX_PHYS_MEM {
             return Err(SyscallError::InvalidArgument);
         }
@@ -241,6 +256,7 @@ impl Kernel {
         let space_id = self.thread_space_id(current)?;
         let vmo = Vmo::new(VmoId(0), size, VmoFlags(flags));
         let idx = self.vmos.alloc(vmo).ok_or(SyscallError::OutOfMemory)?;
+
         self.vmos.get_mut(idx).unwrap().id = VmoId(idx);
 
         let generation = self.vmos.get(idx).unwrap().generation();
@@ -248,6 +264,7 @@ impl Kernel {
             .spaces
             .get_mut(space_id.0)
             .ok_or(SyscallError::InvalidArgument)?;
+
         match space
             .handles_mut()
             .allocate(ObjectType::Vmo, idx, Rights::ALL, generation)
@@ -255,6 +272,7 @@ impl Kernel {
             Ok(hid) => Ok(hid.0 as u64),
             Err(e) => {
                 self.vmos.dealloc(idx);
+
                 Err(e)
             }
         }
@@ -264,9 +282,9 @@ impl Kernel {
         let handle_id = HandleId(args[0] as u32);
         let addr_hint = args[1] as usize;
         let perms = Rights(args[2] as u32);
-
         let space_id = self.thread_space_id(current)?;
         let handle = self.lookup_handle(space_id, handle_id)?;
+
         if handle.object_type != ObjectType::Vmo {
             return Err(SyscallError::WrongHandleType);
         }
@@ -282,12 +300,12 @@ impl Kernel {
             .get(handle.object_id)
             .ok_or(SyscallError::InvalidHandle)?
             .size();
-
         let space = self
             .spaces
             .get_mut(space_id.0)
             .ok_or(SyscallError::InvalidArgument)?;
         let va = space.map_vmo(VmoId(handle.object_id), vmo_size, perms, addr_hint)?;
+
         Ok(va as u64)
     }
 
@@ -298,7 +316,9 @@ impl Kernel {
             .spaces
             .get_mut(space_id.0)
             .ok_or(SyscallError::InvalidArgument)?;
+
         space.unmap(addr)?;
+
         Ok(0)
     }
 
@@ -310,6 +330,7 @@ impl Kernel {
         let handle_id = HandleId(args[0] as u32);
         let space_id = self.thread_space_id(current)?;
         let handle = self.lookup_handle(space_id, handle_id)?;
+
         if handle.object_type != ObjectType::Vmo {
             return Err(SyscallError::WrongHandleType);
         }
@@ -320,6 +341,7 @@ impl Kernel {
             .ok_or(SyscallError::InvalidHandle)?;
         let snap = parent.snapshot(VmoId(0));
         let idx = self.vmos.alloc(snap).ok_or(SyscallError::OutOfMemory)?;
+
         self.vmos.get_mut(idx).unwrap().id = VmoId(idx);
         self.vmos
             .get(handle.object_id)
@@ -330,6 +352,7 @@ impl Kernel {
             .spaces
             .get_mut(space_id.0)
             .ok_or(SyscallError::InvalidArgument)?;
+
         match space
             .handles_mut()
             .allocate(ObjectType::Vmo, idx, Rights::ALL, generation)
@@ -337,6 +360,7 @@ impl Kernel {
             Ok(hid) => Ok(hid.0 as u64),
             Err(e) => {
                 self.vmos.dealloc(idx);
+
                 Err(e)
             }
         }
@@ -346,6 +370,7 @@ impl Kernel {
         let handle_id = HandleId(args[0] as u32);
         let space_id = self.thread_space_id(current)?;
         let handle = self.lookup_handle(space_id, handle_id)?;
+
         if handle.object_type != ObjectType::Vmo {
             return Err(SyscallError::WrongHandleType);
         }
@@ -357,17 +382,21 @@ impl Kernel {
             .get_mut(handle.object_id)
             .ok_or(SyscallError::InvalidHandle)?
             .seal()?;
+
         Ok(0)
     }
 
     fn sys_vmo_resize(&mut self, current: ThreadId, args: &[u64; 6]) -> Result<u64, SyscallError> {
         let handle_id = HandleId(args[0] as u32);
         let new_size = args[1] as usize;
+
         if new_size > config::MAX_PHYS_MEM {
             return Err(SyscallError::InvalidArgument);
         }
+
         let space_id = self.thread_space_id(current)?;
         let handle = self.lookup_handle(space_id, handle_id)?;
+
         if handle.object_type != ObjectType::Vmo {
             return Err(SyscallError::WrongHandleType);
         }
@@ -380,6 +409,7 @@ impl Kernel {
             .get_mut(handle.object_id)
             .ok_or(SyscallError::InvalidHandle)?
             .resize(new_size)?;
+
         Ok(0)
     }
 
@@ -393,6 +423,7 @@ impl Kernel {
         let space_id = self.thread_space_id(current)?;
         let ep = Endpoint::new(EndpointId(0));
         let idx = self.endpoints.alloc(ep).ok_or(SyscallError::OutOfMemory)?;
+
         self.endpoints.get_mut(idx).unwrap().id = EndpointId(idx);
 
         let generation = self.endpoints.get(idx).unwrap().generation();
@@ -400,6 +431,7 @@ impl Kernel {
             .spaces
             .get_mut(space_id.0)
             .ok_or(SyscallError::InvalidArgument)?;
+
         match space
             .handles_mut()
             .allocate(ObjectType::Endpoint, idx, Rights::ALL, generation)
@@ -407,6 +439,7 @@ impl Kernel {
             Ok(hid) => Ok(hid.0 as u64),
             Err(e) => {
                 self.endpoints.dealloc(idx);
+
                 Err(e)
             }
         }
@@ -422,6 +455,7 @@ impl Kernel {
         let space_id = self.thread_space_id(current)?;
         let event = Event::new(EventId(0));
         let idx = self.events.alloc(event).ok_or(SyscallError::OutOfMemory)?;
+
         self.events.get_mut(idx).unwrap().id = EventId(idx);
 
         let generation = self.events.get(idx).unwrap().generation();
@@ -429,6 +463,7 @@ impl Kernel {
             .spaces
             .get_mut(space_id.0)
             .ok_or(SyscallError::InvalidArgument)?;
+
         match space
             .handles_mut()
             .allocate(ObjectType::Event, idx, Rights::ALL, generation)
@@ -436,6 +471,7 @@ impl Kernel {
             Ok(hid) => Ok(hid.0 as u64),
             Err(e) => {
                 self.events.dealloc(idx);
+
                 Err(e)
             }
         }
@@ -450,6 +486,7 @@ impl Kernel {
         let bits = args[1];
         let space_id = self.thread_space_id(current)?;
         let handle = self.lookup_handle(space_id, handle_id)?;
+
         if handle.object_type != ObjectType::Event {
             return Err(SyscallError::WrongHandleType);
         }
@@ -475,6 +512,7 @@ impl Kernel {
         let bits = args[1];
         let space_id = self.thread_space_id(current)?;
         let handle = self.lookup_handle(space_id, handle_id)?;
+
         if handle.object_type != ObjectType::Event {
             return Err(SyscallError::WrongHandleType);
         }
@@ -486,14 +524,17 @@ impl Kernel {
             .events
             .get_mut(handle.object_id)
             .ok_or(SyscallError::InvalidHandle)?;
+
         event.clear(bits);
 
         if event.irq_bound() {
             let (intids, count) = self
                 .irqs
                 .intids_for_event_bits(EventId(handle.object_id), bits);
+
             for &intid in &intids[..count] {
                 self.irqs.ack(intid).ok();
+
                 #[cfg(target_os = "none")]
                 crate::frame::arch::gic::unmask_spi(intid);
             }
@@ -513,6 +554,7 @@ impl Kernel {
         let asid = self.alloc_asid()?;
         let space = AddressSpace::new(AddressSpaceId(0), asid, 0);
         let idx = self.spaces.alloc(space).ok_or(SyscallError::OutOfMemory)?;
+
         self.spaces.get_mut(idx).unwrap().id = AddressSpaceId(idx);
 
         let generation = self.spaces.get(idx).unwrap().generation();
@@ -520,6 +562,7 @@ impl Kernel {
             .spaces
             .get_mut(caller_space_id.0)
             .ok_or(SyscallError::InvalidArgument)?;
+
         match caller_space.handles_mut().allocate(
             ObjectType::AddressSpace,
             idx,
@@ -529,6 +572,7 @@ impl Kernel {
             Ok(hid) => Ok(hid.0 as u64),
             Err(e) => {
                 self.spaces.dealloc(idx);
+
                 Err(e)
             }
         }
@@ -540,8 +584,8 @@ impl Kernel {
         let handle_id = HandleId(args[0] as u32);
         let new_rights = Rights(args[1] as u32);
         let space_id = self.thread_space_id(current)?;
-
         let handle = self.lookup_handle(space_id, handle_id)?;
+
         if !handle.rights.contains(Rights::DUP) {
             return Err(SyscallError::InsufficientRights);
         }
@@ -551,6 +595,7 @@ impl Kernel {
             .get_mut(space_id.0)
             .ok_or(SyscallError::InvalidArgument)?;
         let new_id = space.handles_mut().duplicate(handle_id, new_rights)?;
+
         Ok(new_id.0 as u64)
     }
 
@@ -565,7 +610,9 @@ impl Kernel {
             .spaces
             .get_mut(space_id.0)
             .ok_or(SyscallError::InvalidArgument)?;
+
         space.handles_mut().close(handle_id)?;
+
         Ok(0)
     }
 
@@ -573,6 +620,7 @@ impl Kernel {
         let handle_id = HandleId(args[0] as u32);
         let space_id = self.thread_space_id(current)?;
         let handle = self.lookup_handle(space_id, handle_id)?;
+
         Ok(((handle.object_type as u64) << 32) | (handle.rights.0 as u64))
     }
 
@@ -582,6 +630,7 @@ impl Kernel {
 
     fn sys_system_info(&self, args: &[u64; 6]) -> Result<u64, SyscallError> {
         let what = args[0];
+
         match what {
             0 => Ok(crate::config::PAGE_SIZE as u64),
             1 => Ok(crate::endpoint::MSG_SIZE as u64),
@@ -594,23 +643,26 @@ impl Kernel {
 
     fn sys_event_wait(&mut self, current: ThreadId, args: &[u64; 6]) -> Result<u64, SyscallError> {
         let space_id = self.thread_space_id(current)?;
-
         let mut wait_items: [(u32, u32, u64); 3] = [(0, 0, 0); 3];
         let mut count = 0usize;
 
         for i in 0..3 {
             let hid_raw = args[i * 2] as u32;
             let mask = args[i * 2 + 1];
+
             if mask == 0 {
                 continue;
             }
+
             let handle = self.lookup_handle(space_id, HandleId(hid_raw))?;
+
             if handle.object_type != ObjectType::Event {
                 return Err(SyscallError::WrongHandleType);
             }
             if !handle.rights.contains(Rights::WAIT) {
                 return Err(SyscallError::InsufficientRights);
             }
+
             wait_items[count] = (hid_raw, handle.object_id, mask);
             count += 1;
         }
@@ -624,6 +676,7 @@ impl Kernel {
                 .events
                 .get_mut(obj_id)
                 .ok_or(SyscallError::InvalidHandle)?;
+
             if let Some(fired) = event.check(mask) {
                 return Ok(((hid as u64) << 32) | (fired & 0xFFFF_FFFF));
             }
@@ -635,7 +688,9 @@ impl Kernel {
                 .events
                 .get_mut(obj_id)
                 .ok_or(SyscallError::InvalidHandle)?;
+
             event.add_waiter(current, mask)?;
+
             obj_ids[i] = obj_id;
         }
 
@@ -663,6 +718,7 @@ impl Kernel {
                 .events
                 .get_mut(obj_id)
                 .ok_or(SyscallError::InvalidHandle)?;
+
             if let Some(fired) = event.check(mask) {
                 for (j, &evt_id) in wait_evts[..wait_n as usize].iter().enumerate() {
                     if j != i {
@@ -671,6 +727,7 @@ impl Kernel {
                             .map(|e| e.remove_waiter(current));
                     }
                 }
+
                 return Ok(((hid as u64) << 32) | (fired & 0xFFFF_FFFF));
             }
         }
@@ -693,21 +750,19 @@ impl Kernel {
 
         let space_id = self.thread_space_id(current)?;
         let handle = self.lookup_handle(space_id, handle_id)?;
+
         if handle.object_type != ObjectType::Endpoint {
             return Err(SyscallError::WrongHandleType);
         }
+
         let ep_obj_id = handle.object_id;
-
         let message = user_mem::read_user_message(msg_ptr, msg_len)?;
-
         let staged = self.remove_handles_atomic(space_id, handles_ptr, handles_count)?;
-
         let priority = self
             .threads
             .get(current.0)
             .ok_or(SyscallError::InvalidArgument)?
             .effective_priority();
-
         let call = PendingCall {
             caller: current,
             priority,
@@ -717,12 +772,10 @@ impl Kernel {
             badge: 0,
             reply_buf: msg_ptr,
         };
-
         let ep = self
             .endpoints
             .get_mut(ep_obj_id)
             .ok_or(SyscallError::InvalidHandle)?;
-
         let recv_waiters = ep.drain_recv_waiters();
         let signal_info = ep.enqueue_call(call)?;
 
@@ -730,6 +783,7 @@ impl Kernel {
             && let Some(event) = self.events.get_mut(event_id.0)
         {
             let woken = event.signal(bits);
+
             for info in woken.as_slice() {
                 crate::sched::wake(self, info.thread_id, 0);
             }
@@ -740,6 +794,7 @@ impl Kernel {
         }
 
         crate::sched::block_current(self, current, 0);
+
         Ok(0)
     }
 
@@ -749,9 +804,9 @@ impl Kernel {
         let out_cap = args[2] as usize;
         let handles_out = args[3] as usize;
         let handles_cap = args[4] as usize;
-
         let space_id = self.thread_space_id(current)?;
         let handle = self.lookup_handle(space_id, handle_id)?;
+
         if handle.object_type != ObjectType::Endpoint {
             return Err(SyscallError::WrongHandleType);
         }
@@ -768,6 +823,7 @@ impl Kernel {
             {
                 e.clear(bits);
             }
+
             return self.recv_deliver(
                 space_id,
                 call,
@@ -797,6 +853,7 @@ impl Kernel {
             {
                 e.clear(bits);
             }
+
             return self.recv_deliver(
                 space_id,
                 call,
@@ -823,12 +880,14 @@ impl Kernel {
         handles_cap: usize,
     ) -> Result<u64, SyscallError> {
         let msg_bytes = call.message.as_bytes();
+
         if msg_bytes.len() > out_cap {
             return Err(SyscallError::BufferFull);
         }
-        user_mem::write_user_bytes(out_buf, msg_bytes)?;
-        let msg_len = msg_bytes.len() as u64;
 
+        user_mem::write_user_bytes(out_buf, msg_bytes)?;
+
+        let msg_len = msg_bytes.len() as u64;
         let mut staged = StagedHandles {
             handles: core::mem::replace(
                 &mut call.handles,
@@ -859,19 +918,19 @@ impl Kernel {
 
         let space_id = self.thread_space_id(current)?;
         let handle = self.lookup_handle(space_id, handle_id)?;
+
         if handle.object_type != ObjectType::Endpoint {
             return Err(SyscallError::WrongHandleType);
         }
 
         let reply_msg = user_mem::read_user_message(msg_ptr, msg_len)?;
         let staged = self.remove_handles_atomic(space_id, handles_ptr, handles_count)?;
-
         let ep = self
             .endpoints
             .get_mut(handle.object_id)
             .ok_or(SyscallError::InvalidHandle)?;
-
         let (caller_id, caller_reply_buf) = ep.consume_reply(reply_cap_id)?;
+
         user_mem::write_user_bytes(caller_reply_buf, reply_msg.as_bytes())?;
 
         if staged.count > 0 {
@@ -887,6 +946,7 @@ impl Kernel {
                 .get_mut(caller_space.0)
                 .ok_or(SyscallError::InvalidHandle)?
                 .handles_mut();
+
             for i in 0..staged.count as usize {
                 if let Some(h) = staged.handles[i].take() {
                     let _ = caller_ht.install(h);
@@ -895,6 +955,7 @@ impl Kernel {
         }
 
         crate::sched::wake(self, caller_id, 0);
+
         Ok(reply_msg.len() as u64)
     }
 
@@ -902,6 +963,7 @@ impl Kernel {
         if ep.has_pending_calls() {
             return None;
         }
+
         ep.bound_event()
             .map(|eid| (eid, Endpoint::ENDPOINT_READABLE_BIT))
     }
@@ -913,9 +975,9 @@ impl Kernel {
     ) -> Result<u64, SyscallError> {
         let ep_handle_id = HandleId(args[0] as u32);
         let event_handle_id = HandleId(args[1] as u32);
-
         let space_id = self.thread_space_id(current)?;
         let ep_handle = self.lookup_handle(space_id, ep_handle_id)?;
+
         if ep_handle.object_type != ObjectType::Endpoint {
             return Err(SyscallError::WrongHandleType);
         }
@@ -942,6 +1004,7 @@ impl Kernel {
             && let Some(event) = self.events.get_mut(event_obj_id.0)
         {
             let woken = event.signal(Endpoint::ENDPOINT_READABLE_BIT);
+
             for info in woken.as_slice() {
                 crate::sched::wake(self, info.thread_id, 0);
             }
@@ -960,9 +1023,7 @@ impl Kernel {
         let entry = args[0] as usize;
         let stack_top = args[1] as usize;
         let arg = args[2] as usize;
-
         let space_id = self.thread_space_id(current)?;
-
         let thread = Thread::new(
             ThreadId(0),
             Some(space_id),
@@ -975,9 +1036,11 @@ impl Kernel {
             .threads
             .alloc(thread)
             .ok_or(SyscallError::OutOfMemory)?;
+
         self.threads.get_mut(idx).unwrap().id = ThreadId(idx);
 
         let core = self.scheduler.least_loaded_core();
+
         self.scheduler
             .enqueue(core, ThreadId(idx), Priority::Medium);
 
@@ -986,6 +1049,7 @@ impl Kernel {
             .spaces
             .get_mut(space_id.0)
             .ok_or(SyscallError::InvalidArgument)?;
+
         match space
             .handles_mut()
             .allocate(ObjectType::Thread, idx, Rights::ALL, generation)
@@ -993,6 +1057,7 @@ impl Kernel {
             Ok(hid) => Ok(hid.0 as u64),
             Err(e) => {
                 self.threads.dealloc(idx);
+
                 Err(e)
             }
         }
@@ -1016,6 +1081,7 @@ impl Kernel {
 
         let caller_space_id = self.thread_space_id(current)?;
         let space_handle = self.lookup_handle(caller_space_id, space_handle_id)?;
+
         if space_handle.object_type != ObjectType::AddressSpace {
             return Err(SyscallError::WrongHandleType);
         }
@@ -1024,8 +1090,8 @@ impl Kernel {
         }
 
         let target_space = AddressSpaceId(space_handle.object_id);
-
         let mut handle_ids = [0u32; config::MAX_IPC_HANDLES];
+
         if handles_count > 0 {
             user_mem::read_user_u32s(handles_ptr, handles_count, &mut handle_ids)?;
         }
@@ -1042,6 +1108,7 @@ impl Kernel {
             .threads
             .alloc(thread)
             .ok_or(SyscallError::OutOfMemory)?;
+
         self.threads.get_mut(idx).unwrap().id = ThreadId(idx);
 
         if handles_count > 0 {
@@ -1051,6 +1118,7 @@ impl Kernel {
                     .spaces
                     .get(caller_space_id.0)
                     .ok_or(SyscallError::InvalidHandle)?;
+
                 for (i, &hid) in handle_ids[..handles_count].iter().enumerate() {
                     cloned[i] = Some(caller_space.handles().lookup(HandleId(hid))?.clone());
                 }
@@ -1059,19 +1127,24 @@ impl Kernel {
                 .spaces
                 .get_mut(target_space.0)
                 .ok_or(SyscallError::InvalidHandle)?;
+
             for (i, slot) in cloned[..handles_count].iter_mut().enumerate() {
                 let h = slot.take().unwrap();
+
                 if let Err(e) = target.handles_mut().allocate_at(i, h) {
                     for j in 0..i {
                         target.handles_mut().close(HandleId(j as u32)).ok();
                     }
+
                     self.threads.dealloc(idx);
+
                     return Err(e);
                 }
             }
         }
 
         let core = self.scheduler.least_loaded_core();
+
         self.scheduler
             .enqueue(core, ThreadId(idx), Priority::Medium);
 
@@ -1080,6 +1153,7 @@ impl Kernel {
             .spaces
             .get_mut(caller_space_id.0)
             .ok_or(SyscallError::InvalidArgument)?;
+
         match space
             .handles_mut()
             .allocate(ObjectType::Thread, idx, Rights::ALL, generation)
@@ -1087,6 +1161,7 @@ impl Kernel {
             Ok(hid) => Ok(hid.0 as u64),
             Err(e) => {
                 self.threads.dealloc(idx);
+
                 Err(e)
             }
         }
@@ -1094,7 +1169,9 @@ impl Kernel {
 
     fn sys_thread_exit(&mut self, current: ThreadId, args: &[u64; 6]) -> Result<u64, SyscallError> {
         let code = args[0] as u32;
+
         crate::sched::exit_current(self, current, 0, code);
+
         Ok(0)
     }
 
@@ -1105,9 +1182,9 @@ impl Kernel {
     ) -> Result<u64, SyscallError> {
         let handle_id = HandleId(args[0] as u32);
         let priority_val = args[1] as u8;
-
         let space_id = self.thread_space_id(current)?;
         let handle = self.lookup_handle(space_id, handle_id)?;
+
         if handle.object_type != ObjectType::Thread {
             return Err(SyscallError::WrongHandleType);
         }
@@ -1135,9 +1212,9 @@ impl Kernel {
     ) -> Result<u64, SyscallError> {
         let handle_id = HandleId(args[0] as u32);
         let hint_val = args[1] as u8;
-
         let space_id = self.thread_space_id(current)?;
         let handle = self.lookup_handle(space_id, handle_id)?;
+
         if handle.object_type != ObjectType::Thread {
             return Err(SyscallError::WrongHandleType);
         }
@@ -1165,14 +1242,15 @@ impl Kernel {
         args: &[u64; 6],
     ) -> Result<u64, SyscallError> {
         let handle_id = HandleId(args[0] as u32);
-
         let caller_space_id = self.thread_space_id(current)?;
         let handle = self.lookup_handle(caller_space_id, handle_id)?;
+
         if handle.object_type != ObjectType::AddressSpace {
             return Err(SyscallError::WrongHandleType);
         }
 
         let target_id = AddressSpaceId(handle.object_id);
+
         if target_id == caller_space_id {
             return Err(SyscallError::InvalidArgument);
         }
@@ -1201,10 +1279,9 @@ impl Kernel {
         let space_handle_id = HandleId(args[1] as u32);
         let addr_hint = args[2] as usize;
         let perms = Rights(args[3] as u32);
-
         let space_id = self.thread_space_id(current)?;
-
         let vmo_handle = self.lookup_handle(space_id, vmo_handle_id)?;
+
         if vmo_handle.object_type != ObjectType::Vmo {
             return Err(SyscallError::WrongHandleType);
         }
@@ -1213,6 +1290,7 @@ impl Kernel {
         }
 
         let space_handle = self.lookup_handle(space_id, space_handle_id)?;
+
         if space_handle.object_type != ObjectType::AddressSpace {
             return Err(SyscallError::WrongHandleType);
         }
@@ -1222,12 +1300,12 @@ impl Kernel {
             .get(vmo_handle.object_id)
             .ok_or(SyscallError::InvalidHandle)?
             .size();
-
         let target_space = self
             .spaces
             .get_mut(space_handle.object_id)
             .ok_or(SyscallError::InvalidArgument)?;
         let va = target_space.map_vmo(VmoId(vmo_handle.object_id), vmo_size, perms, addr_hint)?;
+
         Ok(va as u64)
     }
 
@@ -1238,10 +1316,9 @@ impl Kernel {
     ) -> Result<u64, SyscallError> {
         let vmo_handle_id = HandleId(args[0] as u32);
         let ep_handle_id = HandleId(args[1] as u32);
-
         let space_id = self.thread_space_id(current)?;
-
         let vmo_handle = self.lookup_handle(space_id, vmo_handle_id)?;
+
         if vmo_handle.object_type != ObjectType::Vmo {
             return Err(SyscallError::WrongHandleType);
         }
@@ -1250,6 +1327,7 @@ impl Kernel {
         }
 
         let ep_handle = self.lookup_handle(space_id, ep_handle_id)?;
+
         if ep_handle.object_type != ObjectType::Endpoint {
             return Err(SyscallError::WrongHandleType);
         }
@@ -1272,9 +1350,9 @@ impl Kernel {
         let handle_id = HandleId(args[0] as u32);
         let intid = args[1] as u32;
         let signal_bits = args[2];
-
         let space_id = self.thread_space_id(current)?;
         let handle = self.lookup_handle(space_id, handle_id)?;
+
         if handle.object_type != ObjectType::Event {
             return Err(SyscallError::WrongHandleType);
         }
@@ -1283,12 +1361,14 @@ impl Kernel {
         }
 
         let event_id = EventId(handle.object_id);
+
         self.irqs.bind(intid, event_id, signal_bits)?;
 
         let event = self
             .events
             .get_mut(handle.object_id)
             .ok_or(SyscallError::InvalidHandle)?;
+
         event.set_irq_bound(true);
 
         Ok(0)
@@ -1305,7 +1385,9 @@ mod tests {
     fn setup_kernel() -> Box<Kernel> {
         let mut k = Box::new(Kernel::new(1));
         let space = AddressSpace::new(AddressSpaceId(0), 1, 0);
+
         k.spaces.alloc(space);
+
         let thread = Thread::new(
             ThreadId(0),
             Some(AddressSpaceId(0)),
@@ -1314,7 +1396,9 @@ mod tests {
             0,
             0,
         );
+
         k.threads.alloc(thread);
+
         k
     }
 
@@ -1326,6 +1410,7 @@ mod tests {
     fn unknown_syscall() {
         let mut k = setup_kernel();
         let (err, _) = call(&mut k, 999, &[0; 6]);
+
         assert_eq!(err, SyscallError::InvalidArgument as u64);
     }
 
@@ -1333,10 +1418,12 @@ mod tests {
     fn vmo_create_and_close() {
         let mut k = setup_kernel();
         let (err, hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
         assert_eq!(k.vmos.count(), 1);
 
         let (err, _) = call(&mut k, num::HANDLE_CLOSE, &[hid, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
     }
 
@@ -1344,6 +1431,7 @@ mod tests {
     fn vmo_create_zero_size() {
         let mut k = setup_kernel();
         let (err, _) = call(&mut k, num::VMO_CREATE, &[0, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, SyscallError::InvalidArgument as u64);
     }
 
@@ -1351,12 +1439,16 @@ mod tests {
     fn event_create() {
         let mut k = setup_kernel();
         let (err, hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+
         assert_eq!(err, 0);
         assert_eq!(k.events.count(), 1);
 
         let (err, _) = call(&mut k, num::EVENT_SIGNAL, &[hid, 0b101, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
+
         let event = k.events.get(0).unwrap();
+
         assert_eq!(event.bits(), 0b101);
     }
 
@@ -1364,9 +1456,12 @@ mod tests {
     fn event_clear() {
         let mut k = setup_kernel();
         let (err, hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+
         assert_eq!(err, 0);
+
         call(&mut k, num::EVENT_SIGNAL, &[hid, 0b11, 0, 0, 0, 0]);
         call(&mut k, num::EVENT_CLEAR, &[hid, 0b01, 0, 0, 0, 0]);
+
         assert_eq!(k.events.get(0).unwrap().bits(), 0b10);
     }
 
@@ -1374,6 +1469,7 @@ mod tests {
     fn endpoint_create() {
         let mut k = setup_kernel();
         let (err, _) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
+
         assert_eq!(err, 0);
         assert_eq!(k.endpoints.count(), 1);
     }
@@ -1382,6 +1478,7 @@ mod tests {
     fn space_create() {
         let mut k = setup_kernel();
         let (err, _) = call(&mut k, num::SPACE_CREATE, &[0; 6]);
+
         assert_eq!(err, 0);
         assert_eq!(k.spaces.count(), 2);
     }
@@ -1392,11 +1489,13 @@ mod tests {
         let (_, hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
         let read_only = Rights::READ.0 as u64;
         let (err, dup_hid) = call(&mut k, num::HANDLE_DUP, &[hid, read_only, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
         assert_ne!(hid, dup_hid);
 
         let (_, info) = call(&mut k, num::HANDLE_INFO, &[dup_hid, 0, 0, 0, 0, 0]);
         let rights = (info & 0xFFFF_FFFF) as u32;
+
         assert_eq!(rights, Rights::READ.0);
     }
 
@@ -1405,8 +1504,11 @@ mod tests {
         let mut k = setup_kernel();
         let (_, hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
         let (err, info) = call(&mut k, num::HANDLE_INFO, &[hid, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
+
         let obj_type = (info >> 32) as u8;
+
         assert_eq!(obj_type, ObjectType::Event as u8);
     }
 
@@ -1415,10 +1517,12 @@ mod tests {
         let mut k = setup_kernel();
         let (_, hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
         let (err, _) = call(&mut k, num::VMO_SEAL, &[hid, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
         assert!(k.vmos.get(0).unwrap().is_sealed());
 
         let (err, _) = call(&mut k, num::VMO_SEAL, &[hid, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, SyscallError::AlreadySealed as u64);
     }
 
@@ -1427,6 +1531,7 @@ mod tests {
         let mut k = setup_kernel();
         let (_, hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
         let (err, snap_hid) = call(&mut k, num::VMO_SNAPSHOT, &[hid, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
         assert_ne!(hid, snap_hid);
         assert_eq!(k.vmos.count(), 2);
@@ -1438,10 +1543,12 @@ mod tests {
         let (_, hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
         let perms = (Rights::READ.0 | Rights::MAP.0) as u64;
         let (err, va) = call(&mut k, num::VMO_MAP, &[hid, 0, perms, 0, 0, 0]);
+
         assert_eq!(err, 0);
         assert!(va > 0);
 
         let (err, _) = call(&mut k, num::VMO_UNMAP, &[va, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
     }
 
@@ -1450,6 +1557,7 @@ mod tests {
         let mut k = setup_kernel();
         let (_, hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
         let (err, _) = call(&mut k, num::VMO_SEAL, &[hid, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, SyscallError::WrongHandleType as u64);
     }
 
@@ -1457,6 +1565,7 @@ mod tests {
     fn event_bind_irq_and_clear_acks() {
         let mut k = setup_kernel();
         let (err, event_hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+
         assert_eq!(err, 0);
 
         let (err, _) = call(
@@ -1464,15 +1573,18 @@ mod tests {
             num::EVENT_BIND_IRQ,
             &[event_hid, 64, 0b1010, 0, 0, 0],
         );
+
         assert_eq!(err, 0);
 
         let sig = k.irqs.handle_irq(64).unwrap();
+
         assert_eq!(sig.event_id, EventId(0));
         assert_eq!(sig.signal_bits, 0b1010);
 
         call(&mut k, num::EVENT_SIGNAL, &[event_hid, 0b1010, 0, 0, 0, 0]);
 
         let (err, _) = call(&mut k, num::EVENT_CLEAR, &[event_hid, 0b1010, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
     }
 
@@ -1481,6 +1593,7 @@ mod tests {
         let mut k = setup_kernel();
         let (_, vmo_hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
         let (err, _) = call(&mut k, num::EVENT_BIND_IRQ, &[vmo_hid, 64, 0b1, 0, 0, 0]);
+
         assert_eq!(err, SyscallError::WrongHandleType as u64);
     }
 
@@ -1489,6 +1602,7 @@ mod tests {
         let mut k = setup_kernel();
         let (_, event_hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
         let (err, _) = call(&mut k, num::EVENT_BIND_IRQ, &[event_hid, 10, 0b1, 0, 0, 0]);
+
         assert_eq!(err, SyscallError::InvalidArgument as u64);
     }
 
@@ -1498,6 +1612,7 @@ mod tests {
         let (_, event_hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
         call(&mut k, num::EVENT_SIGNAL, &[event_hid, 0b11, 0, 0, 0, 0]);
         let (err, _) = call(&mut k, num::EVENT_CLEAR, &[event_hid, 0b11, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
         assert_eq!(k.events.get(0).unwrap().bits(), 0);
     }
@@ -1508,11 +1623,16 @@ mod tests {
     fn event_wait_returns_immediately_if_bits_set() {
         let mut k = setup_kernel();
         let (_, hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+
         call(&mut k, num::EVENT_SIGNAL, &[hid, 0b11, 0, 0, 0, 0]);
+
         let (err, packed) = call(&mut k, num::EVENT_WAIT, &[hid, 0b01, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
+
         let fired = packed & 0xFFFF_FFFF;
         let which_hid = packed >> 32;
+
         assert_eq!(fired, 0b01);
         assert_eq!(which_hid, hid);
     }
@@ -1522,8 +1642,11 @@ mod tests {
         let mut k = setup_kernel();
         let (_, hid1) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
         let (_, hid2) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+
         call(&mut k, num::EVENT_SIGNAL, &[hid1, 0b1, 0, 0, 0, 0]);
+
         let (err, packed) = call(&mut k, num::EVENT_WAIT, &[hid1, 0b1, hid2, 0b1, 0, 0]);
+
         assert_eq!(err, 0);
         assert_eq!(packed >> 32, hid1);
         assert_eq!(packed & 0xFFFF_FFFF, 0b1);
@@ -1534,8 +1657,11 @@ mod tests {
         let mut k = setup_kernel();
         let (_, hid1) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
         let (_, hid2) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+
         call(&mut k, num::EVENT_SIGNAL, &[hid2, 0b10, 0, 0, 0, 0]);
+
         let (err, packed) = call(&mut k, num::EVENT_WAIT, &[hid1, 0b1, hid2, 0b10, 0, 0]);
+
         assert_eq!(err, 0);
         assert_eq!(packed >> 32, hid2);
         assert_eq!(packed & 0xFFFF_FFFF, 0b10);
@@ -1547,12 +1673,15 @@ mod tests {
         let (_, hid1) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
         let (_, hid2) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
         let (_, hid3) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+
         call(&mut k, num::EVENT_SIGNAL, &[hid2, 0b100, 0, 0, 0, 0]);
+
         let (err, packed) = call(
             &mut k,
             num::EVENT_WAIT,
             &[hid1, 0b1, hid2, 0b100, hid3, 0b10],
         );
+
         assert_eq!(err, 0);
         assert_eq!(packed >> 32, hid2);
         assert_eq!(packed & 0xFFFF_FFFF, 0b100);
@@ -1562,8 +1691,11 @@ mod tests {
     fn event_wait_zero_mask_skipped() {
         let mut k = setup_kernel();
         let (_, hid1) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+
         call(&mut k, num::EVENT_SIGNAL, &[hid1, 0b1, 0, 0, 0, 0]);
+
         let (err, packed) = call(&mut k, num::EVENT_WAIT, &[hid1, 0b1, 999, 0, 0, 0]);
+
         assert_eq!(err, 0);
         assert_eq!(packed >> 32, hid1);
     }
@@ -1572,6 +1704,7 @@ mod tests {
     fn thread_create_and_inspect() {
         let mut k = setup_kernel();
         let (err, _tid_handle) = call(&mut k, num::THREAD_CREATE, &[0x1000, 0x2000, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
         assert_eq!(k.threads.count(), 2);
     }
@@ -1585,6 +1718,7 @@ mod tests {
             num::THREAD_SET_PRIORITY,
             &[tid_handle, 3, 0, 0, 0, 0],
         );
+
         assert_eq!(err, 0);
     }
 
@@ -1597,6 +1731,7 @@ mod tests {
             num::THREAD_SET_AFFINITY,
             &[tid_handle, 1, 0, 0, 0, 0],
         );
+
         assert_eq!(err, 0);
     }
 
@@ -1604,10 +1739,12 @@ mod tests {
     fn space_destroy() {
         let mut k = setup_kernel();
         let (err, space_hid) = call(&mut k, num::SPACE_CREATE, &[0; 6]);
+
         assert_eq!(err, 0);
         assert_eq!(k.spaces.count(), 2);
 
         let (err, _) = call(&mut k, num::SPACE_DESTROY, &[space_hid, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
         assert_eq!(k.spaces.count(), 1);
     }
@@ -1616,6 +1753,7 @@ mod tests {
     fn space_destroy_invalid_handle() {
         let mut k = setup_kernel();
         let (err, _) = call(&mut k, num::SPACE_DESTROY, &[999, 0, 0, 0, 0, 0]);
+
         assert_ne!(err, 0);
     }
 
@@ -1623,6 +1761,7 @@ mod tests {
     fn system_info_page_size() {
         let mut k = setup_kernel();
         let (err, val) = call(&mut k, num::SYSTEM_INFO, &[0, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
         assert_eq!(val, 16384);
     }
@@ -1631,6 +1770,7 @@ mod tests {
     fn system_info_msg_size() {
         let mut k = setup_kernel();
         let (err, val) = call(&mut k, num::SYSTEM_INFO, &[1, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
         assert_eq!(val, 128);
     }
@@ -1639,6 +1779,7 @@ mod tests {
     fn system_info_num_cores() {
         let mut k = setup_kernel();
         let (err, val) = call(&mut k, num::SYSTEM_INFO, &[2, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
         assert_eq!(val, 1);
     }
@@ -1649,6 +1790,7 @@ mod tests {
         let (_, vmo_hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
         let (_, ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
         let (err, _) = call(&mut k, num::VMO_SET_PAGER, &[vmo_hid, ep_hid, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
     }
 
@@ -1656,6 +1798,7 @@ mod tests {
     fn thread_exit() {
         let mut k = setup_kernel();
         let (err, _) = call(&mut k, num::THREAD_EXIT, &[42, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
     }
 
@@ -1664,7 +1807,9 @@ mod tests {
     fn setup_ipc_kernel() -> (Box<Kernel>, u64) {
         let mut k = setup_kernel();
         let (err, ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
+
         assert_eq!(err, 0);
+
         (k, ep_hid)
     }
 
@@ -1673,6 +1818,7 @@ mod tests {
         let (mut k, ep_hid) = setup_ipc_kernel();
         let mut call_buf = [0u8; 128];
         let request = b"hello server";
+
         call_buf[..request.len()].copy_from_slice(request);
 
         let (err, _) = call(
@@ -1687,6 +1833,7 @@ mod tests {
                 0,
             ],
         );
+
         assert_eq!(err, 0);
 
         let mut recv_buf = [0u8; 128];
@@ -1695,8 +1842,11 @@ mod tests {
             num::RECV,
             &[ep_hid, recv_buf.as_mut_ptr() as u64, 128, 0, 0, 0],
         );
+
         assert_eq!(err, 0);
+
         let msg_len = (packed & 0xFFFF_FFFF) as usize;
+
         assert_eq!(msg_len, request.len());
         assert_eq!(&recv_buf[..msg_len], request);
     }
@@ -1706,6 +1856,7 @@ mod tests {
         let (mut k, ep_hid) = setup_ipc_kernel();
         let mut call_buf = [0u8; 128];
         let request = b"request";
+
         call_buf[..request.len()].copy_from_slice(request);
 
         let (err, _) = call(
@@ -1720,6 +1871,7 @@ mod tests {
                 0,
             ],
         );
+
         assert_eq!(err, 0);
 
         let mut recv_buf = [0u8; 128];
@@ -1728,9 +1880,12 @@ mod tests {
             num::RECV,
             &[ep_hid, recv_buf.as_mut_ptr() as u64, 128, 0, 0, 0],
         );
+
         assert_eq!(err, 0);
+
         let msg_len = (packed & 0xFFFF_FFFF) as usize;
         let reply_cap = (packed >> 32) as u64;
+
         assert_eq!(&recv_buf[..msg_len], request);
 
         let reply = b"response";
@@ -1746,6 +1901,7 @@ mod tests {
                 0,
             ],
         );
+
         assert_eq!(err, 0);
         assert_eq!(&call_buf[..reply.len()], reply);
     }
@@ -1753,8 +1909,8 @@ mod tests {
     #[test]
     fn ipc_empty_message() {
         let (mut k, ep_hid) = setup_ipc_kernel();
-
         let (err, _) = call(&mut k, num::CALL, &[ep_hid, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
 
         let mut recv_buf = [0u8; 128];
@@ -1763,8 +1919,11 @@ mod tests {
             num::RECV,
             &[ep_hid, recv_buf.as_mut_ptr() as u64, 128, 0, 0, 0],
         );
+
         assert_eq!(err, 0);
+
         let msg_len = (packed & 0xFFFF_FFFF) as usize;
+
         assert_eq!(msg_len, 0);
     }
 
@@ -1777,6 +1936,7 @@ mod tests {
             num::CALL,
             &[ep_hid, big.as_ptr() as u64, big.len() as u64, 0, 0, 0],
         );
+
         assert_eq!(err, SyscallError::InvalidArgument as u64);
     }
 
@@ -1789,6 +1949,7 @@ mod tests {
             num::CALL,
             &[ep_hid, msg.as_ptr() as u64, msg.len() as u64, 0, 0, 0],
         );
+
         assert_eq!(err, 0);
 
         let mut tiny_buf = [0u8; 4];
@@ -1797,6 +1958,7 @@ mod tests {
             num::RECV,
             &[ep_hid, tiny_buf.as_mut_ptr() as u64, 4, 0, 0, 0],
         );
+
         assert_eq!(err, SyscallError::BufferFull as u64);
     }
 
@@ -1806,6 +1968,7 @@ mod tests {
     fn ipc_transfer_single_handle() {
         let (mut k, ep_hid) = setup_ipc_kernel();
         let (err, vmo_hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
 
         let handle_ids = [vmo_hid as u32];
@@ -1822,9 +1985,11 @@ mod tests {
                 0,
             ],
         );
+
         assert_eq!(err, 0);
 
         let (err, _) = k.dispatch(ThreadId(0), num::HANDLE_INFO, &[vmo_hid, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, SyscallError::InvalidHandle as u64);
 
         let mut recv_buf = [0u8; 128];
@@ -1841,12 +2006,16 @@ mod tests {
                 0,
             ],
         );
+
         assert_eq!(err, 0);
+
         let h_count = ((packed >> 16) & 0xFFFF) as usize;
+
         assert_eq!(h_count, 1);
 
         let new_hid = recv_handles[0] as u64;
         let (err, info) = call(&mut k, num::HANDLE_INFO, &[new_hid, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
         assert_eq!(info >> 32, ObjectType::Vmo as u64);
     }
@@ -1855,7 +2024,6 @@ mod tests {
     fn ipc_transfer_invalid_handle_fails_atomically() {
         let (mut k, ep_hid) = setup_ipc_kernel();
         let (_, vmo_hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
-
         let handle_ids = [vmo_hid as u32, 999u32];
         let mut call_buf = [0u8; 128];
         let (err, _) = call(
@@ -1870,9 +2038,11 @@ mod tests {
                 0,
             ],
         );
+
         assert_eq!(err, SyscallError::InvalidHandle as u64);
 
         let (err, _) = call(&mut k, num::HANDLE_INFO, &[vmo_hid, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
     }
 
@@ -1885,6 +2055,7 @@ mod tests {
             num::CALL,
             &[ep_hid, call_buf.as_mut_ptr() as u64, 0, 0, 0, 0],
         );
+
         assert_eq!(err, 0);
 
         let mut recv_buf = [0u8; 128];
@@ -1893,8 +2064,11 @@ mod tests {
             num::RECV,
             &[ep_hid, recv_buf.as_mut_ptr() as u64, 128, 0, 0, 0],
         );
+
         assert_eq!(err, 0);
+
         let h_count = ((packed >> 16) & 0xFFFF) as usize;
+
         assert_eq!(h_count, 0);
     }
 
@@ -1904,12 +2078,12 @@ mod tests {
     fn endpoint_bind_event_signals_on_enqueue() {
         let (mut k, ep_hid) = setup_ipc_kernel();
         let (_, ev_hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
-
         let (err, _) = call(
             &mut k,
             num::ENDPOINT_BIND_EVENT,
             &[ep_hid, ev_hid, 0, 0, 0, 0],
         );
+
         assert_eq!(err, 0);
 
         let mut buf = [0u8; 128];
@@ -1918,9 +2092,11 @@ mod tests {
             num::CALL,
             &[ep_hid, buf.as_mut_ptr() as u64, 0, 0, 0, 0],
         );
+
         assert_eq!(err, 0);
 
         let event = k.events.get(0).unwrap();
+
         assert_ne!(event.bits() & 1, 0);
     }
 
@@ -1928,16 +2104,17 @@ mod tests {
     fn endpoint_no_signal_without_binding() {
         let (mut k, ep_hid) = setup_ipc_kernel();
         let (_, _ev_hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
-
         let mut buf = [0u8; 128];
         let (err, _) = call(
             &mut k,
             num::CALL,
             &[ep_hid, buf.as_mut_ptr() as u64, 0, 0, 0, 0],
         );
+
         assert_eq!(err, 0);
 
         let event = k.events.get(0).unwrap();
+
         assert_eq!(event.bits(), 0);
     }
 
@@ -1953,19 +2130,23 @@ mod tests {
         );
 
         let mut buf = [0u8; 128];
+
         call(
             &mut k,
             num::CALL,
             &[ep_hid, buf.as_mut_ptr() as u64, 0, 0, 0, 0],
         );
+
         assert_ne!(k.events.get(0).unwrap().bits() & 1, 0);
 
         let mut recv_buf = [0u8; 128];
+
         call(
             &mut k,
             num::RECV,
             &[ep_hid, recv_buf.as_mut_ptr() as u64, 128, 0, 0, 0],
         );
+
         assert_eq!(k.events.get(0).unwrap().bits() & 1, 0);
     }
 
@@ -1973,8 +2154,8 @@ mod tests {
     fn endpoint_bind_with_pending_signals_immediately() {
         let (mut k, ep_hid) = setup_ipc_kernel();
         let (_, ev_hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
-
         let mut buf = [0u8; 128];
+
         call(
             &mut k,
             num::CALL,
@@ -1986,6 +2167,7 @@ mod tests {
             num::ENDPOINT_BIND_EVENT,
             &[ep_hid, ev_hid, 0, 0, 0, 0],
         );
+
         assert_eq!(err, 0);
         assert_ne!(k.events.get(0).unwrap().bits() & 1, 0);
     }
@@ -1998,19 +2180,22 @@ mod tests {
         let (_, space_hid) = call(&mut k, num::SPACE_CREATE, &[0; 6]);
         let (_, vmo_hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
         let (_, ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
-
         let handle_ids = [vmo_hid as u32, ep_hid as u32];
         let (err, _) = call(
             &mut k,
             num::THREAD_CREATE_IN,
             &[space_hid, 0x1000, 0x2000, 2, handle_ids.as_ptr() as u64, 2],
         );
+
         assert_eq!(err, 0);
 
         let target_space = k.spaces.get(1).unwrap();
         let h0 = target_space.handles().lookup(HandleId(0)).unwrap();
+
         assert_eq!(h0.object_type, ObjectType::Vmo);
+
         let h1 = target_space.handles().lookup(HandleId(1)).unwrap();
+
         assert_eq!(h1.object_type, ObjectType::Endpoint);
     }
 
@@ -2023,6 +2208,7 @@ mod tests {
             num::THREAD_CREATE_IN,
             &[space_hid, 0x1000, 0x2000, 0, 0, 0],
         );
+
         assert_eq!(err, 0);
     }
 
@@ -2031,13 +2217,13 @@ mod tests {
         let mut k = setup_kernel();
         let (_, space_hid) = call(&mut k, num::SPACE_CREATE, &[0; 6]);
         let (_, vmo_hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
-
         let handle_ids = [vmo_hid as u32, 999u32];
         let (err, _) = call(
             &mut k,
             num::THREAD_CREATE_IN,
             &[space_hid, 0x1000, 0x2000, 0, handle_ids.as_ptr() as u64, 2],
         );
+
         assert_eq!(err, SyscallError::InvalidHandle as u64);
     }
 
@@ -2046,8 +2232,8 @@ mod tests {
         let mut k = setup_kernel();
         let (_, space_hid) = call(&mut k, num::SPACE_CREATE, &[0; 6]);
         let (_, vmo_hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
-
         let handle_ids = [vmo_hid as u32];
+
         call(
             &mut k,
             num::THREAD_CREATE_IN,
@@ -2055,6 +2241,7 @@ mod tests {
         );
 
         let (err, _) = call(&mut k, num::HANDLE_INFO, &[vmo_hid, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
     }
 }

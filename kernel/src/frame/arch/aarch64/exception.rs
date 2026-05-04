@@ -126,10 +126,13 @@ fn irq_handler(_frame: &mut TrapFrame) {
         }
         32.. => {
             let handler_addr = DEVICE_IRQ_HANDLER.load(Ordering::Acquire);
+
             if handler_addr != 0 {
                 // SAFETY: set_device_irq_handler stores a valid fn pointer.
                 let handler: fn(u32) = unsafe { core::mem::transmute(handler_addr) };
+
                 handler(intid);
+
                 super::gic::mask_spi(intid);
             } else {
                 crate::println!("IRQ: unhandled device INTID {intid}");
@@ -204,13 +207,13 @@ extern "C" fn svc_fast_handler(
     syscall_num: u64,
 ) -> (u64, u64) {
     let args = [a0, a1, a2, a3, a4, a5];
-
     // SAFETY: percpu() requires init_percpu_bsp to have been called.
     // kernel_ptr was set during boot via set_kernel_ptr.
     let (kernel, current_thread) = unsafe {
         let pc = super::cpu::percpu();
         let kernel = &mut *(pc.kernel_ptr as *mut crate::syscall::Kernel);
         let current = crate::types::ThreadId(pc.current_thread);
+
         (kernel, current)
     };
 
@@ -227,28 +230,29 @@ fn el1_sync_handler(frame: &mut TrapFrame) {
     match ec {
         // SVC from EL1 — kernel benchmarks use this to measure trap overhead.
         0x15 => {
-            let syscall_num = frame.gprs[8];
-            let args: [u64; 6] = [
-                frame.gprs[0],
-                frame.gprs[1],
-                frame.gprs[2],
-                frame.gprs[3],
-                frame.gprs[4],
-                frame.gprs[5],
-            ];
-
             #[cfg(target_os = "none")]
             {
+                let syscall_num = frame.gprs[8];
+                let args: [u64; 6] = [
+                    frame.gprs[0],
+                    frame.gprs[1],
+                    frame.gprs[2],
+                    frame.gprs[3],
+                    frame.gprs[4],
+                    frame.gprs[5],
+                ];
+                // SAFETY: percpu() requires init_percpu_bsp to have been called.
+                // kernel_ptr was set during boot via set_kernel_ptr.
                 let (kernel, current) = unsafe {
                     let pc = super::cpu::percpu();
                     let kernel = &mut *(pc.kernel_ptr as *mut crate::syscall::Kernel);
                     (kernel, crate::types::ThreadId(pc.current_thread))
                 };
                 let (error, value) = kernel.dispatch(current, syscall_num, &args);
+
                 frame.gprs[0] = error;
                 frame.gprs[1] = value;
             }
-
             #[cfg(not(target_os = "none"))]
             {
                 frame.gprs[0] = crate::types::SyscallError::InvalidArgument as u64;
@@ -281,8 +285,8 @@ fn el0_sync_handler(frame: &mut TrapFrame) {
                 frame.gprs[4],
                 frame.gprs[5],
             ];
-
             let handler_addr = SYSCALL_HANDLER.load(Ordering::Acquire);
+
             if handler_addr == 0 {
                 unimplemented_el0(frame, "SVC (no handler registered)");
             }
@@ -292,6 +296,7 @@ fn el0_sync_handler(frame: &mut TrapFrame) {
                 unsafe { core::mem::transmute(handler_addr) };
 
             let (error, value) = handler(syscall_num, &args);
+
             frame.gprs[0] = error; // x0 = error code
             frame.gprs[1] = value; // x1 = return value
         }
@@ -322,9 +327,9 @@ static FP_OWNER: [core::sync::atomic::AtomicU32; crate::config::MAX_CORES] =
 fn handle_fp_trap() {
     let (core_id, current_tid) = unsafe {
         let pc = super::cpu::percpu();
+
         (pc.core_id as usize, pc.current_thread)
     };
-
     let prev_owner = FP_OWNER[core_id].swap(current_tid, core::sync::atomic::Ordering::Relaxed);
 
     if prev_owner != super::cpu::PerCpu::IDLE && prev_owner != current_tid {
@@ -332,8 +337,10 @@ fn handle_fp_trap() {
         // thread ID because we set it when that thread last used FP.
         unsafe {
             let kernel = &mut *(super::cpu::percpu().kernel_ptr as *mut crate::syscall::Kernel);
+
             if let Some(thread) = kernel.threads.get_mut(prev_owner) {
                 let rs = thread.init_register_state();
+
                 save_fp_state(rs);
             }
         }
@@ -342,6 +349,7 @@ fn handle_fp_trap() {
     // Load current thread's FP state (if it has saved state).
     unsafe {
         let kernel = &*(super::cpu::percpu().kernel_ptr as *const crate::syscall::Kernel);
+
         if let Some(thread) = kernel.threads.get(current_tid)
             && let Some(rs) = thread.register_state()
         {
@@ -351,6 +359,7 @@ fn handle_fp_trap() {
 
     // Re-enable FP access.
     let cpacr = sysreg::cpacr_el1();
+
     sysreg::set_cpacr_el1(cpacr | (0b11 << 20));
     sysreg::isb();
 }
@@ -361,6 +370,7 @@ fn save_fp_state(rs: &mut crate::frame::arch::register_state::RegisterState) {
     // Uses fp_regs base pointer since fp_regs is at offset 280 (not 16-aligned).
     unsafe {
         let fp_base = (rs as *mut _ as usize) + 280;
+
         core::arch::asm!(
             "stp q0, q1, [{base}]",
             "stp q2, q3, [{base}, #32]",
@@ -394,6 +404,7 @@ fn load_fp_state(rs: &crate::frame::arch::register_state::RegisterState) {
     // SAFETY: Writes FP registers from saved state.
     unsafe {
         let fp_base = (rs as *const _ as usize) + 280;
+
         core::arch::asm!(
             "ldp q0, q1, [{base}]",
             "ldp q2, q3, [{base}, #32]",
@@ -426,8 +437,8 @@ fn handle_data_abort(frame: &mut TrapFrame) {
     let far = frame.far;
     let esr = frame.esr;
     let is_write = (esr >> 6) & 1 != 0; // WnR bit
-
     let handler_addr = FAULT_HANDLER.load(Ordering::Acquire);
+
     if handler_addr == 0 {
         unimplemented_el0(frame, "data abort (no handler)");
     }

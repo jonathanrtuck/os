@@ -34,12 +34,14 @@ impl PhysAddr {
 #[allow(clippy::declare_interior_mutable_const)]
 static BITMAP: [AtomicU64; config::BITMAP_WORDS] = {
     const ZERO: AtomicU64 = AtomicU64::new(0);
+
     [ZERO; config::BITMAP_WORDS]
 };
 
 #[allow(clippy::declare_interior_mutable_const)]
 static REFCOUNTS: [AtomicU16; config::MAX_PHYS_PAGES] = {
     const ZERO: AtomicU16 = AtomicU16::new(0);
+
     [ZERO; config::MAX_PHYS_PAGES]
 };
 
@@ -62,6 +64,7 @@ fn first_clear_bit(word: u64) -> Option<u32> {
     if word == u64::MAX {
         return None;
     }
+
     Some((!word).trailing_zeros())
 }
 
@@ -70,12 +73,14 @@ fn first_clear_bit(word: u64) -> Option<u32> {
 fn atomic_set_bit(word: &AtomicU64, bit: u32) -> bool {
     let mask = 1u64 << bit;
     let prev = word.fetch_or(mask, Ordering::AcqRel);
+
     prev & mask == 0
 }
 
 /// Clear bit `bit` in a bitmap word atomically.
 fn atomic_clear_bit(word: &AtomicU64, bit: u32) {
     let mask = 1u64 << bit;
+
     word.fetch_and(!mask, Ordering::Release);
 }
 
@@ -129,7 +134,6 @@ pub fn alloc_page() -> Option<PhysAddr> {
     let first_word = base / 64;
     let last_word = end_page.div_ceil(64);
     let word_count = last_word - first_word;
-
     let hint = ALLOC_HINT.load(Ordering::Relaxed);
     let hint = if hint >= first_word && hint < last_word {
         hint - first_word
@@ -188,8 +192,11 @@ pub fn alloc_contiguous(count: usize) -> Option<PhysAddr> {
     }
 
     contiguous_lock();
+
     let result = alloc_contiguous_inner(count);
+
     contiguous_unlock();
+
     result
 }
 
@@ -197,7 +204,6 @@ fn alloc_contiguous_inner(count: usize) -> Option<PhysAddr> {
     let base = BASE_PAGE.load(Ordering::Relaxed);
     let total = TOTAL_PAGES.load(Ordering::Relaxed);
     let end_page = base + total;
-
     // Simple linear scan for a contiguous run of free pages.
     let mut run_start = base;
     let mut run_len = 0;
@@ -211,7 +217,9 @@ fn alloc_contiguous_inner(count: usize) -> Option<PhysAddr> {
             if run_len == 0 {
                 run_start = page;
             }
+
             run_len += 1;
+
             if run_len == count {
                 // Claim all pages in the run.
                 #[allow(clippy::needless_range_loop)]
@@ -227,14 +235,19 @@ fn alloc_contiguous_inner(count: usize) -> Option<PhysAddr> {
 
                             atomic_clear_bit(&BITMAP[qw], qb);
                         }
+
                         // Retry from this point.
                         run_len = 0;
+
                         break;
                     }
+
                     REFCOUNTS[p].store(1, Ordering::Relaxed);
                 }
+
                 if run_len == count {
                     FREE_COUNT.fetch_sub(count, Ordering::Relaxed);
+
                     return Some(PhysAddr(run_start * config::PAGE_SIZE));
                 }
             }
@@ -266,6 +279,7 @@ pub fn release(addr: PhysAddr) -> bool {
 
         atomic_clear_bit(&BITMAP[word], bit);
         FREE_COUNT.fetch_add(1, Ordering::Relaxed);
+
         true
     } else {
         false
@@ -322,6 +336,7 @@ mod tests {
     #[test]
     fn set_bit_on_zero_word() {
         let word = AtomicU64::new(0);
+
         assert!(atomic_set_bit(&word, 5));
         assert_eq!(word.load(Ordering::Relaxed), 1 << 5);
     }
@@ -329,13 +344,16 @@ mod tests {
     #[test]
     fn set_bit_already_set() {
         let word = AtomicU64::new(1 << 5);
+
         assert!(!atomic_set_bit(&word, 5));
     }
 
     #[test]
     fn clear_bit() {
         let word = AtomicU64::new(1 << 5);
+
         atomic_clear_bit(&word, 5);
+
         assert_eq!(word.load(Ordering::Relaxed), 0);
     }
 
@@ -354,6 +372,7 @@ mod tests {
         for i in 0..page_count {
             REFCOUNTS[i].store(0, Ordering::Relaxed);
         }
+
         BASE_PAGE.store(0, Ordering::Relaxed);
         TOTAL_PAGES.store(page_count, Ordering::Relaxed);
         FREE_COUNT.store(page_count, Ordering::Relaxed);
@@ -364,7 +383,9 @@ mod tests {
     #[serial]
     fn alloc_returns_page_aligned_address() {
         setup_allocator(64);
+
         let addr = alloc_page().unwrap();
+
         assert_eq!(addr.as_usize() % config::PAGE_SIZE, 0);
     }
 
@@ -372,7 +393,9 @@ mod tests {
     #[serial]
     fn alloc_sets_refcount_to_one() {
         setup_allocator(64);
+
         let addr = alloc_page().unwrap();
+
         assert_eq!(refcount(addr), 1);
     }
 
@@ -380,8 +403,10 @@ mod tests {
     #[serial]
     fn alloc_then_release_frees_page() {
         setup_allocator(64);
+
         let free_before = free_pages();
         let addr = alloc_page().unwrap();
+
         assert_eq!(free_pages(), free_before - 1);
         assert!(release(addr));
         assert_eq!(free_pages(), free_before);
@@ -391,8 +416,10 @@ mod tests {
     #[serial]
     fn alloc_exhaustion_returns_none() {
         setup_allocator(2);
+
         let _a = alloc_page().unwrap();
         let _b = alloc_page().unwrap();
+
         assert!(alloc_page().is_none());
     }
 
@@ -400,11 +427,17 @@ mod tests {
     #[serial]
     fn addref_increments_refcount() {
         setup_allocator(64);
+
         let addr = alloc_page().unwrap();
+
         assert_eq!(refcount(addr), 1);
+
         addref(addr);
+
         assert_eq!(refcount(addr), 2);
+
         addref(addr);
+
         assert_eq!(refcount(addr), 3);
     }
 
@@ -412,9 +445,12 @@ mod tests {
     #[serial]
     fn release_with_refcount_gt_1_does_not_free() {
         setup_allocator(64);
+
         let free_before = free_pages();
         let addr = alloc_page().unwrap();
+
         addref(addr);
+
         assert!(!release(addr)); // refcount 2 -> 1, not freed
         assert_eq!(free_pages(), free_before - 1);
         assert!(release(addr)); // refcount 1 -> 0, freed
@@ -425,10 +461,13 @@ mod tests {
     #[serial]
     fn alloc_contiguous_basic() {
         setup_allocator(64);
+
         let base = alloc_contiguous(4).unwrap();
+
         // All 4 pages should be consecutive.
         for i in 0..4 {
             let page = base.page_index() + i;
+
             assert_eq!(refcount(PhysAddr(page * config::PAGE_SIZE)), 1);
         }
     }
@@ -437,16 +476,22 @@ mod tests {
     #[serial]
     fn alloc_free_realloc_no_leak() {
         setup_allocator(16);
+
         let initial_free = free_pages();
         let mut pages = Vec::new();
+
         for _ in 0..16 {
             pages.push(alloc_page().unwrap());
         }
+
         assert_eq!(free_pages(), 0);
+
         for p in &pages {
             release(*p);
         }
+
         assert_eq!(free_pages(), initial_free);
+
         // Reallocate — should succeed.
         for _ in 0..16 {
             assert!(alloc_page().is_some());

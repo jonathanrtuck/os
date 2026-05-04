@@ -56,9 +56,12 @@ impl Message {
         if bytes.len() > MSG_SIZE {
             return Err(SyscallError::InvalidArgument);
         }
+
         let mut msg = Self::empty();
+
         msg.data[..bytes.len()].copy_from_slice(bytes);
         msg.len = bytes.len();
+
         Ok(msg)
     }
 
@@ -72,6 +75,7 @@ impl Message {
 
     pub fn set_len(&mut self, len: usize) {
         debug_assert!(len <= MSG_SIZE);
+
         self.len = len;
     }
 
@@ -179,7 +183,9 @@ impl Endpoint {
     /// Allocate the next unique badge value for this endpoint.
     pub fn next_badge(&mut self) -> u32 {
         let b = self.badge_counter;
+
         self.badge_counter += 1;
+
         b
     }
 
@@ -197,7 +203,9 @@ impl Endpoint {
         if self.send_queue.len() >= config::MAX_PENDING_PER_ENDPOINT {
             return Err(SyscallError::BufferFull);
         }
+
         self.send_queue.push(call);
+
         Ok(self
             .bound_event
             .map(|eid| (eid, Self::ENDPOINT_READABLE_BIT)))
@@ -216,10 +224,11 @@ impl Endpoint {
             .max_by_key(|(_, c)| c.priority)
             .map(|(i, _)| i)
             .unwrap();
-
         let call = self.send_queue.swap_remove(best_idx);
         let cap_id = ReplyCapId(self.next_reply_id);
+
         self.next_reply_id += 1;
+
         self.active_replies.push(ActiveReply {
             cap_id,
             caller: call.caller,
@@ -237,6 +246,7 @@ impl Endpoint {
             .position(|r| r.cap_id == cap_id)
             .ok_or(SyscallError::InvalidHandle)?;
         let reply = self.active_replies.swap_remove(pos);
+
         Ok((reply.caller, reply.reply_buf))
     }
 
@@ -250,13 +260,16 @@ impl Endpoint {
         if self.peer_closed {
             return Err(SyscallError::PeerClosed);
         }
+
         for slot in &mut self.recv_waiters {
             if slot.is_none() {
                 *slot = Some(thread);
                 self.recv_waiter_count += 1;
+
                 return Ok(());
             }
         }
+
         Err(SyscallError::BufferFull)
     }
 
@@ -266,9 +279,11 @@ impl Endpoint {
             if *slot == Some(thread) {
                 *slot = None;
                 self.recv_waiter_count -= 1;
+
                 return true;
             }
         }
+
         false
     }
 
@@ -278,13 +293,16 @@ impl Endpoint {
             items: [ThreadId(0); config::MAX_RECV_WAITERS],
             len: 0,
         };
+
         for slot in &mut self.recv_waiters {
             if let Some(tid) = slot.take() {
                 list.items[list.len] = tid;
                 list.len += 1;
             }
         }
+
         self.recv_waiter_count = 0;
+
         list
     }
 
@@ -292,6 +310,7 @@ impl Endpoint {
     /// callers in send queue + callers awaiting reply + recv waiters.
     pub fn close_peer(&mut self) -> Vec<ThreadId> {
         self.peer_closed = true;
+
         let mut blocked = Vec::new();
 
         for call in self.send_queue.drain(..) {
@@ -305,6 +324,7 @@ impl Endpoint {
                 blocked.push(tid);
             }
         }
+
         self.recv_waiter_count = 0;
 
         blocked
@@ -315,7 +335,9 @@ impl Endpoint {
         if self.bound_event.is_some() {
             return Err(SyscallError::InvalidArgument);
         }
+
         self.bound_event = Some(event);
+
         Ok(())
     }
 
@@ -375,14 +397,17 @@ mod tests {
             badge: 42,
             reply_buf: 0,
         };
+
         ep.enqueue_call(call).unwrap();
 
         let (received, reply_cap) = ep.dequeue_call().unwrap();
+
         assert_eq!(received.caller, ThreadId(1));
         assert_eq!(received.badge, 42);
         assert_eq!(received.message.as_bytes(), b"request");
 
         let (caller, _reply_buf) = ep.consume_reply(reply_cap).unwrap();
+
         assert_eq!(caller, ThreadId(1));
         assert_eq!(ep.pending_reply_count(), 0);
     }
@@ -391,8 +416,10 @@ mod tests {
     fn handle_transfer_staged_in_call() {
         let mut ep = make_endpoint(0);
         let mut handles = [const { None }; config::MAX_IPC_HANDLES];
+
         handles[0] = Some(make_handle(99));
         handles[1] = Some(make_handle(100));
+
         let call = PendingCall {
             caller: ThreadId(1),
             priority: Priority::Medium,
@@ -402,9 +429,11 @@ mod tests {
             badge: 0,
             reply_buf: 0,
         };
+
         ep.enqueue_call(call).unwrap();
 
         let (received, _) = ep.dequeue_call().unwrap();
+
         assert_eq!(received.handle_count, 2);
         assert_eq!(received.handles[0].as_ref().unwrap().object_id, 99);
         assert_eq!(received.handles[1].as_ref().unwrap().object_id, 100);
@@ -415,27 +444,36 @@ mod tests {
     #[test]
     fn many_to_one_priority_ordering() {
         let mut ep = make_endpoint(0);
+
         ep.enqueue_call(make_call(1, Priority::Low, 10)).unwrap();
         ep.enqueue_call(make_call(2, Priority::High, 20)).unwrap();
         ep.enqueue_call(make_call(3, Priority::Medium, 30)).unwrap();
 
         let (first, _) = ep.dequeue_call().unwrap();
+
         assert_eq!(first.caller, ThreadId(2));
+
         let (second, _) = ep.dequeue_call().unwrap();
+
         assert_eq!(second.caller, ThreadId(3));
+
         let (third, _) = ep.dequeue_call().unwrap();
+
         assert_eq!(third.caller, ThreadId(1));
     }
 
     #[test]
     fn highest_caller_priority_tracks_queue() {
         let mut ep = make_endpoint(0);
+
         assert!(ep.highest_caller_priority().is_none());
 
         ep.enqueue_call(make_call(1, Priority::Low, 0)).unwrap();
+
         assert_eq!(ep.highest_caller_priority(), Some(Priority::Low));
 
         ep.enqueue_call(make_call(2, Priority::High, 0)).unwrap();
+
         assert_eq!(ep.highest_caller_priority(), Some(Priority::High));
     }
 
@@ -444,7 +482,9 @@ mod tests {
     #[test]
     fn reply_cap_consumed_once() {
         let mut ep = make_endpoint(0);
+
         ep.enqueue_call(make_call(1, Priority::Medium, 0)).unwrap();
+
         let (_, cap) = ep.dequeue_call().unwrap();
 
         assert!(ep.consume_reply(cap).is_ok());
@@ -459,13 +499,12 @@ mod tests {
 
         ep.enqueue_call(make_call(1, Priority::Medium, 0)).unwrap();
         ep.enqueue_call(make_call(2, Priority::Medium, 0)).unwrap();
-
         ep.enqueue_call(make_call(3, Priority::Medium, 0)).unwrap();
         ep.dequeue_call().unwrap(); // one call moves to active_replies
-
         ep.add_recv_waiter(ThreadId(10)).unwrap();
 
         let blocked = ep.close_peer();
+
         assert_eq!(blocked.len(), 4);
         assert!(blocked.contains(&ThreadId(1)));
         assert!(blocked.contains(&ThreadId(2)));
@@ -475,7 +514,9 @@ mod tests {
     #[test]
     fn enqueue_on_closed_endpoint() {
         let mut ep = make_endpoint(0);
+
         ep.close_peer();
+
         assert_eq!(
             ep.enqueue_call(make_call(1, Priority::Medium, 0)),
             Err(SyscallError::PeerClosed)
@@ -485,7 +526,9 @@ mod tests {
     #[test]
     fn recv_waiter_on_closed_endpoint() {
         let mut ep = make_endpoint(0);
+
         ep.close_peer();
+
         assert_eq!(
             ep.add_recv_waiter(ThreadId(1)),
             Err(SyscallError::PeerClosed)
@@ -497,16 +540,19 @@ mod tests {
     #[test]
     fn dequeue_empty_returns_none() {
         let mut ep = make_endpoint(0);
+
         assert!(ep.dequeue_call().is_none());
     }
 
     #[test]
     fn send_queue_exhaustion() {
         let mut ep = make_endpoint(0);
+
         for i in 0..config::MAX_PENDING_PER_ENDPOINT {
             ep.enqueue_call(make_call(i as u32, Priority::Medium, 0))
                 .unwrap();
         }
+
         assert_eq!(
             ep.enqueue_call(make_call(999, Priority::Medium, 0)),
             Err(SyscallError::BufferFull)
@@ -518,15 +564,17 @@ mod tests {
     #[test]
     fn recv_waiter_lifecycle() {
         let mut ep = make_endpoint(0);
+
         ep.add_recv_waiter(ThreadId(1)).unwrap();
         ep.add_recv_waiter(ThreadId(2)).unwrap();
-        assert_eq!(ep.recv_waiter_count(), 2);
 
+        assert_eq!(ep.recv_waiter_count(), 2);
         assert!(ep.remove_recv_waiter(ThreadId(1)));
         assert_eq!(ep.recv_waiter_count(), 1);
         assert!(!ep.remove_recv_waiter(ThreadId(1)));
 
         let waiters = ep.drain_recv_waiters();
+
         assert_eq!(waiters.len(), 1);
         assert_eq!(waiters.as_slice()[0], ThreadId(2));
         assert_eq!(ep.recv_waiter_count(), 0);
@@ -535,9 +583,11 @@ mod tests {
     #[test]
     fn recv_waiter_exhaustion() {
         let mut ep = make_endpoint(0);
+
         for i in 0..config::MAX_RECV_WAITERS {
             ep.add_recv_waiter(ThreadId(i as u32)).unwrap();
         }
+
         assert_eq!(
             ep.add_recv_waiter(ThreadId(999)),
             Err(SyscallError::BufferFull)
@@ -547,11 +597,14 @@ mod tests {
     #[test]
     fn drain_recv_waiters_after_mixed_add_remove() {
         let mut ep = make_endpoint(0);
+
         ep.add_recv_waiter(ThreadId(1)).unwrap();
         ep.add_recv_waiter(ThreadId(2)).unwrap();
         ep.add_recv_waiter(ThreadId(3)).unwrap();
         ep.remove_recv_waiter(ThreadId(2));
+
         let drained = ep.drain_recv_waiters();
+
         assert_eq!(drained.len(), 2);
         assert!(drained.as_slice().contains(&ThreadId(1)));
         assert!(drained.as_slice().contains(&ThreadId(3)));
@@ -562,6 +615,7 @@ mod tests {
     #[test]
     fn badge_counter_increments() {
         let mut ep = make_endpoint(0);
+
         assert_eq!(ep.next_badge(), 0);
         assert_eq!(ep.next_badge(), 1);
         assert_eq!(ep.next_badge(), 2);
@@ -570,21 +624,28 @@ mod tests {
     #[test]
     fn bind_event() {
         let mut ep = make_endpoint(0);
+
         ep.bind_event(EventId(5)).unwrap();
+
         assert_eq!(ep.bound_event(), Some(EventId(5)));
         assert_eq!(
             ep.bind_event(EventId(6)),
             Err(SyscallError::InvalidArgument)
         );
+
         ep.unbind_event();
+
         assert!(ep.bound_event().is_none());
     }
 
     #[test]
     fn generation_revoke() {
         let mut ep = make_endpoint(0);
+
         assert_eq!(ep.generation(), 0);
+
         ep.revoke();
+
         assert_eq!(ep.generation(), 1);
     }
 
@@ -593,12 +654,14 @@ mod tests {
     #[test]
     fn message_roundtrip() {
         let msg = Message::from_bytes(b"test data").unwrap();
+
         assert_eq!(msg.as_bytes(), b"test data");
     }
 
     #[test]
     fn message_too_large() {
         let big = [0u8; MSG_SIZE + 1];
+
         assert_eq!(
             Message::from_bytes(&big),
             Err(SyscallError::InvalidArgument)

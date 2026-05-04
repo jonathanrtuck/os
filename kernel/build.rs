@@ -1,8 +1,4 @@
-use std::{
-    env,
-    path::PathBuf,
-    process::Command,
-};
+use std::{env, path::PathBuf, process::Command};
 
 fn main() {
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
@@ -10,6 +6,7 @@ fn main() {
     if target_os == "none" {
         let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
         let link_ld = manifest_dir.join("link.ld");
+
         println!("cargo:rustc-link-arg=-T{}", link_ld.display());
 
         build_init(&manifest_dir);
@@ -22,7 +19,6 @@ fn build_init(kernel_dir: &std::path::Path) {
     let init_dir = kernel_dir.join("../init");
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let init_bin = out_dir.join("init.bin");
-
     let status = Command::new("cargo")
         .args([
             "build",
@@ -38,7 +34,6 @@ fn build_init(kernel_dir: &std::path::Path) {
     }
 
     let init_elf = init_dir.join("target/aarch64-unknown-none/release/init");
-
     let status = Command::new("rust-objcopy")
         .args([
             "-O",

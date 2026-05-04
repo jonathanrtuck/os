@@ -16,11 +16,10 @@ const STACK_SIZE: usize = 16384 * 4;
 
 fn spawn_service(entry: &manifest::ServiceEntry) -> Result<Handle, libsys::types::SyscallError> {
     let code_vmo = Handle(entry.code_vmo_handle_index);
-
     let space = libsys::space::create()?;
     let stack_vmo = libsys::vmo::create(STACK_SIZE, 0)?;
-
     let bootstrap_handles = [code_vmo.0, stack_vmo.0];
+
     libsys::thread::create_in(
         space,
         0x0020_0000,

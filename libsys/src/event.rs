@@ -29,10 +29,12 @@ pub struct WaitResult {
 
 pub fn wait(items: &[(Handle, u64)]) -> Result<WaitResult, SyscallError> {
     let mut args = [0u64; 6];
+
     for (i, &(h, mask)) in items.iter().take(3).enumerate() {
         args[i * 2] = h.0 as u64;
         args[i * 2 + 1] = mask;
     }
+
     let packed = check(raw::syscall(
         num::EVENT_WAIT,
         args[0],
@@ -42,6 +44,7 @@ pub fn wait(items: &[(Handle, u64)]) -> Result<WaitResult, SyscallError> {
         args[4],
         args[5],
     ))?;
+
     Ok(WaitResult {
         handle: Handle((packed >> 32) as u32),
         fired_bits: packed & 0xFFFF_FFFF,

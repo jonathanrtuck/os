@@ -92,10 +92,12 @@ unsafe impl Sync for PerCpuArray {}
 static PER_CPU_DATA: PerCpuArray = PerCpuArray(UnsafeCell::new({
     let mut arr = [PerCpu::new(0); config::MAX_CORES];
     let mut i = 0;
+
     while i < config::MAX_CORES {
         arr[i] = PerCpu::new(i as u32);
         i += 1;
     }
+
     arr
 }));
 
@@ -106,6 +108,7 @@ pub fn init_percpu_bsp() {
     // SAFETY: PER_CPU_DATA is initialized at compile time. We're accessing
     // slot 0 to get its address for TPIDR_EL1. No concurrent access during boot.
     let ptr = unsafe { &(*PER_CPU_DATA.0.get())[0] as *const PerCpu as u64 };
+
     sysreg::set_tpidr_el1(ptr);
 }
 
@@ -115,6 +118,7 @@ pub fn init_percpu(core_id: usize) {
     // SAFETY: core_id is validated by the caller (secondary_main). Each core
     // initializes only its own slot.
     let ptr = unsafe { &(*PER_CPU_DATA.0.get())[core_id] as *const PerCpu as u64 };
+
     sysreg::set_tpidr_el1(ptr);
 }
 
@@ -126,6 +130,7 @@ pub fn init_percpu(core_id: usize) {
 #[cfg(target_os = "none")]
 pub unsafe fn percpu() -> &'static PerCpu {
     let ptr = sysreg::tpidr_el1() as *const PerCpu;
+
     // SAFETY: TPIDR_EL1 was set to point to this core's PerCpu slot
     // during boot. The slot lives in a static with 'static lifetime.
     unsafe { &*ptr }
@@ -139,6 +144,7 @@ pub unsafe fn percpu() -> &'static PerCpu {
 #[cfg(target_os = "none")]
 pub unsafe fn percpu_mut() -> &'static mut PerCpu {
     let ptr = sysreg::tpidr_el1() as *mut PerCpu;
+
     // SAFETY: TPIDR_EL1 points to this core's exclusive slot. Caller
     // guarantees no concurrent access.
     unsafe { &mut *ptr }
@@ -152,6 +158,7 @@ pub fn set_kernel_ptr(ptr: *mut u8) {
     // SAFETY: Called during single-threaded boot, before secondaries.
     // UnsafeCell permits interior mutation.
     let data = unsafe { &mut *PER_CPU_DATA.0.get() };
+
     for slot in data.iter_mut() {
         slot.kernel_ptr = ptr as usize;
     }
@@ -258,6 +265,7 @@ extern "C" fn secondary_main(core_id: usize) -> ! {
     super::exception::init();
     super::mmu::init_secondary();
     super::gic::init_per_core(core_id);
+
     init_percpu(core_id);
 
     crate::println!("core {}: alive", core_id);
@@ -284,6 +292,7 @@ mod tests {
     #[test]
     fn percpu_idle_sentinel() {
         let p = PerCpu::new(3);
+
         assert_eq!(p.core_id, 3);
         assert_eq!(p.current_thread, PerCpu::IDLE);
         assert_eq!(p.kernel_ptr, 0);

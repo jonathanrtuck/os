@@ -6,13 +6,12 @@
 
 #![no_std]
 
-mod raw;
-pub mod types;
-
 pub mod event;
 pub mod handle;
 pub mod ipc;
+mod raw;
 pub mod space;
 pub mod system;
 pub mod thread;
+pub mod types;
 pub mod vmo;

@@ -435,12 +435,10 @@ mod tests {
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
         b.prop_u32("#size-cells", 2);
-
         b.begin_node(&format!("memory@{ram_base:x}"));
         b.prop_string("device_type", "memory");
         b.prop_reg(ram_base, ram_size);
         b.end_node();
-
         b.begin_node("cpus");
         b.prop_u32("#address-cells", 1);
         b.prop_u32("#size-cells", 0);

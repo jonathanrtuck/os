@@ -28,6 +28,7 @@ pub fn call(
         handles.len() as u64,
         0,
     ))?;
+
     Ok(CallResult {
         reply_len: r as usize,
     })
@@ -53,6 +54,7 @@ pub fn recv(
         handles_buf.len() as u64,
         0,
     ))?;
+
     Ok(RecvResult {
         reply_cap: (packed >> 32) as u32,
         handle_count: ((packed >> 16) & 0xFFFF) as usize,

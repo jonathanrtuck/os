@@ -39,6 +39,7 @@ pub mod num {
 pub fn syscall(num: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> (u64, u64) {
     let error: u64;
     let value: u64;
+
     // SAFETY: SVC #0 is the kernel entry point. The kernel validates all
     // arguments and returns a well-defined (error, value) pair.
     unsafe {
@@ -60,6 +61,7 @@ pub fn syscall(num: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -
 #[inline(always)]
 pub fn check(result: (u64, u64)) -> Result<u64, SyscallError> {
     let (err, val) = result;
+
     if err == 0 {
         Ok(val)
     } else {
