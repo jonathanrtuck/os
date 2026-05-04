@@ -22,6 +22,7 @@ extern crate std;
 
 pub mod address_space;
 pub mod config;
+pub mod event;
 #[allow(unsafe_code)]
 pub mod frame;
 pub mod handle;
