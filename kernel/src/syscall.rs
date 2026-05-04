@@ -51,9 +51,8 @@ pub mod num {
     pub const HANDLE_INFO: u64 = 25;
     pub const CLOCK_READ: u64 = 26;
     pub const SYSTEM_INFO: u64 = 27;
-    pub const IRQ_BIND: u64 = 28;
-    pub const IRQ_ACK: u64 = 29;
-    pub const ENDPOINT_BIND_EVENT: u64 = 30;
+    pub const EVENT_BIND_IRQ: u64 = 28;
+    pub const ENDPOINT_BIND_EVENT: u64 = 29;
 }
 
 struct StagedHandles {
@@ -219,8 +218,7 @@ impl Kernel {
             num::HANDLE_INFO => self.sys_handle_info(current, args),
             num::CLOCK_READ => self.sys_clock_read(args),
             num::SYSTEM_INFO => self.sys_system_info(args),
-            num::IRQ_BIND => self.sys_irq_bind(current, args),
-            num::IRQ_ACK => self.sys_irq_ack(args),
+            num::EVENT_BIND_IRQ => self.sys_event_bind_irq(current, args),
             num::ENDPOINT_BIND_EVENT => self.sys_endpoint_bind_event(current, args),
             _ => Err(SyscallError::InvalidArgument),
         };
@@ -484,10 +482,23 @@ impl Kernel {
             return Err(SyscallError::InsufficientRights);
         }
 
-        self.events
+        let event = self
+            .events
             .get_mut(handle.object_id)
-            .ok_or(SyscallError::InvalidHandle)?
-            .clear(bits);
+            .ok_or(SyscallError::InvalidHandle)?;
+        event.clear(bits);
+
+        if event.irq_bound() {
+            let (intids, count) = self
+                .irqs
+                .intids_for_event_bits(EventId(handle.object_id), bits);
+            for &intid in &intids[..count] {
+                self.irqs.ack(intid).ok();
+                #[cfg(target_os = "none")]
+                crate::frame::arch::gic::unmask_spi(intid);
+            }
+        }
+
         Ok(0)
     }
 
@@ -1215,9 +1226,13 @@ impl Kernel {
 
     // -- IRQ syscalls --
 
-    fn sys_irq_bind(&mut self, current: ThreadId, args: &[u64; 6]) -> Result<u64, SyscallError> {
-        let intid = args[0] as u32;
-        let handle_id = HandleId(args[1] as u32);
+    fn sys_event_bind_irq(
+        &mut self,
+        current: ThreadId,
+        args: &[u64; 6],
+    ) -> Result<u64, SyscallError> {
+        let handle_id = HandleId(args[0] as u32);
+        let intid = args[1] as u32;
         let signal_bits = args[2];
 
         let space_id = self.thread_space_id(current)?;
@@ -1231,12 +1246,13 @@ impl Kernel {
 
         let event_id = EventId(handle.object_id);
         self.irqs.bind(intid, event_id, signal_bits)?;
-        Ok(0)
-    }
 
-    fn sys_irq_ack(&mut self, args: &[u64; 6]) -> Result<u64, SyscallError> {
-        let intid = args[0] as u32;
-        self.irqs.ack(intid)?;
+        let event = self
+            .events
+            .get_mut(handle.object_id)
+            .ok_or(SyscallError::InvalidHandle)?;
+        event.set_irq_bound(true);
+
         Ok(0)
     }
 }
@@ -1400,43 +1416,52 @@ mod tests {
     }
 
     #[test]
-    fn irq_bind_and_ack() {
+    fn event_bind_irq_and_clear_acks() {
         let mut k = setup_kernel();
         let (err, event_hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
         assert_eq!(err, 0);
 
-        let (err, _) = call(&mut k, num::IRQ_BIND, &[64, event_hid, 0b1010, 0, 0, 0]);
+        let (err, _) = call(
+            &mut k,
+            num::EVENT_BIND_IRQ,
+            &[event_hid, 64, 0b1010, 0, 0, 0],
+        );
         assert_eq!(err, 0);
 
         let sig = k.irqs.handle_irq(64).unwrap();
         assert_eq!(sig.event_id, EventId(0));
         assert_eq!(sig.signal_bits, 0b1010);
 
-        let (err, _) = call(&mut k, num::IRQ_ACK, &[64, 0, 0, 0, 0, 0]);
+        call(&mut k, num::EVENT_SIGNAL, &[event_hid, 0b1010, 0, 0, 0, 0]);
+
+        let (err, _) = call(&mut k, num::EVENT_CLEAR, &[event_hid, 0b1010, 0, 0, 0, 0]);
         assert_eq!(err, 0);
     }
 
     #[test]
-    fn irq_bind_wrong_handle_type() {
+    fn event_bind_irq_wrong_handle_type() {
         let mut k = setup_kernel();
         let (_, vmo_hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
-        let (err, _) = call(&mut k, num::IRQ_BIND, &[64, vmo_hid, 0b1, 0, 0, 0]);
+        let (err, _) = call(&mut k, num::EVENT_BIND_IRQ, &[vmo_hid, 64, 0b1, 0, 0, 0]);
         assert_eq!(err, SyscallError::WrongHandleType as u64);
     }
 
     #[test]
-    fn irq_bind_invalid_intid() {
+    fn event_bind_irq_invalid_intid() {
         let mut k = setup_kernel();
         let (_, event_hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
-        let (err, _) = call(&mut k, num::IRQ_BIND, &[10, event_hid, 0b1, 0, 0, 0]);
+        let (err, _) = call(&mut k, num::EVENT_BIND_IRQ, &[event_hid, 10, 0b1, 0, 0, 0]);
         assert_eq!(err, SyscallError::InvalidArgument as u64);
     }
 
     #[test]
-    fn irq_ack_without_pending() {
+    fn event_clear_non_irq_skips_scan() {
         let mut k = setup_kernel();
-        let (err, _) = call(&mut k, num::IRQ_ACK, &[64, 0, 0, 0, 0, 0]);
-        assert_eq!(err, SyscallError::NotFound as u64);
+        let (_, event_hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+        call(&mut k, num::EVENT_SIGNAL, &[event_hid, 0b11, 0, 0, 0, 0]);
+        let (err, _) = call(&mut k, num::EVENT_CLEAR, &[event_hid, 0b11, 0, 0, 0, 0]);
+        assert_eq!(err, 0);
+        assert_eq!(k.events.get(0).unwrap().bits(), 0);
     }
 
     // -- New syscall tests --

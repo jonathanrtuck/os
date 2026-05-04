@@ -91,7 +91,6 @@ impl IrqTable {
     }
 
     /// Acknowledge a handled IRQ, clearing the ack-pending flag.
-    /// The frame layer should unmask the IRQ at the GIC redistributor.
     pub fn ack(&mut self, intid: u32) -> Result<(), SyscallError> {
         if intid < DEVICE_IRQ_BASE || (intid as usize) >= config::MAX_IRQS {
             return Err(SyscallError::InvalidArgument);
@@ -104,6 +103,24 @@ impl IrqTable {
         }
         binding.ack_pending = false;
         Ok(())
+    }
+
+    /// Return INTIDs bound to a given event whose signal_bits overlap
+    /// with `cleared_bits`. Used by event_clear to auto-unmask IRQs.
+    pub fn intids_for_event_bits(&self, event_id: EventId, cleared_bits: u64) -> ([u32; 4], usize) {
+        let mut result = [0u32; 4];
+        let mut count = 0;
+        for (intid, slot) in self.bindings.iter().enumerate() {
+            if let Some(b) = slot
+                && b.event_id == event_id
+                && b.signal_bits & cleared_bits != 0
+                && count < 4
+            {
+                result[count] = intid as u32;
+                count += 1;
+            }
+        }
+        (result, count)
     }
 }
 

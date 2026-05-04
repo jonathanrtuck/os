@@ -67,6 +67,7 @@ pub struct Event {
     waiters: [Option<Waiter>; config::MAX_WAITERS_PER_EVENT],
     waiter_count: usize,
     bound_endpoint: Option<EndpointId>,
+    irq_bound: bool,
 }
 
 #[allow(clippy::new_without_default)]
@@ -79,6 +80,7 @@ impl Event {
             waiters: [None; config::MAX_WAITERS_PER_EVENT],
             waiter_count: 0,
             bound_endpoint: None,
+            irq_bound: false,
         }
     }
 
@@ -92,6 +94,14 @@ impl Event {
 
     pub fn bound_endpoint(&self) -> Option<EndpointId> {
         self.bound_endpoint
+    }
+
+    pub fn irq_bound(&self) -> bool {
+        self.irq_bound
+    }
+
+    pub fn set_irq_bound(&mut self, bound: bool) {
+        self.irq_bound = bound;
     }
 
     pub fn waiter_count(&self) -> usize {
