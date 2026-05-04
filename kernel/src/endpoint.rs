@@ -39,6 +39,7 @@ impl PriorityRing {
         }
 
         let tail = (self.head as usize + self.len as usize) % SLOTS_PER_PRIORITY;
+
         self.slots[tail] = Some(item);
         self.len += 1;
 
@@ -51,6 +52,7 @@ impl PriorityRing {
         }
 
         let item = self.slots[self.head as usize].take();
+
         self.head = ((self.head as usize + 1) % SLOTS_PER_PRIORITY) as u8;
         self.len -= 1;
 
@@ -77,6 +79,7 @@ impl PrioritySendQueue {
 
     fn enqueue(&mut self, call: PendingCall) -> Result<(), SyscallError> {
         let level = call.priority as usize;
+
         self.rings[level].push(call)?;
         self.total += 1;
 
@@ -87,6 +90,7 @@ impl PrioritySendQueue {
         for level in (0..NUM_PRIORITY_LEVELS).rev() {
             if let Some(call) = self.rings[level].pop() {
                 self.total -= 1;
+
                 return Some(call);
             }
         }
@@ -124,6 +128,7 @@ impl PrioritySendQueue {
                 out(call.caller);
             }
         }
+
         self.total = 0;
     }
 }
@@ -407,6 +412,7 @@ impl Endpoint {
                 && r.cap_id == cap_id
             {
                 let reply = *r;
+
                 *slot = None;
                 self.active_reply_count -= 1;
 
@@ -481,12 +487,15 @@ impl Endpoint {
         let mut blocked = CloseList::new();
 
         self.send_queue.drain_callers(&mut |tid| blocked.push(tid));
+
         for slot in &mut self.active_replies {
             if let Some(reply) = slot.take() {
                 blocked.push(reply.caller);
             }
         }
+
         self.active_reply_count = 0;
+
         for slot in &mut self.recv_waiters {
             if let Some(tid) = slot.take() {
                 blocked.push(tid);
@@ -513,7 +522,6 @@ impl Endpoint {
     pub fn unbind_event(&mut self) {
         self.bound_event = None;
     }
-
 }
 
 #[cfg(test)]
@@ -711,11 +719,14 @@ mod tests {
     #[test]
     fn send_queue_exhaustion() {
         let mut ep = make_endpoint(0);
-        let priorities = [Priority::Idle, Priority::Low, Priority::Medium, Priority::High];
+        let priorities = [
+            Priority::Idle,
+            Priority::Low,
+            Priority::Medium,
+            Priority::High,
+        ];
 
-        for (i, &pri) in (0..config::MAX_PENDING_PER_ENDPOINT)
-            .zip(priorities.iter().cycle())
-        {
+        for (i, &pri) in (0..config::MAX_PENDING_PER_ENDPOINT).zip(priorities.iter().cycle()) {
             ep.enqueue_call(make_call(i as u32, pri, 0)).unwrap();
         }
 

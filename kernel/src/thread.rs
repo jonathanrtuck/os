@@ -348,11 +348,14 @@ impl Scheduler {
         for core in &mut self.cores {
             if core.current == Some(thread) {
                 core.current = None;
+
                 return;
             }
+
             for q in &mut core.queues {
                 if let Some(pos) = q.iter().position(|&t| t == thread) {
                     q.remove(pos);
+
                     return;
                 }
             }

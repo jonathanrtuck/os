@@ -119,21 +119,28 @@ impl HandleTable {
 
         if head == target_u32 {
             let next = self.free_next[target].load(Ordering::Relaxed);
+
             self.free_head.store(next, Ordering::Relaxed);
             self.free_next[target].store(EMPTY, Ordering::Relaxed);
+
             return;
         }
 
         let mut cur = head;
+
         while cur != EMPTY {
             let cur_idx = cur as usize;
             let next = self.free_next[cur_idx].load(Ordering::Relaxed);
+
             if next == target_u32 {
                 let target_next = self.free_next[target].load(Ordering::Relaxed);
+
                 self.free_next[cur_idx].store(target_next, Ordering::Relaxed);
                 self.free_next[target].store(EMPTY, Ordering::Relaxed);
+
                 return;
             }
+
             cur = next;
         }
     }
@@ -339,7 +346,6 @@ mod tests {
             generation: 0,
             badge: 0,
         };
-
         let id = t.allocate_at(3, h).unwrap();
 
         assert_eq!(id, HandleId(3));

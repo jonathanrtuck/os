@@ -106,10 +106,7 @@ impl Kernel {
     }
 
     fn link_thread_to_space(&mut self, thread_idx: u32, space_id: AddressSpaceId) {
-        let old_head = self
-            .spaces
-            .get(space_id.0)
-            .and_then(|s| s.thread_head());
+        let old_head = self.spaces.get(space_id.0).and_then(|s| s.thread_head());
 
         if let Some(t) = self.threads.get_mut(thread_idx) {
             t.set_space_next(old_head);
@@ -128,14 +125,8 @@ impl Kernel {
     }
 
     fn unlink_thread_from_space(&mut self, thread_idx: u32, space_id: AddressSpaceId) {
-        let prev = self
-            .threads
-            .get(thread_idx)
-            .and_then(|t| t.space_prev());
-        let next = self
-            .threads
-            .get(thread_idx)
-            .and_then(|t| t.space_next());
+        let prev = self.threads.get(thread_idx).and_then(|t| t.space_prev());
+        let next = self.threads.get(thread_idx).and_then(|t| t.space_next());
 
         if let Some(p) = prev {
             if let Some(t) = self.threads.get_mut(p) {
@@ -1438,10 +1429,7 @@ impl Kernel {
         }
 
         // 1. Walk the thread list and kill all threads in the target space.
-        let mut thread_cursor = self
-            .spaces
-            .get(target_id.0)
-            .and_then(|s| s.thread_head());
+        let mut thread_cursor = self.spaces.get(target_id.0).and_then(|s| s.thread_head());
 
         while let Some(tid) = thread_cursor {
             thread_cursor = self.threads.get(tid).and_then(|t| t.space_next());
@@ -1968,13 +1956,11 @@ mod tests {
             .lookup(HandleId(space_hid as u32))
             .unwrap()
             .object_id;
-
         let (_, _tid_hid) = call(
             &mut k,
             num::THREAD_CREATE_IN,
             &[space_hid, 0x1000, 0x2000, 0, 0, 0],
         );
-
         let initial_threads = k.threads.count();
         let (err, _) = call(&mut k, num::SPACE_DESTROY, &[space_hid, 0, 0, 0, 0, 0]);
 

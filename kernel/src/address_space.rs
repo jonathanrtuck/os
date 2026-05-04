@@ -240,16 +240,14 @@ impl AddressSpace {
         }
 
         let va = self.va_allocator.allocate(aligned_size, addr_hint)?;
-
         let record = MappingRecord {
             vmo_id,
             va_start: va,
             size: aligned_size,
             rights,
         };
-        let pos = self
-            .mappings
-            .partition_point(|m| m.va_start < va);
+        let pos = self.mappings.partition_point(|m| m.va_start < va);
+
         self.mappings.insert(pos, record);
 
         Ok(va)
@@ -257,9 +255,7 @@ impl AddressSpace {
 
     /// Unmap a region by its start virtual address.
     pub fn unmap(&mut self, addr: usize) -> Result<MappingRecord, SyscallError> {
-        let pos = self
-            .mappings
-            .partition_point(|m| m.va_start < addr);
+        let pos = self.mappings.partition_point(|m| m.va_start < addr);
 
         if pos >= self.mappings.len() || self.mappings[pos].va_start != addr {
             return Err(SyscallError::NotFound);
@@ -275,7 +271,9 @@ impl AddressSpace {
     /// Find the mapping containing `addr` (for page fault handling).
     /// O(log n) via binary search on the sorted mapping array.
     pub fn find_mapping(&self, addr: usize) -> Option<&MappingRecord> {
-        let idx = self.mappings.partition_point(|m| m.va_start + m.size <= addr);
+        let idx = self
+            .mappings
+            .partition_point(|m| m.va_start + m.size <= addr);
 
         self.mappings
             .get(idx)

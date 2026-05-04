@@ -241,6 +241,7 @@ fn el1_sync_handler(frame: &mut TrapFrame) {
             if recovery != 0 {
                 frame.elr = recovery;
                 frame.gprs[0] = 1; // Signal fault to the copy function via x0.
+
                 return;
             }
 
@@ -264,6 +265,7 @@ fn el1_sync_handler(frame: &mut TrapFrame) {
                 let (kernel, current) = unsafe {
                     let pc = super::cpu::percpu();
                     let kernel = &mut *(pc.kernel_ptr as *mut crate::syscall::Kernel);
+
                     (kernel, crate::types::ThreadId(pc.current_thread))
                 };
                 let (error, value) = kernel.dispatch(current, syscall_num, &args);

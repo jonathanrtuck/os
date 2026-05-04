@@ -25,18 +25,12 @@ pub struct ObjectTable<T, const MAX: usize> {
 impl<T, const MAX: usize> ObjectTable<T, MAX> {
     pub fn new() -> Self {
         let mut entries = Vec::with_capacity(MAX);
+
         entries.resize_with(MAX, || None);
 
         let generations: Vec<AtomicU64> = (0..MAX).map(|_| AtomicU64::new(0)).collect();
-
         let free_next: Vec<AtomicU32> = (0..MAX)
-            .map(|i| {
-                AtomicU32::new(if i + 1 < MAX {
-                    (i + 1) as u32
-                } else {
-                    EMPTY
-                })
-            })
+            .map(|i| AtomicU32::new(if i + 1 < MAX { (i + 1) as u32 } else { EMPTY }))
             .collect();
 
         Self {
@@ -66,6 +60,7 @@ impl<T, const MAX: usize> ObjectTable<T, MAX> {
                 self.free_next[head as usize].store(EMPTY, Ordering::Relaxed);
                 self.entries[head as usize] = Some(value);
                 self.count.fetch_add(1, Ordering::Relaxed);
+
                 let generation = self.generations[head as usize].load(Ordering::Acquire);
 
                 return Some((head, generation));
@@ -81,6 +76,7 @@ impl<T, const MAX: usize> ObjectTable<T, MAX> {
         }
 
         let value = self.entries[i].take()?;
+
         self.generations[i].fetch_add(1, Ordering::Release);
 
         loop {
