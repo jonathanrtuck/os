@@ -5,8 +5,12 @@
 //! same priority tier. Idle threads (Priority::Idle) are the fallback when
 //! all user-priority queues are empty.
 
+#[cfg(any(target_os = "none", test))]
+use alloc::boxed::Box;
 use alloc::{collections::VecDeque, vec::Vec};
 
+#[cfg(any(target_os = "none", test))]
+use crate::frame::arch::register_state::RegisterState;
 use crate::types::{AddressSpaceId, EventId, Priority, ThreadId, TopologyHint};
 
 /// Number of priority levels: Idle, Low, Medium, High.
@@ -41,6 +45,8 @@ pub struct Thread {
     kernel_sp: usize,
     exit_code: Option<u32>,
     fp_dirty: bool,
+    #[cfg(any(target_os = "none", test))]
+    register_state: Option<Box<RegisterState>>,
 }
 
 #[allow(clippy::new_without_default)]
@@ -68,6 +74,8 @@ impl Thread {
             kernel_sp: 0,
             exit_code: None,
             fp_dirty: false,
+            #[cfg(any(target_os = "none", test))]
+            register_state: None,
         }
     }
 
@@ -171,6 +179,26 @@ impl Thread {
     pub fn exit(&mut self, code: u32) {
         self.state = ThreadRunState::Exited;
         self.exit_code = Some(code);
+    }
+
+    pub fn generation(&self) -> u64 {
+        0
+    }
+
+    #[cfg(any(target_os = "none", test))]
+    pub fn register_state(&self) -> Option<&RegisterState> {
+        self.register_state.as_deref()
+    }
+
+    #[cfg(any(target_os = "none", test))]
+    pub fn register_state_mut(&mut self) -> Option<&mut RegisterState> {
+        self.register_state.as_deref_mut()
+    }
+
+    #[cfg(any(target_os = "none", test))]
+    pub fn init_register_state(&mut self) -> &mut RegisterState {
+        self.register_state
+            .get_or_insert_with(|| Box::new(RegisterState::zeroed()))
     }
 }
 
@@ -374,6 +402,29 @@ mod tests {
 
         t.release_boost();
         assert_eq!(t.effective_priority(), Priority::Low);
+    }
+
+    #[test]
+    fn thread_register_state_starts_none() {
+        let t = make_thread(0, Priority::Medium);
+        assert!(t.register_state().is_none());
+    }
+
+    #[test]
+    fn thread_init_register_state() {
+        let mut t = make_thread(0, Priority::Medium);
+        let rs = t.init_register_state();
+        rs.pc = 0x1000;
+        rs.sp = 0x2000;
+        rs.pstate = 0;
+        assert_eq!(t.register_state().unwrap().pc, 0x1000);
+        assert_eq!(t.register_state().unwrap().sp, 0x2000);
+    }
+
+    #[test]
+    fn thread_generation_is_zero() {
+        let t = make_thread(0, Priority::Medium);
+        assert_eq!(t.generation(), 0);
     }
 
     #[test]

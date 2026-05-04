@@ -63,6 +63,10 @@ pub const MAX_WAITERS_PER_EVENT: usize = 16;
 pub const MAX_PENDING_PER_ENDPOINT: usize = 16;
 pub const KERNEL_STACK_PAGES: usize = 2;
 
+/// Kernel stack size per thread (2 pages = 32 KiB).
+/// Must hold: TrapFrame (832 bytes) + Rust call stack for deepest syscall path.
+pub const THREAD_KERNEL_STACK_SIZE: usize = KERNEL_STACK_PAGES * PAGE_SIZE;
+
 // IRQ binding table capacity. GICv3 supports INTIDs 0-1023.
 // SGIs (0-15) and PPIs (16-31) are kernel-internal; SPIs (32-1019) are
 // bindable to userspace events. 1024 covers the full INTID range.

@@ -29,6 +29,17 @@ pub struct RegisterState {
     pub fpsr: u64,
 }
 
+impl RegisterState {
+    /// Create a zeroed RegisterState, suitable for a new thread.
+    ///
+    /// All fields are numeric types where zero is a valid value.
+    pub fn zeroed() -> Self {
+        // SAFETY: RegisterState contains only u64, u128 arrays, and u64 scalars.
+        // All-zeros is a valid representation for every field.
+        unsafe { core::mem::zeroed() }
+    }
+}
+
 const _: () = {
     assert!(core::mem::size_of::<RegisterState>() == 816);
 };
