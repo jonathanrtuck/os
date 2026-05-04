@@ -8,8 +8,9 @@
 implemented end-to-end), capability-based access control, blocking IPC with
 message data and handle transfer, multi-wait events, SVC fast path, lazy FP,
 event-based interrupts, page table population, fault resolution, and framekernel
-discipline. 271 tests passing, fuzz-tested, boot-to-userspace verified in
-release mode. Userspace syscall library (libsys) and service manifest ready.
+discipline. 355 tests passing (with structural invariant verification on every
+syscall-level test), fuzz-tested, boot-to-userspace verified in release mode.
+Userspace syscall library (abi) and service manifest ready.
 
 The previous implementation (v0.1-v0.6) is preserved at tag `v0.6-pre-rewrite`.
 
@@ -62,22 +63,33 @@ The previous implementation (v0.1-v0.6) is preserved at tag `v0.6-pre-rewrite`.
 - **Fuzz harness:** cargo-fuzz targets for single and sequential syscall fuzzing
 - **Benchmark suite:** CNTVCT_EL0 cycle-count harness with 10x structural
   regression thresholds
+- **Invariant checker** (`invariants.rs`): post-condition verification for
+  handle→object referential integrity, generation-count consistency,
+  waiter/counter agreement, thread linked-list validity, scheduler uniqueness,
+  and thread state consistency. Runs after every syscall-level test. Zero
+  runtime cost.
+- **Verification test suite** (`verification.rs`): boundary values (bit 32/63,
+  page boundaries, all rights bits), failure paths (rollback on full handle
+  table, wrong types, double close), object lifecycles (create→use→destroy for
+  all 5 types), generation revocation, and bare-metal RegisterState coverage
+- **Pre-commit gate:** clippy + full test suite + framekernel discipline check
+- **Makefile:** `make test` / `make build` / `make clippy` targets
 
 ### What's Implemented
 
-| Module          | Description                                           | Tests |
-| --------------- | ----------------------------------------------------- | ----- |
-| `vmo.rs`        | VMO: pages, COW snapshots, sealing, resize, pager     | 16    |
-| `handle.rs`     | Handle table: alloc/close/dup with rights attenuation | 7     |
-| `address_space` | VA allocator, mapping records, destroy lifecycle      | 20    |
-| `event.rs`      | Level-triggered signal bits, waiter queue, irq_bound  | 14    |
-| `endpoint.rs`   | Sync IPC: call/recv/reply, priority inheritance       | 19    |
-| `thread.rs`     | Thread lifecycle, scheduler, multi-core, multi-wait   | 16    |
-| `sched.rs`      | Block/wake/yield/exit, context switch integration     | 6     |
-| `syscall.rs`    | Dispatch table (30 syscalls), Kernel struct           | 41    |
-| `fault.rs`      | Data abort handler: COW/lazy/pager resolution         | 4     |
-| `irq.rs`        | Interrupt-to-event bridge, intids_for_event_bits      | 22    |
-| `table.rs`      | Heap-backed O(1) object table, safe dual-reference    | 6     |
+| Module            | Description                                           | Tests |
+| ----------------- | ----------------------------------------------------- | ----- |
+| `vmo.rs`          | VMO: pages, COW snapshots, sealing, resize, pager     | 16    |
+| `handle.rs`       | Handle table: alloc/close/dup with rights attenuation  | 8     |
+| `address_space`   | VA allocator, mapping records, destroy lifecycle       | 20    |
+| `event.rs`        | Level-triggered signal bits, waiter queue, irq_bound   | 14    |
+| `endpoint.rs`     | Sync IPC: call/recv/reply, priority inheritance        | 19    |
+| `thread.rs`       | Thread lifecycle, scheduler, multi-core, multi-wait    | 16    |
+| `sched.rs`        | Block/wake/yield/exit, context switch integration      | 6     |
+| `syscall.rs`      | Dispatch table (30 syscalls), Kernel struct            | 73    |
+| `fault.rs`        | Data abort handler: COW/lazy/pager resolution          | 8     |
+| `irq.rs`          | Interrupt-to-event bridge, intids_for_event_bits       | 22    |
+| `table.rs`        | Heap-backed O(1) object table, safe dual-reference     | 6     |
 | `bootstrap.rs`  | Init environment setup, page table population         | 8     |
 | `pipeline.rs`   | Multi-service integration tests                       | 8     |
 | `frame/`        | AArch64 platform (boot, MMU, GIC, timer, page tables) | 71    |

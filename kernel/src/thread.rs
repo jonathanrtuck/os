@@ -662,4 +662,122 @@ mod tests {
 
         assert!(least == 2 || least == 3);
     }
+
+    // -- Scheduler edge cases --
+
+    #[test]
+    fn round_robin_all_priority_levels() {
+        for pri in [
+            Priority::Idle,
+            Priority::Low,
+            Priority::Medium,
+            Priority::High,
+        ] {
+            let mut sched = Scheduler::new(1);
+
+            sched.enqueue(0, ThreadId(1), pri);
+            sched.enqueue(0, ThreadId(2), pri);
+
+            assert_eq!(sched.pick_next(0), Some(ThreadId(1)));
+
+            sched.core_mut(0).set_current(Some(ThreadId(1)));
+            sched.core_mut(0).rotate_current(pri);
+
+            assert_eq!(sched.pick_next(0), Some(ThreadId(2)));
+        }
+    }
+
+    #[test]
+    fn preemption_detection_at_every_boundary() {
+        let mut sched = Scheduler::new(1);
+
+        sched.enqueue(0, ThreadId(1), Priority::High);
+
+        assert!(sched.core(0).has_higher_priority_than(Priority::Medium));
+        assert!(sched.core(0).has_higher_priority_than(Priority::Low));
+        assert!(sched.core(0).has_higher_priority_than(Priority::Idle));
+        assert!(!sched.core(0).has_higher_priority_than(Priority::High));
+    }
+
+    #[test]
+    fn remove_thread_from_middle_of_queue() {
+        let mut sched = Scheduler::new(1);
+
+        sched.enqueue(0, ThreadId(1), Priority::Medium);
+        sched.enqueue(0, ThreadId(2), Priority::Medium);
+        sched.enqueue(0, ThreadId(3), Priority::Medium);
+
+        sched.core_mut(0).dequeue(ThreadId(2), Priority::Medium);
+
+        assert_eq!(sched.pick_next(0), Some(ThreadId(1)));
+        assert_eq!(sched.pick_next(0), Some(ThreadId(3)));
+        assert!(sched.pick_next(0).is_none());
+    }
+
+    #[test]
+    fn remove_nonexistent_thread_is_noop() {
+        let mut sched = Scheduler::new(1);
+
+        sched.enqueue(0, ThreadId(1), Priority::Medium);
+
+        assert!(!sched.core_mut(0).dequeue(ThreadId(99), Priority::Medium));
+        assert_eq!(sched.core(0).total_ready(), 1);
+    }
+
+    #[test]
+    fn remove_from_global_scheduler_finds_correct_core() {
+        let mut sched = Scheduler::new(3);
+
+        sched.enqueue(0, ThreadId(1), Priority::Medium);
+        sched.enqueue(1, ThreadId(2), Priority::Medium);
+        sched.enqueue(2, ThreadId(3), Priority::Medium);
+
+        sched.remove(ThreadId(2));
+
+        assert_eq!(sched.core(0).total_ready(), 1);
+        assert_eq!(sched.core(1).total_ready(), 0);
+        assert_eq!(sched.core(2).total_ready(), 1);
+    }
+
+    #[test]
+    fn empty_queue_pick_returns_none() {
+        let mut sched = Scheduler::new(1);
+
+        assert!(sched.pick_next(0).is_none());
+        assert!(sched.core(0).current().is_none());
+    }
+
+    #[test]
+    fn set_priority_preserves_boost() {
+        let mut t = make_thread(0, Priority::Low);
+
+        t.boost_priority(Priority::High);
+        t.set_priority(Priority::Medium);
+
+        assert_eq!(t.priority(), Priority::Medium);
+        assert_eq!(
+            t.effective_priority(),
+            Priority::High,
+            "boost should be preserved when base priority changes"
+        );
+    }
+
+    #[test]
+    fn set_priority_below_boost_keeps_boost() {
+        let mut t = make_thread(0, Priority::Low);
+
+        t.boost_priority(Priority::High);
+        t.set_priority(Priority::Low);
+
+        assert_eq!(t.effective_priority(), Priority::High);
+    }
+
+    #[test]
+    fn boost_below_current_effective_is_noop() {
+        let mut t = make_thread(0, Priority::High);
+
+        t.boost_priority(Priority::Low);
+
+        assert_eq!(t.effective_priority(), Priority::High);
+    }
 }
