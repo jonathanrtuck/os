@@ -9,8 +9,6 @@
 //! Timer (INTID 27) and SGI/PPI interrupts (0-31) are kernel-internal and
 //! cannot be bound to userspace events.
 
-use alloc::vec::Vec;
-
 use crate::{
     config,
     types::{EventId, SyscallError},
@@ -32,17 +30,15 @@ pub struct IrqSignal {
 }
 
 pub struct IrqTable {
-    bindings: Vec<Option<IrqBinding>>,
+    bindings: [Option<IrqBinding>; config::MAX_IRQS],
 }
 
 #[allow(clippy::new_without_default)]
 impl IrqTable {
     pub fn new() -> Self {
-        let mut bindings = Vec::with_capacity(config::MAX_IRQS);
-
-        bindings.resize_with(config::MAX_IRQS, || None);
-
-        IrqTable { bindings }
+        IrqTable {
+            bindings: [None; config::MAX_IRQS],
+        }
     }
 
     pub fn bind(
