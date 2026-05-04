@@ -9,3 +9,4 @@ pub mod arch;
 pub mod firmware;
 #[cfg(target_os = "none")]
 pub mod heap;
+pub mod user_mem;

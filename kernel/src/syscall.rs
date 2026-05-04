@@ -9,8 +9,9 @@ use alloc::vec::Vec;
 use crate::{
     address_space::AddressSpace,
     config,
-    endpoint::{Endpoint, Message, PendingCall, ReplyCapId},
+    endpoint::{Endpoint, PendingCall, ReplyCapId},
     event::Event,
+    frame::user_mem,
     handle::Handle,
     irq::IrqTable,
     table::ObjectTable,
@@ -537,12 +538,16 @@ impl Kernel {
 
     fn sys_call(&mut self, current: ThreadId, args: &[u64; 6]) -> Result<u64, SyscallError> {
         let handle_id = HandleId(args[0] as u32);
+        let msg_ptr = args[1] as usize;
+        let msg_len = args[2] as usize;
 
         let space_id = self.thread_space_id(current)?;
         let handle = self.lookup_handle(space_id, handle_id)?;
         if handle.object_type != ObjectType::Endpoint {
             return Err(SyscallError::WrongHandleType);
         }
+
+        let message = user_mem::read_user_message(msg_ptr, msg_len)?;
 
         let priority = self
             .threads
@@ -553,9 +558,10 @@ impl Kernel {
         let call = PendingCall {
             caller: current,
             priority,
-            message: Message::empty(),
+            message,
             handles: Vec::new(),
             badge: 0,
+            reply_buf: msg_ptr,
         };
 
         let ep = self
@@ -576,6 +582,8 @@ impl Kernel {
 
     fn sys_recv(&mut self, current: ThreadId, args: &[u64; 6]) -> Result<u64, SyscallError> {
         let handle_id = HandleId(args[0] as u32);
+        let out_buf = args[1] as usize;
+        let out_cap = args[2] as usize;
 
         let space_id = self.thread_space_id(current)?;
         let handle = self.lookup_handle(space_id, handle_id)?;
@@ -589,8 +597,8 @@ impl Kernel {
             .get_mut(obj_id)
             .ok_or(SyscallError::InvalidHandle)?;
 
-        if let Some((_call, reply_cap)) = ep.dequeue_call() {
-            return Ok(reply_cap.0 as u64);
+        if let Some((call, reply_cap)) = ep.dequeue_call() {
+            return self.recv_deliver(call, reply_cap, out_buf, out_cap);
         }
 
         if ep.is_peer_closed() {
@@ -605,16 +613,34 @@ impl Kernel {
             .get_mut(obj_id)
             .ok_or(SyscallError::InvalidHandle)?;
 
-        if let Some((_call, reply_cap)) = ep.dequeue_call() {
-            return Ok(reply_cap.0 as u64);
+        if let Some((call, reply_cap)) = ep.dequeue_call() {
+            return self.recv_deliver(call, reply_cap, out_buf, out_cap);
         }
 
         Err(SyscallError::PeerClosed)
     }
 
+    fn recv_deliver(
+        &self,
+        call: PendingCall,
+        reply_cap: ReplyCapId,
+        out_buf: usize,
+        out_cap: usize,
+    ) -> Result<u64, SyscallError> {
+        let msg_bytes = call.message.as_bytes();
+        if msg_bytes.len() > out_cap {
+            return Err(SyscallError::BufferFull);
+        }
+        user_mem::write_user_bytes(out_buf, msg_bytes)?;
+        let msg_len = msg_bytes.len() as u64;
+        Ok((reply_cap.0 as u64) << 32 | msg_len)
+    }
+
     fn sys_reply(&mut self, current: ThreadId, args: &[u64; 6]) -> Result<u64, SyscallError> {
         let handle_id = HandleId(args[0] as u32);
         let reply_cap_id = ReplyCapId(args[1] as u32);
+        let msg_ptr = args[2] as usize;
+        let msg_len = args[3] as usize;
 
         let space_id = self.thread_space_id(current)?;
         let handle = self.lookup_handle(space_id, handle_id)?;
@@ -622,15 +648,18 @@ impl Kernel {
             return Err(SyscallError::WrongHandleType);
         }
 
+        let reply_msg = user_mem::read_user_message(msg_ptr, msg_len)?;
+
         let ep = self
             .endpoints
             .get_mut(handle.object_id)
             .ok_or(SyscallError::InvalidHandle)?;
 
-        let caller_id = ep.consume_reply(reply_cap_id)?;
+        let (caller_id, caller_reply_buf) = ep.consume_reply(reply_cap_id)?;
+        user_mem::write_user_bytes(caller_reply_buf, reply_msg.as_bytes())?;
         crate::sched::wake(self, caller_id, 0);
 
-        Ok(0)
+        Ok(reply_msg.len() as u64)
     }
 
     // -- Thread lifecycle --
@@ -1234,5 +1263,146 @@ mod tests {
         let mut k = setup_kernel();
         let (err, _) = call(&mut k, num::THREAD_EXIT, &[42, 0, 0, 0, 0, 0]);
         assert_eq!(err, 0);
+    }
+
+    // -- IPC message passthrough --
+
+    fn setup_ipc_kernel() -> (Box<Kernel>, u64) {
+        let mut k = setup_kernel();
+        let (err, ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
+        assert_eq!(err, 0);
+        (k, ep_hid)
+    }
+
+    #[test]
+    fn ipc_send_recv_message_bytes() {
+        let (mut k, ep_hid) = setup_ipc_kernel();
+        let mut call_buf = [0u8; 128];
+        let request = b"hello server";
+        call_buf[..request.len()].copy_from_slice(request);
+
+        let (err, _) = call(
+            &mut k,
+            num::CALL,
+            &[
+                ep_hid,
+                call_buf.as_mut_ptr() as u64,
+                request.len() as u64,
+                0,
+                0,
+                0,
+            ],
+        );
+        assert_eq!(err, 0);
+
+        let mut recv_buf = [0u8; 128];
+        let (err, packed) = call(
+            &mut k,
+            num::RECV,
+            &[ep_hid, recv_buf.as_mut_ptr() as u64, 128, 0, 0, 0],
+        );
+        assert_eq!(err, 0);
+        let msg_len = (packed & 0xFFFF_FFFF) as usize;
+        assert_eq!(msg_len, request.len());
+        assert_eq!(&recv_buf[..msg_len], request);
+    }
+
+    #[test]
+    fn ipc_message_full_roundtrip_with_reply() {
+        let (mut k, ep_hid) = setup_ipc_kernel();
+        let mut call_buf = [0u8; 128];
+        let request = b"request";
+        call_buf[..request.len()].copy_from_slice(request);
+
+        let (err, _) = call(
+            &mut k,
+            num::CALL,
+            &[
+                ep_hid,
+                call_buf.as_mut_ptr() as u64,
+                request.len() as u64,
+                0,
+                0,
+                0,
+            ],
+        );
+        assert_eq!(err, 0);
+
+        let mut recv_buf = [0u8; 128];
+        let (err, packed) = call(
+            &mut k,
+            num::RECV,
+            &[ep_hid, recv_buf.as_mut_ptr() as u64, 128, 0, 0, 0],
+        );
+        assert_eq!(err, 0);
+        let msg_len = (packed & 0xFFFF_FFFF) as usize;
+        let reply_cap = (packed >> 32) as u64;
+        assert_eq!(&recv_buf[..msg_len], request);
+
+        let reply = b"response";
+        let (err, _) = call(
+            &mut k,
+            num::REPLY,
+            &[
+                ep_hid,
+                reply_cap,
+                reply.as_ptr() as u64,
+                reply.len() as u64,
+                0,
+                0,
+            ],
+        );
+        assert_eq!(err, 0);
+        assert_eq!(&call_buf[..reply.len()], reply);
+    }
+
+    #[test]
+    fn ipc_empty_message() {
+        let (mut k, ep_hid) = setup_ipc_kernel();
+
+        let (err, _) = call(&mut k, num::CALL, &[ep_hid, 0, 0, 0, 0, 0]);
+        assert_eq!(err, 0);
+
+        let mut recv_buf = [0u8; 128];
+        let (err, packed) = call(
+            &mut k,
+            num::RECV,
+            &[ep_hid, recv_buf.as_mut_ptr() as u64, 128, 0, 0, 0],
+        );
+        assert_eq!(err, 0);
+        let msg_len = (packed & 0xFFFF_FFFF) as usize;
+        assert_eq!(msg_len, 0);
+    }
+
+    #[test]
+    fn ipc_oversized_message_rejected() {
+        let (mut k, ep_hid) = setup_ipc_kernel();
+        let big = [0u8; 129];
+        let (err, _) = call(
+            &mut k,
+            num::CALL,
+            &[ep_hid, big.as_ptr() as u64, big.len() as u64, 0, 0, 0],
+        );
+        assert_eq!(err, SyscallError::InvalidArgument as u64);
+    }
+
+    #[test]
+    fn ipc_recv_insufficient_buffer() {
+        let (mut k, ep_hid) = setup_ipc_kernel();
+        let msg = b"some data here";
+        let (err, _) = call(
+            &mut k,
+            num::CALL,
+            &[ep_hid, msg.as_ptr() as u64, msg.len() as u64, 0, 0, 0],
+        );
+        assert_eq!(err, 0);
+
+        let mut tiny_buf = [0u8; 4];
+        let (err, _) = call(
+            &mut k,
+            num::RECV,
+            &[ep_hid, tiny_buf.as_mut_ptr() as u64, 4, 0, 0, 0],
+        );
+        assert_eq!(err, SyscallError::BufferFull as u64);
     }
 }

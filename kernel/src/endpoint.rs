@@ -65,6 +65,23 @@ impl Message {
     pub fn as_bytes(&self) -> &[u8] {
         &self.data[..self.len]
     }
+
+    pub fn data_mut(&mut self) -> &mut [u8; MSG_SIZE] {
+        &mut self.data
+    }
+
+    pub fn set_len(&mut self, len: usize) {
+        debug_assert!(len <= MSG_SIZE);
+        self.len = len;
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
 }
 
 impl core::fmt::Debug for Message {
@@ -85,12 +102,14 @@ pub struct PendingCall {
     pub message: Message,
     pub handles: Vec<Handle>,
     pub badge: u32,
+    pub reply_buf: usize,
 }
 
 /// Tracks a reply cap issued to a server, linking it to the blocked caller.
 struct ActiveReply {
     cap_id: ReplyCapId,
     caller: ThreadId,
+    reply_buf: usize,
 }
 
 /// A synchronous IPC endpoint.
@@ -195,20 +214,21 @@ impl Endpoint {
         self.active_replies.push(ActiveReply {
             cap_id,
             caller: call.caller,
+            reply_buf: call.reply_buf,
         });
 
         Some((call, cap_id))
     }
 
-    /// Consume a reply cap, returning the blocked caller's thread ID.
-    pub fn consume_reply(&mut self, cap_id: ReplyCapId) -> Result<ThreadId, SyscallError> {
+    /// Consume a reply cap, returning (caller_thread_id, caller_reply_buf).
+    pub fn consume_reply(&mut self, cap_id: ReplyCapId) -> Result<(ThreadId, usize), SyscallError> {
         let pos = self
             .active_replies
             .iter()
             .position(|r| r.cap_id == cap_id)
             .ok_or(SyscallError::InvalidHandle)?;
         let reply = self.active_replies.swap_remove(pos);
-        Ok(reply.caller)
+        Ok((reply.caller, reply.reply_buf))
     }
 
     /// Highest priority among pending callers (for priority inheritance).
@@ -317,6 +337,7 @@ mod tests {
             message: Message::from_bytes(b"hello").unwrap(),
             handles: Vec::new(),
             badge,
+            reply_buf: 0,
         }
     }
 
@@ -341,6 +362,7 @@ mod tests {
             message: Message::from_bytes(b"request").unwrap(),
             handles: Vec::new(),
             badge: 42,
+            reply_buf: 0,
         };
         ep.enqueue_call(call).unwrap();
 
@@ -349,7 +371,7 @@ mod tests {
         assert_eq!(received.badge, 42);
         assert_eq!(received.message.as_bytes(), b"request");
 
-        let caller = ep.consume_reply(reply_cap).unwrap();
+        let (caller, _reply_buf) = ep.consume_reply(reply_cap).unwrap();
         assert_eq!(caller, ThreadId(1));
         assert_eq!(ep.pending_reply_count(), 0);
     }
@@ -363,6 +385,7 @@ mod tests {
             message: Message::empty(),
             handles: vec![make_handle(99), make_handle(100)],
             badge: 0,
+            reply_buf: 0,
         };
         ep.enqueue_call(call).unwrap();
 
