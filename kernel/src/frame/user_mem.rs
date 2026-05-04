@@ -1,6 +1,10 @@
 //! User-space memory access — the unsafe boundary for IPC message transfer.
 //!
-//! On bare metal (`target_os = "none"`): validates VA range, copies via raw pointer.
+//! On bare metal: LDTR/STTR instructions perform loads/stores using EL0's
+//! page table, with fault recovery via the data abort handler. If the user
+//! address is unmapped or has wrong permissions, the copy returns an error
+//! instead of crashing the kernel.
+//!
 //! On host (test target): direct pointer dereference (same address space).
 
 use crate::{
@@ -26,6 +30,157 @@ fn validate_user_range(ptr: usize, len: usize) -> Result<(), SyscallError> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Bare-metal: LDTR/STTR with fault recovery
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "none")]
+fn copy_from_user(dst: &mut [u8], src_va: usize) -> Result<(), SyscallError> {
+    use super::arch::exception::COPY_FAULT_RECOVERY;
+
+    let len = dst.len();
+    let fault: u64;
+
+    // SAFETY: LDTR performs the load using EL0's translation regime. If the
+    // address is unmapped or lacks read permission, a data abort (EC 0x25)
+    // occurs at EL1. The handler checks COPY_FAULT_RECOVERY and, if set,
+    // jumps to the recovery label (sets x0=1 in the TrapFrame). The `adr`
+    // instruction computes the recovery label address without accessing
+    // memory — safe with nomem omitted. `str` to COPY_FAULT_RECOVERY is a
+    // kernel VA write (identity-mapped), not a user VA access.
+    unsafe {
+        core::arch::asm!(
+            "adr {recovery}, 22f",
+            "str {recovery}, [{flag}]",
+            "11:",
+            "cmp {len}, #8",
+            "b.lt 13f",
+            "ldtr {tmp}, [{src}]",
+            "str {tmp}, [{dst}]",
+            "add {src}, {src}, #8",
+            "add {dst}, {dst}, #8",
+            "sub {len}, {len}, #8",
+            "b 11b",
+            "13:",
+            "cbz {len}, 14f",
+            "15:",
+            "ldtrb {tmp:w}, [{src}]",
+            "strb {tmp:w}, [{dst}]",
+            "add {src}, {src}, #1",
+            "add {dst}, {dst}, #1",
+            "sub {len}, {len}, #1",
+            "cbnz {len}, 15b",
+            "14:",
+            "str xzr, [{flag}]",
+            "mov {fault}, #0",
+            "b 16f",
+            "22:",
+            "str xzr, [{flag}]",
+            "mov {fault}, #1",
+            "16:",
+            src = inout(reg) src_va => _,
+            dst = inout(reg) dst.as_mut_ptr() => _,
+            len = inout(reg) len => _,
+            tmp = out(reg) _,
+            fault = lateout(reg) fault,
+            recovery = out(reg) _,
+            flag = in(reg) COPY_FAULT_RECOVERY.as_ptr(),
+            options(nostack),
+        );
+    }
+
+    if fault != 0 {
+        Err(SyscallError::InvalidArgument)
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "none")]
+fn copy_to_user(dst_va: usize, src: &[u8]) -> Result<(), SyscallError> {
+    use super::arch::exception::COPY_FAULT_RECOVERY;
+
+    let len = src.len();
+    let fault: u64;
+
+    // SAFETY: STTR performs the store using EL0's translation regime. Same
+    // fault recovery mechanism as copy_from_user.
+    unsafe {
+        core::arch::asm!(
+            "adr {recovery}, 22f",
+            "str {recovery}, [{flag}]",
+            "11:",
+            "cmp {len}, #8",
+            "b.lt 13f",
+            "ldr {tmp}, [{src}]",
+            "sttr {tmp}, [{dst}]",
+            "add {src}, {src}, #8",
+            "add {dst}, {dst}, #8",
+            "sub {len}, {len}, #8",
+            "b 11b",
+            "13:",
+            "cbz {len}, 14f",
+            "15:",
+            "ldrb {tmp:w}, [{src}]",
+            "sttrb {tmp:w}, [{dst}]",
+            "add {src}, {src}, #1",
+            "add {dst}, {dst}, #1",
+            "sub {len}, {len}, #1",
+            "cbnz {len}, 15b",
+            "14:",
+            "str xzr, [{flag}]",
+            "mov {fault}, #0",
+            "b 16f",
+            "22:",
+            "str xzr, [{flag}]",
+            "mov {fault}, #1",
+            "16:",
+            dst = inout(reg) dst_va => _,
+            src = inout(reg) src.as_ptr() => _,
+            len = inout(reg) len => _,
+            tmp = out(reg) _,
+            fault = lateout(reg) fault,
+            recovery = out(reg) _,
+            flag = in(reg) COPY_FAULT_RECOVERY.as_ptr(),
+            options(nostack),
+        );
+    }
+
+    if fault != 0 {
+        Err(SyscallError::InvalidArgument)
+    } else {
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Host (test): direct pointer copy
+// ---------------------------------------------------------------------------
+
+#[cfg(not(target_os = "none"))]
+fn copy_from_user(dst: &mut [u8], src_va: usize) -> Result<(), SyscallError> {
+    // SAFETY: On host tests, src_va is a pointer in the same address space.
+    unsafe {
+        core::ptr::copy_nonoverlapping(src_va as *const u8, dst.as_mut_ptr(), dst.len());
+    }
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "none"))]
+fn copy_to_user(dst_va: usize, src: &[u8]) -> Result<(), SyscallError> {
+    // SAFETY: On host tests, dst_va is a pointer in the same address space.
+    unsafe {
+        core::ptr::copy_nonoverlapping(src.as_ptr(), dst_va as *mut u8, src.len());
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Public API — delegates to copy_from_user/copy_to_user
+// ---------------------------------------------------------------------------
+
 pub fn read_user_message(ptr: usize, len: usize) -> Result<Message, SyscallError> {
     if len > MSG_SIZE {
         return Err(SyscallError::InvalidArgument);
@@ -38,44 +193,21 @@ pub fn read_user_message(ptr: usize, len: usize) -> Result<Message, SyscallError
 
     let mut msg = Message::empty();
 
-    // SAFETY: On host tests, ptr is a valid pointer to the caller's buffer in
-    // the same address space. On bare metal, the kernel has verified the VA is
-    // mapped in the current address space before reaching this point.
-    unsafe {
-        let src = ptr as *const u8;
-        let dst = msg.data_mut().as_mut_ptr();
-
-        core::ptr::copy_nonoverlapping(src, dst, len);
-    }
-
+    copy_from_user(&mut msg.data_mut()[..len], ptr)?;
     msg.set_len(len);
 
     Ok(msg)
 }
 
-/// Write bytes to user memory.
-///
-/// # Safety
-/// Same VA requirements as `read_user_message`.
 pub fn write_user_bytes(ptr: usize, data: &[u8]) -> Result<(), SyscallError> {
     if data.is_empty() {
         return Ok(());
     }
 
     validate_user_range(ptr, data.len())?;
-
-    // SAFETY: ptr is verified as a valid user VA (same safety argument as
-    // read_user_message). data.len() <= MSG_SIZE enforced by caller.
-    unsafe {
-        let dst = ptr as *mut u8;
-
-        core::ptr::copy_nonoverlapping(data.as_ptr(), dst, data.len());
-    }
-
-    Ok(())
+    copy_to_user(ptr, data)
 }
 
-/// Read a slice of u32 values from user memory into a caller-provided buffer.
 pub fn read_user_u32s(ptr: usize, count: usize, buf: &mut [u32]) -> Result<(), SyscallError> {
     if count == 0 {
         return Ok(());
@@ -84,19 +216,18 @@ pub fn read_user_u32s(ptr: usize, count: usize, buf: &mut [u32]) -> Result<(), S
         return Err(SyscallError::InvalidArgument);
     }
 
-    validate_user_range(ptr, count * core::mem::size_of::<u32>())?;
+    let byte_len = count * core::mem::size_of::<u32>();
 
-    // SAFETY: same VA argument as read_user_message.
-    unsafe {
-        let src = ptr as *const u32;
+    validate_user_range(ptr, byte_len)?;
 
-        core::ptr::copy_nonoverlapping(src, buf.as_mut_ptr(), count);
-    }
+    // SAFETY: buf[..count] is valid for byte_len bytes, properly aligned.
+    let dst_bytes = unsafe {
+        core::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut u8, byte_len)
+    };
 
-    Ok(())
+    copy_from_user(dst_bytes, ptr)
 }
 
-/// Write a slice of u32 values to user memory.
 pub fn write_user_u32s(ptr: usize, data: &[u32]) -> Result<(), SyscallError> {
     if data.is_empty() {
         return Ok(());
@@ -104,14 +235,12 @@ pub fn write_user_u32s(ptr: usize, data: &[u32]) -> Result<(), SyscallError> {
 
     validate_user_range(ptr, core::mem::size_of_val(data))?;
 
-    // SAFETY: same VA argument as write_user_bytes.
-    unsafe {
-        let dst = ptr as *mut u32;
+    // SAFETY: data is a valid slice of u32, reinterpreted as bytes.
+    let src_bytes = unsafe {
+        core::slice::from_raw_parts(data.as_ptr() as *const u8, core::mem::size_of_val(data))
+    };
 
-        core::ptr::copy_nonoverlapping(data.as_ptr(), dst, data.len());
-    }
-
-    Ok(())
+    copy_to_user(ptr, src_bytes)
 }
 
 /// Write data to a physical address. Bare-metal only.

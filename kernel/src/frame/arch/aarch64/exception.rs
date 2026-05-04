@@ -8,9 +8,15 @@
 #[cfg(target_os = "none")]
 core::arch::global_asm!(include_str!("exception.S"));
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use super::sysreg;
+
+/// Per-core fault recovery address for LDTR/STTR user memory access.
+/// When non-zero, an EL1 data abort during copy_from_user/copy_to_user
+/// jumps to this address instead of panicking. Cleared after the copy
+/// completes (success or fault).
+pub static COPY_FAULT_RECOVERY: AtomicU64 = AtomicU64::new(0);
 
 // ---------------------------------------------------------------------------
 // TrapFrame — must match the assembly layout in exception.S exactly.
@@ -228,6 +234,18 @@ fn el1_sync_handler(frame: &mut TrapFrame) {
     let ec = (frame.esr >> 26) & 0x3F;
 
     match ec {
+        // Data abort from same EL — LDTR/STTR fault during user memory copy.
+        0x25 => {
+            let recovery = COPY_FAULT_RECOVERY.swap(0, Ordering::Relaxed);
+
+            if recovery != 0 {
+                frame.elr = recovery;
+                frame.gprs[0] = 1; // Signal fault to the copy function via x0.
+                return;
+            }
+
+            fatal_exception(frame, 4);
+        }
         // SVC from EL1 — kernel benchmarks use this to measure trap overhead.
         0x15 => {
             #[cfg(target_os = "none")]
