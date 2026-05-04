@@ -8,11 +8,24 @@ use crate::{
     types::SyscallError,
 };
 
-/// Read a message from user memory into a stack-allocated Message.
-///
-/// # Safety
-/// On bare metal, `ptr` must be a valid user-space virtual address mapped
-/// into the current address space. On host, `ptr` is a direct pointer.
+#[cfg(target_os = "none")]
+const USER_VA_END: usize = 1 << 36;
+
+fn validate_user_range(ptr: usize, len: usize) -> Result<(), SyscallError> {
+    if ptr == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if ptr.checked_add(len).is_none() {
+        return Err(SyscallError::InvalidArgument);
+    }
+    #[cfg(target_os = "none")]
+    if ptr + len > USER_VA_END {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    Ok(())
+}
+
 pub fn read_user_message(ptr: usize, len: usize) -> Result<Message, SyscallError> {
     if len > MSG_SIZE {
         return Err(SyscallError::InvalidArgument);
@@ -20,9 +33,8 @@ pub fn read_user_message(ptr: usize, len: usize) -> Result<Message, SyscallError
     if len == 0 {
         return Ok(Message::empty());
     }
-    if ptr == 0 {
-        return Err(SyscallError::InvalidArgument);
-    }
+
+    validate_user_range(ptr, len)?;
 
     let mut msg = Message::empty();
 
@@ -49,9 +61,8 @@ pub fn write_user_bytes(ptr: usize, data: &[u8]) -> Result<(), SyscallError> {
     if data.is_empty() {
         return Ok(());
     }
-    if ptr == 0 {
-        return Err(SyscallError::InvalidArgument);
-    }
+
+    validate_user_range(ptr, data.len())?;
 
     // SAFETY: ptr is verified as a valid user VA (same safety argument as
     // read_user_message). data.len() <= MSG_SIZE enforced by caller.
@@ -69,9 +80,11 @@ pub fn read_user_u32s(ptr: usize, count: usize, buf: &mut [u32]) -> Result<(), S
     if count == 0 {
         return Ok(());
     }
-    if ptr == 0 || count > buf.len() {
+    if count > buf.len() {
         return Err(SyscallError::InvalidArgument);
     }
+
+    validate_user_range(ptr, count * core::mem::size_of::<u32>())?;
 
     // SAFETY: same VA argument as read_user_message.
     unsafe {
@@ -88,9 +101,8 @@ pub fn write_user_u32s(ptr: usize, data: &[u32]) -> Result<(), SyscallError> {
     if data.is_empty() {
         return Ok(());
     }
-    if ptr == 0 {
-        return Err(SyscallError::InvalidArgument);
-    }
+
+    validate_user_range(ptr, core::mem::size_of_val(data))?;
 
     // SAFETY: same VA argument as write_user_bytes.
     unsafe {
