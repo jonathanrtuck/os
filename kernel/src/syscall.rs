@@ -78,7 +78,6 @@ pub struct Kernel {
     pub spaces: ObjectTable<AddressSpace, { config::MAX_ADDRESS_SPACES }>,
     pub irqs: IrqTable,
     pub scheduler: Scheduler,
-    next_asid: u8,
 }
 
 impl Kernel {
@@ -91,20 +90,19 @@ impl Kernel {
             spaces: ObjectTable::new(),
             irqs: IrqTable::new(),
             scheduler: Scheduler::new(num_cores),
-            next_asid: 1,
         }
     }
 
-    pub fn alloc_asid(&mut self) -> Result<u8, SyscallError> {
-        if self.next_asid as usize >= config::MAX_ADDRESS_SPACES {
-            return Err(SyscallError::OutOfMemory);
-        }
+    #[cfg(any(target_os = "none", test))]
+    pub fn alloc_asid(&self) -> Result<u8, SyscallError> {
+        crate::frame::arch::page_table::alloc_asid()
+            .map(|asid| asid.0)
+            .ok_or(SyscallError::OutOfMemory)
+    }
 
-        let asid = self.next_asid;
-
-        self.next_asid += 1;
-
-        Ok(asid)
+    #[cfg(not(any(target_os = "none", test)))]
+    pub fn alloc_asid(&self) -> Result<u8, SyscallError> {
+        Err(SyscallError::OutOfMemory)
     }
 
     pub fn thread_space_id(&self, thread: ThreadId) -> Result<AddressSpaceId, SyscallError> {
@@ -615,6 +613,22 @@ impl Kernel {
     }
 
     fn sys_clock_read(&self, _args: &[u64; 6]) -> Result<u64, SyscallError> {
+        #[cfg(any(target_os = "none", test))]
+        {
+            let ticks = crate::frame::arch::timer::now();
+            let freq = crate::frame::arch::timer::frequency();
+
+            if freq == 0 {
+                return Ok(0);
+            }
+
+            let secs = ticks / freq;
+            let remainder = ticks % freq;
+
+            Ok(secs * 1_000_000_000 + remainder * 1_000_000_000 / freq)
+        }
+
+        #[cfg(not(any(target_os = "none", test)))]
         Ok(0)
     }
 
