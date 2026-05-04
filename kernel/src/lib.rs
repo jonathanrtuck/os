@@ -32,6 +32,8 @@ pub mod fault;
 pub mod frame;
 pub mod handle;
 pub mod irq;
+#[cfg(test)]
+mod pipeline;
 pub mod print;
 pub mod syscall;
 pub mod table;
