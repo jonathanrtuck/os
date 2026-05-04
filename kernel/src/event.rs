@@ -4,6 +4,8 @@
 //! on signal, AND-NOT'd on clear. Waiters match against current bits
 //! (level-triggered: if bits are already set, the waiter wakes immediately).
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
 use crate::{
     config,
     types::{EndpointId, EventId, SyscallError, ThreadId},
@@ -62,7 +64,7 @@ struct Waiter {
 /// An event object — signal bits + waiter queue.
 pub struct Event {
     pub id: EventId,
-    bits: u64,
+    bits: AtomicU64,
     waiters: [Option<Waiter>; config::MAX_WAITERS_PER_EVENT],
     waiter_count: usize,
     bound_endpoint: Option<EndpointId>,
@@ -73,7 +75,7 @@ impl Event {
     pub fn new(id: EventId) -> Self {
         Event {
             id,
-            bits: 0,
+            bits: AtomicU64::new(0),
             waiters: [None; config::MAX_WAITERS_PER_EVENT],
             waiter_count: 0,
             bound_endpoint: None,
@@ -81,7 +83,7 @@ impl Event {
     }
 
     pub fn bits(&self) -> u64 {
-        self.bits
+        self.bits.load(Ordering::Acquire)
     }
 
     pub fn bound_endpoint(&self) -> Option<EndpointId> {
@@ -95,21 +97,22 @@ impl Event {
     /// Check if any requested bits are currently set. Returns the matching
     /// bits, or None if no match (caller should block the thread).
     pub fn check(&self, mask: u64) -> Option<u64> {
-        let fired = self.bits & mask;
+        let fired = self.bits.load(Ordering::Acquire) & mask;
 
         if fired != 0 { Some(fired) } else { None }
     }
 
     /// Signal (OR) bits and wake all matching waiters.
-    /// Returns the list of threads to wake with their fired bits (inline, no heap).
+    /// On ARM64 with LSE, fetch_or compiles to a single LDSET instruction (~4 cycles).
     pub fn signal(&mut self, bits: u64) -> WakeList {
-        self.bits |= bits;
+        self.bits.fetch_or(bits, Ordering::Release);
 
+        let current_bits = self.bits.load(Ordering::Acquire);
         let mut woken = WakeList::new();
 
         for slot in &mut self.waiters {
             if let Some(waiter) = slot {
-                let fired = self.bits & waiter.mask;
+                let fired = current_bits & waiter.mask;
 
                 if fired != 0 {
                     woken.push(WakeInfo {
@@ -127,8 +130,9 @@ impl Event {
     }
 
     /// Clear (AND-NOT) bits.
+    /// On ARM64 with LSE, fetch_and compiles to a single LDCLR instruction (~4 cycles).
     pub fn clear(&mut self, bits: u64) {
-        self.bits &= !bits;
+        self.bits.fetch_and(!bits, Ordering::Release);
     }
 
     /// Add a waiter to the queue. Returns Err if the queue is full.
