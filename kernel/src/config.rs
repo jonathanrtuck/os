@@ -13,3 +13,52 @@ pub const KERNEL_STACK_SIZE: usize = 64 * 1024;
 /// data). Must be >= the actual core count discovered from the DTB at
 /// runtime. The current value targets QEMU virt / Apple HVF configurations.
 pub const MAX_CORES: usize = 8;
+
+/// Page size — 16 KiB (Apple Silicon native granule).
+pub const PAGE_SIZE: usize = 16 * 1024;
+
+/// Maximum supported physical memory: 48 GiB.
+pub const MAX_PHYS_MEM: usize = 48 * 1024 * 1024 * 1024;
+
+/// Maximum physical pages (MAX_PHYS_MEM / PAGE_SIZE).
+pub const MAX_PHYS_PAGES: usize = MAX_PHYS_MEM / PAGE_SIZE;
+
+/// Bitmap words needed for page allocator (MAX_PHYS_PAGES / 64).
+pub const BITMAP_WORDS: usize = MAX_PHYS_PAGES / 64;
+
+// Capacity limits derived from workload analysis:
+// Target: 50 open documents, 10 services, 14-core M4 Pro
+//
+// MAX_VMOS (4096): ~423 VMOs at peak (50 docs × 5 undo + decoded +
+//   scene graph + stacks + IPC buffers). 4096 = ~10x headroom.
+// MAX_HANDLES (512): OS service at peak holds ~387 handles (50 docs ×
+//   5 undo snapshots + endpoints + events). 512 = ~1.3x headroom.
+//   Undo ring depth is the primary driver.
+// MAX_THREADS (512): ~48 threads at peak (10 services + 4 workers +
+//   14 idle + 10 decoder workers + spare). 512 = ~10x headroom.
+// MAX_EVENTS (1024): ~50 events at peak. 1024 = ~20x headroom.
+// MAX_ENDPOINTS (256): ~15 endpoints at peak. 256 = ~17x headroom.
+// MAX_ADDRESS_SPACES (128): ~12 spaces at peak. 128 = ~10x headroom.
+// MAX_PAGES_INLINE (32): covers VMOs up to 512 KiB (32 × 16 KiB).
+//   Most documents are < 100 KiB. Overflow to heap for larger VMOs.
+// MAX_VA_REGIONS (64): per-space VA free list. 64 regions covers ~10
+//   mapped VMOs per space with fragmentation headroom.
+// MAX_MAPPINGS (128): per-space mapping records. Covers OS service
+//   worst case (50 docs + undo snapshots + scene graph + stacks).
+// MAX_WAITERS_PER_EVENT (16): concurrent waiters on one event.
+//   Typical: 1 (compositor on scene-ready). 16 = generous headroom.
+// MAX_PENDING_PER_ENDPOINT (16): concurrent callers blocked on one
+//   endpoint. Typical: 1-3 editors calling OS service. 16 = headroom.
+
+pub const MAX_VMOS: usize = 4096;
+pub const MAX_HANDLES: usize = 512;
+pub const MAX_ADDRESS_SPACES: usize = 128;
+pub const MAX_THREADS: usize = 512;
+pub const MAX_EVENTS: usize = 1024;
+pub const MAX_ENDPOINTS: usize = 256;
+pub const MAX_PAGES_INLINE: usize = 32;
+pub const MAX_VA_REGIONS: usize = 64;
+pub const MAX_MAPPINGS: usize = 128;
+pub const MAX_WAITERS_PER_EVENT: usize = 16;
+pub const MAX_PENDING_PER_ENDPOINT: usize = 16;
+pub const KERNEL_STACK_PAGES: usize = 2;

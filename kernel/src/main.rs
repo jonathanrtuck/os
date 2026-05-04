@@ -21,6 +21,17 @@ extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
     arch::timer::init();
     arch::enable_interrupts();
 
+    arch::page_alloc::init(
+        arch::platform::ram_base(),
+        arch::platform::ram_size(),
+        kernel_end_addr(),
+    );
+    println!(
+        "pages: {} total, {} free",
+        arch::page_alloc::total_pages(),
+        arch::page_alloc::free_pages(),
+    );
+
     println!("alive");
 
     arch::cpu::activate_secondaries();
@@ -28,6 +39,13 @@ extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
     loop {
         arch::halt();
     }
+}
+
+fn kernel_end_addr() -> usize {
+    unsafe extern "C" {
+        static __kernel_end: u8;
+    }
+    (&raw const __kernel_end) as usize
 }
 
 #[panic_handler]

@@ -9,6 +9,7 @@ pub mod cpu;
 pub mod entropy;
 pub mod exception;
 pub mod gic;
+pub mod page_alloc;
 pub use gic as interrupts;
 mod mmio;
 pub mod mmu;

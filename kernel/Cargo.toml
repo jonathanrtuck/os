@@ -12,3 +12,6 @@ path = "src/lib.rs"
 name = "kernel"
 path = "src/main.rs"
 test = false
+
+[dev-dependencies]
+serial_test = "3"
