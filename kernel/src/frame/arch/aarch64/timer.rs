@@ -16,8 +16,11 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use super::sysreg;
 
-/// Whether a deadline has expired but not yet been consumed.
-static DEADLINE_EXPIRED: AtomicBool = AtomicBool::new(false);
+/// Per-core deadline-expired flags. The virtual timer (INTID 27) is a PPI —
+/// each core has its own instance. The expired flag must be per-core to
+/// prevent one core from stealing another's timer expiry.
+static DEADLINE_EXPIRED: [AtomicBool; crate::config::MAX_CORES] =
+    [const { AtomicBool::new(false) }; crate::config::MAX_CORES];
 
 /// Ensure the timer starts in a known disarmed state.
 ///
@@ -49,8 +52,8 @@ pub fn frequency() -> u64 {
 /// The timer will fire exactly once (INTID 27), calling [`handle_deadline`]
 /// through the IRQ handler. After firing, the timer remains disarmed until
 /// explicitly re-armed.
-pub fn set_deadline(ticks_from_now: u64) {
-    DEADLINE_EXPIRED.store(false, Ordering::Relaxed);
+pub fn set_deadline(core_id: usize, ticks_from_now: u64) {
+    DEADLINE_EXPIRED[core_id].store(false, Ordering::Relaxed);
 
     sysreg::set_cntv_tval_el0(ticks_from_now);
     sysreg::set_cntv_ctl_el0(1); // ENABLE=1, IMASK=0
@@ -67,17 +70,17 @@ pub fn clear_deadline() {
 ///
 /// Masks the timer interrupt (one-shot: does not re-arm) and sets the
 /// expired flag for the scheduler to consume via [`deadline_elapsed`].
-pub fn handle_deadline() {
+pub fn handle_deadline(core_id: usize) {
     sysreg::set_cntv_ctl_el0(0b11); // ENABLE=1, IMASK=1
     sysreg::isb();
 
-    DEADLINE_EXPIRED.store(true, Ordering::Release);
+    DEADLINE_EXPIRED[core_id].store(true, Ordering::Release);
 }
 
-/// Check and clear the deadline-expired flag.
+/// Check and clear the deadline-expired flag for this core.
 ///
 /// Returns `true` exactly once after each deadline expiry. The scheduler
 /// calls this to decide whether to preempt or wake a timed-out thread.
-pub fn deadline_elapsed() -> bool {
-    DEADLINE_EXPIRED.swap(false, Ordering::Acquire)
+pub fn deadline_elapsed(core_id: usize) -> bool {
+    DEADLINE_EXPIRED[core_id].swap(false, Ordering::Acquire)
 }

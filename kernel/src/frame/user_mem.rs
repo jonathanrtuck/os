@@ -38,6 +38,7 @@ fn validate_user_range(ptr: usize, len: usize) -> Result<(), SyscallError> {
 fn copy_from_user(dst: &mut [u8], src_va: usize) -> Result<(), SyscallError> {
     use super::arch::exception::COPY_FAULT_RECOVERY;
 
+    let core_id = unsafe { super::arch::cpu::percpu().core_id as usize };
     let len = dst.len();
     let fault: u64;
 
@@ -84,7 +85,7 @@ fn copy_from_user(dst: &mut [u8], src_va: usize) -> Result<(), SyscallError> {
             tmp = out(reg) _,
             fault = lateout(reg) fault,
             recovery = out(reg) _,
-            flag = in(reg) COPY_FAULT_RECOVERY.as_ptr(),
+            flag = in(reg) COPY_FAULT_RECOVERY[core_id].as_ptr(),
             options(nostack),
         );
     }
@@ -100,6 +101,7 @@ fn copy_from_user(dst: &mut [u8], src_va: usize) -> Result<(), SyscallError> {
 fn copy_to_user(dst_va: usize, src: &[u8]) -> Result<(), SyscallError> {
     use super::arch::exception::COPY_FAULT_RECOVERY;
 
+    let core_id = unsafe { super::arch::cpu::percpu().core_id as usize };
     let len = src.len();
     let fault: u64;
 
@@ -141,7 +143,7 @@ fn copy_to_user(dst_va: usize, src: &[u8]) -> Result<(), SyscallError> {
             tmp = out(reg) _,
             fault = lateout(reg) fault,
             recovery = out(reg) _,
-            flag = in(reg) COPY_FAULT_RECOVERY.as_ptr(),
+            flag = in(reg) COPY_FAULT_RECOVERY[core_id].as_ptr(),
             options(nostack),
         );
     }
@@ -216,7 +218,9 @@ pub fn read_user_u32s(ptr: usize, count: usize, buf: &mut [u32]) -> Result<(), S
         return Err(SyscallError::InvalidArgument);
     }
 
-    let byte_len = count * core::mem::size_of::<u32>();
+    let byte_len = count
+        .checked_mul(core::mem::size_of::<u32>())
+        .ok_or(SyscallError::InvalidArgument)?;
 
     validate_user_range(ptr, byte_len)?;
 
@@ -246,8 +250,14 @@ pub fn write_user_u32s(ptr: usize, data: &[u32]) -> Result<(), SyscallError> {
 /// Write data to a physical address. Bare-metal only.
 #[cfg(target_os = "none")]
 pub fn write_phys(pa: usize, offset: usize, data: &[u8]) {
+    assert!(
+        offset + data.len() <= crate::config::PAGE_SIZE,
+        "write_phys: would write past page boundary"
+    );
+
     // SAFETY: pa is a physical address returned by page_alloc::alloc_page.
     // With identity-mapped kernel memory, PA == VA for RAM pages.
+    // Bounds checked above.
     unsafe {
         let dst = (pa + offset) as *mut u8;
 

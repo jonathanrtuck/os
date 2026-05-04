@@ -1,20 +1,25 @@
-//! Flat-array object table with lock-free allocation.
+//! Flat-array object table with lazy allocation.
 //!
 //! Each kernel object type (VMO, Event, Endpoint, Thread, AddressSpace)
 //! is stored in an ObjectTable. Objects are accessed by ID (array index).
-//! Storage is heap-backed (Vec) so composite tables don't overflow the stack.
+//!
+//! Entries use `Option<Box<T>>` — only allocated objects consume heap.
+//! At init, the entries Vec holds MAX `None` values (8 bytes each).
+//! This is critical: an Endpoint is ~7 KB (16 inline PendingCalls with
+//! 128-byte message buffers), so pre-allocating 256 of them would cost
+//! 1.6 MB. With Box, the entries Vec costs 256 × 8 = 2 KB, and each
+//! Endpoint is allocated individually when created via syscall.
 //!
 //! The free list and generation counters use atomics for SMP-ready alloc/dealloc.
 //! Alloc pops from a Treiber stack (CAS on free_head), dealloc pushes back.
-//! Single-threaded CAS degenerates to unconditional success.
 
-use alloc::vec::Vec;
+use alloc::{boxed::Box, vec::Vec};
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 const EMPTY: u32 = u32::MAX;
 
 pub struct ObjectTable<T, const MAX: usize> {
-    entries: Vec<Option<T>>,
+    entries: Vec<Option<Box<T>>>,
     generations: Vec<AtomicU64>,
     free_head: AtomicU32,
     free_next: Vec<AtomicU32>,
@@ -24,7 +29,7 @@ pub struct ObjectTable<T, const MAX: usize> {
 #[allow(clippy::new_without_default)]
 impl<T, const MAX: usize> ObjectTable<T, MAX> {
     pub fn new() -> Self {
-        let mut entries = Vec::with_capacity(MAX);
+        let mut entries: Vec<Option<Box<T>>> = Vec::with_capacity(MAX);
 
         entries.resize_with(MAX, || None);
 
@@ -58,7 +63,7 @@ impl<T, const MAX: usize> ObjectTable<T, MAX> {
                 .is_ok()
             {
                 self.free_next[head as usize].store(EMPTY, Ordering::Relaxed);
-                self.entries[head as usize] = Some(value);
+                self.entries[head as usize] = Some(Box::new(value));
                 self.count.fetch_add(1, Ordering::Relaxed);
 
                 let generation = self.generations[head as usize].load(Ordering::Acquire);
@@ -75,7 +80,7 @@ impl<T, const MAX: usize> ObjectTable<T, MAX> {
             return None;
         }
 
-        let value = self.entries[i].take()?;
+        let value = *self.entries[i].take()?;
 
         self.generations[i].fetch_add(1, Ordering::Release);
 
@@ -99,11 +104,11 @@ impl<T, const MAX: usize> ObjectTable<T, MAX> {
     }
 
     pub fn get(&self, idx: u32) -> Option<&T> {
-        self.entries.get(idx as usize)?.as_ref()
+        self.entries.get(idx as usize)?.as_deref()
     }
 
     pub fn get_mut(&mut self, idx: u32) -> Option<&mut T> {
-        self.entries.get_mut(idx as usize)?.as_mut()
+        self.entries.get_mut(idx as usize)?.as_deref_mut()
     }
 
     pub fn count(&self) -> usize {
@@ -134,11 +139,11 @@ impl<T, const MAX: usize> ObjectTable<T, MAX> {
         if mi < ri {
             let (left, right) = self.entries.split_at_mut(ri);
 
-            Some((left[mi].as_mut()?, right[0].as_ref()?))
+            Some((left[mi].as_deref_mut()?, right[0].as_deref()?))
         } else {
             let (left, right) = self.entries.split_at_mut(mi);
 
-            Some((right[0].as_mut()?, left[ri].as_ref()?))
+            Some((right[0].as_deref_mut()?, left[ri].as_deref()?))
         }
     }
 }

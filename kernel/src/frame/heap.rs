@@ -1,7 +1,10 @@
-//! Kernel heap — talc allocator for rare variable-size allocations.
+//! Kernel heap — talc allocator for ObjectTable metadata and live objects.
 //!
-//! Kernel objects use flat-array ObjectTable, NOT the heap. This allocator
-//! handles only overflow page lists and init bootstrap.
+//! ObjectTable entries use `Option<Box<T>>` — only live objects consume heap.
+//! At init, each table allocates MAX × 8 bytes (pointers) plus metadata.
+//! Actual objects (Endpoint ~7 KB, Thread ~300 B) are allocated individually
+//! when created via syscall, keeping init cost proportional to metadata, not
+//! max capacity × object size.
 
 #[cfg(target_os = "none")]
 mod inner {

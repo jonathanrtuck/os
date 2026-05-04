@@ -30,8 +30,10 @@ impl WakeList {
     }
 
     fn push(&mut self, info: WakeInfo) {
-        self.items[self.len] = info;
-        self.len += 1;
+        if self.len < self.items.len() {
+            self.items[self.len] = info;
+            self.len += 1;
+        }
     }
 
     pub fn as_slice(&self) -> &[WakeInfo] {
@@ -180,7 +182,6 @@ impl Event {
     pub fn unbind_endpoint(&mut self) {
         self.bound_endpoint = None;
     }
-
 }
 
 #[cfg(test)]
@@ -342,4 +343,137 @@ mod tests {
         assert!(e.bind_endpoint(EndpointId(8)).is_ok());
     }
 
+    // --- Adversarial and boundary tests ---
+
+    #[test]
+    fn signal_with_mask_zero_is_noop() {
+        let mut e = make_event(1);
+
+        e.add_waiter(ThreadId(1), 0b11).unwrap();
+
+        let woken = e.signal(0);
+
+        assert_eq!(e.bits(), 0);
+        assert!(woken.is_empty());
+        assert_eq!(e.waiter_count(), 1);
+    }
+
+    #[test]
+    fn add_waiter_with_mask_zero_succeeds_but_never_fires() {
+        let mut e = make_event(2);
+
+        assert!(e.add_waiter(ThreadId(1), 0).is_ok());
+        assert_eq!(e.waiter_count(), 1);
+
+        // Signal every possible bit — the zero-mask waiter must not wake.
+        let woken = e.signal(u64::MAX);
+
+        assert!(woken.is_empty());
+        assert_eq!(e.waiter_count(), 1);
+    }
+
+    #[test]
+    fn add_waiter_at_capacity_returns_buffer_full() {
+        let mut e = make_event(3);
+
+        for i in 0..config::MAX_WAITERS_PER_EVENT {
+            assert!(e.add_waiter(ThreadId(i as u32), 1 << (i % 64)).is_ok());
+        }
+
+        assert_eq!(e.waiter_count(), config::MAX_WAITERS_PER_EVENT);
+        assert_eq!(
+            e.add_waiter(ThreadId(999), 0b1),
+            Err(SyscallError::BufferFull)
+        );
+        // Capacity unchanged after rejection.
+        assert_eq!(e.waiter_count(), config::MAX_WAITERS_PER_EVENT);
+    }
+
+    #[test]
+    fn signal_all_64_bits() {
+        let mut e = make_event(4);
+        let woken = e.signal(u64::MAX);
+
+        assert_eq!(e.bits(), u64::MAX);
+        assert!(woken.is_empty());
+        assert_eq!(e.check(u64::MAX), Some(u64::MAX));
+    }
+
+    #[test]
+    fn check_with_upper_32_bits() {
+        let mut e = make_event(5);
+        let upper_mask: u64 = 0xFFFF_FFFF_0000_0000;
+
+        // No bits set — check returns None.
+        assert!(e.check(upper_mask).is_none());
+
+        // Set bit 63 and bit 32.
+        e.signal(1u64 << 63 | 1u64 << 32);
+
+        assert_eq!(e.check(upper_mask), Some(1u64 << 63 | 1u64 << 32));
+        // Lower 32 bits are unset.
+        assert!(e.check(0x0000_0000_FFFF_FFFF).is_none());
+    }
+
+    #[test]
+    fn remove_waiter_that_does_not_exist_is_noop() {
+        let mut e = make_event(6);
+
+        // Empty queue — remove returns false, count stays 0.
+        assert!(!e.remove_waiter(ThreadId(42)));
+        assert_eq!(e.waiter_count(), 0);
+
+        // Add a different thread, then try removing a non-existent one.
+        e.add_waiter(ThreadId(1), 0b1).unwrap();
+
+        assert!(!e.remove_waiter(ThreadId(42)));
+        assert_eq!(e.waiter_count(), 1);
+    }
+
+    #[test]
+    fn signal_then_clear_then_check() {
+        let mut e = make_event(7);
+
+        e.signal(0b1111);
+
+        assert_eq!(e.bits(), 0b1111);
+
+        e.clear(0b1010);
+
+        assert_eq!(e.bits(), 0b0101);
+
+        // Cleared bits must not match.
+        assert!(e.check(0b1010).is_none());
+        // Surviving bits still match.
+        assert_eq!(e.check(0b0101), Some(0b0101));
+        // Mixed mask only returns surviving bits.
+        assert_eq!(e.check(0b1111), Some(0b0101));
+    }
+
+    #[test]
+    fn wake_list_capacity_all_waiters_wake_simultaneously() {
+        let mut e = make_event(8);
+
+        // Fill every waiter slot, all watching bit 0.
+        for i in 0..config::MAX_WAITERS_PER_EVENT {
+            e.add_waiter(ThreadId(i as u32), 0b1).unwrap();
+        }
+
+        assert_eq!(e.waiter_count(), config::MAX_WAITERS_PER_EVENT);
+
+        let woken = e.signal(0b1);
+
+        assert_eq!(woken.len(), config::MAX_WAITERS_PER_EVENT);
+        assert_eq!(e.waiter_count(), 0);
+
+        // Every thread must appear exactly once.
+        for i in 0..config::MAX_WAITERS_PER_EVENT {
+            assert!(
+                woken
+                    .as_slice()
+                    .iter()
+                    .any(|w| w.thread_id == ThreadId(i as u32)),
+            );
+        }
+    }
 }

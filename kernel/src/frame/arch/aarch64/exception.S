@@ -28,11 +28,12 @@
 //   800     fpcr
 //   808     fpsr
 //
-// Optimization note: FP/SIMD state is saved/restored eagerly on every
-// exception. This is simple and correct but costs ~100 cycles per entry/exit.
-// When this becomes a bottleneck, switch to lazy save: disable FP access via
-// CPACR_EL1, trap on first FP use, and save/restore only when the interrupted
-// context actually used FP registers.
+// FP/SIMD state: conditional save/restore. FP is saved only when CPACR_EL1
+// has FP enabled at entry (the thread was actively using FP). When lazy FP
+// trapping is active (CPACR.FPEN=0), the save is skipped at entry and the
+// entry-time decision is recorded in fp_saved [sp+824]. The restore path
+// checks fp_saved, NOT the live CPACR — handle_fp_trap may enable CPACR
+// mid-exception without saving FP to the TrapFrame.
 //
 // Register state checklist (audit whenever exception entry/exit changes):
 //   [x] GPRs x0-x30
@@ -146,8 +147,12 @@ __exception_common:
     str     x9, [sp, #816]
 
     // Conditional FP save: skip if FP is disabled (lazy mode active).
+    // Record the decision at [sp+824] (fp_saved) so the restore path uses
+    // the entry-time state, not the live CPACR (which handle_fp_trap may
+    // enable mid-exception).
     mrs     x9, cpacr_el1
     ubfx    x9, x9, #20, #2        // Extract FPEN field [21:20]
+    str     x9, [sp, #824]          // fp_saved: non-zero if we save FP
     cbz     x9, .Lskip_fp_save     // If disabled, skip FP save
 
     // Save FP/SIMD registers q0-q31 (128-bit each).
@@ -181,9 +186,10 @@ __exception_common:
     ldr     x1, [sp, #280]
     bl      exception_handler
 
-    // Conditional FP restore: skip if FP is disabled (lazy mode active).
-    mrs     x9, cpacr_el1
-    ubfx    x9, x9, #20, #2
+    // Conditional FP restore: use the entry-time decision, not live CPACR.
+    // handle_fp_trap may have enabled CPACR mid-exception without saving
+    // FP to the TrapFrame — restoring unsaved data would corrupt FP state.
+    ldr     x9, [sp, #824]          // fp_saved: was FP saved at entry?
     cbz     x9, .Lskip_fp_restore
 
     // Restore FPCR and FPSR.

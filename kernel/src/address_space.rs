@@ -113,7 +113,22 @@ impl VaAllocator {
 
     /// Free a VA range, coalescing with adjacent free regions.
     pub fn free(&mut self, addr: usize, size: usize) {
+        debug_assert!(addr.checked_add(size).is_some(), "free: addr+size overflow");
+
         let pos = self.free_list.partition_point(|&(s, _)| s < addr);
+
+        // Overlap check: the freed region must not overlap existing free regions.
+        debug_assert!(
+            pos >= self.free_list.len() || addr + size <= self.free_list[pos].0,
+            "free: overlaps next free region (double-free?)"
+        );
+        debug_assert!(
+            pos == 0 || {
+                let (ps, pl) = self.free_list[pos - 1];
+                ps + pl <= addr
+            },
+            "free: overlaps previous free region (double-free?)"
+        );
 
         self.free_list.insert(pos, (addr, size));
 

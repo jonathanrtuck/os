@@ -45,7 +45,7 @@ pub struct Thread {
     kernel_sp: usize,
     exit_code: Option<u32>,
     fp_dirty: bool,
-    wait_events: [u32; 3],
+    wait_events: [u32; crate::config::MAX_MULTI_WAIT],
     wait_count: u8,
     space_next: Option<u32>,
     space_prev: Option<u32>,
@@ -78,7 +78,7 @@ impl Thread {
             kernel_sp: 0,
             exit_code: None,
             fp_dirty: false,
-            wait_events: [0; 3],
+            wait_events: [0; crate::config::MAX_MULTI_WAIT],
             wait_count: 0,
             space_next: None,
             space_prev: None,
@@ -155,13 +155,36 @@ impl Thread {
         self.priority == Priority::Idle
     }
 
-    pub fn set_state(&mut self, state: ThreadRunState) {
-        self.state = state;
+    pub fn set_state(&mut self, new: ThreadRunState) {
+        debug_assert!(
+            matches!(
+                (self.state, new),
+                (ThreadRunState::Ready, ThreadRunState::Running)
+                    | (ThreadRunState::Ready, ThreadRunState::Blocked)
+                    | (ThreadRunState::Ready, ThreadRunState::Exited)
+                    | (ThreadRunState::Running, ThreadRunState::Running)
+                    | (ThreadRunState::Running, ThreadRunState::Blocked)
+                    | (ThreadRunState::Running, ThreadRunState::Exited)
+                    | (ThreadRunState::Running, ThreadRunState::Ready)
+                    | (ThreadRunState::Blocked, ThreadRunState::Ready)
+                    | (ThreadRunState::Blocked, ThreadRunState::Exited)
+            ),
+            "invalid state transition: {:?} -> {:?}",
+            self.state,
+            new
+        );
+
+        self.state = new;
     }
 
     pub fn set_priority(&mut self, priority: Priority) {
+        let was_boosted = self.effective_priority > self.priority;
+
         self.priority = priority;
-        if self.effective_priority < priority {
+
+        if was_boosted {
+            self.effective_priority = self.effective_priority.max(priority);
+        } else {
             self.effective_priority = priority;
         }
     }
@@ -200,15 +223,17 @@ impl Thread {
     }
 
     pub fn set_wait_events(&mut self, ids: &[u32]) {
-        self.wait_count = ids.len() as u8;
-        self.wait_events = [0; 3];
-        self.wait_events[..ids.len()].copy_from_slice(ids);
+        let count = ids.len().min(crate::config::MAX_MULTI_WAIT);
+
+        self.wait_count = count as u8;
+        self.wait_events = [0; crate::config::MAX_MULTI_WAIT];
+        self.wait_events[..count].copy_from_slice(&ids[..count]);
     }
 
-    pub fn take_wait_events(&mut self) -> ([u32; 3], u8) {
+    pub fn take_wait_events(&mut self) -> ([u32; crate::config::MAX_MULTI_WAIT], u8) {
         let result = (self.wait_events, self.wait_count);
 
-        self.wait_events = [0; 3];
+        self.wait_events = [0; crate::config::MAX_MULTI_WAIT];
         self.wait_count = 0;
 
         result

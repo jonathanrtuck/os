@@ -76,10 +76,14 @@ impl Vmo {
     }
 
     pub fn add_ref(&mut self) {
+        assert!(self.refcount < usize::MAX, "VMO refcount overflow");
+
         self.refcount += 1;
     }
 
     pub fn release_ref(&mut self) -> bool {
+        assert!(self.refcount > 0, "VMO refcount underflow");
+
         self.refcount -= 1;
         self.refcount == 0
     }
@@ -173,11 +177,18 @@ impl Vmo {
         Ok(())
     }
 
-    /// Replace a page during COW fault resolution.
+    /// Record a physical page at the given index (COW resolution or lazy alloc).
+    ///
+    /// Panics if `page_idx` is out of range — callers must ensure the index
+    /// is valid (derived from the mapping and VMO size).
     pub fn replace_page(&mut self, page_idx: usize, new_addr: usize) {
-        if page_idx < self.pages.len() {
-            self.pages[page_idx] = Some(new_addr);
-        }
+        assert!(
+            page_idx < self.pages.len(),
+            "replace_page: index out of range"
+        );
+
+        self.pages[page_idx] = Some(new_addr);
+        self.has_pages = true;
     }
 }
 

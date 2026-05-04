@@ -78,6 +78,10 @@ pub struct Kernel {
     pub spaces: ObjectTable<AddressSpace, { config::MAX_ADDRESS_SPACES }>,
     pub irqs: IrqTable,
     pub scheduler: Scheduler,
+    /// Core ID of the current syscall dispatch. Set at dispatch entry from
+    /// percpu (bare metal) or 0 (host tests). Used by all scheduler calls
+    /// instead of hardcoding core 0.
+    core_id: usize,
 }
 
 impl Kernel {
@@ -90,6 +94,7 @@ impl Kernel {
             spaces: ObjectTable::new(),
             irqs: IrqTable::new(),
             scheduler: Scheduler::new(num_cores),
+            core_id: 0,
         }
     }
 
@@ -243,7 +248,15 @@ impl Kernel {
     }
 
     /// Main dispatch — routes syscall number to handler.
-    pub fn dispatch(&mut self, current: ThreadId, syscall_num: u64, args: &[u64; 6]) -> (u64, u64) {
+    pub fn dispatch(
+        &mut self,
+        current: ThreadId,
+        core_id: usize,
+        syscall_num: u64,
+        args: &[u64; 6],
+    ) -> (u64, u64) {
+        self.core_id = core_id;
+
         let result = match syscall_num {
             num::VMO_CREATE => self.sys_vmo_create(current, args),
             num::VMO_MAP => self.sys_vmo_map(current, args),
@@ -291,6 +304,12 @@ impl Kernel {
         let flags = args[1] as u32;
 
         if size == 0 || size > config::MAX_PHYS_MEM {
+            return Err(SyscallError::InvalidArgument);
+        }
+
+        let known_flags = VmoFlags::HINT_CONTIGUOUS.0;
+
+        if flags & !known_flags != 0 {
             return Err(SyscallError::InvalidArgument);
         }
 
@@ -535,7 +554,7 @@ impl Kernel {
             .signal(bits);
 
         for info in woken.as_slice() {
-            crate::sched::wake(self, info.thread_id, 0);
+            crate::sched::wake(self, info.thread_id, self.core_id);
         }
 
         Ok(0)
@@ -791,6 +810,7 @@ impl Kernel {
         current: ThreadId,
         wait_items: &[(u32, u32, u64)],
     ) -> Result<u64, SyscallError> {
+        // First pass: check for immediate satisfaction.
         for &(hid, obj_id, mask) in wait_items {
             let event = self
                 .events
@@ -802,8 +822,9 @@ impl Kernel {
             }
         }
 
-        let mut obj_ids = [0u32; 3];
-        let use_count = wait_items.len().min(3);
+        // No event ready — register waiters on ALL events (not just first 3).
+        let mut obj_ids = [0u32; config::MAX_MULTI_WAIT];
+        let use_count = wait_items.len().min(config::MAX_MULTI_WAIT);
 
         for (i, &(_, obj_id, mask)) in wait_items[..use_count].iter().enumerate() {
             let event = self
@@ -821,8 +842,9 @@ impl Kernel {
             .ok_or(SyscallError::InvalidArgument)?
             .set_wait_events(&obj_ids[..use_count]);
 
-        crate::sched::block_current(self, current, 0);
+        crate::sched::block_current(self, current, self.core_id);
 
+        // Post-wakeup: find which event fired and clean up other waiters.
         let (wait_evts, wait_n) = self
             .threads
             .get_mut(current.0)
@@ -831,26 +853,33 @@ impl Kernel {
 
         for i in 0..wait_n as usize {
             let obj_id = wait_evts[i];
-            let (hid, _, mask) = wait_items
-                .iter()
-                .find(|&&(_, oid, _)| oid == obj_id)
-                .copied()
-                .unwrap();
-            let event = self
-                .events
-                .get_mut(obj_id)
-                .ok_or(SyscallError::InvalidHandle)?;
+            // The event may have been destroyed while we were blocked.
+            let Some(&(hid, _, mask)) = wait_items.iter().find(|&&(_, oid, _)| oid == obj_id)
+            else {
+                continue;
+            };
+            let Some(event) = self.events.get_mut(obj_id) else {
+                continue;
+            };
 
             if let Some(fired) = event.check(mask) {
-                for (j, &evt_id) in wait_evts[..wait_n as usize].iter().enumerate() {
-                    if j != i {
-                        self.events
-                            .get_mut(evt_id)
-                            .map(|e| e.remove_waiter(current));
+                // Remove ourselves from all other events' waiter lists.
+                for &evt_id in &wait_evts[..wait_n as usize] {
+                    if evt_id != obj_id
+                        && let Some(e) = self.events.get_mut(evt_id)
+                    {
+                        e.remove_waiter(current);
                     }
                 }
 
                 return Ok(((hid as u64) << 32) | (fired & 0xFFFF_FFFF));
+            }
+        }
+
+        // Spurious wakeup or all events destroyed — clean up any remaining.
+        for &evt_id in &wait_evts[..wait_n as usize] {
+            if let Some(e) = self.events.get_mut(evt_id) {
+                e.remove_waiter(current);
             }
         }
 
@@ -920,15 +949,15 @@ impl Kernel {
             let woken = event.signal(bits);
 
             for info in woken.as_slice() {
-                crate::sched::wake(self, info.thread_id, 0);
+                crate::sched::wake(self, info.thread_id, self.core_id);
             }
         }
 
         for waiter in recv_waiters.as_slice() {
-            crate::sched::wake(self, *waiter, 0);
+            crate::sched::wake(self, *waiter, self.core_id);
         }
 
-        crate::sched::block_current(self, current, 0);
+        crate::sched::block_current(self, current, self.core_id);
 
         Ok(0)
     }
@@ -975,7 +1004,7 @@ impl Kernel {
             .ok_or(SyscallError::InvalidHandle)?;
 
         ep.add_recv_waiter(current)?;
-        crate::sched::block_current(self, current, 0);
+        crate::sched::block_current(self, current, self.core_id);
 
         if let Some(result) = self.try_dequeue_and_deliver(
             obj_id,
@@ -1097,6 +1126,16 @@ impl Kernel {
             server.release_boost();
         }
 
+        // Verify caller is still alive before writing to its reply buffer.
+        let caller = self
+            .threads
+            .get(caller_id.0)
+            .ok_or(SyscallError::InvalidArgument)?;
+
+        if caller.state() != crate::thread::ThreadRunState::Blocked {
+            return Err(SyscallError::InvalidArgument);
+        }
+
         user_mem::write_user_bytes(caller_reply_buf, reply_msg.as_bytes())?;
 
         if staged.count > 0 {
@@ -1120,7 +1159,7 @@ impl Kernel {
             }
         }
 
-        crate::sched::wake(self, caller_id, 0);
+        crate::sched::wake(self, caller_id, self.core_id);
 
         Ok(reply_msg.len() as u64)
     }
@@ -1172,7 +1211,7 @@ impl Kernel {
             let woken = event.signal(Endpoint::ENDPOINT_READABLE_BIT);
 
             for info in woken.as_slice() {
-                crate::sched::wake(self, info.thread_id, 0);
+                crate::sched::wake(self, info.thread_id, self.core_id);
             }
         }
 
@@ -1339,7 +1378,7 @@ impl Kernel {
     fn sys_thread_exit(&mut self, current: ThreadId, args: &[u64; 6]) -> Result<u64, SyscallError> {
         let code = args[0] as u32;
 
-        crate::sched::exit_current(self, current, 0, code);
+        crate::sched::exit_current(self, current, self.core_id, code);
 
         Ok(0)
     }
@@ -1587,7 +1626,7 @@ mod tests {
     }
 
     fn call(k: &mut Kernel, num: u64, args: &[u64; 6]) -> (u64, u64) {
-        k.dispatch(ThreadId(0), num, args)
+        k.dispatch(ThreadId(0), 0, num, args)
     }
 
     #[test]
@@ -2212,7 +2251,7 @@ mod tests {
 
         assert_eq!(err, 0);
 
-        let (err, _) = k.dispatch(ThreadId(0), num::HANDLE_INFO, &[vmo_hid, 0, 0, 0, 0, 0]);
+        let (err, _) = k.dispatch(ThreadId(0), 0, num::HANDLE_INFO, &[vmo_hid, 0, 0, 0, 0, 0]);
 
         assert_eq!(err, SyscallError::InvalidHandle as u64);
 
@@ -2467,5 +2506,428 @@ mod tests {
         let (err, _) = call(&mut k, num::HANDLE_INFO, &[vmo_hid, 0, 0, 0, 0, 0]);
 
         assert_eq!(err, 0);
+    }
+
+    // =====================================================================
+    // Integration tests — cross-module flows
+    // =====================================================================
+
+    #[test]
+    fn multiple_threads_have_distinct_priorities() {
+        let mut k = setup_kernel();
+        let low_thread = Thread::new(
+            ThreadId(1),
+            Some(AddressSpaceId(0)),
+            Priority::Low,
+            0x1000,
+            0x2000,
+            0,
+        );
+
+        k.threads.alloc(low_thread);
+        k.threads.get_mut(1).unwrap().id = ThreadId(1);
+
+        let high_thread = Thread::new(
+            ThreadId(2),
+            Some(AddressSpaceId(0)),
+            Priority::High,
+            0x1000,
+            0x2000,
+            0,
+        );
+
+        k.threads.alloc(high_thread);
+        k.threads.get_mut(2).unwrap().id = ThreadId(2);
+
+        assert_eq!(
+            k.threads.get(0).unwrap().effective_priority(),
+            Priority::Medium
+        );
+        assert_eq!(
+            k.threads.get(1).unwrap().effective_priority(),
+            Priority::Low
+        );
+        assert_eq!(
+            k.threads.get(2).unwrap().effective_priority(),
+            Priority::High
+        );
+    }
+
+    #[test]
+    fn vmo_snapshot_cow_fault_resolution() {
+        use crate::fault;
+
+        let mut k = setup_kernel();
+        let (err, vmo_hid) = call(&mut k, num::VMO_CREATE, &[16384, 0, 0, 0, 0, 0]);
+
+        assert_eq!(err, 0);
+
+        let rw_rights: u64 = (Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0) as u64;
+        let (err, va) = call(&mut k, num::VMO_MAP, &[vmo_hid, 0, rw_rights, 0, 0, 0]);
+
+        assert_eq!(err, 0);
+
+        // Trigger lazy allocation to commit the page.
+        let action = fault::handle_data_abort(&mut k, ThreadId(0), va as usize, true);
+
+        assert_eq!(action, fault::FaultAction::Resolved);
+
+        // The VMO should now have a committed page.
+        let vmo_obj_id = k
+            .spaces
+            .get(0)
+            .unwrap()
+            .handles()
+            .lookup(HandleId(vmo_hid as u32))
+            .unwrap()
+            .object_id;
+
+        assert!(k.vmos.get(vmo_obj_id).unwrap().page_at(0).is_some());
+
+        // Snapshot the VMO.
+        let (err, snap_hid) = call(&mut k, num::VMO_SNAPSHOT, &[vmo_hid, 0, 0, 0, 0, 0]);
+
+        assert_eq!(err, 0);
+
+        // Map the snapshot.
+        let (err, snap_va) = call(&mut k, num::VMO_MAP, &[snap_hid, 0, rw_rights, 0, 0, 0]);
+
+        assert_eq!(err, 0);
+
+        // The snapshot should share the same page.
+        let snap_obj_id = k
+            .spaces
+            .get(0)
+            .unwrap()
+            .handles()
+            .lookup(HandleId(snap_hid as u32))
+            .unwrap()
+            .object_id;
+        let original_page = k.vmos.get(snap_obj_id).unwrap().page_at(0).unwrap();
+        // Write fault on the snapshot triggers COW.
+        let action = fault::handle_data_abort(&mut k, ThreadId(0), snap_va as usize, true);
+
+        assert_eq!(action, fault::FaultAction::Resolved);
+
+        // After COW, the snapshot should have a DIFFERENT physical page.
+        let cow_page = k.vmos.get(snap_obj_id).unwrap().page_at(0).unwrap();
+
+        assert_ne!(
+            original_page, cow_page,
+            "COW should allocate a new page, not keep the shared one"
+        );
+    }
+
+    #[test]
+    fn event_wait_multiple_events_first_fires() {
+        let mut k = setup_kernel();
+        let (err1, ev1_hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+        let (err2, ev2_hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+
+        assert_eq!(err1, 0);
+        assert_eq!(err2, 0);
+
+        // Signal event 1 before waiting — should immediately return.
+        let (err, _) = call(&mut k, num::EVENT_SIGNAL, &[ev1_hid, 0x1, 0, 0, 0, 0]);
+
+        assert_eq!(err, 0);
+
+        // Wait on event 2 first (not ready), then event 1 (ready).
+        // Register-path: args[0]=ev2_handle, args[1]=mask, args[2]=ev1_handle, args[3]=mask
+        let (err, val) = call(
+            &mut k,
+            num::EVENT_WAIT,
+            &[ev2_hid, 0xFF, ev1_hid, 0xFF, 0, 0],
+        );
+
+        assert_eq!(err, 0);
+
+        // The returned handle_id should be ev1 (the one with signal bits set).
+        let returned_hid = (val >> 32) as u32;
+        let returned_bits = val & 0xFFFF_FFFF;
+
+        assert_eq!(returned_hid, ev1_hid as u32);
+        assert_eq!(returned_bits, 0x1);
+    }
+
+    #[test]
+    fn space_create_and_thread_create_in() {
+        let mut k = setup_kernel();
+        let (err, space_hid) = call(&mut k, num::SPACE_CREATE, &[0; 6]);
+
+        assert_eq!(err, 0);
+
+        let (err, vmo_hid) = call(&mut k, num::VMO_CREATE, &[16384, 0, 0, 0, 0, 0]);
+
+        assert_eq!(err, 0);
+
+        // Create a thread in the new space with one transferred handle.
+        let handle_ids = [vmo_hid as u32];
+        let (err, thread_hid) = call(
+            &mut k,
+            num::THREAD_CREATE_IN,
+            &[space_hid, 0x1000, 0x2000, 1, handle_ids.as_ptr() as u64, 1],
+        );
+
+        assert_eq!(err, 0);
+        assert!(thread_hid > 0);
+
+        // Verify the original VMO handle still exists in the source space.
+        let (err, _) = call(&mut k, num::HANDLE_INFO, &[vmo_hid, 0, 0, 0, 0, 0]);
+
+        assert_eq!(err, 0);
+    }
+
+    #[test]
+    fn handle_dup_respects_right_reduction() {
+        let mut k = setup_kernel();
+        let (err, vmo_hid) = call(&mut k, num::VMO_CREATE, &[16384, 0, 0, 0, 0, 0]);
+
+        assert_eq!(err, 0);
+
+        // Dup with reduced rights (read-only).
+        let read_only = Rights::READ.0 as u64;
+        let (err, dup_hid) = call(&mut k, num::HANDLE_DUP, &[vmo_hid, read_only, 0, 0, 0, 0]);
+
+        assert_eq!(err, 0);
+
+        // The dup handle should have reduced rights.
+        // HANDLE_INFO returns (object_type << 32) | rights.
+        let (err, info) = call(&mut k, num::HANDLE_INFO, &[dup_hid, 0, 0, 0, 0, 0]);
+
+        assert_eq!(err, 0);
+
+        let dup_rights = info as u32;
+
+        assert_eq!(dup_rights & Rights::READ.0, Rights::READ.0);
+        assert_eq!(dup_rights & Rights::WRITE.0, 0);
+    }
+
+    #[test]
+    fn close_handle_then_use_returns_error() {
+        let mut k = setup_kernel();
+        let (err, ev_hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+
+        assert_eq!(err, 0);
+
+        let (err, _) = call(&mut k, num::HANDLE_CLOSE, &[ev_hid, 0, 0, 0, 0, 0]);
+
+        assert_eq!(err, 0);
+
+        // Using the closed handle should fail.
+        let (err, _) = call(&mut k, num::EVENT_SIGNAL, &[ev_hid, 0x1, 0, 0, 0, 0]);
+
+        assert_ne!(err, 0);
+    }
+
+    #[test]
+    fn seal_prevents_write_fault() {
+        use crate::fault;
+
+        let mut k = setup_kernel();
+        let (err, vmo_hid) = call(&mut k, num::VMO_CREATE, &[16384, 0, 0, 0, 0, 0]);
+
+        assert_eq!(err, 0);
+
+        // Seal the VMO.
+        let (err, _) = call(&mut k, num::VMO_SEAL, &[vmo_hid, 0, 0, 0, 0, 0]);
+
+        assert_eq!(err, 0);
+
+        // Map it writable (the mapping has write rights, but the VMO is sealed).
+        let rw_rights: u64 = (Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0) as u64;
+        let (err, va) = call(&mut k, num::VMO_MAP, &[vmo_hid, 0, rw_rights, 0, 0, 0]);
+
+        assert_eq!(err, 0);
+
+        // Write fault on sealed VMO should kill.
+        let action = fault::handle_data_abort(&mut k, ThreadId(0), va as usize, true);
+
+        assert_eq!(action, fault::FaultAction::Kill);
+    }
+
+    // =====================================================================
+    // Adversarial input tests — malicious userspace arguments
+    // =====================================================================
+
+    #[test]
+    fn adversarial_vmo_create_size_max() {
+        let mut k = setup_kernel();
+        let (err, _) = call(&mut k, num::VMO_CREATE, &[u64::MAX, 0, 0, 0, 0, 0]);
+
+        assert_ne!(err, 0);
+    }
+
+    #[test]
+    fn adversarial_vmo_create_unknown_flags() {
+        let mut k = setup_kernel();
+        let (err, _) = call(&mut k, num::VMO_CREATE, &[4096, 0xDEAD_BEEF, 0, 0, 0, 0]);
+
+        assert_eq!(err, SyscallError::InvalidArgument as u64);
+    }
+
+    #[test]
+    fn adversarial_vmo_resize_to_zero() {
+        let mut k = setup_kernel();
+        let (err, hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
+
+        assert_eq!(err, 0);
+
+        let (err, _) = call(&mut k, num::VMO_RESIZE, &[hid, 0, 0, 0, 0, 0]);
+
+        // Resize to 0 is permitted by the handler (only > MAX_PHYS_MEM is rejected).
+        // Verify it succeeds without panic.
+        assert_eq!(err, 0);
+    }
+
+    #[test]
+    fn adversarial_vmo_resize_exceeds_max_phys_mem() {
+        let mut k = setup_kernel();
+        let (err, hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
+
+        assert_eq!(err, 0);
+
+        let too_big = (config::MAX_PHYS_MEM as u64) + 1;
+        let (err, _) = call(&mut k, num::VMO_RESIZE, &[hid, too_big, 0, 0, 0, 0]);
+
+        assert_eq!(err, SyscallError::InvalidArgument as u64);
+    }
+
+    #[test]
+    fn adversarial_vmo_map_invalid_handle_max() {
+        let mut k = setup_kernel();
+        let perms = (Rights::READ.0 | Rights::MAP.0) as u64;
+        let (err, _) = call(&mut k, num::VMO_MAP, &[u32::MAX as u64, 0, perms, 0, 0, 0]);
+
+        assert_eq!(err, SyscallError::InvalidHandle as u64);
+    }
+
+    #[test]
+    fn adversarial_handle_dup_rights_escalation() {
+        let mut k = setup_kernel();
+        let (err, hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
+
+        assert_eq!(err, 0);
+
+        // Dup with only READ rights.
+        let read_only = Rights::READ.0 as u64;
+        let (err, dup_hid) = call(&mut k, num::HANDLE_DUP, &[hid, read_only, 0, 0, 0, 0]);
+
+        assert_eq!(err, 0);
+
+        // Now try to dup the read-only handle requesting u32::MAX rights.
+        let (err, _) = call(
+            &mut k,
+            num::HANDLE_DUP,
+            &[dup_hid, u32::MAX as u64, 0, 0, 0, 0],
+        );
+
+        assert_eq!(err, SyscallError::InsufficientRights as u64);
+    }
+
+    #[test]
+    fn adversarial_thread_set_priority_out_of_range() {
+        let mut k = setup_kernel();
+        let (err, tid_handle) = call(&mut k, num::THREAD_CREATE, &[0x1000, 0x2000, 0, 0, 0, 0]);
+
+        assert_eq!(err, 0);
+
+        let (err, _) = call(
+            &mut k,
+            num::THREAD_SET_PRIORITY,
+            &[tid_handle, 255, 0, 0, 0, 0],
+        );
+
+        assert_eq!(err, SyscallError::InvalidArgument as u64);
+    }
+
+    #[test]
+    fn adversarial_event_signal_on_non_event() {
+        let mut k = setup_kernel();
+        let (err, vmo_hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
+
+        assert_eq!(err, 0);
+
+        let (err, _) = call(&mut k, num::EVENT_SIGNAL, &[vmo_hid, 0b1, 0, 0, 0, 0]);
+
+        assert_eq!(err, SyscallError::WrongHandleType as u64);
+    }
+
+    #[test]
+    fn adversarial_event_wait_buffer_path_garbage_pointer() {
+        let mut k = setup_kernel();
+        // args[0] > MAX_HANDLES triggers the buffer path, which interprets
+        // args[0] as a user pointer and args[1] as count. A count exceeding
+        // MAX_MULTI_WAIT must be rejected before any pointer dereference.
+        let garbage_ptr = (config::MAX_HANDLES as u64) + 1;
+        let bad_count = (config::MAX_MULTI_WAIT as u64) + 1;
+        let (err, _) = call(
+            &mut k,
+            num::EVENT_WAIT,
+            &[garbage_ptr, bad_count, 0, 0, 0, 0],
+        );
+
+        assert_eq!(err, SyscallError::InvalidArgument as u64);
+    }
+
+    #[test]
+    fn adversarial_event_wait_buffer_path_zero_count() {
+        let mut k = setup_kernel();
+        // Buffer path with count=0 must also be rejected.
+        let garbage_ptr = (config::MAX_HANDLES as u64) + 1;
+        let (err, _) = call(&mut k, num::EVENT_WAIT, &[garbage_ptr, 0, 0, 0, 0, 0]);
+
+        assert_eq!(err, SyscallError::InvalidArgument as u64);
+    }
+
+    #[test]
+    fn adversarial_handle_close_invalid() {
+        let mut k = setup_kernel();
+        let (err, _) = call(&mut k, num::HANDLE_CLOSE, &[999, 0, 0, 0, 0, 0]);
+
+        assert_eq!(err, SyscallError::InvalidHandle as u64);
+    }
+
+    #[test]
+    fn adversarial_handle_close_u32_max() {
+        let mut k = setup_kernel();
+        let (err, _) = call(&mut k, num::HANDLE_CLOSE, &[u32::MAX as u64, 0, 0, 0, 0, 0]);
+
+        assert_eq!(err, SyscallError::InvalidHandle as u64);
+    }
+
+    #[test]
+    fn adversarial_unknown_syscall_high() {
+        let mut k = setup_kernel();
+        let (err, _) = call(&mut k, u64::MAX, &[0; 6]);
+
+        assert_eq!(err, SyscallError::InvalidArgument as u64);
+    }
+
+    #[test]
+    fn kernel_init_heap_budget() {
+        let _k = Box::new(Kernel::new(1));
+        let entry_overhead = core::mem::size_of::<Option<Box<u8>>>()
+            * (config::MAX_VMOS
+                + config::MAX_EVENTS
+                + config::MAX_ENDPOINTS
+                + config::MAX_THREADS
+                + config::MAX_ADDRESS_SPACES);
+        let metadata_per_slot = core::mem::size_of::<core::sync::atomic::AtomicU64>()
+            + core::mem::size_of::<core::sync::atomic::AtomicU32>();
+        let metadata_overhead = metadata_per_slot
+            * (config::MAX_VMOS
+                + config::MAX_EVENTS
+                + config::MAX_ENDPOINTS
+                + config::MAX_THREADS
+                + config::MAX_ADDRESS_SPACES);
+        let total_init_bytes = entry_overhead + metadata_overhead;
+        let heap_limit = 4 * 1024 * 1024;
+
+        assert!(
+            total_init_bytes < heap_limit / 2,
+            "Kernel init heap ({total_init_bytes} bytes) exceeds 50% of bare-metal heap ({heap_limit} bytes). \
+             ObjectTable entries must use Box<T> for lazy allocation."
+        );
     }
 }

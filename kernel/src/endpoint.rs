@@ -194,9 +194,7 @@ impl Message {
     }
 
     pub fn set_len(&mut self, len: usize) {
-        debug_assert!(len <= MSG_SIZE);
-
-        self.len = len;
+        self.len = len.min(MSG_SIZE);
     }
 
     pub fn len(&self) -> usize {
@@ -356,7 +354,7 @@ impl Endpoint {
     pub fn next_badge(&mut self) -> u32 {
         let b = self.badge_counter;
 
-        self.badge_counter += 1;
+        self.badge_counter = self.badge_counter.wrapping_add(1);
 
         b
     }
@@ -381,26 +379,23 @@ impl Endpoint {
     }
 
     /// Dequeue the highest-priority pending call and issue a reply cap.
+    ///
+    /// Returns `None` if the send queue is empty OR all reply slots are
+    /// occupied (backpressure — the server must reply before receiving more).
     pub fn dequeue_call(&mut self) -> Option<(PendingCall, ReplyCapId)> {
+        // Check for a free reply slot BEFORE dequeuing. If we dequeue first
+        // and then find no slot, the call is lost and the caller deadlocks.
+        let free_slot = self.active_replies.iter().position(|s| s.is_none())?;
         let call = self.send_queue.dequeue_highest()?;
         let cap_id = ReplyCapId(self.next_reply_id);
 
-        self.next_reply_id += 1;
-
-        let reply = ActiveReply {
+        self.next_reply_id = self.next_reply_id.wrapping_add(1);
+        self.active_replies[free_slot] = Some(ActiveReply {
             cap_id,
             caller: call.caller,
             reply_buf: call.reply_buf,
-        };
-
-        for slot in &mut self.active_replies {
-            if slot.is_none() {
-                *slot = Some(reply);
-                self.active_reply_count += 1;
-
-                return Some((call, cap_id));
-            }
-        }
+        });
+        self.active_reply_count += 1;
 
         Some((call, cap_id))
     }
@@ -851,5 +846,184 @@ mod tests {
             Message::from_bytes(&big),
             Err(SyscallError::InvalidArgument)
         );
+    }
+
+    // -- Adversarial / boundary tests --
+
+    #[test]
+    fn dequeue_call_blocked_by_full_active_replies() {
+        let mut ep = make_endpoint(0);
+        let priorities = [
+            Priority::Idle,
+            Priority::Low,
+            Priority::Medium,
+            Priority::High,
+        ];
+
+        // Fill all reply slots: enqueue MAX_PENDING_PER_ENDPOINT calls spread
+        // across priority levels, then dequeue each one (moves it to
+        // active_replies) without replying.
+        for (i, &pri) in (0..config::MAX_PENDING_PER_ENDPOINT).zip(priorities.iter().cycle()) {
+            ep.enqueue_call(make_call(i as u32, pri, 0)).unwrap();
+        }
+
+        for _ in 0..config::MAX_PENDING_PER_ENDPOINT {
+            assert!(ep.dequeue_call().is_some());
+        }
+
+        assert_eq!(ep.pending_reply_count(), config::MAX_PENDING_PER_ENDPOINT);
+
+        // Enqueue one more call — it enters the send queue fine.
+        ep.enqueue_call(make_call(100, Priority::Medium, 0))
+            .unwrap();
+
+        assert!(ep.has_pending_calls());
+        // But dequeue must return None: no free reply slot (backpressure).
+        assert!(ep.dequeue_call().is_none());
+    }
+
+    #[test]
+    fn consume_reply_invalid_cap_id() {
+        let mut ep = make_endpoint(0);
+
+        // No active replies at all — any cap_id is invalid.
+        assert_eq!(
+            ep.consume_reply(ReplyCapId(0)),
+            Err(SyscallError::InvalidHandle)
+        );
+        assert_eq!(
+            ep.consume_reply(ReplyCapId(u32::MAX)),
+            Err(SyscallError::InvalidHandle)
+        );
+
+        // Issue a real reply cap, then try a different cap_id.
+        ep.enqueue_call(make_call(1, Priority::Medium, 0)).unwrap();
+
+        let (_, valid_cap) = ep.dequeue_call().unwrap();
+        let bogus_cap = ReplyCapId(valid_cap.0.wrapping_add(1));
+
+        assert_eq!(
+            ep.consume_reply(bogus_cap),
+            Err(SyscallError::InvalidHandle)
+        );
+        // The valid cap still works.
+        assert!(ep.consume_reply(valid_cap).is_ok());
+    }
+
+    #[test]
+    fn next_reply_id_wraparound() {
+        let mut ep = make_endpoint(0);
+
+        // Advance the internal counter to just before u32::MAX.
+        ep.next_reply_id = u32::MAX - 1;
+
+        // Issue three reply caps that straddle the wraparound boundary.
+        ep.enqueue_call(make_call(1, Priority::Medium, 0)).unwrap();
+        ep.enqueue_call(make_call(2, Priority::Medium, 0)).unwrap();
+        ep.enqueue_call(make_call(3, Priority::Medium, 0)).unwrap();
+
+        let (_, cap_a) = ep.dequeue_call().unwrap(); // u32::MAX - 1
+        let (_, cap_b) = ep.dequeue_call().unwrap(); // u32::MAX
+        let (_, cap_c) = ep.dequeue_call().unwrap(); // 0 (wrapped)
+
+        // All three cap IDs are distinct.
+        assert_eq!(cap_a, ReplyCapId(u32::MAX - 1));
+        assert_eq!(cap_b, ReplyCapId(u32::MAX));
+        assert_eq!(cap_c, ReplyCapId(0));
+
+        // Each cap resolves to the correct caller.
+        let (caller_a, _) = ep.consume_reply(cap_a).unwrap();
+        let (caller_b, _) = ep.consume_reply(cap_b).unwrap();
+        let (caller_c, _) = ep.consume_reply(cap_c).unwrap();
+
+        assert_eq!(caller_a, ThreadId(1));
+        assert_eq!(caller_b, ThreadId(2));
+        assert_eq!(caller_c, ThreadId(3));
+    }
+
+    #[test]
+    fn message_set_len_clamps_to_msg_size() {
+        let mut msg = Message::empty();
+
+        msg.set_len(MSG_SIZE + 100);
+
+        assert_eq!(msg.len(), MSG_SIZE);
+    }
+
+    #[test]
+    fn message_set_len_zero() {
+        let mut msg = Message::from_bytes(b"some data").unwrap();
+
+        assert_eq!(msg.len(), 9);
+
+        msg.set_len(0);
+
+        assert_eq!(msg.len(), 0);
+        assert!(msg.is_empty());
+        assert_eq!(msg.as_bytes(), &[]);
+    }
+
+    #[test]
+    fn enqueue_call_peer_closed() {
+        let mut ep = make_endpoint(0);
+
+        ep.close_peer();
+
+        assert_eq!(
+            ep.enqueue_call(make_call(1, Priority::High, 0)),
+            Err(SyscallError::PeerClosed)
+        );
+    }
+
+    #[test]
+    fn send_queue_full_single_priority() {
+        let mut ep = make_endpoint(0);
+
+        // Fill all slots at Priority::High (only SLOTS_PER_PRIORITY available).
+        for i in 0..SLOTS_PER_PRIORITY {
+            ep.enqueue_call(make_call(i as u32, Priority::High, 0))
+                .unwrap();
+        }
+
+        // The next call at the same priority must fail with BufferFull.
+        assert_eq!(
+            ep.enqueue_call(make_call(99, Priority::High, 0)),
+            Err(SyscallError::BufferFull)
+        );
+
+        // Other priorities still have room.
+        ep.enqueue_call(make_call(100, Priority::Low, 0)).unwrap();
+    }
+
+    #[test]
+    fn close_peer_returns_all_blocked_ids() {
+        let mut ep = make_endpoint(0);
+
+        // Enqueue callers in the send queue.
+        ep.enqueue_call(make_call(1, Priority::Low, 0)).unwrap();
+        ep.enqueue_call(make_call(2, Priority::High, 0)).unwrap();
+
+        // Move one call to active_replies (caller 2, highest priority).
+        let _ = ep.dequeue_call().unwrap();
+
+        // Enqueue another caller after the dequeue.
+        ep.enqueue_call(make_call(3, Priority::Medium, 0)).unwrap();
+
+        // Add recv waiters.
+        ep.add_recv_waiter(ThreadId(10)).unwrap();
+        ep.add_recv_waiter(ThreadId(11)).unwrap();
+
+        let blocked = ep.close_peer();
+
+        // Expected blocked threads:
+        //   send queue: 1, 3
+        //   active replies: 2 (dequeued but not replied)
+        //   recv waiters: 10, 11
+        assert_eq!(blocked.len(), 5);
+        assert!(blocked.contains(&ThreadId(1)));
+        assert!(blocked.contains(&ThreadId(2)));
+        assert!(blocked.contains(&ThreadId(3)));
+        assert!(blocked.contains(&ThreadId(10)));
+        assert!(blocked.contains(&ThreadId(11)));
     }
 }

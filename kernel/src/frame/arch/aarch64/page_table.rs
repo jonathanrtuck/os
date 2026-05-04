@@ -311,14 +311,42 @@ pub fn switch_table(root: PhysAddr, asid: Asid) {
 }
 
 /// Invalidate a single page's TLB entry for a given ASID.
+///
+/// Page-aligns the VA before computing the TLBI operand — raw fault
+/// addresses may have non-zero bits below PAGE_SHIFT, which would produce
+/// an incorrect TLBI on granules > 4KB.
 #[cfg(target_os = "none")]
 pub fn invalidate_page(asid: Asid, vaddr: VirtAddr) {
-    // TLBI VAE1IS format: ASID[63:48] | VA[43:12]
-    let val = ((asid.0 as u64) << 48) | ((vaddr.0 as u64) >> 12);
+    // TLBI VAE1IS format: ASID[63:48] | VA[43:12].
+    // Page-align first: for 16KB granule, bits [13:12] must be zero.
+    let aligned = vaddr.0 & !(config::PAGE_SIZE - 1);
+    let val = ((asid.0 as u64) << 48) | ((aligned as u64) >> 12);
 
+    // DSB ISHST ensures preceding PTE stores are visible to hardware walkers
+    // on all cores before the TLBI invalidates cached translations.
+    sysreg::dsb_ishst();
     sysreg::tlbi_vae1is(val);
     sysreg::dsb_ish();
     sysreg::isb();
+}
+
+/// Replace a valid page mapping with a new physical address.
+///
+/// Implements break-before-make (ARM ARM D8.14.1): valid-to-valid PTE
+/// transitions require writing invalid first, flushing the TLB, then
+/// writing the new valid entry. Without this, cores may hold stale TLB
+/// entries for the old translation.
+#[cfg(target_os = "none")]
+pub fn replace_page(
+    root: PhysAddr,
+    asid: Asid,
+    vaddr: VirtAddr,
+    new_paddr: PhysAddr,
+    perms: Perms,
+) {
+    unmap_page(root, vaddr);
+    invalidate_page(asid, vaddr);
+    map_page(root, vaddr, new_paddr, perms);
 }
 
 /// Invalidate all TLB entries for an ASID.

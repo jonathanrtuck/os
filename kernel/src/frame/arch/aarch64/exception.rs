@@ -16,7 +16,11 @@ use super::sysreg;
 /// When non-zero, an EL1 data abort during copy_from_user/copy_to_user
 /// jumps to this address instead of panicking. Cleared after the copy
 /// completes (success or fault).
-pub static COPY_FAULT_RECOVERY: AtomicU64 = AtomicU64::new(0);
+///
+/// Indexed by core_id. Must be per-core: concurrent user memory copies on
+/// different cores must not clobber each other's recovery addresses.
+pub static COPY_FAULT_RECOVERY: [AtomicU64; crate::config::MAX_CORES] =
+    [const { AtomicU64::new(0) }; crate::config::MAX_CORES];
 
 // ---------------------------------------------------------------------------
 // TrapFrame — must match the assembly layout in exception.S exactly.
@@ -51,8 +55,11 @@ pub struct TrapFrame {
     pub fpsr: u64,
     /// User stack pointer (SP_EL0) — saved on exception from EL0.
     pub sp_el0: u64,
-    /// Padding for 16-byte alignment of the full frame.
-    _pad2: u64,
+    /// Whether FP/SIMD registers were saved at exception entry.
+    /// Set by assembly: non-zero if saved, zero if skipped (lazy FP trap).
+    /// The restore path checks this instead of re-reading CPACR, which
+    /// handle_fp_trap may have changed mid-exception.
+    pub fp_saved: u64,
 }
 
 // Offsets must match exception.S — the assembly uses hard-coded immediates for
@@ -68,6 +75,7 @@ const _: () = {
     assert!(core::mem::offset_of!(TrapFrame, fpcr) == 800);
     assert!(core::mem::offset_of!(TrapFrame, fpsr) == 808);
     assert!(core::mem::offset_of!(TrapFrame, sp_el0) == 816);
+    assert!(core::mem::offset_of!(TrapFrame, fp_saved) == 824);
     assert!(core::mem::size_of::<TrapFrame>() == 832); // sub sp, sp, #832
 };
 
@@ -128,7 +136,12 @@ fn irq_handler(_frame: &mut TrapFrame) {
 
     match intid {
         super::gic::INTID_VTIMER => {
-            super::timer::handle_deadline();
+            #[cfg(target_os = "none")]
+            let core = unsafe { super::cpu::percpu().core_id as usize };
+            #[cfg(not(target_os = "none"))]
+            let core = 0;
+
+            super::timer::handle_deadline(core);
         }
         32.. => {
             let handler_addr = DEVICE_IRQ_HANDLER.load(Ordering::Acquire);
@@ -215,15 +228,15 @@ extern "C" fn svc_fast_handler(
     let args = [a0, a1, a2, a3, a4, a5];
     // SAFETY: percpu() requires init_percpu_bsp to have been called.
     // kernel_ptr was set during boot via set_kernel_ptr.
-    let (kernel, current_thread) = unsafe {
+    let (kernel, current_thread, core_id) = unsafe {
         let pc = super::cpu::percpu();
         let kernel = &mut *(pc.kernel_ptr as *mut crate::syscall::Kernel);
         let current = crate::types::ThreadId(pc.current_thread);
 
-        (kernel, current)
+        (kernel, current, pc.core_id as usize)
     };
 
-    kernel.dispatch(current_thread, syscall_num, &args)
+    kernel.dispatch(current_thread, core_id, syscall_num, &args)
 }
 
 // ---------------------------------------------------------------------------
@@ -236,7 +249,11 @@ fn el1_sync_handler(frame: &mut TrapFrame) {
     match ec {
         // Data abort from same EL — LDTR/STTR fault during user memory copy.
         0x25 => {
-            let recovery = COPY_FAULT_RECOVERY.swap(0, Ordering::Relaxed);
+            #[cfg(target_os = "none")]
+            let core = unsafe { super::cpu::percpu().core_id as usize };
+            #[cfg(not(target_os = "none"))]
+            let core = 0;
+            let recovery = COPY_FAULT_RECOVERY[core].swap(0, Ordering::Relaxed);
 
             if recovery != 0 {
                 frame.elr = recovery;
@@ -262,13 +279,17 @@ fn el1_sync_handler(frame: &mut TrapFrame) {
                 ];
                 // SAFETY: percpu() requires init_percpu_bsp to have been called.
                 // kernel_ptr was set during boot via set_kernel_ptr.
-                let (kernel, current) = unsafe {
+                let (kernel, current, core_id) = unsafe {
                     let pc = super::cpu::percpu();
                     let kernel = &mut *(pc.kernel_ptr as *mut crate::syscall::Kernel);
 
-                    (kernel, crate::types::ThreadId(pc.current_thread))
+                    (
+                        kernel,
+                        crate::types::ThreadId(pc.current_thread),
+                        pc.core_id as usize,
+                    )
                 };
-                let (error, value) = kernel.dispatch(current, syscall_num, &args);
+                let (error, value) = kernel.dispatch(current, core_id, syscall_num, &args);
 
                 frame.gprs[0] = error;
                 frame.gprs[1] = value;
