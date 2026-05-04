@@ -24,11 +24,13 @@ pub mod address_space;
 pub mod config;
 pub mod endpoint;
 pub mod event;
+pub mod fault;
 #[allow(unsafe_code)]
 pub mod frame;
 pub mod handle;
 #[cfg(any(target_os = "none", test))]
 pub mod print;
+pub mod syscall;
 pub mod table;
 pub mod thread;
 pub mod types;

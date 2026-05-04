@@ -2,14 +2,16 @@
 //!
 //! Each kernel object type (VMO, Event, Endpoint, Thread, AddressSpace)
 //! is stored in an ObjectTable. Objects are accessed by ID (array index).
-//! No heap allocation — the table is a fixed-size array.
+//! Storage is heap-backed (Vec) so composite tables don't overflow the stack.
+
+use alloc::vec::Vec;
 
 /// Generic flat-array storage for kernel objects.
 /// Alloc: scan from hint for a free slot. O(1) amortized.
 /// Dealloc: set slot to None. O(1).
 /// Lookup: index into array. O(1).
 pub struct ObjectTable<T, const MAX: usize> {
-    entries: [Option<T>; MAX],
+    entries: Vec<Option<T>>,
     free_hint: usize,
     count: usize,
 }
@@ -18,8 +20,10 @@ pub struct ObjectTable<T, const MAX: usize> {
 impl<T, const MAX: usize> ObjectTable<T, MAX> {
     /// Create with all slots empty.
     pub fn new() -> Self {
+        let mut entries = Vec::with_capacity(MAX);
+        entries.resize_with(MAX, || None);
         Self {
-            entries: core::array::from_fn(|_| None),
+            entries,
             free_hint: 0,
             count: 0,
         }
