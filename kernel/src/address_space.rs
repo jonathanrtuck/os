@@ -231,12 +231,16 @@ impl AddressSpace {
 
         let va = self.va_allocator.allocate(aligned_size, addr_hint)?;
 
-        self.mappings.push(MappingRecord {
+        let record = MappingRecord {
             vmo_id,
             va_start: va,
             size: aligned_size,
             rights,
-        });
+        };
+        let pos = self
+            .mappings
+            .partition_point(|m| m.va_start < va);
+        self.mappings.insert(pos, record);
 
         Ok(va)
     }
@@ -245,10 +249,13 @@ impl AddressSpace {
     pub fn unmap(&mut self, addr: usize) -> Result<MappingRecord, SyscallError> {
         let pos = self
             .mappings
-            .iter()
-            .position(|m| m.va_start == addr)
-            .ok_or(SyscallError::NotFound)?;
-        let record = self.mappings.swap_remove(pos);
+            .partition_point(|m| m.va_start < addr);
+
+        if pos >= self.mappings.len() || self.mappings[pos].va_start != addr {
+            return Err(SyscallError::NotFound);
+        }
+
+        let record = self.mappings.remove(pos);
 
         self.va_allocator.free(record.va_start, record.size);
 
@@ -256,10 +263,13 @@ impl AddressSpace {
     }
 
     /// Find the mapping containing `addr` (for page fault handling).
+    /// O(log n) via binary search on the sorted mapping array.
     pub fn find_mapping(&self, addr: usize) -> Option<&MappingRecord> {
+        let idx = self.mappings.partition_point(|m| m.va_start + m.size <= addr);
+
         self.mappings
-            .iter()
-            .find(|m| addr >= m.va_start && addr < m.va_start + m.size)
+            .get(idx)
+            .filter(|m| addr >= m.va_start && addr < m.va_start + m.size)
     }
 
     /// Destroy the address space. Kills threads via callback, returns
