@@ -699,6 +699,20 @@ impl Kernel {
 
     fn sys_event_wait(&mut self, current: ThreadId, args: &[u64; 6]) -> Result<u64, SyscallError> {
         let space_id = self.thread_space_id(current)?;
+
+        if args[0] as u32 > config::MAX_HANDLES as u32 {
+            return self.event_wait_buffer(current, space_id, args);
+        }
+
+        self.event_wait_register(current, space_id, args)
+    }
+
+    fn event_wait_register(
+        &mut self,
+        current: ThreadId,
+        space_id: AddressSpaceId,
+        args: &[u64; 6],
+    ) -> Result<u64, SyscallError> {
         let mut wait_items: [(u32, u32, u64); 3] = [(0, 0, 0); 3];
         let mut count = 0usize;
 
@@ -727,7 +741,66 @@ impl Kernel {
             return Err(SyscallError::InvalidArgument);
         }
 
-        for &(hid, obj_id, mask) in &wait_items[..count] {
+        self.event_wait_common(current, &wait_items[..count])
+    }
+
+    fn event_wait_buffer(
+        &mut self,
+        current: ThreadId,
+        space_id: AddressSpaceId,
+        args: &[u64; 6],
+    ) -> Result<u64, SyscallError> {
+        let user_ptr = args[0] as usize;
+        let count = args[1] as usize;
+
+        if count == 0 || count > config::MAX_MULTI_WAIT {
+            return Err(SyscallError::InvalidArgument);
+        }
+
+        let mut raw = [0u32; config::MAX_MULTI_WAIT * 3];
+
+        user_mem::read_user_u32s(user_ptr, count * 3, &mut raw)?;
+
+        let mut wait_items = [(0u32, 0u32, 0u64); config::MAX_MULTI_WAIT];
+        #[allow(unused_mut)]
+        let mut valid = 0;
+
+        for i in 0..count {
+            let hid_raw = raw[i * 3];
+            let mask_lo = raw[i * 3 + 1] as u64;
+            let mask_hi = raw[i * 3 + 2] as u64;
+            let mask = mask_lo | (mask_hi << 32);
+
+            if mask == 0 {
+                continue;
+            }
+
+            let handle = self.lookup_handle(space_id, HandleId(hid_raw))?;
+
+            if handle.object_type != ObjectType::Event {
+                return Err(SyscallError::WrongHandleType);
+            }
+            if !handle.rights.contains(Rights::WAIT) {
+                return Err(SyscallError::InsufficientRights);
+            }
+
+            wait_items[valid] = (hid_raw, handle.object_id, mask);
+            valid += 1;
+        }
+
+        if valid == 0 {
+            return Err(SyscallError::InvalidArgument);
+        }
+
+        self.event_wait_common(current, &wait_items[..valid])
+    }
+
+    fn event_wait_common(
+        &mut self,
+        current: ThreadId,
+        wait_items: &[(u32, u32, u64)],
+    ) -> Result<u64, SyscallError> {
+        for &(hid, obj_id, mask) in wait_items {
             let event = self
                 .events
                 .get_mut(obj_id)
@@ -739,7 +812,9 @@ impl Kernel {
         }
 
         let mut obj_ids = [0u32; 3];
-        for (i, &(_, obj_id, mask)) in wait_items[..count].iter().enumerate() {
+        let use_count = wait_items.len().min(3);
+
+        for (i, &(_, obj_id, mask)) in wait_items[..use_count].iter().enumerate() {
             let event = self
                 .events
                 .get_mut(obj_id)
@@ -753,7 +828,7 @@ impl Kernel {
         self.threads
             .get_mut(current.0)
             .ok_or(SyscallError::InvalidArgument)?
-            .set_wait_events(&obj_ids[..count]);
+            .set_wait_events(&obj_ids[..use_count]);
 
         crate::sched::block_current(self, current, 0);
 

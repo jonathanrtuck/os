@@ -62,6 +62,7 @@ pub const MAX_MAPPINGS: usize = 128;
 pub const MAX_WAITERS_PER_EVENT: usize = 16;
 pub const MAX_PENDING_PER_ENDPOINT: usize = 16;
 pub const MAX_RECV_WAITERS: usize = 4;
+pub const MAX_MULTI_WAIT: usize = 32;
 pub const MAX_IPC_HANDLES: usize = 8;
 pub const KERNEL_STACK_PAGES: usize = 2;
 
