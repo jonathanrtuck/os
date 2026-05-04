@@ -27,3 +27,4 @@ pub mod frame;
 pub mod print;
 pub mod table;
 pub mod types;
+pub mod vmo;
