@@ -7,6 +7,9 @@ core::arch::global_asm!(include_str!("secondary_entry.S"));
 
 pub mod context;
 pub mod cpu;
+pub use cpu::PerCpu;
+#[cfg(target_os = "none")]
+pub use cpu::{init_percpu_bsp, set_kernel_ptr};
 pub mod entropy;
 pub mod exception;
 pub mod gic;

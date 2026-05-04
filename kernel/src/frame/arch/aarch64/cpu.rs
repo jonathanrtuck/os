@@ -44,6 +44,119 @@ static CORE_STACKS: CoreStacks = CoreStacks(UnsafeCell::new(
 #[cfg(target_os = "none")]
 static CORES_ONLINE: AtomicUsize = AtomicUsize::new(0);
 
+// ---------------------------------------------------------------------------
+// Per-CPU data — accessed via TPIDR_EL1 for O(1) "who am I?" queries.
+// ---------------------------------------------------------------------------
+
+/// Per-CPU data stored at the address in TPIDR_EL1.
+///
+/// 128-byte aligned to own one M4 Pro cache line. Accessed from
+/// exception handlers via MRS TPIDR_EL1 (2 cycles).
+#[derive(Clone, Copy)]
+#[repr(C, align(128))]
+pub struct PerCpu {
+    pub core_id: u32,
+    pub current_thread: u32,
+    pub kernel_ptr: usize,
+    pub reschedule_pending: u32,
+    _pad: [u8; 104],
+}
+
+impl PerCpu {
+    pub const IDLE: u32 = u32::MAX;
+
+    pub const fn new(core_id: u32) -> Self {
+        PerCpu {
+            core_id,
+            current_thread: Self::IDLE,
+            kernel_ptr: 0,
+            reschedule_pending: 0,
+            _pad: [0; 104],
+        }
+    }
+}
+
+const _: () = {
+    assert!(core::mem::size_of::<PerCpu>() == 128);
+};
+
+#[cfg(target_os = "none")]
+struct PerCpuArray(UnsafeCell<[PerCpu; config::MAX_CORES]>);
+
+// SAFETY: Each core exclusively owns its PerCpu slot, indexed by core_id.
+// Cross-core writes only happen during single-threaded boot (set_kernel_ptr).
+#[cfg(target_os = "none")]
+unsafe impl Sync for PerCpuArray {}
+
+#[cfg(target_os = "none")]
+static PER_CPU_DATA: PerCpuArray = PerCpuArray(UnsafeCell::new({
+    let mut arr = [PerCpu::new(0); config::MAX_CORES];
+    let mut i = 0;
+    while i < config::MAX_CORES {
+        arr[i] = PerCpu::new(i as u32);
+        i += 1;
+    }
+    arr
+}));
+
+/// Initialize per-CPU data for core 0 (BSP). Call early in kernel_main,
+/// before any exception can fire.
+#[cfg(target_os = "none")]
+pub fn init_percpu_bsp() {
+    // SAFETY: PER_CPU_DATA is initialized at compile time. We're accessing
+    // slot 0 to get its address for TPIDR_EL1. No concurrent access during boot.
+    let ptr = unsafe { &(*PER_CPU_DATA.0.get())[0] as *const PerCpu as u64 };
+    sysreg::set_tpidr_el1(ptr);
+}
+
+/// Initialize per-CPU data for a secondary core. Called from secondary_main.
+#[cfg(target_os = "none")]
+pub fn init_percpu(core_id: usize) {
+    // SAFETY: core_id is validated by the caller (secondary_main). Each core
+    // initializes only its own slot.
+    let ptr = unsafe { &(*PER_CPU_DATA.0.get())[core_id] as *const PerCpu as u64 };
+    sysreg::set_tpidr_el1(ptr);
+}
+
+/// Read this core's PerCpu data from TPIDR_EL1.
+///
+/// # Safety
+/// Must only be called after init_percpu_bsp/init_percpu has been called
+/// on this core.
+#[cfg(target_os = "none")]
+pub unsafe fn percpu() -> &'static PerCpu {
+    let ptr = sysreg::tpidr_el1() as *const PerCpu;
+    // SAFETY: TPIDR_EL1 was set to point to this core's PerCpu slot
+    // during boot. The slot lives in a static with 'static lifetime.
+    unsafe { &*ptr }
+}
+
+/// Read this core's PerCpu data mutably.
+///
+/// # Safety
+/// Must only be called after init_percpu. Caller must ensure no concurrent
+/// mutation (IRQs disabled or single-threaded context).
+#[cfg(target_os = "none")]
+pub unsafe fn percpu_mut() -> &'static mut PerCpu {
+    let ptr = sysreg::tpidr_el1() as *mut PerCpu;
+    // SAFETY: TPIDR_EL1 points to this core's exclusive slot. Caller
+    // guarantees no concurrent access.
+    unsafe { &mut *ptr }
+}
+
+/// Store the Kernel pointer in all per-CPU data slots.
+///
+/// Called once during boot, before secondary cores start.
+#[cfg(target_os = "none")]
+pub fn set_kernel_ptr(ptr: *mut u8) {
+    // SAFETY: Called during single-threaded boot, before secondaries.
+    // UnsafeCell permits interior mutation.
+    let data = unsafe { &mut *PER_CPU_DATA.0.get() };
+    for slot in data.iter_mut() {
+        slot.kernel_ptr = ptr as usize;
+    }
+}
+
 /// Extract the linear core ID from an MPIDR_EL1 value.
 ///
 /// On QEMU virt and Apple HVF, Aff0 (bits [7:0]) gives a linear core index.
@@ -132,7 +245,7 @@ extern "C" fn secondary_main(core_id: usize) -> ! {
     super::exception::init();
     super::mmu::init_secondary();
     super::gic::init_per_core(core_id);
-    super::sysreg::set_tpidr_el1(core_id as u64);
+    init_percpu(core_id);
 
     crate::println!("core {}: alive", core_id);
 
@@ -146,6 +259,23 @@ extern "C" fn secondary_main(core_id: usize) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- PerCpu layout --
+
+    #[test]
+    fn percpu_is_one_cache_line() {
+        assert_eq!(core::mem::size_of::<PerCpu>(), 128);
+        assert_eq!(core::mem::align_of::<PerCpu>(), 128);
+    }
+
+    #[test]
+    fn percpu_idle_sentinel() {
+        let p = PerCpu::new(3);
+        assert_eq!(p.core_id, 3);
+        assert_eq!(p.current_thread, PerCpu::IDLE);
+        assert_eq!(p.kernel_ptr, 0);
+        assert_eq!(p.reschedule_pending, 0);
+    }
 
     // -- core_id_from_mpidr --
 
