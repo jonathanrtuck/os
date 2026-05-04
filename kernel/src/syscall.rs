@@ -185,7 +185,6 @@ impl Kernel {
             .get(space_id.0)
             .ok_or(SyscallError::InvalidHandle)?;
         let handle = space.handles().lookup(handle_id)?.clone();
-
         let current_gen = match handle.object_type {
             ObjectType::Vmo => self.vmos.generation(handle.object_id),
             ObjectType::Endpoint => self.endpoints.generation(handle.object_id),
@@ -1739,6 +1738,7 @@ mod tests {
         let (err, _) = call(&mut k, 999, &[0; 6]);
 
         assert_eq!(err, SyscallError::InvalidArgument as u64);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -1753,6 +1753,7 @@ mod tests {
         let (err, _) = call(&mut k, num::HANDLE_CLOSE, &[hid, 0, 0, 0, 0, 0]);
 
         assert_eq!(err, 0);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -1762,6 +1763,7 @@ mod tests {
         let (err, _) = call(&mut k, num::VMO_CREATE, &[0, 0, 0, 0, 0, 0]);
 
         assert_eq!(err, SyscallError::InvalidArgument as u64);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -1780,6 +1782,7 @@ mod tests {
         let event = k.events.get(0).unwrap();
 
         assert_eq!(event.bits(), 0b101);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -1794,6 +1797,7 @@ mod tests {
         call(&mut k, num::EVENT_CLEAR, &[hid, 0b01, 0, 0, 0, 0]);
 
         assert_eq!(k.events.get(0).unwrap().bits(), 0b10);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -1804,6 +1808,7 @@ mod tests {
 
         assert_eq!(err, 0);
         assert_eq!(k.endpoints.count(), 1);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -1814,6 +1819,7 @@ mod tests {
 
         assert_eq!(err, 0);
         assert_eq!(k.spaces.count(), 2);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -1831,6 +1837,7 @@ mod tests {
         let rights = (info & 0xFFFF_FFFF) as u32;
 
         assert_eq!(rights, Rights::READ.0);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -1845,6 +1852,7 @@ mod tests {
         let obj_type = (info >> 32) as u8;
 
         assert_eq!(obj_type, ObjectType::Event as u8);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -1860,6 +1868,7 @@ mod tests {
         let (err, _) = call(&mut k, num::VMO_SEAL, &[hid, 0, 0, 0, 0, 0]);
 
         assert_eq!(err, SyscallError::AlreadySealed as u64);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -1872,6 +1881,7 @@ mod tests {
         assert_eq!(err, 0);
         assert_ne!(hid, snap_hid);
         assert_eq!(k.vmos.count(), 2);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -1888,6 +1898,7 @@ mod tests {
         let (err, _) = call(&mut k, num::VMO_UNMAP, &[va, 0, 0, 0, 0, 0]);
 
         assert_eq!(err, 0);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -1898,6 +1909,7 @@ mod tests {
         let (err, _) = call(&mut k, num::VMO_SEAL, &[hid, 0, 0, 0, 0, 0]);
 
         assert_eq!(err, SyscallError::WrongHandleType as u64);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -1926,6 +1938,7 @@ mod tests {
         let (err, _) = call(&mut k, num::EVENT_CLEAR, &[event_hid, 0b1010, 0, 0, 0, 0]);
 
         assert_eq!(err, 0);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -1936,6 +1949,7 @@ mod tests {
         let (err, _) = call(&mut k, num::EVENT_BIND_IRQ, &[vmo_hid, 64, 0b1, 0, 0, 0]);
 
         assert_eq!(err, SyscallError::WrongHandleType as u64);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -1946,6 +1960,7 @@ mod tests {
         let (err, _) = call(&mut k, num::EVENT_BIND_IRQ, &[event_hid, 10, 0b1, 0, 0, 0]);
 
         assert_eq!(err, SyscallError::InvalidArgument as u64);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -1958,6 +1973,7 @@ mod tests {
 
         assert_eq!(err, 0);
         assert_eq!(k.events.get(0).unwrap().bits(), 0);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -1974,6 +1990,7 @@ mod tests {
 
         assert_eq!(err, 0);
         assert_eq!(value, hid);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -1989,6 +2006,7 @@ mod tests {
 
         assert_eq!(err, 0);
         assert_eq!(value, hid);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2004,6 +2022,7 @@ mod tests {
 
         assert_eq!(err, 0);
         assert_eq!(value, hid);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2019,6 +2038,7 @@ mod tests {
 
         assert_eq!(err, 0);
         assert_eq!(value, hid1);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2034,6 +2054,7 @@ mod tests {
 
         assert_eq!(err, 0);
         assert_eq!(value, hid2);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2054,6 +2075,7 @@ mod tests {
 
         assert_eq!(err, 0);
         assert_eq!(value, hid2);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2068,6 +2090,7 @@ mod tests {
 
         assert_eq!(err, 0);
         assert_eq!(value, hid1);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2078,6 +2101,7 @@ mod tests {
 
         assert_eq!(err, 0);
         assert_eq!(k.threads.count(), 2);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2092,6 +2116,7 @@ mod tests {
         );
 
         assert_eq!(err, 0);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2106,6 +2131,7 @@ mod tests {
         );
 
         assert_eq!(err, 0);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2121,6 +2147,7 @@ mod tests {
 
         assert_eq!(err, 0);
         assert_eq!(k.spaces.count(), 1);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2130,6 +2157,7 @@ mod tests {
         let (err, _) = call(&mut k, num::SPACE_DESTROY, &[999, 0, 0, 0, 0, 0]);
 
         assert_ne!(err, 0);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2158,6 +2186,7 @@ mod tests {
 
         assert_eq!(err, 0);
         assert_eq!(k.spaces.count(), 1);
+
         // Threads persist as Exited (not deallocated) because external
         // handles may still reference them. Verify the thread is Exited.
         let created_tid = initial_threads as u32 - 1;
@@ -2166,6 +2195,7 @@ mod tests {
             k.threads.get(created_tid).unwrap().state(),
             crate::thread::ThreadRunState::Exited
         );
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2179,6 +2209,7 @@ mod tests {
         let (err, _) = call(&mut k, num::SPACE_DESTROY, &[space_hid, 0, 0, 0, 0, 0]);
 
         assert_ne!(err, 0);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2189,6 +2220,7 @@ mod tests {
 
         assert_eq!(err, 0);
         assert_eq!(val, 16384);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2199,6 +2231,7 @@ mod tests {
 
         assert_eq!(err, 0);
         assert_eq!(val, 128);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2209,6 +2242,7 @@ mod tests {
 
         assert_eq!(err, 0);
         assert_eq!(val, 1);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2220,6 +2254,7 @@ mod tests {
         let (err, _) = call(&mut k, num::VMO_SET_PAGER, &[vmo_hid, ep_hid, 0, 0, 0, 0]);
 
         assert_eq!(err, 0);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2229,6 +2264,7 @@ mod tests {
         let (err, _) = call(&mut k, num::THREAD_EXIT, &[42, 0, 0, 0, 0, 0]);
 
         assert_eq!(err, 0);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2279,6 +2315,7 @@ mod tests {
 
         assert_eq!(msg_len, request.len());
         assert_eq!(&recv_buf[..msg_len], request);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2335,6 +2372,7 @@ mod tests {
 
         assert_eq!(err, 0);
         assert_eq!(&call_buf[..reply.len()], reply);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2357,6 +2395,7 @@ mod tests {
         let msg_len = (packed & 0xFFFF_FFFF) as usize;
 
         assert_eq!(msg_len, 0);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2371,6 +2410,7 @@ mod tests {
         );
 
         assert_eq!(err, SyscallError::InvalidArgument as u64);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2394,6 +2434,7 @@ mod tests {
         );
 
         assert_eq!(err, SyscallError::BufferFull as u64);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2453,6 +2494,7 @@ mod tests {
 
         assert_eq!(err, 0);
         assert_eq!(info >> 32, ObjectType::Vmo as u64);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2480,6 +2522,7 @@ mod tests {
         let (err, _) = call(&mut k, num::HANDLE_INFO, &[vmo_hid, 0, 0, 0, 0, 0]);
 
         assert_eq!(err, 0);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2507,6 +2550,7 @@ mod tests {
         let h_count = ((packed >> 16) & 0xFFFF) as usize;
 
         assert_eq!(h_count, 0);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2536,6 +2580,7 @@ mod tests {
         let event = k.events.get(0).unwrap();
 
         assert_ne!(event.bits() & 1, 0);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2555,6 +2600,7 @@ mod tests {
         let event = k.events.get(0).unwrap();
 
         assert_eq!(event.bits(), 0);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2588,6 +2634,7 @@ mod tests {
         );
 
         assert_eq!(k.events.get(0).unwrap().bits() & 1, 0);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2611,6 +2658,7 @@ mod tests {
 
         assert_eq!(err, 0);
         assert_ne!(k.events.get(0).unwrap().bits() & 1, 0);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2639,6 +2687,7 @@ mod tests {
         let h1 = target_space.handles().lookup(HandleId(1)).unwrap();
 
         assert_eq!(h1.object_type, ObjectType::Endpoint);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2653,6 +2702,7 @@ mod tests {
         );
 
         assert_eq!(err, 0);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2669,6 +2719,7 @@ mod tests {
         );
 
         assert_eq!(err, SyscallError::InvalidHandle as u64);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2688,6 +2739,7 @@ mod tests {
         let (err, _) = call(&mut k, num::HANDLE_INFO, &[vmo_hid, 0, 0, 0, 0, 0]);
 
         assert_eq!(err, 0);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2736,6 +2788,7 @@ mod tests {
             k.threads.get(2).unwrap().effective_priority(),
             Priority::High
         );
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2802,6 +2855,7 @@ mod tests {
             original_page, cow_page,
             "COW should allocate a new page, not keep the shared one"
         );
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2829,6 +2883,7 @@ mod tests {
 
         assert_eq!(err, 0);
         assert_eq!(val, ev1_hid);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2858,6 +2913,7 @@ mod tests {
         let (err, _) = call(&mut k, num::HANDLE_INFO, &[vmo_hid, 0, 0, 0, 0, 0]);
 
         assert_eq!(err, 0);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2884,6 +2940,7 @@ mod tests {
 
         assert_eq!(dup_rights & Rights::READ.0, Rights::READ.0);
         assert_eq!(dup_rights & Rights::WRITE.0, 0);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2902,6 +2959,7 @@ mod tests {
         let (err, _) = call(&mut k, num::EVENT_SIGNAL, &[ev_hid, 0x1, 0, 0, 0, 0]);
 
         assert_ne!(err, 0);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2929,6 +2987,7 @@ mod tests {
         let action = fault::handle_data_abort(&mut k, ThreadId(0), va as usize, true);
 
         assert_eq!(action, fault::FaultAction::Kill);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2942,6 +3001,7 @@ mod tests {
         let (err, _) = call(&mut k, num::VMO_CREATE, &[u64::MAX, 0, 0, 0, 0, 0]);
 
         assert_ne!(err, 0);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2951,6 +3011,7 @@ mod tests {
         let (err, _) = call(&mut k, num::VMO_CREATE, &[4096, 0xDEAD_BEEF, 0, 0, 0, 0]);
 
         assert_eq!(err, SyscallError::InvalidArgument as u64);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2966,6 +3027,7 @@ mod tests {
         // Resize to 0 is permitted by the handler (only > MAX_PHYS_MEM is rejected).
         // Verify it succeeds without panic.
         assert_eq!(err, 0);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2980,6 +3042,7 @@ mod tests {
         let (err, _) = call(&mut k, num::VMO_RESIZE, &[hid, too_big, 0, 0, 0, 0]);
 
         assert_eq!(err, SyscallError::InvalidArgument as u64);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -2990,6 +3053,7 @@ mod tests {
         let (err, _) = call(&mut k, num::VMO_MAP, &[u32::MAX as u64, 0, perms, 0, 0, 0]);
 
         assert_eq!(err, SyscallError::InvalidHandle as u64);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -3014,6 +3078,7 @@ mod tests {
         );
 
         assert_eq!(err, SyscallError::InsufficientRights as u64);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -3031,6 +3096,7 @@ mod tests {
         );
 
         assert_eq!(err, SyscallError::InvalidArgument as u64);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -3044,6 +3110,7 @@ mod tests {
         let (err, _) = call(&mut k, num::EVENT_SIGNAL, &[vmo_hid, 0b1, 0, 0, 0, 0]);
 
         assert_eq!(err, SyscallError::WrongHandleType as u64);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -3062,6 +3129,7 @@ mod tests {
         );
 
         assert_eq!(err, SyscallError::InvalidArgument as u64);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -3073,6 +3141,7 @@ mod tests {
         let (err, _) = call(&mut k, num::EVENT_WAIT, &[garbage_ptr, 0, 0, 0, 0, 0]);
 
         assert_eq!(err, SyscallError::InvalidArgument as u64);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -3082,6 +3151,7 @@ mod tests {
         let (err, _) = call(&mut k, num::HANDLE_CLOSE, &[999, 0, 0, 0, 0, 0]);
 
         assert_eq!(err, SyscallError::InvalidHandle as u64);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -3091,6 +3161,7 @@ mod tests {
         let (err, _) = call(&mut k, num::HANDLE_CLOSE, &[u32::MAX as u64, 0, 0, 0, 0, 0]);
 
         assert_eq!(err, SyscallError::InvalidHandle as u64);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -3100,6 +3171,7 @@ mod tests {
         let (err, _) = call(&mut k, u64::MAX, &[0; 6]);
 
         assert_eq!(err, SyscallError::InvalidArgument as u64);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -3128,6 +3200,7 @@ mod tests {
             "Kernel init heap ({total_init_bytes} bytes) exceeds 50% of bare-metal heap ({heap_limit} bytes). \
              ObjectTable entries must use Box<T> for lazy allocation."
         );
+
         crate::invariants::assert_valid(&*k);
     }
 }

@@ -334,9 +334,11 @@ impl RunQueue {
     #[cfg(test)]
     pub fn all_queued_thread_ids(&self) -> alloc::vec::Vec<ThreadId> {
         let mut ids = alloc::vec::Vec::new();
+
         for q in &self.queues {
             ids.extend(q.iter().copied());
         }
+
         ids
     }
 }

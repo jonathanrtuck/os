@@ -67,6 +67,7 @@ mod tests {
         assert_eq!(event.bits(), u64::MAX);
         {
             let v = crate::invariants::verify(&*k);
+
             assert!(v.is_empty(), "invariant violations: {:?}", v);
         }
     }
@@ -83,6 +84,7 @@ mod tests {
         assert_eq!(k.events.get(0).unwrap().bits(), 0x0000_0000_FFFF_FFFF);
         {
             let v = crate::invariants::verify(&*k);
+
             assert!(v.is_empty(), "invariant violations: {:?}", v);
         }
     }
@@ -100,8 +102,10 @@ mod tests {
 
             assert_eq!(err, 0, "bit {bit}: unexpected error");
             assert_eq!(value, hid, "bit {bit}: wrong handle returned");
+
             {
                 let v = crate::invariants::verify(&*k);
+
                 assert!(v.is_empty(), "invariant violations: {:?}", v);
             }
         }
@@ -110,7 +114,6 @@ mod tests {
     #[test]
     fn vmo_create_page_boundary_sizes() {
         let mut k = setup_kernel();
-
         let (err, _) = call(&mut k, num::VMO_CREATE, &[1, 0, 0, 0, 0, 0]);
 
         assert_eq!(err, 0, "size=1 should succeed");
@@ -138,8 +141,10 @@ mod tests {
             SyscallError::InvalidArgument as u64,
             "size=0 must fail"
         );
+
         {
             let v = crate::invariants::verify(&*k);
+
             assert!(v.is_empty(), "invariant violations: {:?}", v);
         }
     }
@@ -148,12 +153,13 @@ mod tests {
     fn vmo_create_rejects_oversized() {
         let mut k = setup_kernel();
         let too_big = (config::MAX_PHYS_MEM as u64) + 1;
-
         let (err, _) = call(&mut k, num::VMO_CREATE, &[too_big, 0, 0, 0, 0, 0]);
 
         assert_eq!(err, SyscallError::InvalidArgument as u64);
+
         {
             let v = crate::invariants::verify(&*k);
+
             assert!(v.is_empty(), "invariant violations: {:?}", v);
         }
     }
@@ -161,7 +167,6 @@ mod tests {
     #[test]
     fn handle_info_encodes_all_object_types() {
         let mut k = setup_kernel();
-
         let types = [
             (num::VMO_CREATE, &[4096u64, 0, 0, 0, 0, 0], ObjectType::Vmo),
             (num::EVENT_CREATE, &[0; 6], ObjectType::Event),
@@ -184,6 +189,7 @@ mod tests {
 
         {
             let v = crate::invariants::verify(&*k);
+
             assert!(v.is_empty(), "invariant violations: {:?}", v);
         }
     }
@@ -192,7 +198,6 @@ mod tests {
     fn all_rights_bits_preserved_through_dup() {
         let mut k = setup_kernel();
         let (_, hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
-
         let individual_rights = [
             Rights::READ,
             Rights::WRITE,
@@ -218,6 +223,7 @@ mod tests {
 
         {
             let v = crate::invariants::verify(&*k);
+
             assert!(v.is_empty(), "invariant violations: {:?}", v);
         }
     }
@@ -240,8 +246,10 @@ mod tests {
         let (err, _) = call(&mut k, num::THREAD_SET_PRIORITY, &[tid_hid, 4, 0, 0, 0, 0]);
 
         assert_eq!(err, SyscallError::InvalidArgument as u64);
+
         {
             let v = crate::invariants::verify(&*k);
+
             assert!(v.is_empty(), "invariant violations: {:?}", v);
         }
     }
@@ -264,8 +272,10 @@ mod tests {
         let (err, _) = call(&mut k, num::THREAD_SET_AFFINITY, &[tid_hid, 3, 0, 0, 0, 0]);
 
         assert_eq!(err, SyscallError::InvalidArgument as u64);
+
         {
             let v = crate::invariants::verify(&*k);
+
             assert!(v.is_empty(), "invariant violations: {:?}", v);
         }
     }
@@ -273,7 +283,6 @@ mod tests {
     #[test]
     fn system_info_all_selectors() {
         let mut k = setup_kernel();
-
         let (err, val) = call(&mut k, num::SYSTEM_INFO, &[0, 0, 0, 0, 0, 0]);
 
         assert_eq!(err, 0);
@@ -292,8 +301,10 @@ mod tests {
         let (err, _) = call(&mut k, num::SYSTEM_INFO, &[3, 0, 0, 0, 0, 0]);
 
         assert_eq!(err, SyscallError::InvalidArgument as u64);
+
         {
             let v = crate::invariants::verify(&*k);
+
             assert!(v.is_empty(), "invariant violations: {:?}", v);
         }
     }
@@ -316,8 +327,10 @@ mod tests {
         let (err, _) = call(&mut k, u64::MAX, &[0; 6]);
 
         assert_eq!(err, SyscallError::InvalidArgument as u64);
+
         {
             let v = crate::invariants::verify(&*k);
+
             assert!(v.is_empty(), "invariant violations: {:?}", v);
         }
     }
@@ -335,13 +348,13 @@ mod tests {
         // Fill the handle table.
         for _ in 0..config::MAX_HANDLES {
             let (err, _) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
+
             if err != 0 {
                 break;
             }
         }
 
         let vmo_count_before = k.vmos.count();
-
         // Next create should fail — and must not leak a VMO.
         let (err, _) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
 
@@ -351,8 +364,10 @@ mod tests {
             vmo_count_before,
             "VMO leaked on handle alloc failure"
         );
+
         {
             let v = crate::invariants::verify(&*k);
+
             assert!(v.is_empty(), "invariant violations: {:?}", v);
         }
     }
@@ -363,6 +378,7 @@ mod tests {
 
         for _ in 0..config::MAX_HANDLES {
             let (err, _) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+
             if err != 0 {
                 break;
             }
@@ -373,8 +389,10 @@ mod tests {
 
         assert_ne!(err, 0);
         assert_eq!(k.events.count(), event_count_before, "Event leaked");
+
         {
             let v = crate::invariants::verify(&*k);
+
             assert!(v.is_empty(), "invariant violations: {:?}", v);
         }
     }
@@ -385,6 +403,7 @@ mod tests {
 
         for _ in 0..config::MAX_HANDLES {
             let (err, _) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
+
             if err != 0 {
                 break;
             }
@@ -395,8 +414,10 @@ mod tests {
 
         assert_ne!(err, 0);
         assert_eq!(k.endpoints.count(), ep_count_before, "Endpoint leaked");
+
         {
             let v = crate::invariants::verify(&*k);
+
             assert!(v.is_empty(), "invariant violations: {:?}", v);
         }
     }
@@ -407,6 +428,7 @@ mod tests {
 
         for _ in 0..config::MAX_HANDLES {
             let (err, _) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
+
             if err != 0 {
                 break;
             }
@@ -417,8 +439,10 @@ mod tests {
 
         assert_ne!(err, 0);
         assert_eq!(k.threads.count(), thread_count_before, "Thread leaked");
+
         {
             let v = crate::invariants::verify(&*k);
+
             assert!(v.is_empty(), "invariant violations: {:?}", v);
         }
     }
@@ -429,7 +453,6 @@ mod tests {
         let (_, vmo_hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
         let (_, event_hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
         let (_, _ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
-
         // VMO syscalls with event handle.
         let vmo_syscalls = [
             num::VMO_MAP,
@@ -485,8 +508,10 @@ mod tests {
         let (err, _) = call(&mut k, num::REPLY, &[vmo_hid, 0, 0, 0, 0, 0]);
 
         assert_eq!(err, SyscallError::WrongHandleType as u64);
+
         {
             let v = crate::invariants::verify(&*k);
+
             assert!(v.is_empty(), "invariant violations: {:?}", v);
         }
     }
@@ -501,8 +526,10 @@ mod tests {
         let (err, _) = call(&mut k, num::VMO_SEAL, &[hid, 0, 0, 0, 0, 0]);
 
         assert_eq!(err, SyscallError::InvalidHandle as u64);
+
         {
             let v = crate::invariants::verify(&*k);
+
             assert!(v.is_empty(), "invariant violations: {:?}", v);
         }
     }
@@ -511,7 +538,6 @@ mod tests {
     fn double_close_returns_invalid() {
         let mut k = setup_kernel();
         let (_, hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
-
         let (err, _) = call(&mut k, num::HANDLE_CLOSE, &[hid, 0, 0, 0, 0, 0]);
 
         assert_eq!(err, 0);
@@ -519,8 +545,10 @@ mod tests {
         let (err, _) = call(&mut k, num::HANDLE_CLOSE, &[hid, 0, 0, 0, 0, 0]);
 
         assert_eq!(err, SyscallError::InvalidHandle as u64);
+
         {
             let v = crate::invariants::verify(&*k);
+
             assert!(v.is_empty(), "invariant violations: {:?}", v);
         }
     }
@@ -531,12 +559,13 @@ mod tests {
         let (_, hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
         let read_only = Rights::READ.0 as u64;
         let (_, dup_hid) = call(&mut k, num::HANDLE_DUP, &[hid, read_only, 0, 0, 0, 0]);
-
         let (err, _) = call(&mut k, num::EVENT_SIGNAL, &[dup_hid, 0b1, 0, 0, 0, 0]);
 
         assert_eq!(err, SyscallError::InsufficientRights as u64);
+
         {
             let v = crate::invariants::verify(&*k);
+
             assert!(v.is_empty(), "invariant violations: {:?}", v);
         }
     }
@@ -548,12 +577,13 @@ mod tests {
         let no_map = Rights::READ.0 as u64;
         let (_, dup) = call(&mut k, num::HANDLE_DUP, &[hid, no_map, 0, 0, 0, 0]);
         let perms = (Rights::READ.0 | Rights::MAP.0) as u64;
-
         let (err, _) = call(&mut k, num::VMO_MAP, &[dup, 0, perms, 0, 0, 0]);
 
         assert_eq!(err, SyscallError::InsufficientRights as u64);
+
         {
             let v = crate::invariants::verify(&*k);
+
             assert!(v.is_empty(), "invariant violations: {:?}", v);
         }
     }
@@ -562,7 +592,6 @@ mod tests {
     fn vmo_resize_to_zero() {
         let mut k = setup_kernel();
         let (_, hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
-
         let (err, _) = call(&mut k, num::VMO_RESIZE, &[hid, 0, 0, 0, 0, 0]);
 
         assert_eq!(err, 0);
@@ -571,8 +600,10 @@ mod tests {
 
         assert_eq!(vmo.size(), 0);
         assert_eq!(vmo.page_count(), 0);
+
         {
             let v = crate::invariants::verify(&*k);
+
             assert!(v.is_empty(), "invariant violations: {:?}", v);
         }
     }
@@ -587,7 +618,6 @@ mod tests {
     fn generation_mismatch_after_dealloc_realloc() {
         let mut k = setup_kernel();
         let (_, hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
-
         let old_gen = k
             .spaces
             .get(0)
@@ -624,7 +654,6 @@ mod tests {
     #[test]
     fn fresh_handle_after_realloc_works() {
         let mut k = setup_kernel();
-
         let (_, hid1) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
 
         call(&mut k, num::HANDLE_CLOSE, &[hid1, 0, 0, 0, 0, 0]);
@@ -637,8 +666,10 @@ mod tests {
         let (err, _) = call(&mut k, num::VMO_SEAL, &[hid2, 0, 0, 0, 0, 0]);
 
         assert_eq!(err, 0);
+
         {
             let v = crate::invariants::verify(&*k);
+
             assert!(v.is_empty(), "invariant violations: {:?}", v);
         }
     }
@@ -652,7 +683,6 @@ mod tests {
     #[test]
     fn vmo_full_lifecycle() {
         let mut k = setup_kernel();
-
         let (_, hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
 
         assert_eq!(k.vmos.count(), 1);
@@ -676,6 +706,7 @@ mod tests {
 
         {
             let v = crate::invariants::verify(&*k);
+
             assert!(v.is_empty(), "invariant violations: {:?}", v);
         }
     }
@@ -683,7 +714,6 @@ mod tests {
     #[test]
     fn event_full_lifecycle() {
         let mut k = setup_kernel();
-
         let (_, hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
 
         assert_eq!(k.events.count(), 1);
@@ -708,6 +738,7 @@ mod tests {
 
         {
             let v = crate::invariants::verify(&*k);
+
             assert!(v.is_empty(), "invariant violations: {:?}", v);
         }
     }
@@ -715,7 +746,6 @@ mod tests {
     #[test]
     fn endpoint_full_lifecycle() {
         let mut k = setup_kernel();
-
         let (_, hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
 
         assert_eq!(k.endpoints.count(), 1);
@@ -725,6 +755,7 @@ mod tests {
 
         {
             let v = crate::invariants::verify(&*k);
+
             assert!(v.is_empty(), "invariant violations: {:?}", v);
         }
     }
@@ -733,7 +764,6 @@ mod tests {
     fn thread_full_lifecycle() {
         let mut k = setup_kernel();
         let initial_count = k.threads.count();
-
         let (err, tid_hid) = call(&mut k, num::THREAD_CREATE, &[0x1000, 0x2000, 42, 0, 0, 0]);
 
         assert_eq!(err, 0);
@@ -747,6 +777,7 @@ mod tests {
 
         {
             let v = crate::invariants::verify(&*k);
+
             assert!(v.is_empty(), "invariant violations: {:?}", v);
         }
     }
@@ -755,7 +786,6 @@ mod tests {
     fn space_create_and_destroy_lifecycle() {
         let mut k = setup_kernel();
         let initial_space_count = k.spaces.count();
-
         let (err, space_hid) = call(&mut k, num::SPACE_CREATE, &[0; 6]);
 
         assert_eq!(err, 0);
@@ -765,8 +795,10 @@ mod tests {
 
         assert_eq!(err, 0);
         assert_eq!(k.spaces.count(), initial_space_count);
+
         {
             let v = crate::invariants::verify(&*k);
+
             assert!(v.is_empty(), "invariant violations: {:?}", v);
         }
     }
@@ -774,7 +806,6 @@ mod tests {
     #[test]
     fn space_destroy_cleans_up_vmo_refcounts() {
         let mut k = setup_kernel();
-
         // Create a child space.
         let (_, space_hid) = call(&mut k, num::SPACE_CREATE, &[0; 6]);
         let target_space_id = k
@@ -785,7 +816,6 @@ mod tests {
             .lookup(HandleId(space_hid as u32))
             .unwrap()
             .object_id;
-
         // Create a VMO and give the child space a handle to it.
         let (_, vmo_hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
         let vmo_obj_id = k
@@ -817,8 +847,10 @@ mod tests {
             1,
             "VMO refcount should be decremented on space destroy"
         );
+
         {
             let v = crate::invariants::verify(&*k);
+
             assert!(v.is_empty(), "invariant violations: {:?}", v);
         }
     }
@@ -826,7 +858,6 @@ mod tests {
     #[test]
     fn space_destroy_signals_peer_closed() {
         let mut k = setup_kernel();
-
         let (_, space_hid) = call(&mut k, num::SPACE_CREATE, &[0; 6]);
         let target_space_id = k
             .spaces
@@ -836,7 +867,6 @@ mod tests {
             .lookup(HandleId(space_hid as u32))
             .unwrap()
             .object_id;
-
         // Create an endpoint and give the child space a handle.
         let (_, ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
         let ep_obj_id = k
@@ -864,8 +894,10 @@ mod tests {
             k.endpoints.get(ep_obj_id).unwrap().is_peer_closed(),
             "endpoint should be peer_closed after space destroy"
         );
+
         {
             let v = crate::invariants::verify(&*k);
+
             assert!(v.is_empty(), "invariant violations: {:?}", v);
         }
     }
@@ -879,7 +911,6 @@ mod tests {
     #[test]
     fn thread_create_initializes_register_state() {
         let mut k = setup_kernel();
-
         let (err, _) = call(
             &mut k,
             num::THREAD_CREATE,
@@ -897,8 +928,10 @@ mod tests {
         assert_eq!(rs.sp, 0xBEEF_0000, "sp must be stack_top");
         assert_eq!(rs.gprs[0], 42, "x0 must be arg");
         assert_eq!(rs.pstate, 0, "pstate must be EL0t");
+
         {
             let v = crate::invariants::verify(&*k);
+
             assert!(v.is_empty(), "invariant violations: {:?}", v);
         }
     }
@@ -907,7 +940,6 @@ mod tests {
     fn thread_create_in_initializes_register_state() {
         let mut k = setup_kernel();
         let (_, space_hid) = call(&mut k, num::SPACE_CREATE, &[0; 6]);
-
         let (err, _) = call(
             &mut k,
             num::THREAD_CREATE_IN,
@@ -927,8 +959,10 @@ mod tests {
         assert_eq!(rs.sp, 0xFACE_0000);
         assert_eq!(rs.gprs[0], 99);
         assert_eq!(rs.pstate, 0);
+
         {
             let v = crate::invariants::verify(&*k);
+
             assert!(v.is_empty(), "invariant violations: {:?}", v);
         }
     }
@@ -941,7 +975,6 @@ mod tests {
     fn irq_bind_boundary_intids() {
         let mut k = setup_kernel();
         let (_, hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
-
         // First valid SPI.
         let (err, _) = call(&mut k, num::EVENT_BIND_IRQ, &[hid, 32, 0b1, 0, 0, 0]);
 
@@ -969,8 +1002,10 @@ mod tests {
         let (err4, _) = call(&mut k, num::EVENT_BIND_IRQ, &[hid, 0, 0b1, 0, 0, 0]);
 
         assert_eq!(err4, SyscallError::InvalidArgument as u64);
+
         {
             let v = crate::invariants::verify(&*k);
+
             assert!(v.is_empty(), "invariant violations: {:?}", v);
         }
     }
@@ -985,7 +1020,6 @@ mod tests {
         let (_, vmo_hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
         let (_, ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
         let (_, ev_hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
-
         // VMO as endpoint arg.
         let (err, _) = call(
             &mut k,
@@ -1003,8 +1037,10 @@ mod tests {
         );
 
         assert_eq!(err, SyscallError::WrongHandleType as u64);
+
         {
             let v = crate::invariants::verify(&*k);
+
             assert!(v.is_empty(), "invariant violations: {:?}", v);
         }
     }
@@ -1015,7 +1051,6 @@ mod tests {
         let (_, ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
         let (_, ev1_hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
         let (_, ev2_hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
-
         let (err, _) = call(
             &mut k,
             num::ENDPOINT_BIND_EVENT,
@@ -1031,8 +1066,10 @@ mod tests {
         );
 
         assert_eq!(err, SyscallError::InvalidArgument as u64);
+
         {
             let v = crate::invariants::verify(&*k);
+
             assert!(v.is_empty(), "invariant violations: {:?}", v);
         }
     }
@@ -1044,7 +1081,6 @@ mod tests {
     #[test]
     fn space_destroy_self_rejected() {
         let mut k = setup_kernel();
-
         // space 0 handle doesn't exist in the handle table by default.
         // Create a handle to space 0 in space 0.
         let space_gen = k.spaces.generation(0);
@@ -1062,8 +1098,10 @@ mod tests {
         let (err, _) = call(&mut k, num::SPACE_DESTROY, &[hid, 0, 0, 0, 0, 0]);
 
         assert_eq!(err, SyscallError::InvalidArgument as u64);
+
         {
             let v = crate::invariants::verify(&*k);
+
             assert!(v.is_empty(), "invariant violations: {:?}", v);
         }
     }
@@ -1078,7 +1116,6 @@ mod tests {
         let (_, space_hid) = call(&mut k, num::SPACE_CREATE, &[0; 6]);
         let (_, vmo_hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
         let perms = Rights::READ.0 as u64;
-
         let (err, va) = call(
             &mut k,
             num::VMO_MAP_INTO,
@@ -1087,8 +1124,10 @@ mod tests {
 
         assert_eq!(err, 0);
         assert!(va > 0);
+
         {
             let v = crate::invariants::verify(&*k);
+
             assert!(v.is_empty(), "invariant violations: {:?}", v);
         }
     }
@@ -1098,13 +1137,14 @@ mod tests {
         let mut k = setup_kernel();
         let (_, vmo_hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
         let (_, ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
-
         let (err, _) = call(&mut k, num::VMO_SET_PAGER, &[vmo_hid, ep_hid, 0, 0, 0, 0]);
 
         assert_eq!(err, 0);
         assert!(k.vmos.get(0).unwrap().pager().is_some());
+
         {
             let v = crate::invariants::verify(&*k);
+
             assert!(v.is_empty(), "invariant violations: {:?}", v);
         }
     }

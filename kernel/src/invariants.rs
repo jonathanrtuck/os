@@ -126,6 +126,7 @@ fn check_thread_space_linked_lists(kernel: &Kernel, violations: &mut Vec<Violati
                         space_idx, tid
                     ),
                 });
+
                 break;
             }
 
@@ -139,6 +140,7 @@ fn check_thread_space_linked_lists(kernel: &Kernel, violations: &mut Vec<Violati
                             space_idx, tid
                         ),
                     });
+
                     break;
                 }
             };

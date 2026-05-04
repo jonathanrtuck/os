@@ -186,9 +186,11 @@ impl Event {
     #[cfg(test)]
     pub fn verify_internal_counts(&self) -> Result<(), &'static str> {
         let actual = self.waiters.iter().filter(|s| s.is_some()).count();
+
         if actual != self.waiter_count {
             return Err("waiter_count mismatch");
         }
+
         Ok(())
     }
 

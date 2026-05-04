@@ -173,6 +173,7 @@ mod tests {
         let space_id = thread.address_space().unwrap();
 
         assert!(k.spaces.get(space_id.0).is_some());
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -183,6 +184,7 @@ mod tests {
         create_init(&mut k, fake_init_binary()).unwrap();
 
         assert_eq!(k.vmos.count(), 2);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -193,6 +195,7 @@ mod tests {
         let thread = k.threads.get(tid.0).unwrap();
 
         assert_eq!(thread.entry_point(), INIT_CODE_VA);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -203,6 +206,7 @@ mod tests {
         let thread = k.threads.get(tid.0).unwrap();
 
         assert_eq!(thread.stack_top(), INIT_STACK_VA + INIT_STACK_SIZE);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -214,6 +218,7 @@ mod tests {
         let space = k.spaces.get(space_id.0).unwrap();
 
         assert!(space.handles().count() >= 2);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -224,6 +229,7 @@ mod tests {
         create_init(&mut k, fake_init_binary()).unwrap();
 
         assert_eq!(k.scheduler.core(0).total_ready(), 1);
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -232,6 +238,7 @@ mod tests {
         let mut k = setup_kernel();
 
         assert_eq!(create_init(&mut k, &[]), Err(SyscallError::InvalidArgument));
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -244,6 +251,7 @@ mod tests {
         let code_vmo = k.vmos.get(0).unwrap();
 
         assert!(code_vmo.size().is_multiple_of(config::PAGE_SIZE));
+
         crate::invariants::assert_valid(&*k);
     }
 }

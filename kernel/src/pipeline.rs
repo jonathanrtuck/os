@@ -151,6 +151,7 @@ mod tests {
 
         assert_eq!(comp_mapping.vmo_id, s.shared_vmo);
         assert!(!comp_mapping.rights.contains(Rights::WRITE));
+
         crate::invariants::assert_valid(&*s.kernel);
     }
 
@@ -168,6 +169,7 @@ mod tests {
         assert_eq!(woken.len(), 1);
         assert_eq!(woken.as_slice()[0].thread_id, s.comp_thread);
         assert_eq!(woken.as_slice()[0].fired_bits, 0b1);
+
         crate::invariants::assert_valid(&*s.kernel);
     }
 
@@ -191,6 +193,7 @@ mod tests {
                 "frame {frame}: bits not cleared"
             );
         }
+
         crate::invariants::assert_valid(&*s.kernel);
     }
 
@@ -213,6 +216,7 @@ mod tests {
 
         assert!(dup_handle.rights.contains(Rights::READ));
         assert!(!dup_handle.rights.contains(Rights::WRITE));
+
         crate::invariants::assert_valid(&*s.kernel);
     }
 
@@ -231,6 +235,7 @@ mod tests {
 
         assert!(blocked.contains(&s.comp_thread));
         assert!(ep.is_peer_closed());
+
         crate::invariants::assert_valid(&*s.kernel);
     }
 
@@ -251,6 +256,7 @@ mod tests {
 
         assert_eq!(snap_vmo.size(), config::PAGE_SIZE * 4);
         assert_eq!(snap_vmo.cow_parent(), Some(s.shared_vmo));
+
         crate::invariants::assert_valid(&*s.kernel);
     }
 
@@ -286,6 +292,7 @@ mod tests {
         }
 
         assert!(found, "init thread not found in any run queue");
+
         crate::invariants::assert_valid(&*k);
     }
 
@@ -323,6 +330,7 @@ mod tests {
 
             event.clear(0b1);
         }
+
         crate::invariants::assert_valid(&*s.kernel);
     }
 }
