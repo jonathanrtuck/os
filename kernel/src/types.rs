@@ -68,10 +68,11 @@ impl Rights {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum Priority {
-    Low = 0,
+    Idle = 0,
+    Low = 1,
     #[default]
-    Medium = 1,
-    High = 2,
+    Medium = 2,
+    High = 3,
 }
 
 /// Topology placement hints.

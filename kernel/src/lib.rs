@@ -30,5 +30,6 @@ pub mod handle;
 #[cfg(any(target_os = "none", test))]
 pub mod print;
 pub mod table;
+pub mod thread;
 pub mod types;
 pub mod vmo;
