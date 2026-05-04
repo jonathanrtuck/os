@@ -14,6 +14,8 @@
 #![no_std]
 #![deny(unsafe_code)]
 
+extern crate alloc;
+
 #[cfg(test)]
 #[macro_use]
 extern crate std;
@@ -23,3 +25,5 @@ pub mod config;
 pub mod frame;
 #[cfg(any(target_os = "none", test))]
 pub mod print;
+pub mod table;
+pub mod types;

@@ -1,5 +1,6 @@
 //! Context switch and userspace entry — safe wrappers around assembly.
 
+#[cfg(target_os = "none")]
 use super::register_state::RegisterState;
 
 #[cfg(target_os = "none")]
