@@ -85,6 +85,14 @@ pub enum TopologyHint {
     SameClusterAs(ThreadId),
 }
 
+/// Reason a thread is blocked — stored for debugging and timeout handling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockReason {
+    EventWait,
+    EndpointRecv,
+    EndpointCall,
+}
+
 // ---------------------------------------------------------------------------
 // ID newtypes — small, Copy, used as array indices
 // ---------------------------------------------------------------------------
