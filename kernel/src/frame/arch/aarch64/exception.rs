@@ -122,10 +122,18 @@ fn irq_handler(_frame: &mut TrapFrame) {
         super::gic::INTID_VTIMER => {
             super::timer::handle_deadline();
         }
-        // BUG: println! here will deadlock if this IRQ preempted a println!
-        // on the same core (serial lock is not interrupt-aware). Acceptable
-        // for now — unhandled IRQs during serial output are unlikely. Fix
-        // when the serial driver gains interrupt-safe locking.
+        32.. => {
+            let handler_addr = DEVICE_IRQ_HANDLER.load(Ordering::Acquire);
+            if handler_addr != 0 {
+                // SAFETY: set_device_irq_handler stores a valid fn pointer.
+                let handler: fn(u32) = unsafe { core::mem::transmute(handler_addr) };
+                handler(intid);
+                // TODO: mask this INTID at the GIC redistributor. The driver
+                // calls irq_ack to unmask after processing.
+            } else {
+                crate::println!("IRQ: unhandled device INTID {intid}");
+            }
+        }
         _ => {
             crate::println!("IRQ: unhandled INTID {intid}");
         }
@@ -144,6 +152,9 @@ static SYSCALL_HANDLER: AtomicUsize = AtomicUsize::new(0);
 /// Fault handler function pointer.
 static FAULT_HANDLER: AtomicUsize = AtomicUsize::new(0);
 
+/// Device IRQ handler function pointer (SPI, INTID >= 32).
+static DEVICE_IRQ_HANDLER: AtomicUsize = AtomicUsize::new(0);
+
 /// Register the syscall dispatch function. Called once during kernel init.
 pub fn set_syscall_handler(handler: fn(u64, &[u64; 6]) -> (u64, u64)) {
     SYSCALL_HANDLER.store(handler as usize, Ordering::Release);
@@ -152,6 +163,14 @@ pub fn set_syscall_handler(handler: fn(u64, &[u64; 6]) -> (u64, u64)) {
 /// Register the fault dispatch function. Called once during kernel init.
 pub fn set_fault_handler(handler: fn(u64, bool, u64) -> FaultAction) {
     FAULT_HANDLER.store(handler as usize, Ordering::Release);
+}
+
+/// Register the device IRQ dispatch function. Called once during kernel init.
+/// The handler receives the INTID (>= 32) and performs binding lookup + event
+/// signaling. The exception handler masks the IRQ at the GIC redistributor
+/// after calling this, and `irq_ack` unmasks it.
+pub fn set_device_irq_handler(handler: fn(u32)) {
+    DEVICE_IRQ_HANDLER.store(handler as usize, Ordering::Release);
 }
 
 /// Result of handling a data abort from EL0.

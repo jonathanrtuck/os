@@ -28,6 +28,7 @@ pub mod fault;
 #[allow(unsafe_code)]
 pub mod frame;
 pub mod handle;
+pub mod irq;
 #[cfg(any(target_os = "none", test))]
 pub mod print;
 pub mod syscall;

@@ -10,6 +10,7 @@ use crate::{
     endpoint::Endpoint,
     event::Event,
     handle::Handle,
+    irq::IrqTable,
     table::ObjectTable,
     thread::{Scheduler, Thread},
     types::{
@@ -60,6 +61,7 @@ pub struct Kernel {
     pub endpoints: ObjectTable<Endpoint, { config::MAX_ENDPOINTS }>,
     pub threads: ObjectTable<Thread, { config::MAX_THREADS }>,
     pub spaces: ObjectTable<AddressSpace, { config::MAX_ADDRESS_SPACES }>,
+    pub irqs: IrqTable,
     pub scheduler: Scheduler,
     next_asid: u8,
 }
@@ -72,6 +74,7 @@ impl Kernel {
             endpoints: ObjectTable::new(),
             threads: ObjectTable::new(),
             spaces: ObjectTable::new(),
+            irqs: IrqTable::new(),
             scheduler: Scheduler::new(num_cores),
             next_asid: 1,
         }
@@ -137,8 +140,8 @@ impl Kernel {
             num::HANDLE_INFO => self.sys_handle_info(current, args),
             num::CLOCK_READ => self.sys_clock_read(args),
             num::SYSTEM_INFO => self.sys_stub(args),
-            num::IRQ_BIND => self.sys_stub(args),
-            num::IRQ_ACK => self.sys_stub(args),
+            num::IRQ_BIND => self.sys_irq_bind(current, args),
+            num::IRQ_ACK => self.sys_irq_ack(args),
             _ => Err(SyscallError::InvalidArgument),
         };
 
@@ -482,6 +485,33 @@ impl Kernel {
     fn sys_clock_read(&self, _args: &[u64; 6]) -> Result<u64, SyscallError> {
         Ok(0)
     }
+
+    // -- IRQ syscalls --
+
+    fn sys_irq_bind(&mut self, current: ThreadId, args: &[u64; 6]) -> Result<u64, SyscallError> {
+        let intid = args[0] as u32;
+        let handle_id = HandleId(args[1] as u32);
+        let signal_bits = args[2];
+
+        let space_id = self.thread_space_id(current)?;
+        let handle = self.lookup_handle(space_id, handle_id)?;
+        if handle.object_type != ObjectType::Event {
+            return Err(SyscallError::WrongHandleType);
+        }
+        if !handle.rights.contains(Rights::SIGNAL) {
+            return Err(SyscallError::InsufficientRights);
+        }
+
+        let event_id = EventId(handle.object_id);
+        self.irqs.bind(intid, event_id, signal_bits)?;
+        Ok(0)
+    }
+
+    fn sys_irq_ack(&mut self, args: &[u64; 6]) -> Result<u64, SyscallError> {
+        let intid = args[0] as u32;
+        self.irqs.ack(intid)?;
+        Ok(0)
+    }
 }
 
 #[cfg(test)]
@@ -640,5 +670,45 @@ mod tests {
         let (_, hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
         let (err, _) = call(&mut k, num::VMO_SEAL, &[hid, 0, 0, 0, 0, 0]);
         assert_eq!(err, SyscallError::WrongHandleType as u64);
+    }
+
+    #[test]
+    fn irq_bind_and_ack() {
+        let mut k = setup_kernel();
+        let (err, event_hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+        assert_eq!(err, 0);
+
+        let (err, _) = call(&mut k, num::IRQ_BIND, &[64, event_hid, 0b1010, 0, 0, 0]);
+        assert_eq!(err, 0);
+
+        let sig = k.irqs.handle_irq(64).unwrap();
+        assert_eq!(sig.event_id, EventId(0));
+        assert_eq!(sig.signal_bits, 0b1010);
+
+        let (err, _) = call(&mut k, num::IRQ_ACK, &[64, 0, 0, 0, 0, 0]);
+        assert_eq!(err, 0);
+    }
+
+    #[test]
+    fn irq_bind_wrong_handle_type() {
+        let mut k = setup_kernel();
+        let (_, vmo_hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
+        let (err, _) = call(&mut k, num::IRQ_BIND, &[64, vmo_hid, 0b1, 0, 0, 0]);
+        assert_eq!(err, SyscallError::WrongHandleType as u64);
+    }
+
+    #[test]
+    fn irq_bind_invalid_intid() {
+        let mut k = setup_kernel();
+        let (_, event_hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+        let (err, _) = call(&mut k, num::IRQ_BIND, &[10, event_hid, 0b1, 0, 0, 0]);
+        assert_eq!(err, SyscallError::InvalidArgument as u64);
+    }
+
+    #[test]
+    fn irq_ack_without_pending() {
+        let mut k = setup_kernel();
+        let (err, _) = call(&mut k, num::IRQ_ACK, &[64, 0, 0, 0, 0, 0]);
+        assert_eq!(err, SyscallError::NotFound as u64);
     }
 }
