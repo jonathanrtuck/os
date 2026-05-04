@@ -5,12 +5,14 @@ core::arch::global_asm!(include_str!("boot.S"));
 #[cfg(target_os = "none")]
 core::arch::global_asm!(include_str!("secondary_entry.S"));
 
+pub mod context;
 pub mod cpu;
 pub mod entropy;
 pub mod exception;
 pub mod gic;
 pub mod page_alloc;
 pub mod page_table;
+pub mod sync;
 pub use gic as interrupts;
 mod mmio;
 pub mod mmu;

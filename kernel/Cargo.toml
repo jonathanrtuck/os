@@ -13,5 +13,8 @@ name = "kernel"
 path = "src/main.rs"
 test = false
 
+[dependencies]
+lock_api = { version = "0.4", default-features = false }
+
 [dev-dependencies]
 serial_test = "3"

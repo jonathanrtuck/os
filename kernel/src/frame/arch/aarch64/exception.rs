@@ -8,6 +8,8 @@
 #[cfg(target_os = "none")]
 core::arch::global_asm!(include_str!("exception.S"));
 
+use core::sync::atomic::{AtomicUsize, Ordering};
+
 use super::sysreg;
 
 // ---------------------------------------------------------------------------
@@ -41,6 +43,10 @@ pub struct TrapFrame {
     pub fpcr: u64,
     /// Floating-point status register.
     pub fpsr: u64,
+    /// User stack pointer (SP_EL0) — saved on exception from EL0.
+    pub sp_el0: u64,
+    /// Padding for 16-byte alignment of the full frame.
+    _pad2: u64,
 }
 
 // Offsets must match exception.S — the assembly uses hard-coded immediates for
@@ -55,7 +61,8 @@ const _: () = {
     assert!(core::mem::offset_of!(TrapFrame, fp_regs) == 288);
     assert!(core::mem::offset_of!(TrapFrame, fpcr) == 800);
     assert!(core::mem::offset_of!(TrapFrame, fpsr) == 808);
-    assert!(core::mem::size_of::<TrapFrame>() == 816); // sub sp, sp, #816
+    assert!(core::mem::offset_of!(TrapFrame, sp_el0) == 816);
+    assert!(core::mem::size_of::<TrapFrame>() == 832); // sub sp, sp, #832
 };
 
 // ---------------------------------------------------------------------------
@@ -128,26 +135,95 @@ fn irq_handler(_frame: &mut TrapFrame) {
 }
 
 // ---------------------------------------------------------------------------
+// Registerable syscall and fault handlers
+// ---------------------------------------------------------------------------
+
+/// Syscall handler function pointer.
+static SYSCALL_HANDLER: AtomicUsize = AtomicUsize::new(0);
+
+/// Fault handler function pointer.
+static FAULT_HANDLER: AtomicUsize = AtomicUsize::new(0);
+
+/// Register the syscall dispatch function. Called once during kernel init.
+pub fn set_syscall_handler(handler: fn(u64, &[u64; 6]) -> (u64, u64)) {
+    SYSCALL_HANDLER.store(handler as usize, Ordering::Release);
+}
+
+/// Register the fault dispatch function. Called once during kernel init.
+pub fn set_fault_handler(handler: fn(u64, bool, u64) -> FaultAction) {
+    FAULT_HANDLER.store(handler as usize, Ordering::Release);
+}
+
+/// Result of handling a data abort from EL0.
+pub enum FaultAction {
+    /// Fault resolved (e.g., COW copy completed). Return to EL0 and retry.
+    Resolved,
+    /// Unrecoverable fault — kill the thread.
+    Kill,
+}
+
+// ---------------------------------------------------------------------------
 // EL0 sync handler — syscalls and userspace faults
 // ---------------------------------------------------------------------------
 
 /// Decode and dispatch synchronous exceptions from EL0 (userspace).
-///
-/// NOTE: SP_EL0 is not yet saved in the TrapFrame (tracked in exception.S
-/// checklist). Adding SP_EL0 save/restore is required before any handler
-/// here returns to EL0 rather than halting.
 fn el0_sync_handler(frame: &mut TrapFrame) {
     let ec = (frame.esr >> 26) & 0x3F;
 
     match ec {
-        // SVC — syscall entry point for the 25 syscalls in the kernel spec.
-        0x15 => unimplemented_el0(frame, "SVC (syscall)"),
-        // Data abort from EL0 — will handle COW faults (vmo_snapshot) and
-        // pager requests (vmo_set_pager).
-        0x24 => unimplemented_el0(frame, "data abort"),
+        // SVC — syscall entry. NO global lock. Each handler acquires
+        // only the per-object locks it needs (Tier 0/1/2 per the
+        // synchronization model).
+        0x15 => {
+            let syscall_num = frame.gprs[8]; // x8 = syscall number
+            let args: [u64; 6] = [
+                frame.gprs[0],
+                frame.gprs[1],
+                frame.gprs[2],
+                frame.gprs[3],
+                frame.gprs[4],
+                frame.gprs[5],
+            ];
+
+            let handler_addr = SYSCALL_HANDLER.load(Ordering::Acquire);
+            if handler_addr == 0 {
+                unimplemented_el0(frame, "SVC (no handler registered)");
+            }
+
+            // SAFETY: set_syscall_handler stores a valid fn pointer.
+            let handler: fn(u64, &[u64; 6]) -> (u64, u64) =
+                unsafe { core::mem::transmute(handler_addr) };
+
+            let (error, value) = handler(syscall_num, &args);
+            frame.gprs[0] = error; // x0 = error code
+            frame.gprs[1] = value; // x1 = return value
+        }
+        // Data abort from EL0.
+        0x24 => handle_data_abort(frame),
         // Instruction abort from EL0.
         0x20 => unimplemented_el0(frame, "instruction abort"),
         _ => fatal_exception(frame, 8),
+    }
+}
+
+fn handle_data_abort(frame: &mut TrapFrame) {
+    let far = frame.far;
+    let esr = frame.esr;
+    let is_write = (esr >> 6) & 1 != 0; // WnR bit
+
+    let handler_addr = FAULT_HANDLER.load(Ordering::Acquire);
+    if handler_addr == 0 {
+        unimplemented_el0(frame, "data abort (no handler)");
+    }
+
+    // SAFETY: set_fault_handler stores a valid fn pointer.
+    let handler: fn(u64, bool, u64) -> FaultAction = unsafe { core::mem::transmute(handler_addr) };
+
+    match handler(far, is_write, esr) {
+        FaultAction::Resolved => {} // Return to EL0, retry the instruction.
+        FaultAction::Kill => {
+            unimplemented_el0(frame, "data abort (killed)");
+        }
     }
 }
 

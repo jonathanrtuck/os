@@ -7,7 +7,7 @@
 // in the TrapFrame's pad slot, and branches to a common handler that saves
 // the remaining context and calls into Rust.
 //
-// TrapFrame layout (816 bytes, 16-byte aligned):
+// TrapFrame layout (832 bytes, 16-byte aligned):
 //
 //   Offset  Field
 //   0       x0
@@ -44,7 +44,7 @@
 //   [x] FPCR (floating-point control register)
 //   [x] FPSR (floating-point status register)
 //   [ ] SVE state (not applicable — SVE not enabled)
-//   [ ] SP_EL0 (only needed when handling exceptions from EL0)
+//   [x] SP_EL0 (user stack pointer — saved/restored for EL0 return)
 
 // ---------------------------------------------------------------------------
 // Vector entry macro — inlined at each of the 16 vector positions.
@@ -55,7 +55,7 @@
 // ---------------------------------------------------------------------------
 .macro VECTOR_ENTRY source
 .align 7
-    sub     sp, sp, #816
+    sub     sp, sp, #832
     stp     x0, x1, [sp, #16 * 0]
     mov     x0, #\source
     str     x0, [sp, #280]
@@ -131,6 +131,10 @@ __exception_common:
     mrs     x9, far_el1
     str     x9, [sp, #272]
 
+    // Save SP_EL0 (user stack pointer) — needed for EL0 return.
+    mrs     x9, sp_el0
+    str     x9, [sp, #816]
+
     // Save FP/SIMD registers q0-q31 (128-bit each).
     stp     q0, q1, [sp, #288]
     stp     q2, q3, [sp, #320]
@@ -184,6 +188,10 @@ __exception_common:
     ldp     q28, q29, [sp, #736]
     ldp     q30, q31, [sp, #768]
 
+    // Restore SP_EL0.
+    ldr     x9, [sp, #816]
+    msr     sp_el0, x9
+
     // Restore ELR_EL1 and SPSR_EL1 (using x9 as scratch — not yet restored).
     ldr     x9, [sp, #248]
     msr     elr_el1, x9
@@ -209,5 +217,5 @@ __exception_common:
     ldr     x30, [sp, #240]
 
     // Deallocate frame and return from exception.
-    add     sp, sp, #816
+    add     sp, sp, #832
     eret

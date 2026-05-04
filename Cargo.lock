@@ -53,6 +53,7 @@ dependencies = [
 name = "kernel"
 version = "0.1.0"
 dependencies = [
+ "lock_api",
  "serial_test",
 ]
 
