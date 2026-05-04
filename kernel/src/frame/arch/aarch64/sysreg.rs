@@ -256,6 +256,38 @@ sysreg_write!(set_icc_igrpen1_el1, "icc_igrpen1_el1");
 sysreg_write!(set_icc_eoir1_el1, "icc_eoir1_el1");
 
 // ---------------------------------------------------------------------------
+// TLBI operations (per-page, per-ASID)
+// ---------------------------------------------------------------------------
+
+/// TLBI VAE1IS — invalidate a single page by VA + ASID (inner-shareable).
+/// Argument format: ASID[63:48] | VA[43:12] (the VA shifted right by 12).
+#[inline(always)]
+pub fn tlbi_vae1is(asid_va: u64) {
+    // SAFETY: TLBI invalidates a single TLB entry. It affects the memory
+    // translation system. No nomem.
+    unsafe {
+        core::arch::asm!("tlbi vae1is, {val}", val = in(reg) asid_va, options(nostack));
+    }
+}
+
+/// TLBI ASIDE1IS — invalidate all entries for an ASID (inner-shareable).
+#[inline(always)]
+pub fn tlbi_aside1is(asid: u64) {
+    let val = asid << 48;
+    // SAFETY: TLBI invalidates all TLB entries for the given ASID.
+    unsafe {
+        core::arch::asm!("tlbi aside1is, {val}", val = in(reg) val, options(nostack));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FP/SIMD control
+// ---------------------------------------------------------------------------
+
+sysreg_read!(cpacr_el1, "cpacr_el1");
+sysreg_write!(set_cpacr_el1, "cpacr_el1");
+
+// ---------------------------------------------------------------------------
 // Per-CPU data
 // ---------------------------------------------------------------------------
 

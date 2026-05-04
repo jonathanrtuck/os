@@ -10,6 +10,7 @@ pub mod entropy;
 pub mod exception;
 pub mod gic;
 pub mod page_alloc;
+pub mod page_table;
 pub use gic as interrupts;
 mod mmio;
 pub mod mmu;

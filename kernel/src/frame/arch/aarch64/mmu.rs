@@ -134,8 +134,9 @@ struct KernelLayout {
 
 /// W^X permission policy: map a physical address to page attributes.
 ///
-/// Returns `None` for addresses beyond `kernel_end` (left unmapped).
 /// Every mapped page is either writable or executable, never both.
+/// Pages beyond `kernel_end` are mapped RW/NX for dynamic allocation
+/// (page tables, kernel heap, etc.).
 #[allow(clippy::if_same_then_else)]
 fn page_attrs(pa: usize, layout: &KernelLayout) -> Option<u64> {
     if pa >= layout.text_start && pa < layout.text_end {
@@ -147,7 +148,9 @@ fn page_attrs(pa: usize, layout: &KernelLayout) -> Option<u64> {
     } else if pa < layout.text_start {
         Some(ATTR_NORMAL | AP_RW_EL1 | PXN | UXN)
     } else {
-        None
+        // Beyond kernel_end: free RAM for dynamic allocation (page tables,
+        // kernel objects, heap). Map as RW/NX.
+        Some(ATTR_NORMAL | AP_RW_EL1 | PXN | UXN)
     }
 }
 
@@ -251,7 +254,8 @@ fn configure_and_enable() {
         | (0b11    << 12)  // SH0: Inner Shareable
         | (0b10    << 14)  // TG0: 16 KiB granule
         | (28      << 16)  // T1SZ = 28
-        | (1       << 23)  // EPD1: disable TTBR1 walks
+        // EPD1 cleared (0): TTBR1 walks enabled for kernel upper-half VA.
+        // TTBR0 is free for per-process user address spaces.
         | (0b01    << 24)  // IRGN1: Inner Write-Back Write-Allocate
         | (0b01    << 26)  // ORGN1: Outer Write-Back Write-Allocate
         | (0b11    << 28)  // SH1: Inner Shareable
@@ -261,11 +265,15 @@ fn configure_and_enable() {
     sysreg::set_tcr_el1(tcr);
 
     // -----------------------------------------------------------------------
-    // TTBR0_EL1: point to L2 root table
+    // TTBR0/TTBR1: kernel runs from both halves (identity map)
     // -----------------------------------------------------------------------
+    // TTBR1 points to the kernel's L2 root — the same table as TTBR0 for now.
+    // After user address spaces are created, TTBR0 will be switched per-process
+    // while TTBR1 stays fixed on the kernel table.
     let l2_pa = L2_ROOT.0.get() as u64;
 
     sysreg::set_ttbr0_el1(l2_pa);
+    sysreg::set_ttbr1_el1(l2_pa);
 
     // -----------------------------------------------------------------------
     // Invalidate TLBs and enable MMU
@@ -380,11 +388,12 @@ mod tests {
     }
 
     #[test]
-    fn beyond_kernel_end_is_unmapped() {
+    fn beyond_kernel_end_is_rw_noexec() {
         let layout = test_layout();
+        let attrs = page_attrs(layout.kernel_end, &layout).unwrap();
 
-        assert!(page_attrs(layout.kernel_end, &layout).is_none());
-        assert!(page_attrs(layout.kernel_end + PAGE_SIZE, &layout).is_none());
+        assert_eq!(attrs & AP_RO_EL1, 0, "should be writable");
+        assert_ne!(attrs & PXN, 0, "should not be kernel-executable");
     }
 
     // -- Boundary precision --
@@ -402,7 +411,7 @@ mod tests {
     // -- L3 builder --
 
     #[test]
-    fn build_l3_maps_kernel_skips_beyond() {
+    fn build_l3_maps_kernel_and_free_ram() {
         let mut table = [0u64; ENTRIES_PER_TABLE];
         let layout = test_layout();
 
@@ -412,9 +421,10 @@ mod tests {
 
         assert_ne!(table[text_idx], 0);
 
+        // Pages beyond kernel_end are now mapped (free RAM for allocation).
         let beyond_idx = (layout.kernel_end - 0x4000_0000) / PAGE_SIZE;
 
-        assert_eq!(table[beyond_idx], 0);
+        assert_ne!(table[beyond_idx], 0);
     }
 
     // -- L2 builder --

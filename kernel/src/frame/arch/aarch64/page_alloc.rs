@@ -43,6 +43,8 @@ static REFCOUNTS: [AtomicU16; config::MAX_PHYS_PAGES] = {
     [ZERO; config::MAX_PHYS_PAGES]
 };
 
+/// First page index in RAM (ram_base / PAGE_SIZE).
+static BASE_PAGE: AtomicUsize = AtomicUsize::new(0);
 /// Total pages discovered from DTB.
 static TOTAL_PAGES: AtomicUsize = AtomicUsize::new(0);
 /// Pages currently free.
@@ -90,6 +92,7 @@ pub fn init(ram_base: usize, ram_size: usize, kernel_end: usize) {
     let page_count = ram_size / config::PAGE_SIZE;
     let base_page = ram_base / config::PAGE_SIZE;
 
+    BASE_PAGE.store(base_page, Ordering::Relaxed);
     TOTAL_PAGES.store(page_count, Ordering::Relaxed);
 
     // Mark all RAM pages as free (clear bits).
@@ -115,24 +118,34 @@ pub fn init(ram_base: usize, ram_size: usize, kernel_end: usize) {
 
 /// Allocate a single physical page. Returns None if memory is exhausted.
 pub fn alloc_page() -> Option<PhysAddr> {
-    let total_words = TOTAL_PAGES.load(Ordering::Relaxed).div_ceil(64);
+    let base = BASE_PAGE.load(Ordering::Relaxed);
+    let count = TOTAL_PAGES.load(Ordering::Relaxed);
 
-    if total_words == 0 {
+    if count == 0 {
         return None;
     }
 
-    let hint = ALLOC_HINT.load(Ordering::Relaxed) % total_words;
+    let end_page = base + count;
+    let first_word = base / 64;
+    let last_word = end_page.div_ceil(64);
+    let word_count = last_word - first_word;
 
-    // Scan from hint, wrapping around.
-    for offset in 0..total_words {
-        let word_idx = (hint + offset) % total_words;
+    let hint = ALLOC_HINT.load(Ordering::Relaxed);
+    let hint = if hint >= first_word && hint < last_word {
+        hint - first_word
+    } else {
+        0
+    };
+
+    // Scan from hint within the RAM word range, wrapping around.
+    for offset in 0..word_count {
+        let word_idx = first_word + (hint + offset) % word_count;
         let word_val = BITMAP[word_idx].load(Ordering::Acquire);
 
         if let Some(bit) = first_clear_bit(word_val) {
             let page_idx = word_idx * 64 + bit as usize;
-            let total = TOTAL_PAGES.load(Ordering::Relaxed);
 
-            if page_idx >= total {
+            if page_idx < base || page_idx >= end_page {
                 continue;
             }
 
@@ -181,13 +194,15 @@ pub fn alloc_contiguous(count: usize) -> Option<PhysAddr> {
 }
 
 fn alloc_contiguous_inner(count: usize) -> Option<PhysAddr> {
+    let base = BASE_PAGE.load(Ordering::Relaxed);
     let total = TOTAL_PAGES.load(Ordering::Relaxed);
+    let end_page = base + total;
 
     // Simple linear scan for a contiguous run of free pages.
-    let mut run_start = 0;
+    let mut run_start = base;
     let mut run_len = 0;
 
-    for page in 0..total {
+    for page in base..end_page {
         let word = page / 64;
         let bit = (page % 64) as u32;
         let val = BITMAP[word].load(Ordering::Acquire);
@@ -339,6 +354,7 @@ mod tests {
         for i in 0..page_count {
             REFCOUNTS[i].store(0, Ordering::Relaxed);
         }
+        BASE_PAGE.store(0, Ordering::Relaxed);
         TOTAL_PAGES.store(page_count, Ordering::Relaxed);
         FREE_COUNT.store(page_count, Ordering::Relaxed);
         ALLOC_HINT.store(0, Ordering::Relaxed);

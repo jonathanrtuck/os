@@ -32,6 +32,14 @@ extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
         arch::page_alloc::free_pages(),
     );
 
+    if let Some((root, asid)) = arch::page_table::create_page_table() {
+        let test_page = arch::page_alloc::alloc_page().expect("OOM");
+        let test_va = arch::page_table::VirtAddr(0x1000_0000);
+        arch::page_table::map_page(root, test_va, test_page, arch::page_table::Perms::RW);
+        arch::page_table::destroy_page_table(root, asid);
+        println!("page_table: create/map/destroy ok");
+    }
+
     println!("alive");
 
     arch::cpu::activate_secondaries();
