@@ -23,6 +23,7 @@ extern crate std;
 pub mod config;
 #[allow(unsafe_code)]
 pub mod frame;
+pub mod handle;
 #[cfg(any(target_os = "none", test))]
 pub mod print;
 pub mod table;
