@@ -1,6 +1,6 @@
 //! Service manifest — static array of services to launch at boot.
 
-use libsys::types::Priority;
+use abi::types::Priority;
 
 #[allow(dead_code)]
 pub struct ServiceEntry {

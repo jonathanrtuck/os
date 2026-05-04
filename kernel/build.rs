@@ -16,7 +16,7 @@ fn main() {
 }
 
 fn build_init(kernel_dir: &std::path::Path) {
-    let init_dir = kernel_dir.join("../init");
+    let init_dir = kernel_dir.join("../userspace/init");
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let init_bin = out_dir.join("init.bin");
     let status = Command::new("cargo")
@@ -48,7 +48,7 @@ fn build_init(kernel_dir: &std::path::Path) {
         panic!("rust-objcopy failed on init binary");
     }
 
-    println!("cargo:rerun-if-changed=../init/src/main.rs");
-    println!("cargo:rerun-if-changed=../init/link.ld");
-    println!("cargo:rerun-if-changed=../init/Cargo.toml");
+    println!("cargo:rerun-if-changed=../userspace/init/src/main.rs");
+    println!("cargo:rerun-if-changed=../userspace/init/link.ld");
+    println!("cargo:rerun-if-changed=../userspace/init/Cargo.toml");
 }

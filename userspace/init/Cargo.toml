@@ -5,6 +5,6 @@ edition = "2024"
 license = "Unlicense"
 
 [dependencies]
-libsys = { path = "../libsys" }
+abi = { path = "../abi" }
 
 [workspace]

@@ -1,4 +1,4 @@
-//! Userspace syscall library — typed wrappers for all kernel syscalls.
+//! Kernel ABI — typed wrappers for all kernel syscalls.
 //!
 //! `#![no_std]`, zero dependencies. Provides safe Rust wrappers over the
 //! raw SVC interface. Each wrapper validates arguments at the type level

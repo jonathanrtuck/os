@@ -1,6 +1,6 @@
 [workspace]
 members = ["kernel"]
-exclude = ["kernel/fuzz", "init", "libsys"]
+exclude = ["kernel/fuzz", "userspace/init", "userspace/abi"]
 resolver = "3"
 
 [profile.dev]
