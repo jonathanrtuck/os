@@ -45,6 +45,8 @@ pub struct Thread {
     kernel_sp: usize,
     exit_code: Option<u32>,
     fp_dirty: bool,
+    wait_events: [u32; 3],
+    wait_count: u8,
     #[cfg(any(target_os = "none", test))]
     register_state: Option<Box<RegisterState>>,
 }
@@ -74,6 +76,8 @@ impl Thread {
             kernel_sp: 0,
             exit_code: None,
             fp_dirty: false,
+            wait_events: [0; 3],
+            wait_count: 0,
             #[cfg(any(target_os = "none", test))]
             register_state: None,
         }
@@ -173,6 +177,19 @@ impl Thread {
 
     pub fn set_fp_dirty(&mut self, dirty: bool) {
         self.fp_dirty = dirty;
+    }
+
+    pub fn set_wait_events(&mut self, ids: &[u32]) {
+        self.wait_count = ids.len() as u8;
+        self.wait_events = [0; 3];
+        self.wait_events[..ids.len()].copy_from_slice(ids);
+    }
+
+    pub fn take_wait_events(&mut self) -> ([u32; 3], u8) {
+        let result = (self.wait_events, self.wait_count);
+        self.wait_events = [0; 3];
+        self.wait_count = 0;
+        result
     }
 
     /// Terminate the thread with an exit code.

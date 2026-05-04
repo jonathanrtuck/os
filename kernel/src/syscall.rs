@@ -580,33 +580,89 @@ impl Kernel {
     // -- Event blocking --
 
     fn sys_event_wait(&mut self, current: ThreadId, args: &[u64; 6]) -> Result<u64, SyscallError> {
-        let handle_id = HandleId(args[0] as u32);
-        let mask = args[1];
-
         let space_id = self.thread_space_id(current)?;
-        let handle = self.lookup_handle(space_id, handle_id)?;
-        if handle.object_type != ObjectType::Event {
-            return Err(SyscallError::WrongHandleType);
-        }
-        if !handle.rights.contains(Rights::WAIT) {
-            return Err(SyscallError::InsufficientRights);
+
+        let mut wait_items: [(u32, u32, u64); 3] = [(0, 0, 0); 3];
+        let mut count = 0usize;
+
+        for i in 0..3 {
+            let hid_raw = args[i * 2] as u32;
+            let mask = args[i * 2 + 1];
+            if mask == 0 {
+                continue;
+            }
+            let handle = self.lookup_handle(space_id, HandleId(hid_raw))?;
+            if handle.object_type != ObjectType::Event {
+                return Err(SyscallError::WrongHandleType);
+            }
+            if !handle.rights.contains(Rights::WAIT) {
+                return Err(SyscallError::InsufficientRights);
+            }
+            wait_items[count] = (hid_raw, handle.object_id, mask);
+            count += 1;
         }
 
-        let event = self
-            .events
-            .get_mut(handle.object_id)
-            .ok_or(SyscallError::InvalidHandle)?;
-
-        if let Some(fired) = event.check(mask) {
-            return Ok(fired);
+        if count == 0 {
+            return Err(SyscallError::InvalidArgument);
         }
 
-        event.add_waiter(current, mask)?;
-        let obj_id = handle.object_id;
+        for &(hid, obj_id, mask) in &wait_items[..count] {
+            let event = self
+                .events
+                .get_mut(obj_id)
+                .ok_or(SyscallError::InvalidHandle)?;
+            if let Some(fired) = event.check(mask) {
+                return Ok(((hid as u64) << 32) | (fired & 0xFFFF_FFFF));
+            }
+        }
+
+        let mut obj_ids = [0u32; 3];
+        for (i, &(_, obj_id, mask)) in wait_items[..count].iter().enumerate() {
+            let event = self
+                .events
+                .get_mut(obj_id)
+                .ok_or(SyscallError::InvalidHandle)?;
+            event.add_waiter(current, mask)?;
+            obj_ids[i] = obj_id;
+        }
+
+        self.threads
+            .get_mut(current.0)
+            .ok_or(SyscallError::InvalidArgument)?
+            .set_wait_events(&obj_ids[..count]);
+
         crate::sched::block_current(self, current, 0);
 
-        let event = self.events.get(obj_id).ok_or(SyscallError::InvalidHandle)?;
-        Ok(event.check(mask).unwrap_or(0))
+        let (wait_evts, wait_n) = self
+            .threads
+            .get_mut(current.0)
+            .ok_or(SyscallError::InvalidArgument)?
+            .take_wait_events();
+
+        for i in 0..wait_n as usize {
+            let obj_id = wait_evts[i];
+            let (hid, _, mask) = wait_items
+                .iter()
+                .find(|&&(_, oid, _)| oid == obj_id)
+                .copied()
+                .unwrap();
+            let event = self
+                .events
+                .get_mut(obj_id)
+                .ok_or(SyscallError::InvalidHandle)?;
+            if let Some(fired) = event.check(mask) {
+                for (j, &evt_id) in wait_evts[..wait_n as usize].iter().enumerate() {
+                    if j != i {
+                        self.events
+                            .get_mut(evt_id)
+                            .map(|e| e.remove_waiter(current));
+                    }
+                }
+                return Ok(((hid as u64) << 32) | (fired & 0xFFFF_FFFF));
+            }
+        }
+
+        Ok(0)
     }
 
     // -- IPC blocking --
@@ -1317,9 +1373,63 @@ mod tests {
         let mut k = setup_kernel();
         let (_, hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
         call(&mut k, num::EVENT_SIGNAL, &[hid, 0b11, 0, 0, 0, 0]);
-        let (err, fired) = call(&mut k, num::EVENT_WAIT, &[hid, 0b01, 0, 0, 0, 0]);
+        let (err, packed) = call(&mut k, num::EVENT_WAIT, &[hid, 0b01, 0, 0, 0, 0]);
         assert_eq!(err, 0);
+        let fired = packed & 0xFFFF_FFFF;
+        let which_hid = packed >> 32;
         assert_eq!(fired, 0b01);
+        assert_eq!(which_hid, hid);
+    }
+
+    #[test]
+    fn event_multi_wait_first_fires() {
+        let mut k = setup_kernel();
+        let (_, hid1) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+        let (_, hid2) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+        call(&mut k, num::EVENT_SIGNAL, &[hid1, 0b1, 0, 0, 0, 0]);
+        let (err, packed) = call(&mut k, num::EVENT_WAIT, &[hid1, 0b1, hid2, 0b1, 0, 0]);
+        assert_eq!(err, 0);
+        assert_eq!(packed >> 32, hid1);
+        assert_eq!(packed & 0xFFFF_FFFF, 0b1);
+    }
+
+    #[test]
+    fn event_multi_wait_second_fires() {
+        let mut k = setup_kernel();
+        let (_, hid1) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+        let (_, hid2) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+        call(&mut k, num::EVENT_SIGNAL, &[hid2, 0b10, 0, 0, 0, 0]);
+        let (err, packed) = call(&mut k, num::EVENT_WAIT, &[hid1, 0b1, hid2, 0b10, 0, 0]);
+        assert_eq!(err, 0);
+        assert_eq!(packed >> 32, hid2);
+        assert_eq!(packed & 0xFFFF_FFFF, 0b10);
+    }
+
+    #[test]
+    fn event_multi_wait_three_events_middle_fires() {
+        let mut k = setup_kernel();
+        let (_, hid1) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+        let (_, hid2) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+        let (_, hid3) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+        call(&mut k, num::EVENT_SIGNAL, &[hid2, 0b100, 0, 0, 0, 0]);
+        let (err, packed) = call(
+            &mut k,
+            num::EVENT_WAIT,
+            &[hid1, 0b1, hid2, 0b100, hid3, 0b10],
+        );
+        assert_eq!(err, 0);
+        assert_eq!(packed >> 32, hid2);
+        assert_eq!(packed & 0xFFFF_FFFF, 0b100);
+    }
+
+    #[test]
+    fn event_wait_zero_mask_skipped() {
+        let mut k = setup_kernel();
+        let (_, hid1) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+        call(&mut k, num::EVENT_SIGNAL, &[hid1, 0b1, 0, 0, 0, 0]);
+        let (err, packed) = call(&mut k, num::EVENT_WAIT, &[hid1, 0b1, 999, 0, 0, 0]);
+        assert_eq!(err, 0);
+        assert_eq!(packed >> 32, hid1);
     }
 
     #[test]
