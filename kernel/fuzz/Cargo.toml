@@ -1,0 +1,24 @@
+[package]
+name = "kernel-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+kernel = { path = ".." }
+
+[[bin]]
+name = "syscall_single"
+path = "fuzz_targets/syscall_single.rs"
+doc = false
+
+[[bin]]
+name = "syscall_sequence"
+path = "fuzz_targets/syscall_sequence.rs"
+doc = false

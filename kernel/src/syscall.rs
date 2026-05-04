@@ -161,7 +161,7 @@ impl Kernel {
     fn sys_vmo_create(&mut self, current: ThreadId, args: &[u64; 6]) -> Result<u64, SyscallError> {
         let size = args[0] as usize;
         let flags = args[1] as u32;
-        if size == 0 {
+        if size == 0 || size > config::MAX_PHYS_MEM {
             return Err(SyscallError::InvalidArgument);
         }
 
@@ -290,6 +290,9 @@ impl Kernel {
     fn sys_vmo_resize(&mut self, current: ThreadId, args: &[u64; 6]) -> Result<u64, SyscallError> {
         let handle_id = HandleId(args[0] as u32);
         let new_size = args[1] as usize;
+        if new_size > config::MAX_PHYS_MEM {
+            return Err(SyscallError::InvalidArgument);
+        }
         let space_id = self.thread_space_id(current)?;
         let handle = self.lookup_handle(space_id, handle_id)?;
         if handle.object_type != ObjectType::Vmo {

@@ -1,5 +1,6 @@
 [workspace]
 members = ["kernel"]
+exclude = ["kernel/fuzz"]
 resolver = "3"
 
 [profile.dev]
