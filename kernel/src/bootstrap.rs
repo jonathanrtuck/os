@@ -81,6 +81,54 @@ pub fn create_init(kernel: &mut Kernel, init_binary: &[u8]) -> Result<ThreadId, 
         .handles_mut()
         .allocate(ObjectType::Vmo, code_idx, Rights::ALL, code_gen)?;
 
+    #[cfg(target_os = "none")]
+    {
+        use crate::frame::{
+            arch::{page_alloc, page_table},
+            user_mem,
+        };
+
+        let (root, asid) = page_table::create_page_table().ok_or(SyscallError::OutOfMemory)?;
+        let space = kernel
+            .spaces
+            .get_mut(space_idx)
+            .ok_or(SyscallError::InvalidArgument)?;
+        space.set_page_table(root.0, asid.0);
+
+        for offset in (0..code_size).step_by(config::PAGE_SIZE) {
+            let pa = page_alloc::alloc_page().ok_or(SyscallError::OutOfMemory)?;
+            let chunk_end = (offset + config::PAGE_SIZE).min(init_binary.len());
+            if offset < init_binary.len() {
+                user_mem::write_phys(pa.0, 0, &init_binary[offset..chunk_end]);
+                if chunk_end - offset < config::PAGE_SIZE {
+                    user_mem::zero_phys(
+                        pa.0 + (chunk_end - offset),
+                        config::PAGE_SIZE - (chunk_end - offset),
+                    );
+                }
+            } else {
+                user_mem::zero_phys(pa.0, config::PAGE_SIZE);
+            }
+            page_table::map_page(
+                root,
+                page_table::VirtAddr(INIT_CODE_VA + offset),
+                pa,
+                page_table::Perms::RX,
+            );
+        }
+
+        for offset in (0..INIT_STACK_SIZE).step_by(config::PAGE_SIZE) {
+            let pa = page_alloc::alloc_page().ok_or(SyscallError::OutOfMemory)?;
+            user_mem::zero_phys(pa.0, config::PAGE_SIZE);
+            page_table::map_page(
+                root,
+                page_table::VirtAddr(INIT_STACK_VA + offset),
+                pa,
+                page_table::Perms::RW,
+            );
+        }
+    }
+
     let stack_top = stack_va + INIT_STACK_SIZE;
     let thread = Thread::new(
         ThreadId(0),

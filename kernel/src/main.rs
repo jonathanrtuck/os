@@ -33,14 +33,6 @@ extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
         arch::page_alloc::free_pages(),
     );
 
-    if let Some((root, asid)) = arch::page_table::create_page_table() {
-        let test_page = arch::page_alloc::alloc_page().expect("OOM");
-        let test_va = arch::page_table::VirtAddr(0x1000_0000);
-        arch::page_table::map_page(root, test_va, test_page, arch::page_table::Perms::RW);
-        arch::page_table::destroy_page_table(root, asid);
-        println!("page_table: create/map/destroy ok");
-    }
-
     // Bootstrap the init service.
     let init_binary = include_bytes!(concat!(env!("OUT_DIR"), "/init.bin"));
     let mut kern = kernel::syscall::Kernel::new(arch::platform::core_count());
@@ -70,6 +62,14 @@ extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
             println!("alive");
 
             arch::cpu::activate_secondaries();
+
+            // Switch to init's page table before entering userspace.
+            let space = kern.threads.get(tid.0).unwrap().address_space().unwrap();
+            let space_obj = kern.spaces.get(space.0).unwrap();
+            arch::page_table::switch_table(
+                arch::page_alloc::PhysAddr(space_obj.page_table_root()),
+                arch::page_table::Asid(space_obj.asid()),
+            );
 
             // Enter userspace — never returns.
             let rs = kern.threads.get(tid.0).unwrap().register_state().unwrap();

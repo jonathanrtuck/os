@@ -176,6 +176,11 @@ impl AddressSpace {
         self.page_table_root
     }
 
+    pub fn set_page_table(&mut self, root: usize, asid: u8) {
+        self.page_table_root = root;
+        self.asid = asid;
+    }
+
     pub fn handles(&self) -> &HandleTable {
         &self.handles
     }

@@ -90,6 +90,27 @@ pub fn write_user_u32s(ptr: usize, data: &[u32]) -> Result<(), SyscallError> {
     Ok(())
 }
 
+/// Write data to a physical address. Bare-metal only.
+#[cfg(target_os = "none")]
+pub fn write_phys(pa: usize, offset: usize, data: &[u8]) {
+    // SAFETY: pa is a physical address returned by page_alloc::alloc_page.
+    // With identity-mapped kernel memory, PA == VA for RAM pages.
+    unsafe {
+        let dst = (pa + offset) as *mut u8;
+        core::ptr::copy_nonoverlapping(data.as_ptr(), dst, data.len());
+    }
+}
+
+/// Zero-fill a physical page. Bare-metal only.
+#[cfg(target_os = "none")]
+pub fn zero_phys(pa: usize, len: usize) {
+    // SAFETY: same identity-map argument as write_phys.
+    unsafe {
+        let dst = pa as *mut u8;
+        core::ptr::write_bytes(dst, 0, len);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
