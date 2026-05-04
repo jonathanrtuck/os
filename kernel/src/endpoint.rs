@@ -289,6 +289,7 @@ pub struct Endpoint {
     next_reply_id: u32,
     badge_counter: u32,
     bound_event: Option<EventId>,
+    active_server: Option<ThreadId>,
     peer_closed: bool,
 }
 
@@ -305,6 +306,7 @@ impl Endpoint {
             next_reply_id: 0,
             badge_counter: 0,
             bound_event: None,
+            active_server: None,
             peer_closed: false,
         }
     }
@@ -335,6 +337,14 @@ impl Endpoint {
 
     pub fn bound_event(&self) -> Option<EventId> {
         self.bound_event
+    }
+
+    pub fn active_server(&self) -> Option<ThreadId> {
+        self.active_server
+    }
+
+    pub fn set_active_server(&mut self, server: Option<ThreadId>) {
+        self.active_server = server;
     }
 
     /// Allocate the next unique badge value for this endpoint.

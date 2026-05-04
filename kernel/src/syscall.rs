@@ -833,7 +833,20 @@ impl Kernel {
             .get_mut(ep_obj_id)
             .ok_or(SyscallError::InvalidHandle)?;
         let signal_info = ep.enqueue_call(call)?;
+        let active_server = ep.active_server();
         let recv_waiters = ep.drain_recv_waiters();
+
+        if let Some(server_tid) = active_server {
+            let caller_pri = self
+                .threads
+                .get(current.0)
+                .map(|t| t.effective_priority())
+                .unwrap_or(Priority::Idle);
+
+            if let Some(server) = self.threads.get_mut(server_tid.0) {
+                server.boost_priority(caller_pri);
+            }
+        }
 
         if let Some((event_id, bits)) = signal_info
             && let Some(event) = self.events.get_mut(event_id.0)
@@ -871,6 +884,7 @@ impl Kernel {
 
         if let Some(result) = self.try_dequeue_and_deliver(
             obj_id,
+            current,
             space_id,
             out_buf,
             out_cap,
@@ -899,6 +913,7 @@ impl Kernel {
 
         if let Some(result) = self.try_dequeue_and_deliver(
             obj_id,
+            current,
             space_id,
             out_buf,
             out_cap,
@@ -911,9 +926,11 @@ impl Kernel {
         Err(SyscallError::PeerClosed)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn try_dequeue_and_deliver(
         &mut self,
         ep_obj_id: u32,
+        server: ThreadId,
         space_id: AddressSpaceId,
         out_buf: usize,
         out_cap: usize,
@@ -922,6 +939,8 @@ impl Kernel {
     ) -> Option<Result<u64, SyscallError>> {
         let ep = self.endpoints.get_mut(ep_obj_id)?;
         let (call, reply_cap) = ep.dequeue_call()?;
+
+        ep.set_active_server(Some(server));
 
         if let Some((eid, bits)) = Self::check_clear_readable(ep)
             && let Some(e) = self.events.get_mut(eid.0)
@@ -1002,6 +1021,15 @@ impl Kernel {
             .get_mut(handle.object_id)
             .ok_or(SyscallError::InvalidHandle)?;
         let (caller_id, caller_reply_buf) = ep.consume_reply(reply_cap_id)?;
+        let next_highest = ep.highest_caller_priority();
+
+        if let Some(pri) = next_highest {
+            if let Some(server) = self.threads.get_mut(current.0) {
+                server.boost_priority(pri);
+            }
+        } else if let Some(server) = self.threads.get_mut(current.0) {
+            server.release_boost();
+        }
 
         user_mem::write_user_bytes(caller_reply_buf, reply_msg.as_bytes())?;
 
