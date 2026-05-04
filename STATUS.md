@@ -8,7 +8,7 @@
 implemented end-to-end), capability-based access control, blocking IPC with
 message data and handle transfer, multi-wait events, SVC fast path, lazy FP,
 event-based interrupts, page table population, fault resolution, and framekernel
-discipline. 355 tests passing (with structural invariant verification on every
+discipline. 470 tests passing (with structural invariant verification on every
 syscall-level test), fuzz-tested, boot-to-userspace verified in release mode.
 Userspace syscall library (abi) and service manifest ready.
 
@@ -77,19 +77,19 @@ The previous implementation (v0.1-v0.6) is preserved at tag `v0.6-pre-rewrite`.
 
 ### What's Implemented
 
-| Module            | Description                                           | Tests |
-| ----------------- | ----------------------------------------------------- | ----- |
-| `vmo.rs`          | VMO: pages, COW snapshots, sealing, resize, pager     | 16    |
-| `handle.rs`       | Handle table: alloc/close/dup with rights attenuation  | 8     |
-| `address_space`   | VA allocator, mapping records, destroy lifecycle       | 20    |
-| `event.rs`        | Level-triggered signal bits, waiter queue, irq_bound   | 14    |
-| `endpoint.rs`     | Sync IPC: call/recv/reply, priority inheritance        | 19    |
-| `thread.rs`       | Thread lifecycle, scheduler, multi-core, multi-wait    | 16    |
-| `sched.rs`        | Block/wake/yield/exit, context switch integration      | 6     |
-| `syscall.rs`      | Dispatch table (30 syscalls), Kernel struct            | 73    |
-| `fault.rs`        | Data abort handler: COW/lazy/pager resolution          | 8     |
-| `irq.rs`          | Interrupt-to-event bridge, intids_for_event_bits       | 22    |
-| `table.rs`        | Heap-backed O(1) object table, safe dual-reference     | 6     |
+| Module          | Description                                           | Tests |
+| --------------- | ----------------------------------------------------- | ----- |
+| `vmo.rs`        | VMO: pages, COW snapshots, sealing, resize, pager     | 16    |
+| `handle.rs`     | Handle table: alloc/close/dup with rights attenuation | 8     |
+| `address_space` | VA allocator, mapping records, destroy lifecycle      | 20    |
+| `event.rs`      | Level-triggered signal bits, waiter queue, irq_bound  | 14    |
+| `endpoint.rs`   | Sync IPC: call/recv/reply, priority inheritance       | 19    |
+| `thread.rs`     | Thread lifecycle, scheduler, multi-core, multi-wait   | 16    |
+| `sched.rs`      | Block/wake/yield/exit, context switch integration     | 6     |
+| `syscall.rs`    | Dispatch table (30 syscalls), Kernel struct           | 154   |
+| `fault.rs`      | Data abort handler: COW/lazy/pager resolution         | 8     |
+| `irq.rs`        | Interrupt-to-event bridge, intids_for_event_bits      | 22    |
+| `table.rs`      | Heap-backed O(1) object table, safe dual-reference    | 6     |
 | `bootstrap.rs`  | Init environment setup, page table population         | 8     |
 | `pipeline.rs`   | Multi-service integration tests                       | 8     |
 | `frame/`        | AArch64 platform (boot, MMU, GIC, timer, page tables) | 71    |

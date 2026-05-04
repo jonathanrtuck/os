@@ -1732,6 +1732,220 @@ mod tests {
         k.dispatch(ThreadId(0), 0, num, args)
     }
 
+    fn assert_ok(result: (u64, u64)) -> u64 {
+        assert_eq!(result.0, 0, "expected success, got error {}", result.0);
+
+        result.1
+    }
+
+    fn assert_err(result: (u64, u64), expected: SyscallError) {
+        assert_eq!(
+            result.0, expected as u64,
+            "expected {:?} ({}), got {}",
+            expected, expected as u64, result.0
+        );
+    }
+
+    fn inv(k: &Kernel) {
+        crate::invariants::assert_valid(k);
+    }
+
+    fn create_vmo(k: &mut Kernel) -> u64 {
+        assert_ok(call(k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]))
+    }
+
+    fn create_event(k: &mut Kernel) -> u64 {
+        assert_ok(call(k, num::EVENT_CREATE, &[0; 6]))
+    }
+
+    fn create_endpoint(k: &mut Kernel) -> u64 {
+        assert_ok(call(k, num::ENDPOINT_CREATE, &[0; 6]))
+    }
+
+    fn create_thread(k: &mut Kernel) -> u64 {
+        assert_ok(call(k, num::THREAD_CREATE, &[0x1000, 0x2000, 0, 0, 0, 0]))
+    }
+
+    fn create_space(k: &mut Kernel) -> u64 {
+        assert_ok(call(k, num::SPACE_CREATE, &[0; 6]))
+    }
+
+    fn dup_with_rights(k: &mut Kernel, hid: u64, rights: u32) -> u64 {
+        assert_ok(call(k, num::HANDLE_DUP, &[hid, rights as u64, 0, 0, 0, 0]))
+    }
+
+    fn create_stale_vmo_handle(k: &mut Kernel) -> u64 {
+        let hid = create_vmo(k);
+        let obj_id = k
+            .spaces
+            .get(0)
+            .unwrap()
+            .handles()
+            .lookup(HandleId(hid as u32))
+            .unwrap()
+            .object_id;
+
+        k.vmos.dealloc(obj_id);
+
+        let new_vmo =
+            crate::vmo::Vmo::new(crate::types::VmoId(0), 8192, crate::vmo::VmoFlags::NONE);
+
+        k.vmos.alloc(new_vmo).unwrap();
+
+        hid
+    }
+
+    fn create_stale_event_handle(k: &mut Kernel) -> u64 {
+        let hid = create_event(k);
+        let obj_id = k
+            .spaces
+            .get(0)
+            .unwrap()
+            .handles()
+            .lookup(HandleId(hid as u32))
+            .unwrap()
+            .object_id;
+
+        k.events.dealloc(obj_id);
+
+        let new_event = crate::event::Event::new(crate::types::EventId(0));
+
+        k.events.alloc(new_event).unwrap();
+
+        hid
+    }
+
+    fn create_stale_endpoint_handle(k: &mut Kernel) -> u64 {
+        let hid = create_endpoint(k);
+        let obj_id = k
+            .spaces
+            .get(0)
+            .unwrap()
+            .handles()
+            .lookup(HandleId(hid as u32))
+            .unwrap()
+            .object_id;
+
+        k.endpoints.dealloc(obj_id);
+
+        let new_ep = Endpoint::new(crate::types::EndpointId(0));
+
+        k.endpoints.alloc(new_ep).unwrap();
+
+        hid
+    }
+
+    fn create_stale_thread_handle(k: &mut Kernel) -> u64 {
+        let hid = create_thread(k);
+        let obj_id = k
+            .spaces
+            .get(0)
+            .unwrap()
+            .handles()
+            .lookup(HandleId(hid as u32))
+            .unwrap()
+            .object_id;
+
+        k.threads
+            .get_mut(obj_id)
+            .unwrap()
+            .set_state(crate::thread::ThreadRunState::Exited);
+        k.threads.dealloc(obj_id);
+
+        let new_thread = Thread::new(ThreadId(0), Some(AddressSpaceId(0)), Priority::Low, 0, 0, 0);
+
+        k.threads.alloc(new_thread).unwrap();
+
+        hid
+    }
+
+    fn create_stale_space_handle(k: &mut Kernel) -> u64 {
+        let hid = create_space(k);
+        let obj_id = k
+            .spaces
+            .get(0)
+            .unwrap()
+            .handles()
+            .lookup(HandleId(hid as u32))
+            .unwrap()
+            .object_id;
+
+        k.spaces.dealloc(obj_id);
+
+        let new_space = AddressSpace::new(AddressSpaceId(0), 99, 0);
+
+        k.spaces.alloc(new_space).unwrap();
+
+        hid
+    }
+
+    fn do_call(k: &mut Kernel, ep_hid: u64, msg: &[u8]) -> u64 {
+        let mut call_buf = [0u8; 128];
+
+        call_buf[..msg.len()].copy_from_slice(msg);
+
+        let (err, _) = call(
+            k,
+            num::CALL,
+            &[
+                ep_hid,
+                call_buf.as_mut_ptr() as u64,
+                msg.len() as u64,
+                0,
+                0,
+                0,
+            ],
+        );
+
+        assert_eq!(err, 0, "CALL failed");
+
+        call_buf.as_ptr() as u64
+    }
+
+    fn do_recv(k: &mut Kernel, ep_hid: u64, out_buf: &mut [u8; 128]) -> (usize, u64) {
+        let (err, packed) = call(
+            k,
+            num::RECV,
+            &[ep_hid, out_buf.as_mut_ptr() as u64, 128, 0, 0, 0],
+        );
+
+        assert_eq!(err, 0, "RECV failed");
+
+        let msg_len = (packed & 0xFFFF_FFFF) as usize;
+        let reply_cap = packed >> 32;
+
+        (msg_len, reply_cap)
+    }
+
+    fn do_reply(k: &mut Kernel, ep_hid: u64, reply_cap: u64, msg: &[u8]) {
+        let (err, _) = call(
+            k,
+            num::REPLY,
+            &[
+                ep_hid,
+                reply_cap,
+                msg.as_ptr() as u64,
+                msg.len() as u64,
+                0,
+                0,
+            ],
+        );
+
+        assert_eq!(err, 0, "REPLY failed");
+    }
+
+    fn resume_caller(k: &mut Kernel) {
+        if let Some(tid) = k.scheduler.pick_next(0) {
+            assert_eq!(tid, ThreadId(0));
+
+            k.threads
+                .get_mut(0)
+                .unwrap()
+                .set_state(crate::thread::ThreadRunState::Running);
+            k.scheduler.core_mut(0).set_current(Some(tid));
+        }
+    }
+
     #[test]
     fn unknown_syscall() {
         let mut k = setup_kernel();
@@ -2168,7 +2382,7 @@ mod tests {
 
         assert_eq!(k.spaces.count(), 2);
 
-        let space_id = k
+        let _space_id = k
             .spaces
             .get(0)
             .unwrap()
@@ -3202,5 +3416,1368 @@ mod tests {
         );
 
         crate::invariants::assert_valid(&*k);
+    }
+
+    // =====================================================================
+    // Per-syscall error path tests
+    // =====================================================================
+
+    #[test]
+    fn vmo_map_wrong_type() {
+        let mut k = setup_kernel();
+        let evt = create_event(&mut k);
+
+        assert_err(
+            call(
+                &mut k,
+                num::VMO_MAP,
+                &[evt, 0, Rights::READ.0 as u64, 0, 0, 0],
+            ),
+            SyscallError::WrongHandleType,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn vmo_map_no_map_right() {
+        let mut k = setup_kernel();
+        let vmo = create_vmo(&mut k);
+        let no_map = dup_with_rights(&mut k, vmo, Rights::READ.0 | Rights::WRITE.0);
+
+        assert_err(
+            call(
+                &mut k,
+                num::VMO_MAP,
+                &[no_map, 0, Rights::READ.0 as u64, 0, 0, 0],
+            ),
+            SyscallError::InsufficientRights,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn vmo_map_no_write_right_but_requests_write() {
+        let mut k = setup_kernel();
+        let vmo = create_vmo(&mut k);
+        let ro = dup_with_rights(&mut k, vmo, Rights::READ.0 | Rights::MAP.0);
+        let perms = (Rights::READ.0 | Rights::WRITE.0) as u64;
+
+        assert_err(
+            call(&mut k, num::VMO_MAP, &[ro, 0, perms, 0, 0, 0]),
+            SyscallError::InsufficientRights,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn vmo_map_generation_mismatch() {
+        let mut k = setup_kernel();
+        let stale = create_stale_vmo_handle(&mut k);
+
+        assert_err(
+            call(
+                &mut k,
+                num::VMO_MAP,
+                &[stale, 0, Rights::READ.0 as u64, 0, 0, 0],
+            ),
+            SyscallError::GenerationMismatch,
+        );
+    }
+
+    #[test]
+    fn vmo_map_into_wrong_type_for_vmo() {
+        let mut k = setup_kernel();
+        let evt = create_event(&mut k);
+        let space = create_space(&mut k);
+
+        assert_err(
+            call(&mut k, num::VMO_MAP_INTO, &[evt, space, 0, 0, 0, 0]),
+            SyscallError::WrongHandleType,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn vmo_map_into_wrong_type_for_space() {
+        let mut k = setup_kernel();
+        let vmo = create_vmo(&mut k);
+        let evt = create_event(&mut k);
+
+        assert_err(
+            call(&mut k, num::VMO_MAP_INTO, &[vmo, evt, 0, 0, 0, 0]),
+            SyscallError::WrongHandleType,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn vmo_map_into_no_map_right() {
+        let mut k = setup_kernel();
+        let vmo = create_vmo(&mut k);
+        let no_map = dup_with_rights(&mut k, vmo, Rights::READ.0);
+        let space = create_space(&mut k);
+
+        assert_err(
+            call(&mut k, num::VMO_MAP_INTO, &[no_map, space, 0, 0, 0, 0]),
+            SyscallError::InsufficientRights,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn vmo_map_into_generation_mismatch_vmo() {
+        let mut k = setup_kernel();
+        let stale_vmo = create_stale_vmo_handle(&mut k);
+        let space = create_space(&mut k);
+
+        assert_err(
+            call(&mut k, num::VMO_MAP_INTO, &[stale_vmo, space, 0, 0, 0, 0]),
+            SyscallError::GenerationMismatch,
+        );
+    }
+
+    #[test]
+    fn vmo_map_into_generation_mismatch_space() {
+        let mut k = setup_kernel();
+        let vmo = create_vmo(&mut k);
+        let stale_space = create_stale_space_handle(&mut k);
+
+        assert_err(
+            call(&mut k, num::VMO_MAP_INTO, &[vmo, stale_space, 0, 0, 0, 0]),
+            SyscallError::GenerationMismatch,
+        );
+    }
+
+    #[test]
+    fn vmo_unmap_nonexistent_address() {
+        let mut k = setup_kernel();
+
+        assert_err(
+            call(&mut k, num::VMO_UNMAP, &[0xDEAD_0000, 0, 0, 0, 0, 0]),
+            SyscallError::NotFound,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn vmo_unmap_double() {
+        let mut k = setup_kernel();
+        let vmo = create_vmo(&mut k);
+        let perms = (Rights::READ.0 | Rights::MAP.0) as u64;
+        let va = assert_ok(call(&mut k, num::VMO_MAP, &[vmo, 0, perms, 0, 0, 0]));
+
+        assert_ok(call(&mut k, num::VMO_UNMAP, &[va, 0, 0, 0, 0, 0]));
+        assert_err(
+            call(&mut k, num::VMO_UNMAP, &[va, 0, 0, 0, 0, 0]),
+            SyscallError::NotFound,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn vmo_snapshot_wrong_type() {
+        let mut k = setup_kernel();
+        let evt = create_event(&mut k);
+
+        assert_err(
+            call(&mut k, num::VMO_SNAPSHOT, &[evt, 0, 0, 0, 0, 0]),
+            SyscallError::WrongHandleType,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn vmo_snapshot_generation_mismatch() {
+        let mut k = setup_kernel();
+        let stale = create_stale_vmo_handle(&mut k);
+
+        assert_err(
+            call(&mut k, num::VMO_SNAPSHOT, &[stale, 0, 0, 0, 0, 0]),
+            SyscallError::GenerationMismatch,
+        );
+    }
+
+    #[test]
+    fn vmo_snapshot_rollback_on_handle_table_full() {
+        let mut k = setup_kernel();
+        let vmo = create_vmo(&mut k);
+
+        loop {
+            if call(&mut k, num::EVENT_CREATE, &[0; 6]).0 != 0 {
+                break;
+            }
+        }
+
+        let vmo_count_before = k.vmos.count();
+
+        assert_err(
+            call(&mut k, num::VMO_SNAPSHOT, &[vmo, 0, 0, 0, 0, 0]),
+            SyscallError::OutOfMemory,
+        );
+
+        assert_eq!(k.vmos.count(), vmo_count_before, "Snapshot VMO leaked");
+
+        inv(&k);
+    }
+
+    #[test]
+    fn vmo_seal_wrong_type() {
+        let mut k = setup_kernel();
+        let evt = create_event(&mut k);
+
+        assert_err(
+            call(&mut k, num::VMO_SEAL, &[evt, 0, 0, 0, 0, 0]),
+            SyscallError::WrongHandleType,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn vmo_seal_no_write_right() {
+        let mut k = setup_kernel();
+        let vmo = create_vmo(&mut k);
+        let ro = dup_with_rights(&mut k, vmo, Rights::READ.0);
+
+        assert_err(
+            call(&mut k, num::VMO_SEAL, &[ro, 0, 0, 0, 0, 0]),
+            SyscallError::InsufficientRights,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn vmo_seal_double() {
+        let mut k = setup_kernel();
+        let vmo = create_vmo(&mut k);
+
+        assert_ok(call(&mut k, num::VMO_SEAL, &[vmo, 0, 0, 0, 0, 0]));
+        assert_err(
+            call(&mut k, num::VMO_SEAL, &[vmo, 0, 0, 0, 0, 0]),
+            SyscallError::AlreadySealed,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn vmo_seal_generation_mismatch() {
+        let mut k = setup_kernel();
+        let stale = create_stale_vmo_handle(&mut k);
+
+        assert_err(
+            call(&mut k, num::VMO_SEAL, &[stale, 0, 0, 0, 0, 0]),
+            SyscallError::GenerationMismatch,
+        );
+    }
+
+    #[test]
+    fn vmo_resize_happy_path_up_and_down() {
+        let mut k = setup_kernel();
+        let vmo = create_vmo(&mut k);
+
+        assert_ok(call(&mut k, num::VMO_RESIZE, &[vmo, 8192, 0, 0, 0, 0]));
+
+        assert_eq!(k.vmos.get(0).unwrap().size(), 8192);
+
+        assert_ok(call(&mut k, num::VMO_RESIZE, &[vmo, 4096, 0, 0, 0, 0]));
+
+        assert_eq!(k.vmos.get(0).unwrap().size(), 4096);
+
+        inv(&k);
+    }
+
+    #[test]
+    fn vmo_resize_sealed() {
+        let mut k = setup_kernel();
+        let vmo = create_vmo(&mut k);
+
+        assert_ok(call(&mut k, num::VMO_SEAL, &[vmo, 0, 0, 0, 0, 0]));
+        assert_err(
+            call(&mut k, num::VMO_RESIZE, &[vmo, 8192, 0, 0, 0, 0]),
+            SyscallError::AlreadySealed,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn vmo_resize_wrong_type() {
+        let mut k = setup_kernel();
+        let evt = create_event(&mut k);
+
+        assert_err(
+            call(&mut k, num::VMO_RESIZE, &[evt, 4096, 0, 0, 0, 0]),
+            SyscallError::WrongHandleType,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn vmo_resize_no_write_right() {
+        let mut k = setup_kernel();
+        let vmo = create_vmo(&mut k);
+        let ro = dup_with_rights(&mut k, vmo, Rights::READ.0);
+
+        assert_err(
+            call(&mut k, num::VMO_RESIZE, &[ro, 8192, 0, 0, 0, 0]),
+            SyscallError::InsufficientRights,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn vmo_resize_generation_mismatch() {
+        let mut k = setup_kernel();
+        let stale = create_stale_vmo_handle(&mut k);
+
+        assert_err(
+            call(&mut k, num::VMO_RESIZE, &[stale, 4096, 0, 0, 0, 0]),
+            SyscallError::GenerationMismatch,
+        );
+    }
+
+    #[test]
+    fn vmo_set_pager_wrong_type_vmo() {
+        let mut k = setup_kernel();
+        let evt = create_event(&mut k);
+        let ep = create_endpoint(&mut k);
+
+        assert_err(
+            call(&mut k, num::VMO_SET_PAGER, &[evt, ep, 0, 0, 0, 0]),
+            SyscallError::WrongHandleType,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn vmo_set_pager_wrong_type_endpoint() {
+        let mut k = setup_kernel();
+        let vmo = create_vmo(&mut k);
+        let evt = create_event(&mut k);
+
+        assert_err(
+            call(&mut k, num::VMO_SET_PAGER, &[vmo, evt, 0, 0, 0, 0]),
+            SyscallError::WrongHandleType,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn vmo_set_pager_no_write_right() {
+        let mut k = setup_kernel();
+        let vmo = create_vmo(&mut k);
+        let ro = dup_with_rights(&mut k, vmo, Rights::READ.0);
+        let ep = create_endpoint(&mut k);
+
+        assert_err(
+            call(&mut k, num::VMO_SET_PAGER, &[ro, ep, 0, 0, 0, 0]),
+            SyscallError::InsufficientRights,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn vmo_set_pager_generation_mismatch_vmo() {
+        let mut k = setup_kernel();
+        let stale = create_stale_vmo_handle(&mut k);
+        let ep = create_endpoint(&mut k);
+
+        assert_err(
+            call(&mut k, num::VMO_SET_PAGER, &[stale, ep, 0, 0, 0, 0]),
+            SyscallError::GenerationMismatch,
+        );
+    }
+
+    #[test]
+    fn vmo_set_pager_generation_mismatch_endpoint() {
+        let mut k = setup_kernel();
+        let vmo = create_vmo(&mut k);
+        let stale = create_stale_endpoint_handle(&mut k);
+
+        assert_err(
+            call(&mut k, num::VMO_SET_PAGER, &[vmo, stale, 0, 0, 0, 0]),
+            SyscallError::GenerationMismatch,
+        );
+    }
+
+    #[test]
+    fn call_wrong_type() {
+        let mut k = setup_kernel();
+        let vmo = create_vmo(&mut k);
+
+        assert_err(
+            call(&mut k, num::CALL, &[vmo, 0, 0, 0, 0, 0]),
+            SyscallError::WrongHandleType,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn call_too_many_handles() {
+        let mut k = setup_kernel();
+        let ep = create_endpoint(&mut k);
+        let too_many = (config::MAX_IPC_HANDLES + 1) as u64;
+
+        assert_err(
+            call(&mut k, num::CALL, &[ep, 0, 0, 0, too_many, 0]),
+            SyscallError::InvalidArgument,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn call_generation_mismatch() {
+        let mut k = setup_kernel();
+        let stale = create_stale_endpoint_handle(&mut k);
+
+        assert_err(
+            call(&mut k, num::CALL, &[stale, 0, 0, 0, 0, 0]),
+            SyscallError::GenerationMismatch,
+        );
+    }
+
+    #[test]
+    fn recv_wrong_type() {
+        let mut k = setup_kernel();
+        let vmo = create_vmo(&mut k);
+
+        assert_err(
+            call(&mut k, num::RECV, &[vmo, 0, 128, 0, 0, 0]),
+            SyscallError::WrongHandleType,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn recv_generation_mismatch() {
+        let mut k = setup_kernel();
+        let stale = create_stale_endpoint_handle(&mut k);
+
+        assert_err(
+            call(&mut k, num::RECV, &[stale, 0, 128, 0, 0, 0]),
+            SyscallError::GenerationMismatch,
+        );
+    }
+
+    #[test]
+    fn recv_peer_closed() {
+        let mut k = setup_kernel();
+        let ep_hid = create_endpoint(&mut k);
+        let obj_id = k
+            .spaces
+            .get(0)
+            .unwrap()
+            .handles()
+            .lookup(HandleId(ep_hid as u32))
+            .unwrap()
+            .object_id;
+
+        k.endpoints.get_mut(obj_id).unwrap().close_peer();
+
+        let mut buf = [0u8; 128];
+
+        assert_err(
+            call(
+                &mut k,
+                num::RECV,
+                &[ep_hid, buf.as_mut_ptr() as u64, 128, 0, 0, 0],
+            ),
+            SyscallError::PeerClosed,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn reply_wrong_type() {
+        let mut k = setup_kernel();
+        let vmo = create_vmo(&mut k);
+
+        assert_err(
+            call(&mut k, num::REPLY, &[vmo, 0, 0, 0, 0, 0]),
+            SyscallError::WrongHandleType,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn reply_too_many_handles() {
+        let mut k = setup_kernel();
+        let ep = create_endpoint(&mut k);
+        let too_many = (config::MAX_IPC_HANDLES + 1) as u64;
+
+        assert_err(
+            call(&mut k, num::REPLY, &[ep, 0, 0, 0, 0, too_many]),
+            SyscallError::InvalidArgument,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn reply_invalid_reply_cap() {
+        let mut k = setup_kernel();
+        let ep = create_endpoint(&mut k);
+
+        assert_err(
+            call(&mut k, num::REPLY, &[ep, 9999, 0, 0, 0, 0]),
+            SyscallError::InvalidHandle,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn reply_generation_mismatch() {
+        let mut k = setup_kernel();
+        let stale = create_stale_endpoint_handle(&mut k);
+
+        assert_err(
+            call(&mut k, num::REPLY, &[stale, 0, 0, 0, 0, 0]),
+            SyscallError::GenerationMismatch,
+        );
+    }
+
+    #[test]
+    fn event_signal_generation_mismatch() {
+        let mut k = setup_kernel();
+        let stale = create_stale_event_handle(&mut k);
+
+        assert_err(
+            call(&mut k, num::EVENT_SIGNAL, &[stale, 0b1, 0, 0, 0, 0]),
+            SyscallError::GenerationMismatch,
+        );
+    }
+
+    #[test]
+    fn event_wait_wrong_type() {
+        let mut k = setup_kernel();
+        let vmo = create_vmo(&mut k);
+
+        assert_err(
+            call(&mut k, num::EVENT_WAIT, &[vmo, 0b1, 0, 0, 0, 0]),
+            SyscallError::WrongHandleType,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn event_wait_no_wait_right() {
+        let mut k = setup_kernel();
+        let evt = create_event(&mut k);
+        let no_wait = dup_with_rights(&mut k, evt, Rights::READ.0 | Rights::SIGNAL.0);
+
+        call(&mut k, num::EVENT_SIGNAL, &[evt, 0b1, 0, 0, 0, 0]);
+
+        assert_err(
+            call(&mut k, num::EVENT_WAIT, &[no_wait, 0b1, 0, 0, 0, 0]),
+            SyscallError::InsufficientRights,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn event_wait_all_masks_zero() {
+        let mut k = setup_kernel();
+        let evt = create_event(&mut k);
+
+        assert_err(
+            call(&mut k, num::EVENT_WAIT, &[evt, 0, 0, 0, 0, 0]),
+            SyscallError::InvalidArgument,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn event_wait_generation_mismatch() {
+        let mut k = setup_kernel();
+        let stale = create_stale_event_handle(&mut k);
+
+        assert_err(
+            call(&mut k, num::EVENT_WAIT, &[stale, 0b1, 0, 0, 0, 0]),
+            SyscallError::GenerationMismatch,
+        );
+    }
+
+    #[test]
+    fn event_clear_wrong_type() {
+        let mut k = setup_kernel();
+        let vmo = create_vmo(&mut k);
+
+        assert_err(
+            call(&mut k, num::EVENT_CLEAR, &[vmo, 0b1, 0, 0, 0, 0]),
+            SyscallError::WrongHandleType,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn event_clear_no_signal_right() {
+        let mut k = setup_kernel();
+        let evt = create_event(&mut k);
+        let ro = dup_with_rights(&mut k, evt, Rights::READ.0);
+
+        assert_err(
+            call(&mut k, num::EVENT_CLEAR, &[ro, 0b1, 0, 0, 0, 0]),
+            SyscallError::InsufficientRights,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn event_clear_generation_mismatch() {
+        let mut k = setup_kernel();
+        let stale = create_stale_event_handle(&mut k);
+
+        assert_err(
+            call(&mut k, num::EVENT_CLEAR, &[stale, 0b1, 0, 0, 0, 0]),
+            SyscallError::GenerationMismatch,
+        );
+    }
+
+    #[test]
+    fn thread_create_in_wrong_type_space() {
+        let mut k = setup_kernel();
+        let vmo = create_vmo(&mut k);
+
+        assert_err(
+            call(
+                &mut k,
+                num::THREAD_CREATE_IN,
+                &[vmo, 0x1000, 0x2000, 0, 0, 0],
+            ),
+            SyscallError::WrongHandleType,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn thread_create_in_no_spawn_right() {
+        let mut k = setup_kernel();
+        let space = create_space(&mut k);
+        let no_spawn = dup_with_rights(&mut k, space, Rights::READ.0);
+
+        assert_err(
+            call(
+                &mut k,
+                num::THREAD_CREATE_IN,
+                &[no_spawn, 0x1000, 0x2000, 0, 0, 0],
+            ),
+            SyscallError::InsufficientRights,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn thread_create_in_too_many_handles() {
+        let mut k = setup_kernel();
+        let space = create_space(&mut k);
+        let too_many = (config::MAX_IPC_HANDLES + 1) as u64;
+
+        assert_err(
+            call(
+                &mut k,
+                num::THREAD_CREATE_IN,
+                &[space, 0x1000, 0x2000, 0, 0, too_many],
+            ),
+            SyscallError::InvalidArgument,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn thread_create_in_generation_mismatch() {
+        let mut k = setup_kernel();
+        let stale = create_stale_space_handle(&mut k);
+
+        assert_err(
+            call(
+                &mut k,
+                num::THREAD_CREATE_IN,
+                &[stale, 0x1000, 0x2000, 0, 0, 0],
+            ),
+            SyscallError::GenerationMismatch,
+        );
+    }
+
+    #[test]
+    fn thread_set_priority_wrong_type() {
+        let mut k = setup_kernel();
+        let vmo = create_vmo(&mut k);
+
+        assert_err(
+            call(&mut k, num::THREAD_SET_PRIORITY, &[vmo, 2, 0, 0, 0, 0]),
+            SyscallError::WrongHandleType,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn thread_set_priority_generation_mismatch() {
+        let mut k = setup_kernel();
+        let stale = create_stale_thread_handle(&mut k);
+
+        assert_err(
+            call(&mut k, num::THREAD_SET_PRIORITY, &[stale, 2, 0, 0, 0, 0]),
+            SyscallError::GenerationMismatch,
+        );
+    }
+
+    #[test]
+    fn thread_set_affinity_wrong_type() {
+        let mut k = setup_kernel();
+        let vmo = create_vmo(&mut k);
+
+        assert_err(
+            call(&mut k, num::THREAD_SET_AFFINITY, &[vmo, 0, 0, 0, 0, 0]),
+            SyscallError::WrongHandleType,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn thread_set_affinity_invalid_value() {
+        let mut k = setup_kernel();
+        let thr = create_thread(&mut k);
+
+        assert_err(
+            call(&mut k, num::THREAD_SET_AFFINITY, &[thr, 3, 0, 0, 0, 0]),
+            SyscallError::InvalidArgument,
+        );
+        assert_err(
+            call(&mut k, num::THREAD_SET_AFFINITY, &[thr, 255, 0, 0, 0, 0]),
+            SyscallError::InvalidArgument,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn thread_set_affinity_generation_mismatch() {
+        let mut k = setup_kernel();
+        let stale = create_stale_thread_handle(&mut k);
+
+        assert_err(
+            call(&mut k, num::THREAD_SET_AFFINITY, &[stale, 0, 0, 0, 0, 0]),
+            SyscallError::GenerationMismatch,
+        );
+    }
+
+    #[test]
+    fn space_create_rollback_on_handle_table_full() {
+        let mut k = setup_kernel();
+
+        for _ in 0..config::MAX_HANDLES {
+            if call(&mut k, num::EVENT_CREATE, &[0; 6]).0 != 0 {
+                break;
+            }
+        }
+
+        let space_count_before = k.spaces.count();
+        let (err, _) = call(&mut k, num::SPACE_CREATE, &[0; 6]);
+
+        assert_ne!(err, 0);
+        assert_eq!(k.spaces.count(), space_count_before, "Space leaked");
+
+        inv(&k);
+    }
+
+    #[test]
+    fn space_destroy_wrong_type() {
+        let mut k = setup_kernel();
+        let vmo = create_vmo(&mut k);
+
+        assert_err(
+            call(&mut k, num::SPACE_DESTROY, &[vmo, 0, 0, 0, 0, 0]),
+            SyscallError::WrongHandleType,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn space_destroy_generation_mismatch() {
+        let mut k = setup_kernel();
+        let stale = create_stale_space_handle(&mut k);
+
+        assert_err(
+            call(&mut k, num::SPACE_DESTROY, &[stale, 0, 0, 0, 0, 0]),
+            SyscallError::GenerationMismatch,
+        );
+    }
+
+    #[test]
+    fn handle_dup_no_dup_right() {
+        let mut k = setup_kernel();
+        let vmo = create_vmo(&mut k);
+        let no_dup = dup_with_rights(&mut k, vmo, Rights::READ.0);
+
+        assert_err(
+            call(
+                &mut k,
+                num::HANDLE_DUP,
+                &[no_dup, Rights::READ.0 as u64, 0, 0, 0, 0],
+            ),
+            SyscallError::InsufficientRights,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn handle_dup_generation_mismatch() {
+        let mut k = setup_kernel();
+        let stale = create_stale_vmo_handle(&mut k);
+
+        assert_err(
+            call(
+                &mut k,
+                num::HANDLE_DUP,
+                &[stale, Rights::READ.0 as u64, 0, 0, 0, 0],
+            ),
+            SyscallError::GenerationMismatch,
+        );
+    }
+
+    #[test]
+    fn handle_dup_table_full() {
+        let mut k = setup_kernel();
+        let vmo = create_vmo(&mut k);
+
+        loop {
+            if call(&mut k, num::EVENT_CREATE, &[0; 6]).0 != 0 {
+                break;
+            }
+        }
+
+        assert_err(
+            call(
+                &mut k,
+                num::HANDLE_DUP,
+                &[vmo, Rights::ALL.0 as u64, 0, 0, 0, 0],
+            ),
+            SyscallError::OutOfMemory,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn handle_info_invalid() {
+        let mut k = setup_kernel();
+
+        assert_err(
+            call(&mut k, num::HANDLE_INFO, &[999, 0, 0, 0, 0, 0]),
+            SyscallError::InvalidHandle,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn handle_info_generation_mismatch() {
+        let mut k = setup_kernel();
+        let stale = create_stale_vmo_handle(&mut k);
+
+        assert_err(
+            call(&mut k, num::HANDLE_INFO, &[stale, 0, 0, 0, 0, 0]),
+            SyscallError::GenerationMismatch,
+        );
+    }
+
+    #[test]
+    fn event_bind_irq_no_signal_right() {
+        let mut k = setup_kernel();
+        let evt = create_event(&mut k);
+        let ro = dup_with_rights(&mut k, evt, Rights::READ.0 | Rights::WAIT.0);
+
+        assert_err(
+            call(&mut k, num::EVENT_BIND_IRQ, &[ro, 32, 0b1, 0, 0, 0]),
+            SyscallError::InsufficientRights,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn event_bind_irq_generation_mismatch() {
+        let mut k = setup_kernel();
+        let stale = create_stale_event_handle(&mut k);
+
+        assert_err(
+            call(&mut k, num::EVENT_BIND_IRQ, &[stale, 32, 0b1, 0, 0, 0]),
+            SyscallError::GenerationMismatch,
+        );
+    }
+
+    #[test]
+    fn event_bind_irq_double_bind_same_intid() {
+        let mut k = setup_kernel();
+        let evt = create_event(&mut k);
+
+        assert_ok(call(&mut k, num::EVENT_BIND_IRQ, &[evt, 32, 0b1, 0, 0, 0]));
+        assert_err(
+            call(&mut k, num::EVENT_BIND_IRQ, &[evt, 32, 0b10, 0, 0, 0]),
+            SyscallError::InvalidArgument,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn endpoint_bind_event_no_write_right_on_endpoint() {
+        let mut k = setup_kernel();
+        let ep = create_endpoint(&mut k);
+        let ro_ep = dup_with_rights(&mut k, ep, Rights::READ.0);
+        let evt = create_event(&mut k);
+
+        assert_err(
+            call(&mut k, num::ENDPOINT_BIND_EVENT, &[ro_ep, evt, 0, 0, 0, 0]),
+            SyscallError::InsufficientRights,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn endpoint_bind_event_no_signal_right_on_event() {
+        let mut k = setup_kernel();
+        let ep = create_endpoint(&mut k);
+        let evt = create_event(&mut k);
+        let ro_evt = dup_with_rights(&mut k, evt, Rights::READ.0 | Rights::WAIT.0);
+
+        assert_err(
+            call(&mut k, num::ENDPOINT_BIND_EVENT, &[ep, ro_evt, 0, 0, 0, 0]),
+            SyscallError::InsufficientRights,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn endpoint_bind_event_generation_mismatch_endpoint() {
+        let mut k = setup_kernel();
+        let stale = create_stale_endpoint_handle(&mut k);
+        let evt = create_event(&mut k);
+
+        assert_err(
+            call(&mut k, num::ENDPOINT_BIND_EVENT, &[stale, evt, 0, 0, 0, 0]),
+            SyscallError::GenerationMismatch,
+        );
+    }
+
+    #[test]
+    fn endpoint_bind_event_generation_mismatch_event() {
+        let mut k = setup_kernel();
+        let ep = create_endpoint(&mut k);
+        let stale = create_stale_event_handle(&mut k);
+
+        assert_err(
+            call(&mut k, num::ENDPOINT_BIND_EVENT, &[ep, stale, 0, 0, 0, 0]),
+            SyscallError::GenerationMismatch,
+        );
+    }
+
+    #[test]
+    fn clock_read_returns_value() {
+        let mut k = setup_kernel();
+        let (err, _val) = call(&mut k, num::CLOCK_READ, &[0; 6]);
+
+        assert_eq!(err, 0);
+
+        inv(&k);
+    }
+
+    #[test]
+    fn system_info_invalid_selector() {
+        let mut k = setup_kernel();
+
+        assert_err(
+            call(&mut k, num::SYSTEM_INFO, &[3, 0, 0, 0, 0, 0]),
+            SyscallError::InvalidArgument,
+        );
+        assert_err(
+            call(&mut k, num::SYSTEM_INFO, &[u64::MAX, 0, 0, 0, 0, 0]),
+            SyscallError::InvalidArgument,
+        );
+
+        inv(&k);
+    }
+
+    // =====================================================================
+    // Multi-round IPC tests
+    // =====================================================================
+
+    #[test]
+    fn ipc_ping_pong_10_rounds() {
+        let mut k = setup_kernel();
+        let ep = create_endpoint(&mut k);
+
+        for round in 0..10u8 {
+            let request = [b'P', b'I', b'N', b'G', round];
+
+            do_call(&mut k, ep, &request);
+            let mut recv_buf = [0u8; 128];
+            let (msg_len, reply_cap) = do_recv(&mut k, ep, &mut recv_buf);
+
+            assert_eq!(
+                &recv_buf[..msg_len],
+                &request,
+                "round {round}: data mismatch"
+            );
+
+            let response = [b'P', b'O', b'N', b'G', round];
+
+            do_reply(&mut k, ep, reply_cap, &response);
+            resume_caller(&mut k);
+        }
+
+        inv(&k);
+    }
+
+    #[test]
+    fn ipc_ping_pong_100_rounds() {
+        let mut k = setup_kernel();
+        let ep = create_endpoint(&mut k);
+
+        for round in 0..100u16 {
+            let request = round.to_le_bytes();
+
+            do_call(&mut k, ep, &request);
+
+            let mut recv_buf = [0u8; 128];
+            let (msg_len, reply_cap) = do_recv(&mut k, ep, &mut recv_buf);
+
+            assert_eq!(msg_len, 2, "round {round}");
+            assert_eq!(
+                u16::from_le_bytes([recv_buf[0], recv_buf[1]]),
+                round,
+                "round {round}: data mismatch"
+            );
+
+            let response = (!round).to_le_bytes();
+
+            do_reply(&mut k, ep, reply_cap, &response);
+            resume_caller(&mut k);
+        }
+
+        inv(&k);
+    }
+
+    #[test]
+    fn ipc_ping_pong_data_integrity_varied_sizes() {
+        let mut k = setup_kernel();
+        let ep = create_endpoint(&mut k);
+
+        for size in [0, 1, 2, 4, 8, 16, 32, 64, 127, 128] {
+            let request: alloc::vec::Vec<u8> = (0..size).map(|i| (i & 0xFF) as u8).collect();
+
+            do_call(&mut k, ep, &request);
+
+            let mut recv_buf = [0u8; 128];
+            let (msg_len, reply_cap) = do_recv(&mut k, ep, &mut recv_buf);
+
+            assert_eq!(msg_len, size, "size {size}");
+            assert_eq!(
+                &recv_buf[..msg_len],
+                &request[..],
+                "size {size}: data corrupt"
+            );
+
+            do_reply(&mut k, ep, reply_cap, &[]);
+            resume_caller(&mut k);
+        }
+
+        inv(&k);
+    }
+
+    #[test]
+    fn ipc_many_callers_then_drain() {
+        let mut k = setup_kernel();
+        let ep = create_endpoint(&mut k);
+        let ep_obj_id = k
+            .spaces
+            .get(0)
+            .unwrap()
+            .handles()
+            .lookup(HandleId(ep as u32))
+            .unwrap()
+            .object_id;
+        let priorities = [
+            Priority::Low,
+            Priority::Low,
+            Priority::Low,
+            Priority::Low,
+            Priority::Medium,
+            Priority::Medium,
+            Priority::Medium,
+            Priority::Medium,
+            Priority::High,
+            Priority::High,
+            Priority::High,
+            Priority::High,
+        ];
+        let n = priorities.len();
+        let mut reply_bufs: [([u8; 128], ThreadId); 12] =
+            core::array::from_fn(|_| ([0u8; 128], ThreadId(0)));
+
+        for i in 0..n {
+            let thr = Thread::new(ThreadId(0), Some(AddressSpaceId(0)), priorities[i], 0, 0, 0);
+            let (tid, _) = k.threads.alloc(thr).unwrap();
+
+            k.threads.get_mut(tid).unwrap().id = ThreadId(tid);
+            k.threads
+                .get_mut(tid)
+                .unwrap()
+                .set_state(crate::thread::ThreadRunState::Blocked);
+            reply_bufs[i].1 = ThreadId(tid);
+
+            let endpoint = k.endpoints.get_mut(ep_obj_id).unwrap();
+            let pending_call = PendingCall {
+                caller: ThreadId(tid),
+                priority: priorities[i],
+                message: crate::endpoint::Message::from_bytes(&[i as u8]).unwrap(),
+                handles: [const { None }; config::MAX_IPC_HANDLES],
+                handle_count: 0,
+                badge: i as u32,
+                reply_buf: reply_bufs[i].0.as_mut_ptr() as usize,
+            };
+
+            endpoint.enqueue_call(pending_call).unwrap();
+        }
+        for i in 0..n {
+            let mut recv_buf = [0u8; 128];
+            let (err, packed) = call(
+                &mut k,
+                num::RECV,
+                &[ep, recv_buf.as_mut_ptr() as u64, 128, 0, 0, 0],
+            );
+
+            assert_eq!(err, 0, "recv {i} failed");
+
+            let msg_len = (packed & 0xFFFF_FFFF) as usize;
+            let reply_cap = packed >> 32;
+
+            assert_eq!(msg_len, 1, "recv {i}: wrong length");
+
+            do_reply(&mut k, ep, reply_cap, &[]);
+        }
+
+        assert_eq!(
+            k.endpoints.get(ep_obj_id).unwrap().pending_call_count(),
+            0,
+            "pending calls not drained"
+        );
+        inv(&k);
+    }
+
+    #[test]
+    fn ipc_interleaved_call_recv_reply_cycles() {
+        let mut k = setup_kernel();
+        let ep = create_endpoint(&mut k);
+
+        for round in 0..20u8 {
+            let msg = [round; 4];
+
+            do_call(&mut k, ep, &msg);
+
+            let mut recv_buf = [0u8; 128];
+            let (msg_len, reply_cap) = do_recv(&mut k, ep, &mut recv_buf);
+
+            assert_eq!(msg_len, 4);
+            assert_eq!(recv_buf[0], round, "round {round}: first byte wrong");
+            assert_eq!(recv_buf[3], round, "round {round}: last byte wrong");
+
+            do_reply(&mut k, ep, reply_cap, &[!round; 4]);
+            resume_caller(&mut k);
+        }
+
+        assert_eq!(
+            k.endpoints.get(0).unwrap().pending_call_count(),
+            0,
+            "pending calls leaked"
+        );
+        assert_eq!(
+            k.endpoints.get(0).unwrap().pending_reply_count(),
+            0,
+            "reply caps leaked"
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn ipc_reply_cap_not_reusable() {
+        let mut k = setup_kernel();
+        let ep = create_endpoint(&mut k);
+
+        do_call(&mut k, ep, b"first");
+
+        let mut recv_buf = [0u8; 128];
+        let (_, reply_cap) = do_recv(&mut k, ep, &mut recv_buf);
+
+        do_reply(&mut k, ep, reply_cap, b"ok");
+        resume_caller(&mut k);
+
+        assert_err(
+            call(&mut k, num::REPLY, &[ep, reply_cap, 0, 0, 0, 0]),
+            SyscallError::InvalidHandle,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn ipc_different_endpoints_independent() {
+        let mut k = setup_kernel();
+        let ep1 = create_endpoint(&mut k);
+        let ep2 = create_endpoint(&mut k);
+
+        do_call(&mut k, ep1, b"ep1-msg");
+
+        let mut buf1 = [0u8; 128];
+        let (len1, rc1) = do_recv(&mut k, ep1, &mut buf1);
+
+        assert_eq!(&buf1[..len1], b"ep1-msg");
+
+        do_reply(&mut k, ep1, rc1, b"r1");
+        resume_caller(&mut k);
+        do_call(&mut k, ep2, b"ep2-msg");
+
+        let mut buf2 = [0u8; 128];
+        let (len2, rc2) = do_recv(&mut k, ep2, &mut buf2);
+
+        assert_eq!(&buf2[..len2], b"ep2-msg");
+
+        do_reply(&mut k, ep2, rc2, b"r2");
+        resume_caller(&mut k);
+        inv(&k);
+    }
+
+    #[test]
+    fn ipc_handle_transfer_per_round() {
+        let mut k = setup_kernel();
+        let ep = create_endpoint(&mut k);
+
+        for round in 0..5 {
+            let vmo = create_vmo(&mut k);
+            let mut call_buf = [0u8; 128];
+            let handles = [vmo as u32, 0, 0, 0, 0, 0, 0, 0];
+            let (err, _) = call(
+                &mut k,
+                num::CALL,
+                &[
+                    ep,
+                    call_buf.as_mut_ptr() as u64,
+                    0,
+                    handles.as_ptr() as u64,
+                    1,
+                    0,
+                ],
+            );
+
+            assert_eq!(err, 0, "round {round}: call failed");
+            assert_eq!(
+                call(&mut k, num::HANDLE_INFO, &[vmo, 0, 0, 0, 0, 0]).0,
+                SyscallError::InvalidHandle as u64,
+                "round {round}: transferred handle still valid"
+            );
+
+            let mut recv_buf = [0u8; 128];
+            let mut handles_out = [0u32; 8];
+            let (err, packed) = call(
+                &mut k,
+                num::RECV,
+                &[
+                    ep,
+                    recv_buf.as_mut_ptr() as u64,
+                    128,
+                    handles_out.as_mut_ptr() as u64,
+                    8,
+                    0,
+                ],
+            );
+
+            assert_eq!(err, 0, "round {round}: recv failed");
+
+            let reply_cap = packed >> 32;
+            let handle_count = ((packed >> 16) & 0xFFFF) as usize;
+
+            assert_eq!(handle_count, 1, "round {round}: wrong handle count");
+
+            let received_hid = handles_out[0] as u64;
+            let (err, info) = call(&mut k, num::HANDLE_INFO, &[received_hid, 0, 0, 0, 0, 0]);
+
+            assert_eq!(err, 0, "round {round}: received handle invalid");
+            assert_eq!(
+                (info >> 32) as u8,
+                ObjectType::Vmo as u8,
+                "round {round}: wrong type"
+            );
+
+            do_reply(&mut k, ep, reply_cap, &[]);
+            resume_caller(&mut k);
+        }
+
+        inv(&k);
+    }
+
+    #[test]
+    fn endpoint_bound_event_ping_pong() {
+        let mut k = setup_kernel();
+        let ep = create_endpoint(&mut k);
+        let evt = create_event(&mut k);
+
+        assert_ok(call(
+            &mut k,
+            num::ENDPOINT_BIND_EVENT,
+            &[ep, evt, 0, 0, 0, 0],
+        ));
+
+        for round in 0..5 {
+            do_call(&mut k, ep, &[round as u8]);
+
+            let bits = k.events.get(0).unwrap().bits();
+
+            assert_ne!(bits, 0, "round {round}: event not signaled after call");
+
+            let mut recv_buf = [0u8; 128];
+            let (_, reply_cap) = do_recv(&mut k, ep, &mut recv_buf);
+
+            do_reply(&mut k, ep, reply_cap, &[]);
+            resume_caller(&mut k);
+        }
+
+        inv(&k);
     }
 }
