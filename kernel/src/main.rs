@@ -40,6 +40,8 @@ extern "C" fn kernel_main(dtb_ptr: usize) -> ! {
         println!("page_table: create/map/destroy ok");
     }
 
+    kernel::bench::run();
+
     println!("alive");
 
     arch::cpu::activate_secondaries();

@@ -75,6 +75,41 @@ pub fn halt() {
     }
 }
 
+/// Read the virtual counter (CNTVCT_EL0) for timing measurements.
+#[inline(always)]
+pub fn read_cycle_counter() -> u64 {
+    sysreg::cntvct_el0()
+}
+
+/// Instruction Synchronization Barrier — serializes the pipeline.
+#[inline(always)]
+pub fn isb() {
+    sysreg::isb();
+}
+
+/// Issue a null SVC for benchmarking trap overhead.
+/// Sends syscall number 255 (invalid), guaranteeing a fast error return.
+#[cfg(target_os = "none")]
+#[inline(always)]
+pub fn svc_null() -> (u64, u64) {
+    let error: u64;
+    let value: u64;
+    // SAFETY: SVC #0 traps to EL1 via the installed exception vector.
+    // x8=255 is an invalid syscall number, so the handler returns
+    // immediately with an error. No memory side effects.
+    unsafe {
+        core::arch::asm!(
+            "mov x8, #255",
+            "svc #0",
+            out("x0") error,
+            out("x1") value,
+            out("x8") _,
+            options(nostack),
+        );
+    }
+    (error, value)
+}
+
 /// Signal a fatal crash to the hypervisor via the pvpanic device.
 ///
 /// Writes 0x01 to the pvpanic MMIO register, which tells QEMU/HVF that
