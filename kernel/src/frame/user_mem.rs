@@ -58,6 +58,38 @@ pub fn write_user_bytes(ptr: usize, data: &[u8]) -> Result<(), SyscallError> {
     Ok(())
 }
 
+/// Read a slice of u32 values from user memory into a caller-provided buffer.
+pub fn read_user_u32s(ptr: usize, count: usize, buf: &mut [u32]) -> Result<(), SyscallError> {
+    if count == 0 {
+        return Ok(());
+    }
+    if ptr == 0 || count > buf.len() {
+        return Err(SyscallError::InvalidArgument);
+    }
+    // SAFETY: same VA argument as read_user_message.
+    unsafe {
+        let src = ptr as *const u32;
+        core::ptr::copy_nonoverlapping(src, buf.as_mut_ptr(), count);
+    }
+    Ok(())
+}
+
+/// Write a slice of u32 values to user memory.
+pub fn write_user_u32s(ptr: usize, data: &[u32]) -> Result<(), SyscallError> {
+    if data.is_empty() {
+        return Ok(());
+    }
+    if ptr == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    // SAFETY: same VA argument as write_user_bytes.
+    unsafe {
+        let dst = ptr as *mut u32;
+        core::ptr::copy_nonoverlapping(data.as_ptr(), dst, data.len());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

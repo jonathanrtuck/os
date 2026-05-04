@@ -4,8 +4,6 @@
 //! handler extracts arguments, validates handles/rights, calls the kernel
 //! object method, and returns (error_code, return_value).
 
-use alloc::vec::Vec;
-
 use crate::{
     address_space::AddressSpace,
     config,
@@ -55,6 +53,20 @@ pub mod num {
     pub const SYSTEM_INFO: u64 = 27;
     pub const IRQ_BIND: u64 = 28;
     pub const IRQ_ACK: u64 = 29;
+}
+
+struct StagedHandles {
+    handles: [Option<Handle>; config::MAX_IPC_HANDLES],
+    count: u8,
+}
+
+impl StagedHandles {
+    fn new() -> Self {
+        StagedHandles {
+            handles: [const { None }; config::MAX_IPC_HANDLES],
+            count: 0,
+        }
+    }
 }
 
 /// Central kernel state — all object tables and the scheduler.
@@ -110,6 +122,69 @@ impl Kernel {
             .get(space_id.0)
             .ok_or(SyscallError::InvalidHandle)?;
         Ok(space.handles().lookup(handle_id)?.clone())
+    }
+
+    fn remove_handles_atomic(
+        &mut self,
+        space_id: AddressSpaceId,
+        handles_ptr: usize,
+        count: usize,
+    ) -> Result<StagedHandles, SyscallError> {
+        let mut staged = StagedHandles::new();
+        if count == 0 {
+            return Ok(staged);
+        }
+        let mut ids = [0u32; config::MAX_IPC_HANDLES];
+        user_mem::read_user_u32s(handles_ptr, count, &mut ids)?;
+
+        let space = self
+            .spaces
+            .get_mut(space_id.0)
+            .ok_or(SyscallError::InvalidHandle)?;
+        let ht = space.handles_mut();
+
+        for (i, &id) in ids[..count].iter().enumerate() {
+            match ht.remove(HandleId(id)) {
+                Ok(h) => {
+                    staged.handles[i] = Some(h);
+                    staged.count = (i + 1) as u8;
+                }
+                Err(e) => {
+                    for slot in &mut staged.handles[..i] {
+                        if let Some(h) = slot.take() {
+                            let _ = ht.install(h);
+                        }
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        Ok(staged)
+    }
+
+    fn install_handles(
+        &mut self,
+        space_id: AddressSpaceId,
+        staged: &mut StagedHandles,
+        out_ptr: usize,
+        out_cap: usize,
+    ) -> Result<usize, SyscallError> {
+        let count = staged.count as usize;
+        if count > out_cap {
+            return Err(SyscallError::BufferFull);
+        }
+        let space = self
+            .spaces
+            .get_mut(space_id.0)
+            .ok_or(SyscallError::InvalidHandle)?;
+        let ht = space.handles_mut();
+        let mut new_ids = [0u32; config::MAX_IPC_HANDLES];
+        for (slot, out_id) in staged.handles[..count].iter_mut().zip(new_ids.iter_mut()) {
+            let h = slot.take().unwrap();
+            *out_id = ht.install(h)?.0;
+        }
+        user_mem::write_user_u32s(out_ptr, &new_ids[..count])?;
+        Ok(count)
     }
 
     /// Main dispatch — routes syscall number to handler.
@@ -540,14 +615,23 @@ impl Kernel {
         let handle_id = HandleId(args[0] as u32);
         let msg_ptr = args[1] as usize;
         let msg_len = args[2] as usize;
+        let handles_ptr = args[3] as usize;
+        let handles_count = args[4] as usize;
+
+        if handles_count > config::MAX_IPC_HANDLES {
+            return Err(SyscallError::InvalidArgument);
+        }
 
         let space_id = self.thread_space_id(current)?;
         let handle = self.lookup_handle(space_id, handle_id)?;
         if handle.object_type != ObjectType::Endpoint {
             return Err(SyscallError::WrongHandleType);
         }
+        let ep_obj_id = handle.object_id;
 
         let message = user_mem::read_user_message(msg_ptr, msg_len)?;
+
+        let staged = self.remove_handles_atomic(space_id, handles_ptr, handles_count)?;
 
         let priority = self
             .threads
@@ -559,14 +643,15 @@ impl Kernel {
             caller: current,
             priority,
             message,
-            handles: Vec::new(),
+            handles: staged.handles,
+            handle_count: staged.count,
             badge: 0,
             reply_buf: msg_ptr,
         };
 
         let ep = self
             .endpoints
-            .get_mut(handle.object_id)
+            .get_mut(ep_obj_id)
             .ok_or(SyscallError::InvalidHandle)?;
 
         let recv_waiters = ep.drain_recv_waiters();
@@ -584,6 +669,8 @@ impl Kernel {
         let handle_id = HandleId(args[0] as u32);
         let out_buf = args[1] as usize;
         let out_cap = args[2] as usize;
+        let handles_out = args[3] as usize;
+        let handles_cap = args[4] as usize;
 
         let space_id = self.thread_space_id(current)?;
         let handle = self.lookup_handle(space_id, handle_id)?;
@@ -598,7 +685,15 @@ impl Kernel {
             .ok_or(SyscallError::InvalidHandle)?;
 
         if let Some((call, reply_cap)) = ep.dequeue_call() {
-            return self.recv_deliver(call, reply_cap, out_buf, out_cap);
+            return self.recv_deliver(
+                space_id,
+                call,
+                reply_cap,
+                out_buf,
+                out_cap,
+                handles_out,
+                handles_cap,
+            );
         }
 
         if ep.is_peer_closed() {
@@ -614,18 +709,30 @@ impl Kernel {
             .ok_or(SyscallError::InvalidHandle)?;
 
         if let Some((call, reply_cap)) = ep.dequeue_call() {
-            return self.recv_deliver(call, reply_cap, out_buf, out_cap);
+            return self.recv_deliver(
+                space_id,
+                call,
+                reply_cap,
+                out_buf,
+                out_cap,
+                handles_out,
+                handles_cap,
+            );
         }
 
         Err(SyscallError::PeerClosed)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn recv_deliver(
-        &self,
-        call: PendingCall,
+        &mut self,
+        space_id: AddressSpaceId,
+        mut call: PendingCall,
         reply_cap: ReplyCapId,
         out_buf: usize,
         out_cap: usize,
+        handles_out: usize,
+        handles_cap: usize,
     ) -> Result<u64, SyscallError> {
         let msg_bytes = call.message.as_bytes();
         if msg_bytes.len() > out_cap {
@@ -633,7 +740,21 @@ impl Kernel {
         }
         user_mem::write_user_bytes(out_buf, msg_bytes)?;
         let msg_len = msg_bytes.len() as u64;
-        Ok((reply_cap.0 as u64) << 32 | msg_len)
+
+        let mut staged = StagedHandles {
+            handles: core::mem::replace(
+                &mut call.handles,
+                [const { None }; config::MAX_IPC_HANDLES],
+            ),
+            count: call.handle_count,
+        };
+        let h_count = if staged.count > 0 {
+            self.install_handles(space_id, &mut staged, handles_out, handles_cap)? as u64
+        } else {
+            0
+        };
+
+        Ok((reply_cap.0 as u64) << 32 | (h_count << 16) | msg_len)
     }
 
     fn sys_reply(&mut self, current: ThreadId, args: &[u64; 6]) -> Result<u64, SyscallError> {
@@ -641,6 +762,12 @@ impl Kernel {
         let reply_cap_id = ReplyCapId(args[1] as u32);
         let msg_ptr = args[2] as usize;
         let msg_len = args[3] as usize;
+        let handles_ptr = args[4] as usize;
+        let handles_count = args[5] as usize;
+
+        if handles_count > config::MAX_IPC_HANDLES {
+            return Err(SyscallError::InvalidArgument);
+        }
 
         let space_id = self.thread_space_id(current)?;
         let handle = self.lookup_handle(space_id, handle_id)?;
@@ -649,6 +776,7 @@ impl Kernel {
         }
 
         let reply_msg = user_mem::read_user_message(msg_ptr, msg_len)?;
+        let staged = self.remove_handles_atomic(space_id, handles_ptr, handles_count)?;
 
         let ep = self
             .endpoints
@@ -657,8 +785,28 @@ impl Kernel {
 
         let (caller_id, caller_reply_buf) = ep.consume_reply(reply_cap_id)?;
         user_mem::write_user_bytes(caller_reply_buf, reply_msg.as_bytes())?;
-        crate::sched::wake(self, caller_id, 0);
 
+        if staged.count > 0 {
+            let caller_space = self
+                .threads
+                .get(caller_id.0)
+                .ok_or(SyscallError::InvalidArgument)?
+                .address_space()
+                .ok_or(SyscallError::InvalidArgument)?;
+            let mut staged = staged;
+            let caller_ht = self
+                .spaces
+                .get_mut(caller_space.0)
+                .ok_or(SyscallError::InvalidHandle)?
+                .handles_mut();
+            for i in 0..staged.count as usize {
+                if let Some(h) = staged.handles[i].take() {
+                    let _ = caller_ht.install(h);
+                }
+            }
+        }
+
+        crate::sched::wake(self, caller_id, 0);
         Ok(reply_msg.len() as u64)
     }
 
@@ -1404,5 +1552,103 @@ mod tests {
             &[ep_hid, tiny_buf.as_mut_ptr() as u64, 4, 0, 0, 0],
         );
         assert_eq!(err, SyscallError::BufferFull as u64);
+    }
+
+    // -- Handle transfer over IPC --
+
+    #[test]
+    fn ipc_transfer_single_handle() {
+        let (mut k, ep_hid) = setup_ipc_kernel();
+        let (err, vmo_hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
+        assert_eq!(err, 0);
+
+        let handle_ids = [vmo_hid as u32];
+        let mut call_buf = [0u8; 128];
+        let (err, _) = call(
+            &mut k,
+            num::CALL,
+            &[
+                ep_hid,
+                call_buf.as_mut_ptr() as u64,
+                0,
+                handle_ids.as_ptr() as u64,
+                1,
+                0,
+            ],
+        );
+        assert_eq!(err, 0);
+
+        let (err, _) = k.dispatch(ThreadId(0), num::HANDLE_INFO, &[vmo_hid, 0, 0, 0, 0, 0]);
+        assert_eq!(err, SyscallError::InvalidHandle as u64);
+
+        let mut recv_buf = [0u8; 128];
+        let mut recv_handles = [0u32; 8];
+        let (err, packed) = call(
+            &mut k,
+            num::RECV,
+            &[
+                ep_hid,
+                recv_buf.as_mut_ptr() as u64,
+                128,
+                recv_handles.as_mut_ptr() as u64,
+                8,
+                0,
+            ],
+        );
+        assert_eq!(err, 0);
+        let h_count = ((packed >> 16) & 0xFFFF) as usize;
+        assert_eq!(h_count, 1);
+
+        let new_hid = recv_handles[0] as u64;
+        let (err, info) = call(&mut k, num::HANDLE_INFO, &[new_hid, 0, 0, 0, 0, 0]);
+        assert_eq!(err, 0);
+        assert_eq!(info >> 32, ObjectType::Vmo as u64);
+    }
+
+    #[test]
+    fn ipc_transfer_invalid_handle_fails_atomically() {
+        let (mut k, ep_hid) = setup_ipc_kernel();
+        let (_, vmo_hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
+
+        let handle_ids = [vmo_hid as u32, 999u32];
+        let mut call_buf = [0u8; 128];
+        let (err, _) = call(
+            &mut k,
+            num::CALL,
+            &[
+                ep_hid,
+                call_buf.as_mut_ptr() as u64,
+                0,
+                handle_ids.as_ptr() as u64,
+                2,
+                0,
+            ],
+        );
+        assert_eq!(err, SyscallError::InvalidHandle as u64);
+
+        let (err, _) = call(&mut k, num::HANDLE_INFO, &[vmo_hid, 0, 0, 0, 0, 0]);
+        assert_eq!(err, 0);
+    }
+
+    #[test]
+    fn ipc_transfer_zero_handles() {
+        let (mut k, ep_hid) = setup_ipc_kernel();
+        let mut call_buf = [0u8; 128];
+        let (err, _) = call(
+            &mut k,
+            num::CALL,
+            &[ep_hid, call_buf.as_mut_ptr() as u64, 0, 0, 0, 0],
+        );
+        assert_eq!(err, 0);
+
+        let mut recv_buf = [0u8; 128];
+        let (err, packed) = call(
+            &mut k,
+            num::RECV,
+            &[ep_hid, recv_buf.as_mut_ptr() as u64, 128, 0, 0, 0],
+        );
+        assert_eq!(err, 0);
+        let h_count = ((packed >> 16) & 0xFFFF) as usize;
+        assert_eq!(h_count, 0);
     }
 }

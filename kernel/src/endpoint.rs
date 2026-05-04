@@ -100,7 +100,8 @@ pub struct PendingCall {
     pub caller: ThreadId,
     pub priority: Priority,
     pub message: Message,
-    pub handles: Vec<Handle>,
+    pub handles: [Option<Handle>; config::MAX_IPC_HANDLES],
+    pub handle_count: u8,
     pub badge: u32,
     pub reply_buf: usize,
 }
@@ -335,7 +336,8 @@ mod tests {
             caller: ThreadId(caller),
             priority,
             message: Message::from_bytes(b"hello").unwrap(),
-            handles: Vec::new(),
+            handles: [const { None }; config::MAX_IPC_HANDLES],
+            handle_count: 0,
             badge,
             reply_buf: 0,
         }
@@ -360,7 +362,8 @@ mod tests {
             caller: ThreadId(1),
             priority: Priority::Medium,
             message: Message::from_bytes(b"request").unwrap(),
-            handles: Vec::new(),
+            handles: [const { None }; config::MAX_IPC_HANDLES],
+            handle_count: 0,
             badge: 42,
             reply_buf: 0,
         };
@@ -379,20 +382,24 @@ mod tests {
     #[test]
     fn handle_transfer_staged_in_call() {
         let mut ep = make_endpoint(0);
+        let mut handles = [const { None }; config::MAX_IPC_HANDLES];
+        handles[0] = Some(make_handle(99));
+        handles[1] = Some(make_handle(100));
         let call = PendingCall {
             caller: ThreadId(1),
             priority: Priority::Medium,
             message: Message::empty(),
-            handles: vec![make_handle(99), make_handle(100)],
+            handles,
+            handle_count: 2,
             badge: 0,
             reply_buf: 0,
         };
         ep.enqueue_call(call).unwrap();
 
         let (received, _) = ep.dequeue_call().unwrap();
-        assert_eq!(received.handles.len(), 2);
-        assert_eq!(received.handles[0].object_id, 99);
-        assert_eq!(received.handles[1].object_id, 100);
+        assert_eq!(received.handle_count, 2);
+        assert_eq!(received.handles[0].as_ref().unwrap().object_id, 99);
+        assert_eq!(received.handles[1].as_ref().unwrap().object_id, 100);
     }
 
     // -- Priority ordering --
