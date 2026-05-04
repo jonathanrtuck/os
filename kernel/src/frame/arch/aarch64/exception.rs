@@ -130,8 +130,7 @@ fn irq_handler(_frame: &mut TrapFrame) {
                 // SAFETY: set_device_irq_handler stores a valid fn pointer.
                 let handler: fn(u32) = unsafe { core::mem::transmute(handler_addr) };
                 handler(intid);
-                // TODO: mask this INTID at the GIC redistributor. The driver
-                // calls irq_ack to unmask after processing.
+                super::gic::mask_spi(intid);
             } else {
                 crate::println!("IRQ: unhandled device INTID {intid}");
             }

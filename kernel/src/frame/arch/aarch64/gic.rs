@@ -8,7 +8,11 @@
 //! still unmask IRQs in PSTATE (clear DAIF.I) and configure an interrupt
 //! source (e.g., the timer) to actually generate one.
 
+use core::sync::atomic::{AtomicUsize, Ordering};
+
 use super::{mmio, platform, sysreg};
+
+static DIST_BASE: AtomicUsize = AtomicUsize::new(0);
 
 // ---------------------------------------------------------------------------
 // INTID constants
@@ -28,8 +32,8 @@ pub const INTID_SPURIOUS: u32 = 1023;
 
 const GICD_CTLR: usize = 0x0000;
 const GICD_IGROUPR: usize = 0x0080; // + 4*n, 1 bit/interrupt
-#[allow(dead_code)]
 const GICD_ISENABLER: usize = 0x0100; // + 4*n, 1 bit/interrupt
+const GICD_ICENABLER: usize = 0x0180; // + 4*n, 1 bit/interrupt (clear-enable)
 const GICD_IPRIORITYR: usize = 0x0400; // + n, 1 byte/interrupt
 
 const GICD_CTLR_ENABLE_GRP1_NS: u32 = 1 << 1;
@@ -108,6 +112,8 @@ pub fn end_of_interrupt(intid: u32) {
 // ---------------------------------------------------------------------------
 
 fn init_distributor(dist_base: usize) {
+    DIST_BASE.store(dist_base, Ordering::Relaxed);
+
     // Disable the distributor while configuring. This prevents spurious
     // interrupt delivery if the distributor was left enabled by firmware.
     mmio::write32(dist_base + GICD_CTLR, 0);
@@ -206,6 +212,33 @@ fn init_cpu_interface() {
     sysreg::isb();
 }
 
+// ---------------------------------------------------------------------------
+// SPI mask/unmask (distributor ISENABLER / ICENABLER)
+// ---------------------------------------------------------------------------
+
+/// Compute the register offset and bit position for an SPI INTID.
+fn spi_reg_bit(intid: u32) -> (usize, u32) {
+    let reg_offset = (intid / 32) as usize * 4;
+    let bit = intid % 32;
+    (reg_offset, bit)
+}
+
+/// Mask (disable) an SPI. Only valid for INTID >= 32.
+pub fn mask_spi(intid: u32) {
+    debug_assert!(intid >= 32, "mask_spi: PPIs/SGIs not supported");
+    let dist = DIST_BASE.load(Ordering::Relaxed);
+    let (reg_off, bit) = spi_reg_bit(intid);
+    mmio::write32(dist + GICD_ICENABLER + reg_off, 1 << bit);
+}
+
+/// Unmask (enable) an SPI. Only valid for INTID >= 32.
+pub fn unmask_spi(intid: u32) {
+    debug_assert!(intid >= 32, "unmask_spi: PPIs/SGIs not supported");
+    let dist = DIST_BASE.load(Ordering::Relaxed);
+    let (reg_off, bit) = spi_reg_bit(intid);
+    mmio::write32(dist + GICD_ISENABLER + reg_off, 1 << bit);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,5 +261,26 @@ mod tests {
         let diff = redist_base_for_core(1) - redist_base_for_core(0);
 
         assert_eq!(diff, 0x20000);
+    }
+
+    #[test]
+    fn spi_reg_bit_intid_32() {
+        let (reg_off, bit) = spi_reg_bit(32);
+        assert_eq!(reg_off, 0x4);
+        assert_eq!(bit, 0);
+    }
+
+    #[test]
+    fn spi_reg_bit_intid_63() {
+        let (reg_off, bit) = spi_reg_bit(63);
+        assert_eq!(reg_off, 0x4);
+        assert_eq!(bit, 31);
+    }
+
+    #[test]
+    fn spi_reg_bit_intid_64() {
+        let (reg_off, bit) = spi_reg_bit(64);
+        assert_eq!(reg_off, 0x8);
+        assert_eq!(bit, 0);
     }
 }
