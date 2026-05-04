@@ -1,7 +1,7 @@
 //! Microkernel.
 //!
-//! Five kernel objects (VMO, Channel, Event, Thread, Address Space),
-//! 25 syscalls, capability-based access control.
+//! Five kernel objects (VMO, Endpoint, Event, Thread, Address Space),
+//! 30 syscalls, capability-based access control.
 //!
 //! See `design/research/kernel-userspace-interface.md` for the full spec.
 //!
