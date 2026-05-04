@@ -11,9 +11,7 @@ use crate::{
     config,
     syscall::Kernel,
     thread::Thread,
-    types::{
-        AddressSpaceId, ObjectType, Priority, Rights, SyscallError, ThreadId, VmoId,
-    },
+    types::{AddressSpaceId, ObjectType, Priority, Rights, SyscallError, ThreadId, VmoId},
     vmo::{Vmo, VmoFlags},
 };
 
@@ -21,22 +19,25 @@ pub const INIT_CODE_VA: usize = 0x0020_0000;
 pub const INIT_STACK_SIZE: usize = config::PAGE_SIZE * 4;
 pub const INIT_STACK_VA: usize = 0x4000_0000;
 
-pub fn create_init(
-    kernel: &mut Kernel,
-    init_binary: &[u8],
-) -> Result<ThreadId, SyscallError> {
+pub fn create_init(kernel: &mut Kernel, init_binary: &[u8]) -> Result<ThreadId, SyscallError> {
     if init_binary.is_empty() {
         return Err(SyscallError::InvalidArgument);
     }
 
     let asid = kernel.alloc_asid()?;
     let space = AddressSpace::new(AddressSpaceId(0), asid, 0);
-    let space_idx = kernel.spaces.alloc(space).ok_or(SyscallError::OutOfMemory)?;
+    let space_idx = kernel
+        .spaces
+        .alloc(space)
+        .ok_or(SyscallError::OutOfMemory)?;
     kernel.spaces.get_mut(space_idx).unwrap().id = AddressSpaceId(space_idx);
 
     let code_size = init_binary.len().next_multiple_of(config::PAGE_SIZE);
     let code_vmo = Vmo::new(VmoId(0), code_size, VmoFlags::NONE);
-    let code_idx = kernel.vmos.alloc(code_vmo).ok_or(SyscallError::OutOfMemory)?;
+    let code_idx = kernel
+        .vmos
+        .alloc(code_vmo)
+        .ok_or(SyscallError::OutOfMemory)?;
     kernel.vmos.get_mut(code_idx).unwrap().id = VmoId(code_idx);
 
     let stack_vmo = Vmo::new(VmoId(0), INIT_STACK_SIZE, VmoFlags::NONE);

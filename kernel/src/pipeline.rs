@@ -13,11 +13,10 @@ mod tests {
 
     use crate::{
         address_space::AddressSpace,
-        bootstrap,
-        config,
+        bootstrap, config,
         endpoint::Endpoint,
         event::Event,
-        syscall::{num, Kernel},
+        syscall::{Kernel, num},
         thread::Thread,
         types::{
             AddressSpaceId, EndpointId, EventId, HandleId, ObjectType, Priority, Rights,
@@ -150,9 +149,7 @@ mod tests {
         let mut s = setup_two_services();
         let event = s.kernel.events.get_mut(s.event.0).unwrap();
 
-        event
-            .add_waiter(s.comp_thread, 0b1)
-            .unwrap();
+        event.add_waiter(s.comp_thread, 0b1).unwrap();
 
         let woken = event.signal(0b1);
         assert_eq!(woken.len(), 1);
@@ -166,9 +163,7 @@ mod tests {
 
         for frame in 0..10 {
             let event = s.kernel.events.get_mut(s.event.0).unwrap();
-            event
-                .add_waiter(s.comp_thread, 0b1)
-                .unwrap();
+            event.add_waiter(s.comp_thread, 0b1).unwrap();
 
             let woken = event.signal(0b1);
             assert_eq!(woken.len(), 1, "frame {frame}: compositor not woken");
@@ -191,12 +186,7 @@ mod tests {
         let svc_space = s.kernel.spaces.get_mut(s.svc_space.0).unwrap();
         let full_hid = svc_space
             .handles_mut()
-            .allocate(
-                ObjectType::Vmo,
-                s.shared_vmo.0,
-                Rights::ALL,
-                vmo_gen,
-            )
+            .allocate(ObjectType::Vmo, s.shared_vmo.0, Rights::ALL, vmo_gen)
             .unwrap();
 
         let read_only_hid = svc_space
@@ -289,9 +279,7 @@ mod tests {
 
         for frame in 0..10 {
             let event = s.kernel.events.get_mut(s.event.0).unwrap();
-            event
-                .add_waiter(s.comp_thread, 0b1)
-                .unwrap();
+            event.add_waiter(s.comp_thread, 0b1).unwrap();
 
             let woken = event.signal(0b1);
             assert_eq!(woken.len(), 1, "frame {frame}");
