@@ -1007,6 +1007,12 @@ impl Kernel {
         let entry = args[1] as usize;
         let stack_top = args[2] as usize;
         let arg = args[3] as usize;
+        let handles_ptr = args[4] as usize;
+        let handles_count = args[5] as usize;
+
+        if handles_count > config::MAX_IPC_HANDLES {
+            return Err(SyscallError::InvalidArgument);
+        }
 
         let caller_space_id = self.thread_space_id(current)?;
         let space_handle = self.lookup_handle(caller_space_id, space_handle_id)?;
@@ -1018,6 +1024,11 @@ impl Kernel {
         }
 
         let target_space = AddressSpaceId(space_handle.object_id);
+
+        let mut handle_ids = [0u32; config::MAX_IPC_HANDLES];
+        if handles_count > 0 {
+            user_mem::read_user_u32s(handles_ptr, handles_count, &mut handle_ids)?;
+        }
 
         let thread = Thread::new(
             ThreadId(0),
@@ -1032,6 +1043,33 @@ impl Kernel {
             .alloc(thread)
             .ok_or(SyscallError::OutOfMemory)?;
         self.threads.get_mut(idx).unwrap().id = ThreadId(idx);
+
+        if handles_count > 0 {
+            let mut cloned = [const { None }; config::MAX_IPC_HANDLES];
+            {
+                let caller_space = self
+                    .spaces
+                    .get(caller_space_id.0)
+                    .ok_or(SyscallError::InvalidHandle)?;
+                for (i, &hid) in handle_ids[..handles_count].iter().enumerate() {
+                    cloned[i] = Some(caller_space.handles().lookup(HandleId(hid))?.clone());
+                }
+            }
+            let target = self
+                .spaces
+                .get_mut(target_space.0)
+                .ok_or(SyscallError::InvalidHandle)?;
+            for (i, slot) in cloned[..handles_count].iter_mut().enumerate() {
+                let h = slot.take().unwrap();
+                if let Err(e) = target.handles_mut().allocate_at(i, h) {
+                    for j in 0..i {
+                        target.handles_mut().close(HandleId(j as u32)).ok();
+                    }
+                    self.threads.dealloc(idx);
+                    return Err(e);
+                }
+            }
+        }
 
         let core = self.scheduler.least_loaded_core();
         self.scheduler
@@ -1950,5 +1988,73 @@ mod tests {
         );
         assert_eq!(err, 0);
         assert_ne!(k.events.get(0).unwrap().bits() & 1, 0);
+    }
+
+    // -- thread_create_in with initial handles --
+
+    #[test]
+    fn thread_create_in_with_initial_handles() {
+        let mut k = setup_kernel();
+        let (_, space_hid) = call(&mut k, num::SPACE_CREATE, &[0; 6]);
+        let (_, vmo_hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
+        let (_, ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
+
+        let handle_ids = [vmo_hid as u32, ep_hid as u32];
+        let (err, _) = call(
+            &mut k,
+            num::THREAD_CREATE_IN,
+            &[space_hid, 0x1000, 0x2000, 2, handle_ids.as_ptr() as u64, 2],
+        );
+        assert_eq!(err, 0);
+
+        let target_space = k.spaces.get(1).unwrap();
+        let h0 = target_space.handles().lookup(HandleId(0)).unwrap();
+        assert_eq!(h0.object_type, ObjectType::Vmo);
+        let h1 = target_space.handles().lookup(HandleId(1)).unwrap();
+        assert_eq!(h1.object_type, ObjectType::Endpoint);
+    }
+
+    #[test]
+    fn thread_create_in_zero_handles() {
+        let mut k = setup_kernel();
+        let (_, space_hid) = call(&mut k, num::SPACE_CREATE, &[0; 6]);
+        let (err, _) = call(
+            &mut k,
+            num::THREAD_CREATE_IN,
+            &[space_hid, 0x1000, 0x2000, 0, 0, 0],
+        );
+        assert_eq!(err, 0);
+    }
+
+    #[test]
+    fn thread_create_in_invalid_handle_rolls_back() {
+        let mut k = setup_kernel();
+        let (_, space_hid) = call(&mut k, num::SPACE_CREATE, &[0; 6]);
+        let (_, vmo_hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
+
+        let handle_ids = [vmo_hid as u32, 999u32];
+        let (err, _) = call(
+            &mut k,
+            num::THREAD_CREATE_IN,
+            &[space_hid, 0x1000, 0x2000, 0, handle_ids.as_ptr() as u64, 2],
+        );
+        assert_eq!(err, SyscallError::InvalidHandle as u64);
+    }
+
+    #[test]
+    fn thread_create_in_source_handles_not_removed() {
+        let mut k = setup_kernel();
+        let (_, space_hid) = call(&mut k, num::SPACE_CREATE, &[0; 6]);
+        let (_, vmo_hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
+
+        let handle_ids = [vmo_hid as u32];
+        call(
+            &mut k,
+            num::THREAD_CREATE_IN,
+            &[space_hid, 0x1000, 0x2000, 1, handle_ids.as_ptr() as u64, 1],
+        );
+
+        let (err, _) = call(&mut k, num::HANDLE_INFO, &[vmo_hid, 0, 0, 0, 0, 0]);
+        assert_eq!(err, 0);
     }
 }
