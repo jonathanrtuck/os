@@ -367,9 +367,9 @@ fn handle_fp_trap() {
 #[cfg(target_os = "none")]
 fn save_fp_state(rs: &mut crate::frame::arch::register_state::RegisterState) {
     // SAFETY: Reads FP registers that are currently live on this core.
-    // Uses fp_regs base pointer since fp_regs is at offset 280 (not 16-aligned).
+    // fp_regs is at offset 288 (after 8 bytes padding for u128 alignment).
     unsafe {
-        let fp_base = (rs as *mut _ as usize) + 280;
+        let fp_base = (rs as *mut _ as usize) + 288;
 
         core::arch::asm!(
             "stp q0, q1, [{base}]",
@@ -403,7 +403,7 @@ fn save_fp_state(rs: &mut crate::frame::arch::register_state::RegisterState) {
 fn load_fp_state(rs: &crate::frame::arch::register_state::RegisterState) {
     // SAFETY: Writes FP registers from saved state.
     unsafe {
-        let fp_base = (rs as *const _ as usize) + 280;
+        let fp_base = (rs as *const _ as usize) + 288;
 
         core::arch::asm!(
             "ldp q0, q1, [{base}]",

@@ -343,9 +343,6 @@ impl Kernel {
         let idx = self.vmos.alloc(snap).ok_or(SyscallError::OutOfMemory)?;
 
         self.vmos.get_mut(idx).unwrap().id = VmoId(idx);
-        self.vmos
-            .get(handle.object_id)
-            .ok_or(SyscallError::InvalidHandle)?;
 
         let generation = self.vmos.get(idx).unwrap().generation();
         let space = self
@@ -527,14 +524,12 @@ impl Kernel {
 
         event.clear(bits);
 
-        if event.irq_bound() {
-            let (intids, count) = self
-                .irqs
-                .intids_for_event_bits(EventId(handle.object_id), bits);
+        let (intids, count) = self
+            .irqs
+            .intids_for_event_bits(EventId(handle.object_id), bits);
 
-            for &intid in &intids[..count] {
-                self.irqs.ack(intid).ok();
-
+        for &intid in &intids[..count] {
+            if self.irqs.ack(intid).is_ok() {
                 #[cfg(target_os = "none")]
                 crate::frame::arch::gic::unmask_spi(intid);
             }
@@ -776,8 +771,8 @@ impl Kernel {
             .endpoints
             .get_mut(ep_obj_id)
             .ok_or(SyscallError::InvalidHandle)?;
-        let recv_waiters = ep.drain_recv_waiters();
         let signal_info = ep.enqueue_call(call)?;
+        let recv_waiters = ep.drain_recv_waiters();
 
         if let Some((event_id, bits)) = signal_info
             && let Some(event) = self.events.get_mut(event_id.0)
@@ -812,60 +807,76 @@ impl Kernel {
         }
 
         let obj_id = handle.object_id;
+
+        if let Some(result) = self.try_dequeue_and_deliver(
+            obj_id,
+            space_id,
+            out_buf,
+            out_cap,
+            handles_out,
+            handles_cap,
+        ) {
+            return result;
+        }
+
         let ep = self
             .endpoints
-            .get_mut(obj_id)
+            .get(obj_id)
             .ok_or(SyscallError::InvalidHandle)?;
-
-        if let Some((call, reply_cap)) = ep.dequeue_call() {
-            if let Some((eid, bits)) = Self::check_clear_readable(ep)
-                && let Some(e) = self.events.get_mut(eid.0)
-            {
-                e.clear(bits);
-            }
-
-            return self.recv_deliver(
-                space_id,
-                call,
-                reply_cap,
-                out_buf,
-                out_cap,
-                handles_out,
-                handles_cap,
-            );
-        }
 
         if ep.is_peer_closed() {
             return Err(SyscallError::PeerClosed);
         }
 
-        ep.add_recv_waiter(current)?;
-        crate::sched::block_current(self, current, 0);
-
         let ep = self
             .endpoints
             .get_mut(obj_id)
             .ok_or(SyscallError::InvalidHandle)?;
 
-        if let Some((call, reply_cap)) = ep.dequeue_call() {
-            if let Some((eid, bits)) = Self::check_clear_readable(ep)
-                && let Some(e) = self.events.get_mut(eid.0)
-            {
-                e.clear(bits);
-            }
+        ep.add_recv_waiter(current)?;
+        crate::sched::block_current(self, current, 0);
 
-            return self.recv_deliver(
-                space_id,
-                call,
-                reply_cap,
-                out_buf,
-                out_cap,
-                handles_out,
-                handles_cap,
-            );
+        if let Some(result) = self.try_dequeue_and_deliver(
+            obj_id,
+            space_id,
+            out_buf,
+            out_cap,
+            handles_out,
+            handles_cap,
+        ) {
+            return result;
         }
 
         Err(SyscallError::PeerClosed)
+    }
+
+    fn try_dequeue_and_deliver(
+        &mut self,
+        ep_obj_id: u32,
+        space_id: AddressSpaceId,
+        out_buf: usize,
+        out_cap: usize,
+        handles_out: usize,
+        handles_cap: usize,
+    ) -> Option<Result<u64, SyscallError>> {
+        let ep = self.endpoints.get_mut(ep_obj_id)?;
+        let (call, reply_cap) = ep.dequeue_call()?;
+
+        if let Some((eid, bits)) = Self::check_clear_readable(ep)
+            && let Some(e) = self.events.get_mut(eid.0)
+        {
+            e.clear(bits);
+        }
+
+        Some(self.recv_deliver(
+            space_id,
+            call,
+            reply_cap,
+            out_buf,
+            out_cap,
+            handles_out,
+            handles_cap,
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -949,7 +960,7 @@ impl Kernel {
 
             for i in 0..staged.count as usize {
                 if let Some(h) = staged.handles[i].take() {
-                    let _ = caller_ht.install(h);
+                    caller_ht.install(h)?;
                 }
             }
         }
@@ -1363,13 +1374,6 @@ impl Kernel {
         let event_id = EventId(handle.object_id);
 
         self.irqs.bind(intid, event_id, signal_bits)?;
-
-        let event = self
-            .events
-            .get_mut(handle.object_id)
-            .ok_or(SyscallError::InvalidHandle)?;
-
-        event.set_irq_bound(true);
 
         Ok(0)
     }

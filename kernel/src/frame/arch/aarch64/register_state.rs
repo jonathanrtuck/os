@@ -42,6 +42,7 @@ impl RegisterState {
 
 const _: () = {
     assert!(core::mem::size_of::<RegisterState>() == 816);
+    assert!(core::mem::offset_of!(RegisterState, fp_regs) == 288);
 };
 
 #[cfg(test)]
