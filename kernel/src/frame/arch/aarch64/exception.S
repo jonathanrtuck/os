@@ -145,6 +145,11 @@ __exception_common:
     mrs     x9, sp_el0
     str     x9, [sp, #816]
 
+    // Conditional FP save: skip if FP is disabled (lazy mode active).
+    mrs     x9, cpacr_el1
+    ubfx    x9, x9, #20, #2        // Extract FPEN field [21:20]
+    cbz     x9, .Lskip_fp_save     // If disabled, skip FP save
+
     // Save FP/SIMD registers q0-q31 (128-bit each).
     stp     q0, q1, [sp, #288]
     stp     q2, q3, [sp, #320]
@@ -169,10 +174,17 @@ __exception_common:
     mrs     x9, fpsr
     str     x9, [sp, #808]
 
+.Lskip_fp_save:
+
     // Call Rust: exception_handler(frame: &mut TrapFrame, source: u64)
     mov     x0, sp
     ldr     x1, [sp, #280]
     bl      exception_handler
+
+    // Conditional FP restore: skip if FP is disabled (lazy mode active).
+    mrs     x9, cpacr_el1
+    ubfx    x9, x9, #20, #2
+    cbz     x9, .Lskip_fp_restore
 
     // Restore FPCR and FPSR.
     ldr     x9, [sp, #800]
@@ -197,6 +209,8 @@ __exception_common:
     ldp     q26, q27, [sp, #704]
     ldp     q28, q29, [sp, #736]
     ldp     q30, q31, [sp, #768]
+
+.Lskip_fp_restore:
 
     // Restore SP_EL0.
     ldr     x9, [sp, #816]

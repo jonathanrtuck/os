@@ -252,11 +252,130 @@ fn el0_sync_handler(frame: &mut TrapFrame) {
             frame.gprs[0] = error; // x0 = error code
             frame.gprs[1] = value; // x1 = return value
         }
+        // FP/SIMD trap — lazy FP state switch.
+        #[cfg(target_os = "none")]
+        0x07 => handle_fp_trap(),
         // Data abort from EL0.
         0x24 => handle_data_abort(frame),
         // Instruction abort from EL0.
         0x20 => unimplemented_el0(frame, "instruction abort"),
         _ => fatal_exception(frame, 8),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Lazy FP/SIMD save
+// ---------------------------------------------------------------------------
+
+/// Per-core FP owner tracking. Stores the ThreadId (as u32) of the thread
+/// whose FP state is currently live in the FP registers on this core.
+/// u32::MAX means no owner (FP registers are don't-care).
+#[cfg(target_os = "none")]
+static FP_OWNER: [core::sync::atomic::AtomicU32; crate::config::MAX_CORES] =
+    [const { core::sync::atomic::AtomicU32::new(super::cpu::PerCpu::IDLE) };
+        crate::config::MAX_CORES];
+
+#[cfg(target_os = "none")]
+fn handle_fp_trap() {
+    let (core_id, current_tid) = unsafe {
+        let pc = super::cpu::percpu();
+        (pc.core_id as usize, pc.current_thread)
+    };
+
+    let prev_owner = FP_OWNER[core_id].swap(current_tid, core::sync::atomic::Ordering::Relaxed);
+
+    if prev_owner != super::cpu::PerCpu::IDLE && prev_owner != current_tid {
+        // SAFETY: kernel_ptr was set during boot. prev_owner is a valid
+        // thread ID because we set it when that thread last used FP.
+        unsafe {
+            let kernel = &mut *(super::cpu::percpu().kernel_ptr as *mut crate::syscall::Kernel);
+            if let Some(thread) = kernel.threads.get_mut(prev_owner) {
+                let rs = thread.init_register_state();
+                save_fp_state(rs);
+            }
+        }
+    }
+
+    // Load current thread's FP state (if it has saved state).
+    unsafe {
+        let kernel = &*(super::cpu::percpu().kernel_ptr as *const crate::syscall::Kernel);
+        if let Some(thread) = kernel.threads.get(current_tid)
+            && let Some(rs) = thread.register_state()
+        {
+            load_fp_state(rs);
+        }
+    }
+
+    // Re-enable FP access.
+    let cpacr = sysreg::cpacr_el1();
+    sysreg::set_cpacr_el1(cpacr | (0b11 << 20));
+    sysreg::isb();
+}
+
+#[cfg(target_os = "none")]
+fn save_fp_state(rs: &mut crate::frame::arch::register_state::RegisterState) {
+    // SAFETY: Reads FP registers that are currently live on this core.
+    // Uses fp_regs base pointer since fp_regs is at offset 280 (not 16-aligned).
+    unsafe {
+        let fp_base = (rs as *mut _ as usize) + 280;
+        core::arch::asm!(
+            "stp q0, q1, [{base}]",
+            "stp q2, q3, [{base}, #32]",
+            "stp q4, q5, [{base}, #64]",
+            "stp q6, q7, [{base}, #96]",
+            "stp q8, q9, [{base}, #128]",
+            "stp q10, q11, [{base}, #160]",
+            "stp q12, q13, [{base}, #192]",
+            "stp q14, q15, [{base}, #224]",
+            "stp q16, q17, [{base}, #256]",
+            "stp q18, q19, [{base}, #288]",
+            "stp q20, q21, [{base}, #320]",
+            "stp q22, q23, [{base}, #352]",
+            "stp q24, q25, [{base}, #384]",
+            "stp q26, q27, [{base}, #416]",
+            "stp q28, q29, [{base}, #448]",
+            "stp q30, q31, [{base}, #480]",
+            "mrs {tmp}, fpcr",
+            "str {tmp}, [{base}, #512]",
+            "mrs {tmp}, fpsr",
+            "str {tmp}, [{base}, #520]",
+            base = in(reg) fp_base,
+            tmp = out(reg) _,
+            options(nostack),
+        );
+    }
+}
+
+#[cfg(target_os = "none")]
+fn load_fp_state(rs: &crate::frame::arch::register_state::RegisterState) {
+    // SAFETY: Writes FP registers from saved state.
+    unsafe {
+        let fp_base = (rs as *const _ as usize) + 280;
+        core::arch::asm!(
+            "ldp q0, q1, [{base}]",
+            "ldp q2, q3, [{base}, #32]",
+            "ldp q4, q5, [{base}, #64]",
+            "ldp q6, q7, [{base}, #96]",
+            "ldp q8, q9, [{base}, #128]",
+            "ldp q10, q11, [{base}, #160]",
+            "ldp q12, q13, [{base}, #192]",
+            "ldp q14, q15, [{base}, #224]",
+            "ldp q16, q17, [{base}, #256]",
+            "ldp q18, q19, [{base}, #288]",
+            "ldp q20, q21, [{base}, #320]",
+            "ldp q22, q23, [{base}, #352]",
+            "ldp q24, q25, [{base}, #384]",
+            "ldp q26, q27, [{base}, #416]",
+            "ldp q28, q29, [{base}, #448]",
+            "ldp q30, q31, [{base}, #480]",
+            "ldr {tmp}, [{base}, #512]",
+            "msr fpcr, {tmp}",
+            "ldr {tmp}, [{base}, #520]",
+            "msr fpsr, {tmp}",
+            base = in(reg) fp_base,
+            tmp = out(reg) _,
+            options(nostack),
+        );
     }
 }
 
