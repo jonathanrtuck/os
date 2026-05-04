@@ -61,6 +61,8 @@ pub const MAX_VA_REGIONS: usize = 64;
 pub const MAX_MAPPINGS: usize = 128;
 pub const MAX_WAITERS_PER_EVENT: usize = 16;
 pub const MAX_PENDING_PER_ENDPOINT: usize = 16;
+pub const MAX_RECV_WAITERS: usize = 4;
+pub const MAX_IPC_HANDLES: usize = 8;
 pub const KERNEL_STACK_PAGES: usize = 2;
 
 /// Kernel stack size per thread (2 pages = 32 KiB).

@@ -387,7 +387,7 @@ impl Kernel {
             .ok_or(SyscallError::InvalidHandle)?
             .signal(bits);
 
-        for info in &woken {
+        for info in woken.as_slice() {
             crate::sched::wake(self, info.thread_id, 0);
         }
 
@@ -566,7 +566,7 @@ impl Kernel {
         let recv_waiters = ep.drain_recv_waiters();
         ep.enqueue_call(call)?;
 
-        for waiter in &recv_waiters {
+        for waiter in recv_waiters.as_slice() {
             crate::sched::wake(self, *waiter, 0);
         }
 
@@ -1148,11 +1148,7 @@ mod tests {
     #[test]
     fn thread_create_and_inspect() {
         let mut k = setup_kernel();
-        let (err, _tid_handle) = call(
-            &mut k,
-            num::THREAD_CREATE,
-            &[0x1000, 0x2000, 0, 0, 0, 0],
-        );
+        let (err, _tid_handle) = call(&mut k, num::THREAD_CREATE, &[0x1000, 0x2000, 0, 0, 0, 0]);
         assert_eq!(err, 0);
         assert_eq!(k.threads.count(), 2);
     }
@@ -1160,11 +1156,7 @@ mod tests {
     #[test]
     fn thread_set_priority() {
         let mut k = setup_kernel();
-        let (_, tid_handle) = call(
-            &mut k,
-            num::THREAD_CREATE,
-            &[0x1000, 0x2000, 0, 0, 0, 0],
-        );
+        let (_, tid_handle) = call(&mut k, num::THREAD_CREATE, &[0x1000, 0x2000, 0, 0, 0, 0]);
         let (err, _) = call(
             &mut k,
             num::THREAD_SET_PRIORITY,
@@ -1176,11 +1168,7 @@ mod tests {
     #[test]
     fn thread_set_affinity() {
         let mut k = setup_kernel();
-        let (_, tid_handle) = call(
-            &mut k,
-            num::THREAD_CREATE,
-            &[0x1000, 0x2000, 0, 0, 0, 0],
-        );
+        let (_, tid_handle) = call(&mut k, num::THREAD_CREATE, &[0x1000, 0x2000, 0, 0, 0, 0]);
         let (err, _) = call(
             &mut k,
             num::THREAD_SET_AFFINITY,
@@ -1237,11 +1225,7 @@ mod tests {
         let mut k = setup_kernel();
         let (_, vmo_hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
         let (_, ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
-        let (err, _) = call(
-            &mut k,
-            num::VMO_SET_PAGER,
-            &[vmo_hid, ep_hid, 0, 0, 0, 0],
-        );
+        let (err, _) = call(&mut k, num::VMO_SET_PAGER, &[vmo_hid, ep_hid, 0, 0, 0, 0]);
         assert_eq!(err, 0);
     }
 

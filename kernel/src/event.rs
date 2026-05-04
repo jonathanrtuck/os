@@ -4,12 +4,46 @@
 //! on signal, AND-NOT'd on clear. Waiters match against current bits
 //! (level-triggered: if bits are already set, the waiter wakes immediately).
 
-use alloc::vec::Vec;
-
 use crate::{
     config,
     types::{EndpointId, EventId, SyscallError, ThreadId},
 };
+
+/// Inline storage for threads woken by a signal — no heap allocation.
+#[derive(Debug)]
+pub struct WakeList {
+    items: [WakeInfo; config::MAX_WAITERS_PER_EVENT],
+    len: usize,
+}
+
+impl WakeList {
+    fn new() -> Self {
+        WakeList {
+            items: [WakeInfo {
+                thread_id: ThreadId(0),
+                fired_bits: 0,
+            }; config::MAX_WAITERS_PER_EVENT],
+            len: 0,
+        }
+    }
+
+    fn push(&mut self, info: WakeInfo) {
+        self.items[self.len] = info;
+        self.len += 1;
+    }
+
+    pub fn as_slice(&self) -> &[WakeInfo] {
+        &self.items[..self.len]
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
 
 /// Information returned when a waiter is woken by a signal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,10 +106,10 @@ impl Event {
     }
 
     /// Signal (OR) bits and wake all matching waiters.
-    /// Returns the list of threads to wake with their fired bits.
-    pub fn signal(&mut self, bits: u64) -> Vec<WakeInfo> {
+    /// Returns the list of threads to wake with their fired bits (inline, no heap).
+    pub fn signal(&mut self, bits: u64) -> WakeList {
         self.bits |= bits;
-        let mut woken = Vec::new();
+        let mut woken = WakeList::new();
 
         for slot in &mut self.waiters {
             if let Some(waiter) = slot {
@@ -175,8 +209,8 @@ mod tests {
 
         let woken = e.signal(0b01);
         assert_eq!(woken.len(), 1);
-        assert_eq!(woken[0].thread_id, ThreadId(1));
-        assert_eq!(woken[0].fired_bits, 0b01);
+        assert_eq!(woken.as_slice()[0].thread_id, ThreadId(1));
+        assert_eq!(woken.as_slice()[0].fired_bits, 0b01);
         assert_eq!(e.waiter_count(), 0);
     }
 
@@ -188,7 +222,7 @@ mod tests {
 
         let woken = e.signal(0b01);
         assert_eq!(woken.len(), 1);
-        assert_eq!(woken[0].thread_id, ThreadId(1));
+        assert_eq!(woken.as_slice()[0].thread_id, ThreadId(1));
         assert_eq!(e.waiter_count(), 1);
     }
 
@@ -201,8 +235,8 @@ mod tests {
 
         let woken = e.signal(0b01);
         assert_eq!(woken.len(), 2);
-        assert!(woken.iter().any(|w| w.thread_id == ThreadId(1)));
-        assert!(woken.iter().any(|w| w.thread_id == ThreadId(2)));
+        assert!(woken.as_slice().iter().any(|w| w.thread_id == ThreadId(1)));
+        assert!(woken.as_slice().iter().any(|w| w.thread_id == ThreadId(2)));
         assert_eq!(e.waiter_count(), 1);
     }
 

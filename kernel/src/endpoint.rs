@@ -13,6 +13,27 @@ use crate::{
     types::{EndpointId, EventId, Priority, SyscallError, ThreadId},
 };
 
+/// Inline storage for drained recv waiters — no heap allocation on the IPC hot path.
+#[derive(Debug)]
+pub struct DrainList {
+    items: [ThreadId; config::MAX_RECV_WAITERS],
+    len: usize,
+}
+
+impl DrainList {
+    pub fn as_slice(&self) -> &[ThreadId] {
+        &self.items[..self.len]
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
 /// IPC message size: one ARM64 cache line.
 pub const MSG_SIZE: usize = 128;
 
@@ -82,7 +103,8 @@ pub struct Endpoint {
     generation: u64,
     send_queue: Vec<PendingCall>,
     active_replies: Vec<ActiveReply>,
-    recv_waiters: Vec<ThreadId>,
+    recv_waiters: [Option<ThreadId>; config::MAX_RECV_WAITERS],
+    recv_waiter_count: usize,
     next_reply_id: u32,
     badge_counter: u32,
     bound_event: Option<EventId>,
@@ -95,9 +117,10 @@ impl Endpoint {
         Endpoint {
             id,
             generation: 0,
-            send_queue: Vec::new(),
-            active_replies: Vec::new(),
-            recv_waiters: Vec::new(),
+            send_queue: Vec::with_capacity(4),
+            active_replies: Vec::with_capacity(4),
+            recv_waiters: [None; config::MAX_RECV_WAITERS],
+            recv_waiter_count: 0,
             next_reply_id: 0,
             badge_counter: 0,
             bound_event: None,
@@ -126,7 +149,7 @@ impl Endpoint {
     }
 
     pub fn recv_waiter_count(&self) -> usize {
-        self.recv_waiters.len()
+        self.recv_waiter_count
     }
 
     pub fn bound_event(&self) -> Option<EventId> {
@@ -198,23 +221,42 @@ impl Endpoint {
         if self.peer_closed {
             return Err(SyscallError::PeerClosed);
         }
-        self.recv_waiters.push(thread);
-        Ok(())
+        for slot in &mut self.recv_waiters {
+            if slot.is_none() {
+                *slot = Some(thread);
+                self.recv_waiter_count += 1;
+                return Ok(());
+            }
+        }
+        Err(SyscallError::BufferFull)
     }
 
     /// Remove a recv waiter (on timeout or cancel).
     pub fn remove_recv_waiter(&mut self, thread: ThreadId) -> bool {
-        if let Some(pos) = self.recv_waiters.iter().position(|&t| t == thread) {
-            self.recv_waiters.swap_remove(pos);
-            true
-        } else {
-            false
+        for slot in &mut self.recv_waiters {
+            if *slot == Some(thread) {
+                *slot = None;
+                self.recv_waiter_count -= 1;
+                return true;
+            }
         }
+        false
     }
 
-    /// Drain all recv waiters (for wakeup when a call arrives).
-    pub fn drain_recv_waiters(&mut self) -> Vec<ThreadId> {
-        core::mem::take(&mut self.recv_waiters)
+    /// Drain all recv waiters (for wakeup when a call arrives). No heap allocation.
+    pub fn drain_recv_waiters(&mut self) -> DrainList {
+        let mut list = DrainList {
+            items: [ThreadId(0); config::MAX_RECV_WAITERS],
+            len: 0,
+        };
+        for slot in &mut self.recv_waiters {
+            if let Some(tid) = slot.take() {
+                list.items[list.len] = tid;
+                list.len += 1;
+            }
+        }
+        self.recv_waiter_count = 0;
+        list
     }
 
     /// Close the peer end. Returns all blocked thread IDs:
@@ -229,7 +271,12 @@ impl Endpoint {
         for reply in self.active_replies.drain(..) {
             blocked.push(reply.caller);
         }
-        blocked.append(&mut self.recv_waiters);
+        for slot in &mut self.recv_waiters {
+            if let Some(tid) = slot.take() {
+                blocked.push(tid);
+            }
+        }
+        self.recv_waiter_count = 0;
 
         blocked
     }
@@ -442,8 +489,34 @@ mod tests {
         assert!(!ep.remove_recv_waiter(ThreadId(1)));
 
         let waiters = ep.drain_recv_waiters();
-        assert_eq!(waiters, vec![ThreadId(2)]);
+        assert_eq!(waiters.len(), 1);
+        assert_eq!(waiters.as_slice()[0], ThreadId(2));
         assert_eq!(ep.recv_waiter_count(), 0);
+    }
+
+    #[test]
+    fn recv_waiter_exhaustion() {
+        let mut ep = make_endpoint(0);
+        for i in 0..config::MAX_RECV_WAITERS {
+            ep.add_recv_waiter(ThreadId(i as u32)).unwrap();
+        }
+        assert_eq!(
+            ep.add_recv_waiter(ThreadId(999)),
+            Err(SyscallError::BufferFull)
+        );
+    }
+
+    #[test]
+    fn drain_recv_waiters_after_mixed_add_remove() {
+        let mut ep = make_endpoint(0);
+        ep.add_recv_waiter(ThreadId(1)).unwrap();
+        ep.add_recv_waiter(ThreadId(2)).unwrap();
+        ep.add_recv_waiter(ThreadId(3)).unwrap();
+        ep.remove_recv_waiter(ThreadId(2));
+        let drained = ep.drain_recv_waiters();
+        assert_eq!(drained.len(), 2);
+        assert!(drained.as_slice().contains(&ThreadId(1)));
+        assert!(drained.as_slice().contains(&ThreadId(3)));
     }
 
     // -- Badge and event --

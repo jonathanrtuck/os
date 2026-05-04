@@ -153,8 +153,8 @@ mod tests {
 
         let woken = event.signal(0b1);
         assert_eq!(woken.len(), 1);
-        assert_eq!(woken[0].thread_id, s.comp_thread);
-        assert_eq!(woken[0].fired_bits, 0b1);
+        assert_eq!(woken.as_slice()[0].thread_id, s.comp_thread);
+        assert_eq!(woken.as_slice()[0].fired_bits, 0b1);
     }
 
     #[test]
@@ -283,7 +283,7 @@ mod tests {
 
             let woken = event.signal(0b1);
             assert_eq!(woken.len(), 1, "frame {frame}");
-            assert_eq!(woken[0].thread_id, s.comp_thread);
+            assert_eq!(woken.as_slice()[0].thread_id, s.comp_thread);
 
             event.clear(0b1);
         }
