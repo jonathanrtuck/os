@@ -1,15 +1,22 @@
-//! Flat-array object table — O(1) alloc/dealloc for kernel objects.
+//! Flat-array object table with free-list allocation.
 //!
 //! Each kernel object type (VMO, Event, Endpoint, Thread, AddressSpace)
 //! is stored in an ObjectTable. Objects are accessed by ID (array index).
 //! Storage is heap-backed (Vec) so composite tables don't overflow the stack.
+//!
+//! Allocation uses an intrusive Treiber stack through empty slots: O(1)
+//! alloc, O(1) dealloc, O(1) lookup. Per-slot generation counters
+//! increment on dealloc for handle revocation.
 
 use alloc::{vec, vec::Vec};
+
+const EMPTY: u32 = u32::MAX;
 
 pub struct ObjectTable<T, const MAX: usize> {
     entries: Vec<Option<T>>,
     generations: Vec<u64>,
-    free_hint: usize,
+    free_head: u32,
+    free_next: Vec<u32>,
     count: usize,
 }
 
@@ -21,29 +28,33 @@ impl<T, const MAX: usize> ObjectTable<T, MAX> {
 
         let generations = vec![0u64; MAX];
 
+        let mut free_next = vec![EMPTY; MAX];
+        for (i, slot) in free_next.iter_mut().enumerate().take(MAX.saturating_sub(1)) {
+            *slot = (i + 1) as u32;
+        }
+
         Self {
             entries,
             generations,
-            free_hint: 0,
+            free_head: if MAX > 0 { 0 } else { EMPTY },
+            free_next,
             count: 0,
         }
     }
 
     pub fn alloc(&mut self, value: T) -> Option<(u32, u64)> {
-        for offset in 0..MAX {
-            let idx = (self.free_hint + offset) % MAX;
-
-            if self.entries[idx].is_none() {
-                self.entries[idx] = Some(value);
-                self.free_hint = (idx + 1) % MAX;
-                self.count += 1;
-                let generation = self.generations[idx];
-
-                return Some((idx as u32, generation));
-            }
+        if self.free_head == EMPTY {
+            return None;
         }
 
-        None
+        let idx = self.free_head as usize;
+        self.free_head = self.free_next[idx];
+        self.free_next[idx] = EMPTY;
+        self.entries[idx] = Some(value);
+        self.count += 1;
+        let generation = self.generations[idx];
+
+        Some((idx as u32, generation))
     }
 
     pub fn dealloc(&mut self, idx: u32) -> Option<T> {
@@ -55,21 +66,17 @@ impl<T, const MAX: usize> ObjectTable<T, MAX> {
 
         let value = self.entries[i].take()?;
         self.generations[i] += 1;
+        self.free_next[i] = self.free_head;
+        self.free_head = idx;
         self.count -= 1;
-
-        if i < self.free_hint {
-            self.free_hint = i;
-        }
 
         Some(value)
     }
 
-    /// Lookup by index. O(1).
     pub fn get(&self, idx: u32) -> Option<&T> {
         self.entries.get(idx as usize)?.as_ref()
     }
 
-    /// Mutable lookup by index. O(1).
     pub fn get_mut(&mut self, idx: u32) -> Option<&mut T> {
         self.entries.get_mut(idx as usize)?.as_mut()
     }
@@ -224,5 +231,32 @@ mod tests {
         let (idx2, generation) = t.alloc(2).unwrap();
 
         assert_eq!(generation, t.generation(idx2));
+    }
+
+    #[test]
+    fn free_list_alloc_is_o1() {
+        let mut t: ObjectTable<u64, 256> = ObjectTable::new();
+        let mut ids = [0u32; 256];
+
+        for i in 0..256 {
+            let (id, _) = t.alloc(i as u64).unwrap();
+            ids[i] = id;
+        }
+
+        assert!(t.alloc(999).is_none());
+
+        t.dealloc(ids[100]);
+        t.dealloc(ids[200]);
+        t.dealloc(ids[50]);
+
+        let (a, _) = t.alloc(1000).unwrap();
+        let (b, _) = t.alloc(1001).unwrap();
+        let (c, _) = t.alloc(1002).unwrap();
+
+        assert!(t.alloc(1003).is_none());
+
+        assert_eq!(a, ids[50]);
+        assert_eq!(b, ids[200]);
+        assert_eq!(c, ids[100]);
     }
 }

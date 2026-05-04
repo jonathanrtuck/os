@@ -1,9 +1,15 @@
-//! Handle table — per-address-space capability table with generation-count revocation.
+//! Handle table — per-address-space capability table with free-list allocation.
+//!
+//! O(1) allocate (pop from free stack), O(1) close (push to free stack),
+//! O(1) lookup (direct index). Generation-count revocation is tracked by
+//! ObjectTable, not here.
 
 use crate::{
     config,
     types::{HandleId, ObjectType, Rights, SyscallError},
 };
+
+const EMPTY: u32 = u32::MAX;
 
 /// A handle is a capability: a reference to a kernel object with rights.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,17 +21,26 @@ pub struct Handle {
     pub badge: u32,
 }
 
-/// Per-address-space handle table. Fixed-size array, O(1) lookup.
+/// Per-address-space handle table. Fixed-size array, O(1) lookup and alloc.
 pub struct HandleTable {
     entries: [Option<Handle>; config::MAX_HANDLES],
+    free_head: u32,
+    free_next: [u32; config::MAX_HANDLES],
     count: usize,
 }
 
 #[allow(clippy::new_without_default)]
 impl HandleTable {
     pub fn new() -> Self {
+        let mut free_next = [EMPTY; config::MAX_HANDLES];
+        for (i, slot) in free_next.iter_mut().enumerate().take(config::MAX_HANDLES.saturating_sub(1)) {
+            *slot = (i + 1) as u32;
+        }
+
         HandleTable {
             entries: core::array::from_fn(|_| None),
+            free_head: if config::MAX_HANDLES > 0 { 0 } else { EMPTY },
+            free_next,
             count: 0,
         }
     }
@@ -49,22 +64,23 @@ impl HandleTable {
         generation: u64,
         badge: u32,
     ) -> Result<HandleId, SyscallError> {
-        for (i, slot) in self.entries.iter_mut().enumerate() {
-            if slot.is_none() {
-                *slot = Some(Handle {
-                    object_type,
-                    object_id,
-                    rights,
-                    generation,
-                    badge,
-                });
-                self.count += 1;
-
-                return Ok(HandleId(i as u32));
-            }
+        if self.free_head == EMPTY {
+            return Err(SyscallError::OutOfMemory);
         }
 
-        Err(SyscallError::OutOfMemory)
+        let idx = self.free_head as usize;
+        self.free_head = self.free_next[idx];
+        self.free_next[idx] = EMPTY;
+        self.entries[idx] = Some(Handle {
+            object_type,
+            object_id,
+            rights,
+            generation,
+            badge,
+        });
+        self.count += 1;
+
+        Ok(HandleId(idx as u32))
     }
 
     /// Allocate a handle at a specific index (for bootstrap initial_handles).
@@ -76,10 +92,32 @@ impl HandleTable {
             return Err(SyscallError::InvalidArgument);
         }
 
+        self.unlink_from_free_list(index);
         self.entries[index] = Some(handle);
         self.count += 1;
 
         Ok(HandleId(index as u32))
+    }
+
+    fn unlink_from_free_list(&mut self, target: usize) {
+        let target_u32 = target as u32;
+
+        if self.free_head == target_u32 {
+            self.free_head = self.free_next[target];
+            self.free_next[target] = EMPTY;
+            return;
+        }
+
+        let mut cur = self.free_head;
+        while cur != EMPTY {
+            let cur_idx = cur as usize;
+            if self.free_next[cur_idx] == target_u32 {
+                self.free_next[cur_idx] = self.free_next[target];
+                self.free_next[target] = EMPTY;
+                return;
+            }
+            cur = self.free_next[cur_idx];
+        }
     }
 
     /// Look up a handle. Checks existence only (generation checked by caller
@@ -126,12 +164,15 @@ impl HandleTable {
             return Err(SyscallError::InvalidHandle);
         }
 
-        self.entries[idx]
+        let handle = self.entries[idx]
             .take()
-            .ok_or(SyscallError::InvalidHandle)
-            .inspect(|_| {
-                self.count -= 1;
-            })
+            .ok_or(SyscallError::InvalidHandle)?;
+
+        self.free_next[idx] = self.free_head;
+        self.free_head = idx as u32;
+        self.count -= 1;
+
+        Ok(handle)
     }
 
     /// Get handle info (type, rights) without cloning the full handle.
@@ -265,5 +306,26 @@ mod tests {
 
         assert_eq!(typ, ObjectType::Thread);
         assert_eq!(rights, Rights::READ);
+    }
+
+    #[test]
+    fn allocate_at_specific_index() {
+        let mut t = make_table();
+        let h = Handle {
+            object_type: ObjectType::Vmo,
+            object_id: 10,
+            rights: Rights::ALL,
+            generation: 0,
+            badge: 0,
+        };
+
+        let id = t.allocate_at(3, h).unwrap();
+
+        assert_eq!(id, HandleId(3));
+        assert_eq!(t.lookup(HandleId(3)).unwrap().object_id, 10);
+
+        let id2 = t.allocate(ObjectType::Event, 20, Rights::ALL, 0).unwrap();
+
+        assert_ne!(id2, HandleId(3));
     }
 }
