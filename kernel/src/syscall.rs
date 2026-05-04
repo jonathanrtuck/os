@@ -53,6 +53,7 @@ pub mod num {
     pub const SYSTEM_INFO: u64 = 27;
     pub const IRQ_BIND: u64 = 28;
     pub const IRQ_ACK: u64 = 29;
+    pub const ENDPOINT_BIND_EVENT: u64 = 30;
 }
 
 struct StagedHandles {
@@ -220,6 +221,7 @@ impl Kernel {
             num::SYSTEM_INFO => self.sys_system_info(args),
             num::IRQ_BIND => self.sys_irq_bind(current, args),
             num::IRQ_ACK => self.sys_irq_ack(args),
+            num::ENDPOINT_BIND_EVENT => self.sys_endpoint_bind_event(current, args),
             _ => Err(SyscallError::InvalidArgument),
         };
 
@@ -711,7 +713,16 @@ impl Kernel {
             .ok_or(SyscallError::InvalidHandle)?;
 
         let recv_waiters = ep.drain_recv_waiters();
-        ep.enqueue_call(call)?;
+        let signal_info = ep.enqueue_call(call)?;
+
+        if let Some((event_id, bits)) = signal_info
+            && let Some(event) = self.events.get_mut(event_id.0)
+        {
+            let woken = event.signal(bits);
+            for info in woken.as_slice() {
+                crate::sched::wake(self, info.thread_id, 0);
+            }
+        }
 
         for waiter in recv_waiters.as_slice() {
             crate::sched::wake(self, *waiter, 0);
@@ -741,6 +752,11 @@ impl Kernel {
             .ok_or(SyscallError::InvalidHandle)?;
 
         if let Some((call, reply_cap)) = ep.dequeue_call() {
+            if let Some((eid, bits)) = Self::check_clear_readable(ep)
+                && let Some(e) = self.events.get_mut(eid.0)
+            {
+                e.clear(bits);
+            }
             return self.recv_deliver(
                 space_id,
                 call,
@@ -765,6 +781,11 @@ impl Kernel {
             .ok_or(SyscallError::InvalidHandle)?;
 
         if let Some((call, reply_cap)) = ep.dequeue_call() {
+            if let Some((eid, bits)) = Self::check_clear_readable(ep)
+                && let Some(e) = self.events.get_mut(eid.0)
+            {
+                e.clear(bits);
+            }
             return self.recv_deliver(
                 space_id,
                 call,
@@ -864,6 +885,58 @@ impl Kernel {
 
         crate::sched::wake(self, caller_id, 0);
         Ok(reply_msg.len() as u64)
+    }
+
+    fn check_clear_readable(ep: &Endpoint) -> Option<(EventId, u64)> {
+        if ep.has_pending_calls() {
+            return None;
+        }
+        ep.bound_event()
+            .map(|eid| (eid, Endpoint::ENDPOINT_READABLE_BIT))
+    }
+
+    fn sys_endpoint_bind_event(
+        &mut self,
+        current: ThreadId,
+        args: &[u64; 6],
+    ) -> Result<u64, SyscallError> {
+        let ep_handle_id = HandleId(args[0] as u32);
+        let event_handle_id = HandleId(args[1] as u32);
+
+        let space_id = self.thread_space_id(current)?;
+        let ep_handle = self.lookup_handle(space_id, ep_handle_id)?;
+        if ep_handle.object_type != ObjectType::Endpoint {
+            return Err(SyscallError::WrongHandleType);
+        }
+        if !ep_handle.rights.contains(Rights::WRITE) {
+            return Err(SyscallError::InsufficientRights);
+        }
+        let event_handle = self.lookup_handle(space_id, event_handle_id)?;
+        if event_handle.object_type != ObjectType::Event {
+            return Err(SyscallError::WrongHandleType);
+        }
+        if !event_handle.rights.contains(Rights::SIGNAL) {
+            return Err(SyscallError::InsufficientRights);
+        }
+
+        let event_obj_id = EventId(event_handle.object_id);
+        let ep = self
+            .endpoints
+            .get_mut(ep_handle.object_id)
+            .ok_or(SyscallError::InvalidHandle)?;
+
+        ep.bind_event(event_obj_id)?;
+
+        if ep.has_pending_calls()
+            && let Some(event) = self.events.get_mut(event_obj_id.0)
+        {
+            let woken = event.signal(Endpoint::ENDPOINT_READABLE_BIT);
+            for info in woken.as_slice() {
+                crate::sched::wake(self, info.thread_id, 0);
+            }
+        }
+
+        Ok(0)
     }
 
     // -- Thread lifecycle --
@@ -1760,5 +1833,97 @@ mod tests {
         assert_eq!(err, 0);
         let h_count = ((packed >> 16) & 0xFFFF) as usize;
         assert_eq!(h_count, 0);
+    }
+
+    // -- Channel-event auto-signal --
+
+    #[test]
+    fn endpoint_bind_event_signals_on_enqueue() {
+        let (mut k, ep_hid) = setup_ipc_kernel();
+        let (_, ev_hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+
+        let (err, _) = call(
+            &mut k,
+            num::ENDPOINT_BIND_EVENT,
+            &[ep_hid, ev_hid, 0, 0, 0, 0],
+        );
+        assert_eq!(err, 0);
+
+        let mut buf = [0u8; 128];
+        let (err, _) = call(
+            &mut k,
+            num::CALL,
+            &[ep_hid, buf.as_mut_ptr() as u64, 0, 0, 0, 0],
+        );
+        assert_eq!(err, 0);
+
+        let event = k.events.get(0).unwrap();
+        assert_ne!(event.bits() & 1, 0);
+    }
+
+    #[test]
+    fn endpoint_no_signal_without_binding() {
+        let (mut k, ep_hid) = setup_ipc_kernel();
+        let (_, _ev_hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+
+        let mut buf = [0u8; 128];
+        let (err, _) = call(
+            &mut k,
+            num::CALL,
+            &[ep_hid, buf.as_mut_ptr() as u64, 0, 0, 0, 0],
+        );
+        assert_eq!(err, 0);
+
+        let event = k.events.get(0).unwrap();
+        assert_eq!(event.bits(), 0);
+    }
+
+    #[test]
+    fn endpoint_clear_on_drain() {
+        let (mut k, ep_hid) = setup_ipc_kernel();
+        let (_, ev_hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+
+        call(
+            &mut k,
+            num::ENDPOINT_BIND_EVENT,
+            &[ep_hid, ev_hid, 0, 0, 0, 0],
+        );
+
+        let mut buf = [0u8; 128];
+        call(
+            &mut k,
+            num::CALL,
+            &[ep_hid, buf.as_mut_ptr() as u64, 0, 0, 0, 0],
+        );
+        assert_ne!(k.events.get(0).unwrap().bits() & 1, 0);
+
+        let mut recv_buf = [0u8; 128];
+        call(
+            &mut k,
+            num::RECV,
+            &[ep_hid, recv_buf.as_mut_ptr() as u64, 128, 0, 0, 0],
+        );
+        assert_eq!(k.events.get(0).unwrap().bits() & 1, 0);
+    }
+
+    #[test]
+    fn endpoint_bind_with_pending_signals_immediately() {
+        let (mut k, ep_hid) = setup_ipc_kernel();
+        let (_, ev_hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+
+        let mut buf = [0u8; 128];
+        call(
+            &mut k,
+            num::CALL,
+            &[ep_hid, buf.as_mut_ptr() as u64, 0, 0, 0, 0],
+        );
+
+        let (err, _) = call(
+            &mut k,
+            num::ENDPOINT_BIND_EVENT,
+            &[ep_hid, ev_hid, 0, 0, 0, 0],
+        );
+        assert_eq!(err, 0);
+        assert_ne!(k.events.get(0).unwrap().bits() & 1, 0);
     }
 }

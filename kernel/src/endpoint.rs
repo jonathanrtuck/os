@@ -183,8 +183,14 @@ impl Endpoint {
         b
     }
 
+    pub const ENDPOINT_READABLE_BIT: u64 = 1;
+
     /// Enqueue a call into the send queue.
-    pub fn enqueue_call(&mut self, call: PendingCall) -> Result<(), SyscallError> {
+    /// Returns `Ok(Some((event_id, bits)))` if a bound event should be signaled.
+    pub fn enqueue_call(
+        &mut self,
+        call: PendingCall,
+    ) -> Result<Option<(EventId, u64)>, SyscallError> {
         if self.peer_closed {
             return Err(SyscallError::PeerClosed);
         }
@@ -192,7 +198,9 @@ impl Endpoint {
             return Err(SyscallError::BufferFull);
         }
         self.send_queue.push(call);
-        Ok(())
+        Ok(self
+            .bound_event
+            .map(|eid| (eid, Self::ENDPOINT_READABLE_BIT)))
     }
 
     /// Dequeue the highest-priority pending call and issue a reply cap.
