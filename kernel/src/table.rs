@@ -70,6 +70,26 @@ impl<T, const MAX: usize> ObjectTable<T, MAX> {
     pub fn count(&self) -> usize {
         self.count
     }
+
+    /// Get a mutable reference and an immutable reference to two different
+    /// slots simultaneously. Uses `split_at_mut` — zero unsafe.
+    ///
+    /// Panics if `mut_idx == ref_idx`.
+    pub fn get_pair_mut(&mut self, mut_idx: u32, ref_idx: u32) -> Option<(&mut T, &T)> {
+        assert_ne!(mut_idx, ref_idx);
+        let mi = mut_idx as usize;
+        let ri = ref_idx as usize;
+        if mi >= MAX || ri >= MAX {
+            return None;
+        }
+        if mi < ri {
+            let (left, right) = self.entries.split_at_mut(ri);
+            Some((left[mi].as_mut()?, right[0].as_ref()?))
+        } else {
+            let (left, right) = self.entries.split_at_mut(mi);
+            Some((right[0].as_mut()?, left[ri].as_ref()?))
+        }
+    }
 }
 
 #[cfg(test)]
