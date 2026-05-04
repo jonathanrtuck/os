@@ -137,6 +137,8 @@ fn irq_handler(_frame: &mut TrapFrame) {
     match intid {
         super::gic::INTID_VTIMER => {
             #[cfg(target_os = "none")]
+            // SAFETY: percpu() requires init_percpu to have been called.
+            // IRQ handlers only fire after boot completes.
             let core = unsafe { super::cpu::percpu().core_id as usize };
             #[cfg(not(target_os = "none"))]
             let core = 0;
@@ -250,6 +252,8 @@ fn el1_sync_handler(frame: &mut TrapFrame) {
         // Data abort from same EL — LDTR/STTR fault during user memory copy.
         0x25 => {
             #[cfg(target_os = "none")]
+            // SAFETY: percpu() requires init_percpu to have been called.
+            // EL1 sync handlers only fire after boot completes.
             let core = unsafe { super::cpu::percpu().core_id as usize };
             #[cfg(not(target_os = "none"))]
             let core = 0;
@@ -366,6 +370,8 @@ static FP_OWNER: [core::sync::atomic::AtomicU32; crate::config::MAX_CORES] =
 
 #[cfg(target_os = "none")]
 fn handle_fp_trap() {
+    // SAFETY: percpu() requires init_percpu to have been called. FP traps
+    // only occur from EL0, which is entered well after boot.
     let (core_id, current_tid) = unsafe {
         let pc = super::cpu::percpu();
 
@@ -387,7 +393,8 @@ fn handle_fp_trap() {
         }
     }
 
-    // Load current thread's FP state (if it has saved state).
+    // SAFETY: percpu().kernel_ptr was set during boot via set_kernel_ptr.
+    // current_tid is the thread that triggered the FP trap — it exists.
     unsafe {
         let kernel = &*(super::cpu::percpu().kernel_ptr as *const crate::syscall::Kernel);
 

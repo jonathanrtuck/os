@@ -38,6 +38,8 @@ fn validate_user_range(ptr: usize, len: usize) -> Result<(), SyscallError> {
 fn copy_from_user(dst: &mut [u8], src_va: usize) -> Result<(), SyscallError> {
     use super::arch::exception::COPY_FAULT_RECOVERY;
 
+    // SAFETY: percpu() requires init_percpu_bsp/init_percpu to have been
+    // called on this core. This runs in a syscall handler, well after boot.
     let core_id = unsafe { super::arch::cpu::percpu().core_id as usize };
     let len = dst.len();
     let fault: u64;
@@ -101,6 +103,8 @@ fn copy_from_user(dst: &mut [u8], src_va: usize) -> Result<(), SyscallError> {
 fn copy_to_user(dst_va: usize, src: &[u8]) -> Result<(), SyscallError> {
     use super::arch::exception::COPY_FAULT_RECOVERY;
 
+    // SAFETY: percpu() requires init_percpu_bsp/init_percpu to have been
+    // called on this core. This runs in a syscall handler, well after boot.
     let core_id = unsafe { super::arch::cpu::percpu().core_id as usize };
     let len = src.len();
     let fault: u64;
@@ -225,9 +229,8 @@ pub fn read_user_u32s(ptr: usize, count: usize, buf: &mut [u32]) -> Result<(), S
     validate_user_range(ptr, byte_len)?;
 
     // SAFETY: buf[..count] is valid for byte_len bytes, properly aligned.
-    let dst_bytes = unsafe {
-        core::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut u8, byte_len)
-    };
+    let dst_bytes =
+        unsafe { core::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut u8, byte_len) };
 
     copy_from_user(dst_bytes, ptr)
 }
