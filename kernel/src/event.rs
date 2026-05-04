@@ -182,6 +182,23 @@ impl Event {
     pub fn unbind_endpoint(&mut self) {
         self.bound_endpoint = None;
     }
+
+    #[cfg(test)]
+    pub fn verify_internal_counts(&self) -> Result<(), &'static str> {
+        let actual = self.waiters.iter().filter(|s| s.is_some()).count();
+        if actual != self.waiter_count {
+            return Err("waiter_count mismatch");
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn all_waiter_thread_ids(&self) -> alloc::vec::Vec<crate::types::ThreadId> {
+        self.waiters
+            .iter()
+            .filter_map(|s| s.as_ref().map(|w| w.thread_id))
+            .collect()
+    }
 }
 
 #[cfg(test)]

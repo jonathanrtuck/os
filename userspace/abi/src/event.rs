@@ -22,12 +22,7 @@ pub fn signal(handle: Handle, bits: u64) -> Result<(), SyscallError> {
     .map(|_| ())
 }
 
-pub struct WaitResult {
-    pub handle: Handle,
-    pub fired_bits: u64,
-}
-
-pub fn wait(items: &[(Handle, u64)]) -> Result<WaitResult, SyscallError> {
+pub fn wait(items: &[(Handle, u64)]) -> Result<Handle, SyscallError> {
     let mut args = [0u64; 6];
 
     for (i, &(h, mask)) in items.iter().take(3).enumerate() {
@@ -35,7 +30,7 @@ pub fn wait(items: &[(Handle, u64)]) -> Result<WaitResult, SyscallError> {
         args[i * 2 + 1] = mask;
     }
 
-    let packed = check(raw::syscall(
+    let handle_id = check(raw::syscall(
         num::EVENT_WAIT,
         args[0],
         args[1],
@@ -45,10 +40,7 @@ pub fn wait(items: &[(Handle, u64)]) -> Result<WaitResult, SyscallError> {
         args[5],
     ))?;
 
-    Ok(WaitResult {
-        handle: Handle((packed >> 32) as u32),
-        fired_bits: packed & 0xFFFF_FFFF,
-    })
+    Ok(Handle(handle_id as u32))
 }
 
 pub fn clear(handle: Handle, bits: u64) -> Result<(), SyscallError> {

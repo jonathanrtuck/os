@@ -51,7 +51,11 @@ pub fn resolve_cow(
 /// Returns the new physical address on success so the caller can update the
 /// VMO's page record. Returns `None` on OOM.
 #[cfg(target_os = "none")]
-pub fn resolve_lazy(root: page_alloc::PhysAddr, vaddr: usize, perms: page_table::Perms) -> Option<usize> {
+pub fn resolve_lazy(
+    root: page_alloc::PhysAddr,
+    vaddr: usize,
+    perms: page_table::Perms,
+) -> Option<usize> {
     let pa = page_alloc::alloc_page()?;
 
     user_mem::zero_phys(pa.0, crate::config::PAGE_SIZE);

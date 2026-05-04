@@ -31,6 +31,8 @@ pub mod fault;
 #[allow(unsafe_code)]
 pub mod frame;
 pub mod handle;
+#[cfg(test)]
+pub mod invariants;
 pub mod irq;
 #[cfg(test)]
 mod pipeline;
@@ -40,4 +42,6 @@ pub mod syscall;
 pub mod table;
 pub mod thread;
 pub mod types;
+#[cfg(test)]
+mod verification;
 pub mod vmo;

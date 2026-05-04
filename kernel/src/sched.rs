@@ -66,7 +66,11 @@ pub fn exit_current(kernel: &mut Kernel, current: ThreadId, core_id: usize, code
 fn switch_away(kernel: &mut Kernel, _current: ThreadId, core_id: usize) {
     let next_id = match kernel.scheduler.pick_next(core_id) {
         Some(id) => id,
-        None => return,
+        None => {
+            kernel.scheduler.core_mut(core_id).set_current(None);
+
+            return;
+        }
     };
     let next = kernel.threads.get_mut(next_id.0).unwrap();
 

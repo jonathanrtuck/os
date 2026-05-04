@@ -58,6 +58,11 @@ mod tests {
         let (svc_tid, _) = k.threads.alloc(svc_thread).unwrap();
 
         k.threads.get_mut(svc_tid).unwrap().id = ThreadId(svc_tid);
+        k.threads
+            .get_mut(svc_tid)
+            .unwrap()
+            .set_state(crate::thread::ThreadRunState::Running);
+        k.scheduler.core_mut(0).set_current(Some(ThreadId(svc_tid)));
 
         let comp_thread = Thread::new(
             ThreadId(0),
@@ -70,6 +75,7 @@ mod tests {
         let (comp_tid, _) = k.threads.alloc(comp_thread).unwrap();
 
         k.threads.get_mut(comp_tid).unwrap().id = ThreadId(comp_tid);
+        k.scheduler.enqueue(1, ThreadId(comp_tid), Priority::Medium);
 
         let shared_vmo = Vmo::new(VmoId(0), config::PAGE_SIZE * 4, VmoFlags::NONE);
         let (vmo_idx, _) = k.vmos.alloc(shared_vmo).unwrap();
@@ -145,6 +151,7 @@ mod tests {
 
         assert_eq!(comp_mapping.vmo_id, s.shared_vmo);
         assert!(!comp_mapping.rights.contains(Rights::WRITE));
+        crate::invariants::assert_valid(&*s.kernel);
     }
 
     // -- Event signaling (control plane) --
@@ -161,6 +168,7 @@ mod tests {
         assert_eq!(woken.len(), 1);
         assert_eq!(woken.as_slice()[0].thread_id, s.comp_thread);
         assert_eq!(woken.as_slice()[0].fired_bits, 0b1);
+        crate::invariants::assert_valid(&*s.kernel);
     }
 
     #[test]
@@ -183,6 +191,7 @@ mod tests {
                 "frame {frame}: bits not cleared"
             );
         }
+        crate::invariants::assert_valid(&*s.kernel);
     }
 
     // -- Handle rights enforcement --
@@ -204,6 +213,7 @@ mod tests {
 
         assert!(dup_handle.rights.contains(Rights::READ));
         assert!(!dup_handle.rights.contains(Rights::WRITE));
+        crate::invariants::assert_valid(&*s.kernel);
     }
 
     // -- Endpoint peer closed --
@@ -221,6 +231,7 @@ mod tests {
 
         assert!(blocked.contains(&s.comp_thread));
         assert!(ep.is_peer_closed());
+        crate::invariants::assert_valid(&*s.kernel);
     }
 
     // -- VMO snapshot (COW for undo) --
@@ -240,6 +251,7 @@ mod tests {
 
         assert_eq!(snap_vmo.size(), config::PAGE_SIZE * 4);
         assert_eq!(snap_vmo.cow_parent(), Some(s.shared_vmo));
+        crate::invariants::assert_valid(&*s.kernel);
     }
 
     // -- Bootstrap integration --
@@ -262,6 +274,11 @@ mod tests {
             if let Some(next) = k.scheduler.pick_next(core) {
                 assert_eq!(next, tid);
 
+                k.threads
+                    .get_mut(next.0)
+                    .unwrap()
+                    .set_state(crate::thread::ThreadRunState::Running);
+                k.scheduler.core_mut(core).set_current(Some(next));
                 found = true;
 
                 break;
@@ -269,6 +286,7 @@ mod tests {
         }
 
         assert!(found, "init thread not found in any run queue");
+        crate::invariants::assert_valid(&*k);
     }
 
     // -- Full pipeline validation --
@@ -305,5 +323,6 @@ mod tests {
 
             event.clear(0b1);
         }
+        crate::invariants::assert_valid(&*s.kernel);
     }
 }

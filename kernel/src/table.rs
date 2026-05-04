@@ -122,6 +122,19 @@ impl<T, const MAX: usize> ObjectTable<T, MAX> {
             .unwrap_or(0)
     }
 
+    #[cfg(test)]
+    pub fn iter_allocated(&self) -> impl Iterator<Item = (u32, &T)> {
+        self.entries
+            .iter()
+            .enumerate()
+            .filter_map(|(i, slot)| slot.as_deref().map(|v| (i as u32, v)))
+    }
+
+    #[cfg(test)]
+    pub fn is_allocated(&self, idx: u32) -> bool {
+        self.entries.get(idx as usize).is_some_and(|s| s.is_some())
+    }
+
     /// Get a mutable reference and an immutable reference to two different
     /// slots simultaneously. Uses `split_at_mut` — zero unsafe.
     ///

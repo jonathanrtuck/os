@@ -517,6 +517,49 @@ impl Endpoint {
     pub fn unbind_event(&mut self) {
         self.bound_event = None;
     }
+
+    #[cfg(test)]
+    pub fn verify_internal_counts(&self) -> Result<(), &'static str> {
+        let actual_active = self.active_replies.iter().filter(|s| s.is_some()).count();
+        if actual_active != self.active_reply_count as usize {
+            return Err("active_reply_count mismatch");
+        }
+
+        let actual_recv = self.recv_waiters.iter().filter(|s| s.is_some()).count();
+        if actual_recv != self.recv_waiter_count {
+            return Err("recv_waiter_count mismatch");
+        }
+
+        let ring_sum: usize = self.send_queue.rings.iter().map(|r| r.len as usize).sum();
+        if ring_sum != self.send_queue.total as usize {
+            return Err("send_queue total mismatch");
+        }
+
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn all_caller_thread_ids(&self) -> alloc::vec::Vec<crate::types::ThreadId> {
+        let mut ids = alloc::vec::Vec::new();
+        for ring in &self.send_queue.rings {
+            for slot in &ring.slots[..ring.len as usize] {
+                if let Some(call) = slot {
+                    ids.push(call.caller);
+                }
+            }
+        }
+        for slot in &self.active_replies {
+            if let Some(r) = slot {
+                ids.push(r.caller);
+            }
+        }
+        ids
+    }
+
+    #[cfg(test)]
+    pub fn all_recv_waiter_ids(&self) -> alloc::vec::Vec<crate::types::ThreadId> {
+        self.recv_waiters.iter().filter_map(|s| *s).collect()
+    }
 }
 
 #[cfg(test)]

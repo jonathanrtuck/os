@@ -230,6 +230,17 @@ impl HandleTable {
     pub fn count(&self) -> usize {
         self.count.load(Ordering::Relaxed)
     }
+
+    pub fn iter_handles(&self) -> impl Iterator<Item = (HandleId, &Handle)> {
+        self.entries
+            .iter()
+            .enumerate()
+            .filter_map(|(i, slot)| slot.as_ref().map(|h| (HandleId(i as u32), h)))
+    }
+
+    pub fn free_slot_count(&self) -> usize {
+        config::MAX_HANDLES - self.count()
+    }
 }
 
 #[cfg(test)]

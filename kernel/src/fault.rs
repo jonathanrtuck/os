@@ -165,6 +165,11 @@ mod tests {
         );
 
         k.threads.alloc(thread);
+        k.threads
+            .get_mut(0)
+            .unwrap()
+            .set_state(crate::thread::ThreadRunState::Running);
+        k.scheduler.core_mut(0).set_current(Some(ThreadId(0)));
 
         k
     }

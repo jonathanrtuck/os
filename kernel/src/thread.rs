@@ -330,6 +330,15 @@ impl RunQueue {
     pub fn total_ready(&self) -> usize {
         self.queues.iter().map(|q| q.len()).sum()
     }
+
+    #[cfg(test)]
+    pub fn all_queued_thread_ids(&self) -> alloc::vec::Vec<ThreadId> {
+        let mut ids = alloc::vec::Vec::new();
+        for q in &self.queues {
+            ids.extend(q.iter().copied());
+        }
+        ids
+    }
 }
 
 /// Multi-core fixed-priority preemptive scheduler.
