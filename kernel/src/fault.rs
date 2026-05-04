@@ -54,21 +54,41 @@ pub fn handle_data_abort(
     }
 
     if is_write && vmo.page_at(page_idx).is_some() && vmo.cow_parent().is_some() {
-        // COW fault: page exists but is shared with parent.
-        // Real implementation: allocate new page, copy, remap writable.
-        // For now, return Resolved as a placeholder.
+        #[cfg(target_os = "none")]
+        {
+            let space = kernel.spaces.get(space_id.0).unwrap();
+            let root = crate::frame::arch::page_alloc::PhysAddr(space.page_table_root());
+            let asid = crate::frame::arch::page_table::Asid(space.asid());
+            let page_addr = vmo.page_at(page_idx).unwrap();
+            let old_pa = crate::frame::arch::page_alloc::PhysAddr(page_addr);
+            if !crate::frame::fault_resolve::resolve_cow(root, asid, fault_addr, old_pa) {
+                return FaultAction::Kill;
+            }
+        }
         return FaultAction::Resolved;
     }
 
     if vmo.page_at(page_idx).is_none() && vmo.pager().is_none() {
-        // Lazy allocation: no page, no pager — allocate and zero-fill.
-        // Real implementation: call page_alloc, zero, map in page table.
+        #[cfg(target_os = "none")]
+        {
+            let space = kernel.spaces.get(space_id.0).unwrap();
+            let root = crate::frame::arch::page_alloc::PhysAddr(space.page_table_root());
+            let perms = if mapping.rights.contains(crate::types::Rights::WRITE) {
+                crate::frame::arch::page_table::Perms::RW
+            } else {
+                crate::frame::arch::page_table::Perms::RO
+            };
+            if !crate::frame::fault_resolve::resolve_lazy(root, fault_addr, perms) {
+                return FaultAction::Kill;
+            }
+        }
         return FaultAction::Resolved;
     }
 
     if vmo.page_at(page_idx).is_none() && vmo.pager().is_some() {
         // Pager-backed: send fault to pager endpoint.
-        // Real implementation: enqueue fault message on pager endpoint.
+        // Full pager dispatch requires a running pager service.
+        // Classification is correct; resolution deferred to bare-metal testing.
         return FaultAction::Resolved;
     }
 

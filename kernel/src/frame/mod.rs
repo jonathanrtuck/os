@@ -6,6 +6,7 @@
 
 #[cfg(any(target_os = "none", test))]
 pub mod arch;
+pub mod fault_resolve;
 pub mod firmware;
 #[cfg(target_os = "none")]
 pub mod heap;
