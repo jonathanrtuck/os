@@ -63,7 +63,6 @@ struct Waiter {
 pub struct Event {
     pub id: EventId,
     bits: u64,
-    generation: u64,
     waiters: [Option<Waiter>; config::MAX_WAITERS_PER_EVENT],
     waiter_count: usize,
     bound_endpoint: Option<EndpointId>,
@@ -75,7 +74,6 @@ impl Event {
         Event {
             id,
             bits: 0,
-            generation: 0,
             waiters: [None; config::MAX_WAITERS_PER_EVENT],
             waiter_count: 0,
             bound_endpoint: None,
@@ -84,10 +82,6 @@ impl Event {
 
     pub fn bits(&self) -> u64 {
         self.bits
-    }
-
-    pub fn generation(&self) -> u64 {
-        self.generation
     }
 
     pub fn bound_endpoint(&self) -> Option<EndpointId> {
@@ -183,10 +177,6 @@ impl Event {
         self.bound_endpoint = None;
     }
 
-    /// Increment generation, revoking all handles to this event.
-    pub fn revoke(&mut self) {
-        self.generation += 1;
-    }
 }
 
 #[cfg(test)]
@@ -348,14 +338,4 @@ mod tests {
         assert!(e.bind_endpoint(EndpointId(8)).is_ok());
     }
 
-    #[test]
-    fn generation_revoke() {
-        let mut e = make_event(0);
-
-        assert_eq!(e.generation(), 0);
-
-        e.revoke();
-
-        assert_eq!(e.generation(), 1);
-    }
 }

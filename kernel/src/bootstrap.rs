@@ -26,7 +26,7 @@ pub fn create_init(kernel: &mut Kernel, init_binary: &[u8]) -> Result<ThreadId, 
 
     let asid = kernel.alloc_asid()?;
     let space = AddressSpace::new(AddressSpaceId(0), asid, 0);
-    let space_idx = kernel
+    let (space_idx, space_gen) = kernel
         .spaces
         .alloc(space)
         .ok_or(SyscallError::OutOfMemory)?;
@@ -35,7 +35,7 @@ pub fn create_init(kernel: &mut Kernel, init_binary: &[u8]) -> Result<ThreadId, 
 
     let code_size = init_binary.len().next_multiple_of(config::PAGE_SIZE);
     let code_vmo = Vmo::new(VmoId(0), code_size, VmoFlags::NONE);
-    let code_idx = kernel
+    let (code_idx, code_gen) = kernel
         .vmos
         .alloc(code_vmo)
         .ok_or(SyscallError::OutOfMemory)?;
@@ -43,7 +43,7 @@ pub fn create_init(kernel: &mut Kernel, init_binary: &[u8]) -> Result<ThreadId, 
     kernel.vmos.get_mut(code_idx).unwrap().id = VmoId(code_idx);
 
     let stack_vmo = Vmo::new(VmoId(0), INIT_STACK_SIZE, VmoFlags::NONE);
-    let stack_idx = kernel
+    let (stack_idx, _stack_gen) = kernel
         .vmos
         .alloc(stack_vmo)
         .ok_or(SyscallError::OutOfMemory)?;
@@ -58,16 +58,6 @@ pub fn create_init(kernel: &mut Kernel, init_binary: &[u8]) -> Result<ThreadId, 
         .ok_or(SyscallError::InvalidArgument)?;
     let code_va = space.map_vmo(VmoId(code_idx), code_size, rx, INIT_CODE_VA)?;
     let stack_va = space.map_vmo(VmoId(stack_idx), INIT_STACK_SIZE, rw, INIT_STACK_VA)?;
-    let space_gen = kernel
-        .spaces
-        .get(space_idx)
-        .ok_or(SyscallError::InvalidArgument)?
-        .generation();
-    let code_gen = kernel
-        .vmos
-        .get(code_idx)
-        .ok_or(SyscallError::InvalidArgument)?
-        .generation();
     let space = kernel
         .spaces
         .get_mut(space_idx)
@@ -142,7 +132,7 @@ pub fn create_init(kernel: &mut Kernel, init_binary: &[u8]) -> Result<ThreadId, 
         stack_top,
         0,
     );
-    let thread_idx = kernel
+    let (thread_idx, _thread_gen) = kernel
         .threads
         .alloc(thread)
         .ok_or(SyscallError::OutOfMemory)?;

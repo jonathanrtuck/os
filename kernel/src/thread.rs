@@ -200,10 +200,6 @@ impl Thread {
         self.exit_code = Some(code);
     }
 
-    pub fn generation(&self) -> u64 {
-        0
-    }
-
     #[cfg(any(target_os = "none", test))]
     pub fn register_state(&self) -> Option<&RegisterState> {
         self.register_state.as_deref()
@@ -461,13 +457,6 @@ mod tests {
 
         assert_eq!(t.register_state().unwrap().pc, 0x1000);
         assert_eq!(t.register_state().unwrap().sp, 0x2000);
-    }
-
-    #[test]
-    fn thread_generation_is_zero() {
-        let t = make_thread(0, Priority::Medium);
-
-        assert_eq!(t.generation(), 0);
     }
 
     #[test]

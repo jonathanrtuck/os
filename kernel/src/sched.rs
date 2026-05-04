@@ -131,7 +131,7 @@ mod tests {
             0x2000,
             0,
         );
-        let idx = k.threads.alloc(thread).unwrap();
+        let (idx, _) = k.threads.alloc(thread).unwrap();
 
         k.threads.get_mut(idx).unwrap().id = ThreadId(idx);
         k.threads

@@ -124,7 +124,6 @@ struct ActiveReply {
 /// for calls). Thread blocking/waking is the syscall layer's concern.
 pub struct Endpoint {
     pub id: EndpointId,
-    generation: u64,
     send_queue: Vec<PendingCall>,
     active_replies: Vec<ActiveReply>,
     recv_waiters: [Option<ThreadId>; config::MAX_RECV_WAITERS],
@@ -140,7 +139,6 @@ impl Endpoint {
     pub fn new(id: EndpointId) -> Self {
         Endpoint {
             id,
-            generation: 0,
             send_queue: Vec::with_capacity(4),
             active_replies: Vec::with_capacity(4),
             recv_waiters: [None; config::MAX_RECV_WAITERS],
@@ -150,10 +148,6 @@ impl Endpoint {
             bound_event: None,
             peer_closed: false,
         }
-    }
-
-    pub fn generation(&self) -> u64 {
-        self.generation
     }
 
     pub fn is_peer_closed(&self) -> bool {
@@ -346,10 +340,6 @@ impl Endpoint {
         self.bound_event = None;
     }
 
-    /// Increment generation, revoking all handles.
-    pub fn revoke(&mut self) {
-        self.generation += 1;
-    }
 }
 
 #[cfg(test)]
@@ -636,17 +626,6 @@ mod tests {
         ep.unbind_event();
 
         assert!(ep.bound_event().is_none());
-    }
-
-    #[test]
-    fn generation_revoke() {
-        let mut ep = make_endpoint(0);
-
-        assert_eq!(ep.generation(), 0);
-
-        ep.revoke();
-
-        assert_eq!(ep.generation(), 1);
     }
 
     // -- Message --

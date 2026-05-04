@@ -140,7 +140,7 @@ mod tests {
     fn write_to_readonly_kills() {
         let mut k = setup();
         let vmo = Vmo::new(VmoId(0), config::PAGE_SIZE, VmoFlags::NONE);
-        let idx = k.vmos.alloc(vmo).unwrap();
+        let (idx, _) = k.vmos.alloc(vmo).unwrap();
         let space = k.spaces.get_mut(0).unwrap();
         let va = space
             .map_vmo(VmoId(idx), config::PAGE_SIZE, Rights::READ, 0)
@@ -154,7 +154,7 @@ mod tests {
     fn lazy_alloc_resolves() {
         let mut k = setup();
         let vmo = Vmo::new(VmoId(0), config::PAGE_SIZE, VmoFlags::NONE);
-        let idx = k.vmos.alloc(vmo).unwrap();
+        let (idx, _) = k.vmos.alloc(vmo).unwrap();
         let rw = Rights(Rights::READ.0 | Rights::WRITE.0);
         let space = k.spaces.get_mut(0).unwrap();
         let va = space.map_vmo(VmoId(idx), config::PAGE_SIZE, rw, 0).unwrap();

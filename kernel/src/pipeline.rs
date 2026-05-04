@@ -38,12 +38,12 @@ mod tests {
     fn setup_two_services() -> TwoServiceSetup {
         let mut k = Box::new(Kernel::new(2));
         let svc_space = AddressSpace::new(AddressSpaceId(0), 1, 0);
-        let svc_idx = k.spaces.alloc(svc_space).unwrap();
+        let (svc_idx, _) = k.spaces.alloc(svc_space).unwrap();
 
         k.spaces.get_mut(svc_idx).unwrap().id = AddressSpaceId(svc_idx);
 
         let comp_space = AddressSpace::new(AddressSpaceId(0), 2, 0);
-        let comp_idx = k.spaces.alloc(comp_space).unwrap();
+        let (comp_idx, _) = k.spaces.alloc(comp_space).unwrap();
 
         k.spaces.get_mut(comp_idx).unwrap().id = AddressSpaceId(comp_idx);
 
@@ -55,7 +55,7 @@ mod tests {
             0x2000,
             0,
         );
-        let svc_tid = k.threads.alloc(svc_thread).unwrap();
+        let (svc_tid, _) = k.threads.alloc(svc_thread).unwrap();
 
         k.threads.get_mut(svc_tid).unwrap().id = ThreadId(svc_tid);
 
@@ -67,22 +67,22 @@ mod tests {
             0x2000,
             0,
         );
-        let comp_tid = k.threads.alloc(comp_thread).unwrap();
+        let (comp_tid, _) = k.threads.alloc(comp_thread).unwrap();
 
         k.threads.get_mut(comp_tid).unwrap().id = ThreadId(comp_tid);
 
         let shared_vmo = Vmo::new(VmoId(0), config::PAGE_SIZE * 4, VmoFlags::NONE);
-        let vmo_idx = k.vmos.alloc(shared_vmo).unwrap();
+        let (vmo_idx, _) = k.vmos.alloc(shared_vmo).unwrap();
 
         k.vmos.get_mut(vmo_idx).unwrap().id = VmoId(vmo_idx);
 
         let event = Event::new(EventId(0));
-        let evt_idx = k.events.alloc(event).unwrap();
+        let (evt_idx, _) = k.events.alloc(event).unwrap();
 
         k.events.get_mut(evt_idx).unwrap().id = EventId(evt_idx);
 
         let endpoint = Endpoint::new(EndpointId(0));
-        let ep_idx = k.endpoints.alloc(endpoint).unwrap();
+        let (ep_idx, _) = k.endpoints.alloc(endpoint).unwrap();
 
         k.endpoints.get_mut(ep_idx).unwrap().id = EndpointId(ep_idx);
 
@@ -190,7 +190,7 @@ mod tests {
     #[test]
     fn handle_rights_attenuate_on_dup() {
         let mut s = setup_two_services();
-        let vmo_gen = s.kernel.vmos.get(s.shared_vmo.0).unwrap().generation();
+        let vmo_gen = s.kernel.vmos.generation(s.shared_vmo.0);
         let svc_space = s.kernel.spaces.get_mut(s.svc_space.0).unwrap();
         let full_hid = svc_space
             .handles_mut()
@@ -230,7 +230,7 @@ mod tests {
         let mut s = setup_two_services();
         let parent = s.kernel.vmos.get(s.shared_vmo.0).unwrap();
         let snap = parent.snapshot(VmoId(0));
-        let snap_idx = s.kernel.vmos.alloc(snap).unwrap();
+        let (snap_idx, _) = s.kernel.vmos.alloc(snap).unwrap();
 
         s.kernel.vmos.get_mut(snap_idx).unwrap().id = VmoId(snap_idx);
 

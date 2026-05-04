@@ -165,7 +165,6 @@ pub struct AddressSpace {
     handles: HandleTable,
     mappings: Vec<MappingRecord>,
     va_allocator: VaAllocator,
-    generation: u64,
 }
 
 #[allow(clippy::new_without_default)]
@@ -178,7 +177,6 @@ impl AddressSpace {
             handles: HandleTable::new(),
             mappings: Vec::new(),
             va_allocator: VaAllocator::new(USER_VA_BASE, USER_VA_SIZE),
-            generation: 0,
         }
     }
 
@@ -201,10 +199,6 @@ impl AddressSpace {
 
     pub fn handles_mut(&mut self) -> &mut HandleTable {
         &mut self.handles
-    }
-
-    pub fn generation(&self) -> u64 {
-        self.generation
     }
 
     pub fn mappings(&self) -> &[MappingRecord] {
@@ -268,11 +262,6 @@ impl AddressSpace {
             .find(|m| addr >= m.va_start && addr < m.va_start + m.size)
     }
 
-    /// Increment generation, revoking all existing handles to this space.
-    pub fn revoke(&mut self) {
-        self.generation += 1;
-    }
-
     /// Destroy the address space. Kills threads via callback, returns
     /// mappings and handle table for the caller to clean up VMO refcounts
     /// and trigger peer-closed events.
@@ -306,7 +295,6 @@ mod tests {
         assert_eq!(space.id, AddressSpaceId(0));
         assert_eq!(space.asid(), 1);
         assert_eq!(space.page_table_root(), 0xDEAD_0000);
-        assert_eq!(space.generation(), 0);
         assert_eq!(space.mapping_count(), 0);
     }
 
@@ -448,17 +436,6 @@ mod tests {
         space.destroy(&mut cb);
 
         assert_eq!(cb.0, Some(AddressSpaceId(7)));
-    }
-
-    #[test]
-    fn generation_revoke() {
-        let mut space = make_space(0);
-
-        assert_eq!(space.generation(), 0);
-
-        space.revoke();
-
-        assert_eq!(space.generation(), 1);
     }
 
     #[test]

@@ -255,11 +255,10 @@ impl Kernel {
 
         let space_id = self.thread_space_id(current)?;
         let vmo = Vmo::new(VmoId(0), size, VmoFlags(flags));
-        let idx = self.vmos.alloc(vmo).ok_or(SyscallError::OutOfMemory)?;
+        let (idx, generation) = self.vmos.alloc(vmo).ok_or(SyscallError::OutOfMemory)?;
 
         self.vmos.get_mut(idx).unwrap().id = VmoId(idx);
 
-        let generation = self.vmos.get(idx).unwrap().generation();
         let space = self
             .spaces
             .get_mut(space_id.0)
@@ -340,11 +339,10 @@ impl Kernel {
             .get(handle.object_id)
             .ok_or(SyscallError::InvalidHandle)?;
         let snap = parent.snapshot(VmoId(0));
-        let idx = self.vmos.alloc(snap).ok_or(SyscallError::OutOfMemory)?;
+        let (idx, generation) = self.vmos.alloc(snap).ok_or(SyscallError::OutOfMemory)?;
 
         self.vmos.get_mut(idx).unwrap().id = VmoId(idx);
 
-        let generation = self.vmos.get(idx).unwrap().generation();
         let space = self
             .spaces
             .get_mut(space_id.0)
@@ -419,11 +417,10 @@ impl Kernel {
     ) -> Result<u64, SyscallError> {
         let space_id = self.thread_space_id(current)?;
         let ep = Endpoint::new(EndpointId(0));
-        let idx = self.endpoints.alloc(ep).ok_or(SyscallError::OutOfMemory)?;
+        let (idx, generation) = self.endpoints.alloc(ep).ok_or(SyscallError::OutOfMemory)?;
 
         self.endpoints.get_mut(idx).unwrap().id = EndpointId(idx);
 
-        let generation = self.endpoints.get(idx).unwrap().generation();
         let space = self
             .spaces
             .get_mut(space_id.0)
@@ -451,11 +448,10 @@ impl Kernel {
     ) -> Result<u64, SyscallError> {
         let space_id = self.thread_space_id(current)?;
         let event = Event::new(EventId(0));
-        let idx = self.events.alloc(event).ok_or(SyscallError::OutOfMemory)?;
+        let (idx, generation) = self.events.alloc(event).ok_or(SyscallError::OutOfMemory)?;
 
         self.events.get_mut(idx).unwrap().id = EventId(idx);
 
-        let generation = self.events.get(idx).unwrap().generation();
         let space = self
             .spaces
             .get_mut(space_id.0)
@@ -548,11 +544,10 @@ impl Kernel {
         let caller_space_id = self.thread_space_id(current)?;
         let asid = self.alloc_asid()?;
         let space = AddressSpace::new(AddressSpaceId(0), asid, 0);
-        let idx = self.spaces.alloc(space).ok_or(SyscallError::OutOfMemory)?;
+        let (idx, generation) = self.spaces.alloc(space).ok_or(SyscallError::OutOfMemory)?;
 
         self.spaces.get_mut(idx).unwrap().id = AddressSpaceId(idx);
 
-        let generation = self.spaces.get(idx).unwrap().generation();
         let caller_space = self
             .spaces
             .get_mut(caller_space_id.0)
@@ -1043,7 +1038,7 @@ impl Kernel {
             stack_top,
             arg,
         );
-        let idx = self
+        let (idx, generation) = self
             .threads
             .alloc(thread)
             .ok_or(SyscallError::OutOfMemory)?;
@@ -1055,7 +1050,6 @@ impl Kernel {
         self.scheduler
             .enqueue(core, ThreadId(idx), Priority::Medium);
 
-        let generation = self.threads.get(idx).unwrap().generation();
         let space = self
             .spaces
             .get_mut(space_id.0)
@@ -1115,7 +1109,7 @@ impl Kernel {
             stack_top,
             arg,
         );
-        let idx = self
+        let (idx, generation) = self
             .threads
             .alloc(thread)
             .ok_or(SyscallError::OutOfMemory)?;
@@ -1159,7 +1153,6 @@ impl Kernel {
         self.scheduler
             .enqueue(core, ThreadId(idx), Priority::Medium);
 
-        let generation = self.threads.get(idx).unwrap().generation();
         let space = self
             .spaces
             .get_mut(caller_space_id.0)

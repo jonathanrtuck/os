@@ -24,7 +24,6 @@ pub struct Vmo {
     size: usize,
     flags: VmoFlags,
     sealed: bool,
-    generation: u64,
     pager: Option<EndpointId>,
     cow_parent: Option<VmoId>,
     has_pages: bool,
@@ -41,7 +40,6 @@ impl Vmo {
             size,
             flags,
             sealed: false,
-            generation: 0,
             pager: None,
             cow_parent: None,
             has_pages: false,
@@ -55,10 +53,6 @@ impl Vmo {
 
     pub fn page_count(&self) -> usize {
         self.pages.len()
-    }
-
-    pub fn generation(&self) -> u64 {
-        self.generation
     }
 
     pub fn is_sealed(&self) -> bool {
@@ -127,7 +121,6 @@ impl Vmo {
             size: self.size,
             flags: self.flags,
             sealed: false,
-            generation: 0,
             pager: self.pager,
             cow_parent: Some(self.id),
             has_pages: self.has_pages,
@@ -178,11 +171,6 @@ impl Vmo {
         self.pager = Some(endpoint);
 
         Ok(())
-    }
-
-    /// Increment the generation counter, revoking all existing handles.
-    pub fn revoke(&mut self) {
-        self.generation += 1;
     }
 
     /// Replace a page during COW fault resolution.
@@ -339,21 +327,6 @@ mod tests {
             vmo.set_pager(EndpointId(5)),
             Err(SyscallError::InvalidArgument)
         );
-    }
-
-    #[test]
-    fn generation_revoke() {
-        let mut vmo = make_vmo(1);
-
-        assert_eq!(vmo.generation(), 0);
-
-        vmo.revoke();
-
-        assert_eq!(vmo.generation(), 1);
-
-        vmo.revoke();
-
-        assert_eq!(vmo.generation(), 2);
     }
 
     #[test]
