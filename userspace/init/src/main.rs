@@ -30,6 +30,7 @@ fn spawn_service(entry: &manifest::ServiceEntry) -> Result<Handle, abi::types::S
 }
 
 #[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.boot")]
 extern "C" fn _start() -> ! {
     let page_size = abi::system::info(abi::system::INFO_PAGE_SIZE).unwrap_or(0);
 

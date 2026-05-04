@@ -118,10 +118,10 @@ fn putc(c: u8) {
 
 #[inline(always)]
 fn uart0_dr() -> usize {
-    platform::UART_BASE
+    platform::device_addr(platform::UART_BASE)
 }
 
 #[inline(always)]
 fn uart0_fr() -> usize {
-    platform::UART_BASE + 0x18
+    platform::device_addr(platform::UART_BASE + 0x18)
 }

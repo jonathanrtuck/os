@@ -145,6 +145,8 @@ pub fn create_init(kernel: &mut Kernel, init_binary: &[u8]) -> Result<ThreadId, 
         .scheduler
         .enqueue(core, ThreadId(thread_idx), Priority::Medium);
 
+    kernel.alive_threads += 1;
+
     Ok(ThreadId(thread_idx))
 }
 

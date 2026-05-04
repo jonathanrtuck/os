@@ -112,6 +112,19 @@ pub fn init_percpu_bsp() {
     sysreg::set_tpidr_el1(ptr);
 }
 
+/// Re-set TPIDR_EL1 to the upper-half VA after MMU enable.
+///
+/// Must be called from the upper-half VA context. At that point, adrp
+/// resolves PER_CPU_DATA to its upper-half VA directly.
+#[cfg(target_os = "none")]
+pub fn reinit_percpu_bsp() {
+    // SAFETY: PER_CPU_DATA is initialized at compile time. Slot 0 belongs to
+    // the BSP. No concurrent access — secondaries haven't started yet.
+    let ptr = unsafe { &(*PER_CPU_DATA.0.get())[0] as *const PerCpu as u64 };
+
+    sysreg::set_tpidr_el1(ptr);
+}
+
 /// Initialize per-CPU data for a secondary core. Called from secondary_main.
 #[cfg(target_os = "none")]
 pub fn init_percpu(core_id: usize) {
@@ -201,6 +214,8 @@ pub fn stack_top_for_core(core_id: usize, stacks_base: usize) -> usize {
 // Secondary core lifecycle (bare-metal only)
 // ---------------------------------------------------------------------------
 
+// SAFETY: __secondary_entry is the assembly entry stub in secondary_entry.S.
+// We only take its address to pass to PSCI CPU_ON as the entry point.
 #[cfg(target_os = "none")]
 unsafe extern "C" {
     fn __secondary_entry();
@@ -218,8 +233,10 @@ pub fn activate_secondaries() {
         return;
     }
 
-    let entry = __secondary_entry as *const () as usize as u64;
-    let stacks_base = CORE_STACKS.0.get() as usize;
+    // PSCI CPU_ON needs physical addresses. Since the BSP now runs at
+    // upper-half VAs, adrp gives VAs — convert to PAs.
+    let entry = platform::virt_to_phys(__secondary_entry as *const () as usize) as u64;
+    let stacks_base = platform::virt_to_phys(CORE_STACKS.0.get() as usize);
 
     for core_id in 1..count {
         let stack_top = stack_top_for_core(core_id, stacks_base) as u64;
@@ -258,15 +275,41 @@ pub fn activate_secondaries() {
     crate::println!("{}/{} cores online", online, count);
 }
 
-/// Rust entry point for secondary cores, called from secondary_entry.S.
+/// Phase 1: secondary core boot at physical address. Sets up exception
+/// vectors and enables the MMU, which branches to secondary_main_upper.
+///
+/// Called from secondary_entry.S via `bl secondary_main`.
 #[cfg(target_os = "none")]
+// SAFETY: no_mangle is required so secondary_entry.S can call this symbol.
+// The function signature matches the assembly calling convention (x0 = core_id).
 #[unsafe(no_mangle)]
 extern "C" fn secondary_main(core_id: usize) -> ! {
     super::exception::init();
-    super::mmu::init_secondary();
-    super::gic::init_per_core(core_id);
 
     init_percpu(core_id);
+
+    // init_secondary enables MMU and branches to secondary_main_upper
+    // at the upper-half VA. Never returns.
+    super::mmu::init_secondary();
+
+    unreachable!();
+}
+
+/// Phase 2: secondary core boot at upper-half VA.
+///
+/// Branched to by the MMU trampoline in configure_and_enable.
+#[cfg(target_os = "none")]
+// SAFETY: no_mangle is required so mmu.rs can take its address via
+// `unsafe extern "C" { fn secondary_main_upper(); }`.
+#[unsafe(no_mangle)]
+extern "C" fn secondary_main_upper() -> ! {
+    super::exception::reinit_vbar();
+
+    let core_id = super::sysreg::mpidr_el1() as usize & 0xFF;
+
+    reinit_percpu(core_id);
+
+    super::gic::init_per_core(core_id);
 
     crate::println!("core {}: alive", core_id);
 
@@ -275,6 +318,16 @@ extern "C" fn secondary_main(core_id: usize) -> ! {
     loop {
         super::halt();
     }
+}
+
+#[cfg(target_os = "none")]
+fn reinit_percpu(core_id: usize) {
+    // SAFETY: core_id was extracted from MPIDR_EL1 by the caller. Each
+    // core reinitializes only its own slot. Called after MMU enable, so the
+    // address resolves to the upper-half VA.
+    let ptr = unsafe { &(*PER_CPU_DATA.0.get())[core_id] as *const PerCpu as u64 };
+
+    sysreg::set_tpidr_el1(ptr);
 }
 
 #[cfg(test)]

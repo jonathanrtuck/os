@@ -1,0 +1,97 @@
+#!/bin/bash
+# Bare-metal integration tests — builds the kernel with the test init binary,
+# boots it under the hypervisor, and verifies exit code + serial output.
+#
+# Usage: scripts/integration-test [--verbose]
+
+set -eo pipefail
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+DIM='\033[2m'
+BOLD='\033[1m'
+RESET='\033[0m'
+
+TIMEOUT=30
+VERBOSE=0
+
+for arg in "$@"; do
+    case "$arg" in
+        --verbose|-v) VERBOSE=1 ;;
+    esac
+done
+
+pass() { printf "${GREEN}pass${RESET}  %s\n" "$1"; }
+fail() { printf "${RED}FAIL${RESET}  %s\n" "$1"; exit 1; }
+info() { printf "${DIM}info${RESET}  %s\n" "$1"; }
+
+# ── Build ───────────────────────────────────────────────────────────────
+
+info "building kernel with integration-tests init..."
+BUILD_OUTPUT=$(cargo build -p kernel --features integration-tests --release 2>&1)
+if [ $? -ne 0 ]; then
+    echo "$BUILD_OUTPUT"
+    fail "kernel build failed"
+fi
+pass "build"
+
+# ── Locate binary ──────────────────────────────────────────────────────
+
+KERNEL_ELF="target/aarch64-unknown-none/release/kernel"
+if [ ! -f "$KERNEL_ELF" ]; then
+    fail "kernel binary not found at $KERNEL_ELF"
+fi
+
+# ── Boot under hypervisor ──────────────────────────────────────────────
+
+if ! command -v hypervisor &>/dev/null; then
+    fail "hypervisor not found in PATH (install from ~/Sites/hypervisor)"
+fi
+
+info "booting under hypervisor (timeout ${TIMEOUT}s)..."
+
+SERIAL_LOG=$(mktemp /tmp/integration-test-XXXXXX.log)
+trap "rm -f $SERIAL_LOG" EXIT
+
+set +e
+hypervisor --no-gpu --timeout "$TIMEOUT" "$KERNEL_ELF" > "$SERIAL_LOG" 2>&1
+EXIT_CODE=$?
+set -e
+
+if [ "$VERBOSE" -eq 1 ]; then
+    printf "${DIM}"
+    cat "$SERIAL_LOG"
+    printf "${RESET}"
+fi
+
+# ── Check results ──────────────────────────────────────────────────────
+
+if [ "$EXIT_CODE" -eq 2 ]; then
+    echo ""
+    info "serial output:"
+    cat "$SERIAL_LOG"
+    fail "hypervisor timeout (${TIMEOUT}s) — kernel hung or deadlocked"
+fi
+
+if [ "$EXIT_CODE" -ne 0 ]; then
+    echo ""
+    info "serial output:"
+    cat "$SERIAL_LOG"
+    fail "hypervisor exited with code $EXIT_CODE"
+fi
+
+# Check for the integration test exit marker in serial output.
+if grep -q "INTEGRATION TEST: EXIT 0" "$SERIAL_LOG"; then
+    pass "all bare-metal integration tests passed"
+elif grep -q "INTEGRATION TEST: EXIT" "$SERIAL_LOG"; then
+    CODE=$(grep "INTEGRATION TEST: EXIT" "$SERIAL_LOG" | head -1 | awk '{print $NF}')
+    echo ""
+    info "serial output:"
+    cat "$SERIAL_LOG"
+    fail "integration tests failed with exit code $CODE"
+else
+    echo ""
+    info "serial output:"
+    cat "$SERIAL_LOG"
+    fail "no test exit marker found in serial output"
+fi

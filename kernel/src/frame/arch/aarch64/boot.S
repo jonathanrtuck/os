@@ -9,6 +9,11 @@
 //   4. Drop from EL2 to EL1 (QEMU enters at EL2 by default)
 //   5. Enable FP/ASIMD
 //   6. Jump to Rust
+//
+// The kernel is linked at upper-half VAs but this code executes at the
+// physical load address (identity-mapped via TTBR0 before MMU enable).
+// All address references use adrp/add (PC-relative) which resolves to
+// physical addresses regardless of the link VMA.
 
 .section .text.boot, "ax"
 .global _start
@@ -23,13 +28,16 @@ _start:
     and     x0, x0, #0xFF
     cbnz    x0, .Lpark
 
-    // Set up a physical stack for early boot.
-    ldr     x0, =__stack_top
+    // Set up a physical stack for early boot (PC-relative: resolves to PA).
+    adrp    x0, __stack_top
+    add     x0, x0, :lo12:__stack_top
     mov     sp, x0
 
-    // Zero BSS.
-    ldr     x1, =__bss_start
-    ldr     x2, =__bss_end
+    // Zero BSS (PC-relative addresses).
+    adrp    x1, __bss_start
+    add     x1, x1, :lo12:__bss_start
+    adrp    x2, __bss_end
+    add     x2, x2, :lo12:__bss_end
 .Lzero_bss:
     cmp     x1, x2
     b.ge    .Lbss_done
@@ -76,7 +84,8 @@ _start:
     // Use SP_EL1.
     msr     spsel, #1
     isb
-    ldr     x0, =__stack_top
+    adrp    x0, __stack_top
+    add     x0, x0, :lo12:__stack_top
     mov     sp, x0
 
     // Enable FP/ASIMD (otherwise any float instruction faults).

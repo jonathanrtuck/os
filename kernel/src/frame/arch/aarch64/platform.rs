@@ -5,7 +5,7 @@
 //! start with compiled defaults and are overridden by [`update_from_dtb`]
 //! during early boot.
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 // ---------------------------------------------------------------------------
 // Fixed constants (not in DTB or needed before DTB scan)
@@ -17,8 +17,46 @@ pub const GIC_DIST_BASE: usize = 0x0800_0000;
 /// GICv3 redistributor base address.
 pub const GIC_REDIST_BASE: usize = 0x080A_0000;
 
-/// Kernel load address. — link.ld sync: `PHYS_BASE`
+/// Kernel physical load address. — link.ld sync: `PHYS_BASE`
 pub const KERNEL_BASE: usize = 0x4008_0000;
+
+/// Offset from physical to virtual address for kernel memory.
+///
+/// With T1SZ=28 the TTBR1 range starts at 0xFFFF_FFF0_0000_0000. The kernel
+/// is identity-mapped within that range: VA = PA + VA_OFFSET.
+///
+///   PA 0x4008_0000  →  VA 0xFFFF_FFF0_4008_0000
+///
+/// This constant is the single source of truth for the PA↔VA relationship.
+/// Every pointer cast from a physical address MUST go through phys_to_virt().
+pub const KERNEL_VA_OFFSET: usize = 0xFFFF_FFF0_0000_0000;
+
+static MMU_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+pub fn set_mmu_active() {
+    MMU_ACTIVE.store(true, Ordering::Release);
+}
+
+#[inline(always)]
+pub const fn phys_to_virt(pa: usize) -> usize {
+    pa.wrapping_add(KERNEL_VA_OFFSET)
+}
+
+#[inline(always)]
+pub const fn virt_to_phys(va: usize) -> usize {
+    va.wrapping_sub(KERNEL_VA_OFFSET)
+}
+
+/// Return a device MMIO address usable as a pointer. Before MMU enable
+/// this is the raw physical address; after, it is the TTBR1 upper-half VA.
+#[inline(always)]
+pub fn device_addr(pa: usize) -> usize {
+    if MMU_ACTIVE.load(Ordering::Relaxed) {
+        phys_to_virt(pa)
+    } else {
+        pa
+    }
+}
 
 /// pvpanic device base address (QEMU pvpanic-mmio spec).
 pub const PVPANIC_BASE: usize = 0x0902_0000;
@@ -57,40 +95,34 @@ pub fn ram_size() -> usize {
 /// these values. Falls back to compiled defaults if the DTB is absent
 /// or malformed.
 pub fn init(dtb_ptr: usize) {
-    match crate::frame::firmware::dtb::scan(dtb_ptr) {
-        Some(info) => {
-            if info.ram_base != 0 {
-                // The kernel binary is position-dependent (linked at
-                // KERNEL_BASE). The MMU identity map assumes RAM starts at
-                // the compiled default. A mismatch means the DTB describes
-                // a different platform than the one we were compiled for —
-                // the MMU tables would not cover the kernel, and enabling
-                // the MMU would fault immediately.
-                let expected = RAM_BASE_VAL.load(Ordering::Relaxed);
+    if let Some(info) = crate::frame::firmware::dtb::scan(dtb_ptr) {
+        if info.ram_base != 0 {
+            let expected = RAM_BASE_VAL.load(Ordering::Relaxed);
 
-                if info.ram_base != expected {
-                    panic!(
-                        "dtb ram_base {:#x} != expected {:#x}",
-                        info.ram_base, expected,
-                    );
+            if info.ram_base != expected {
+                // Can't use println! before MMU enable (vtable dispatch
+                // uses upper-half VAs). Just halt — the mismatch means
+                // the hypervisor and kernel disagree on memory layout.
+                loop {
+                    core::hint::spin_loop();
                 }
             }
-            if info.ram_size != 0 {
-                RAM_SIZE_VAL.store(info.ram_size, Ordering::Relaxed);
-            }
-            if info.core_count != 0 {
-                CORE_COUNT.store(info.core_count, Ordering::Relaxed);
-            }
-
-            crate::println!(
-                "dtb: ram {:#x}+{:#x}, {} core(s)",
-                info.ram_base,
-                info.ram_size,
-                info.core_count,
-            );
         }
-        None => {
-            crate::println!("dtb: not found, using defaults");
+        if info.ram_size != 0 {
+            RAM_SIZE_VAL.store(info.ram_size, Ordering::Relaxed);
+        }
+        if info.core_count != 0 {
+            CORE_COUNT.store(info.core_count, Ordering::Relaxed);
         }
     }
+}
+
+/// Print the DTB scan results. Called after MMU enable.
+pub fn print_info() {
+    crate::println!(
+        "dtb: ram {:#x}+{:#x}, {} core(s)",
+        ram_base(),
+        ram_size(),
+        core_count(),
+    );
 }

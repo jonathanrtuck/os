@@ -24,13 +24,12 @@ pub fn resolve_cow(
     let new_pa = page_alloc::alloc_page()?;
 
     // SAFETY: both old_pa and new_pa are valid physical addresses from the
-    // page allocator. Identity-mapped, so PA == VA for kernel access.
+    // page allocator. phys_to_virt maps to TTBR1 upper-half VAs.
     unsafe {
-        core::ptr::copy_nonoverlapping(
-            old_pa.0 as *const u8,
-            new_pa.0 as *mut u8,
-            crate::config::PAGE_SIZE,
-        );
+        let src = super::arch::platform::phys_to_virt(old_pa.0) as *const u8;
+        let dst = super::arch::platform::phys_to_virt(new_pa.0) as *mut u8;
+
+        core::ptr::copy_nonoverlapping(src, dst, crate::config::PAGE_SIZE);
     }
 
     // Break-before-make: unmap old valid PTE, TLBI, then map new PTE.

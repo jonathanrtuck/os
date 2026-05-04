@@ -1,5 +1,5 @@
 /*
- * Init service linker script — userspace binary at low VA.
+ * Integration test binary linker script.
  *
  * Must match INIT_CODE_VA in kernel/src/bootstrap.rs.
  * .text.boot is placed first so _start is at INIT_VA_BASE.

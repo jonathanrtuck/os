@@ -13,9 +13,15 @@ use core::sync::atomic::{AtomicU8, Ordering};
 #[cfg(target_os = "none")]
 use super::{
     page_alloc::{self, PhysAddr},
-    sysreg,
+    platform, sysreg,
 };
 use crate::config;
+
+#[cfg(target_os = "none")]
+#[inline(always)]
+fn pa_to_ptr<T>(pa: usize) -> *mut T {
+    platform::phys_to_virt(pa) as *mut T
+}
 
 /// Virtual address newtype.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -124,7 +130,7 @@ pub fn create_page_table() -> Option<(PhysAddr, Asid)> {
 
     // SAFETY: We just allocated this page; no other reference exists.
     unsafe {
-        let ptr = root.as_usize() as *mut u8;
+        let ptr: *mut u8 = pa_to_ptr(root.as_usize());
 
         core::ptr::write_bytes(ptr, 0, PAGE_SIZE);
     }
@@ -138,7 +144,7 @@ pub fn destroy_page_table(root: PhysAddr, asid: Asid) {
     // Walk and free all L3 table pages pointed to by L2 entries.
     // SAFETY: root is a valid page table root we own.
     unsafe {
-        let l2 = root.as_usize() as *const u64;
+        let l2: *const u64 = pa_to_ptr(root.as_usize());
 
         for i in 0..ENTRIES_PER_TABLE {
             let entry = core::ptr::read_volatile(l2.add(i));
@@ -170,7 +176,7 @@ pub fn map_page(root: PhysAddr, vaddr: VirtAddr, paddr: PhysAddr, perms: Perms) 
 
     // SAFETY: root is a valid L2 table page we own.
     unsafe {
-        let l2 = root.as_usize() as *mut u64;
+        let l2: *mut u64 = pa_to_ptr(root.as_usize());
         let l2_entry = core::ptr::read_volatile(l2.add(l2_idx));
 
         // Ensure L3 table exists.
@@ -179,7 +185,7 @@ pub fn map_page(root: PhysAddr, vaddr: VirtAddr, paddr: PhysAddr, perms: Perms) 
         } else {
             let new_l3 = page_alloc::alloc_page().expect("OOM: page table page");
 
-            core::ptr::write_bytes(new_l3.as_usize() as *mut u8, 0, PAGE_SIZE);
+            core::ptr::write_bytes(pa_to_ptr::<u8>(new_l3.as_usize()), 0, PAGE_SIZE);
 
             let desc = (new_l3.as_usize() as u64) | TABLE | VALID;
 
@@ -203,7 +209,7 @@ pub fn map_page(root: PhysAddr, vaddr: VirtAddr, paddr: PhysAddr, perms: Perms) 
         attrs |= PXN; // User pages are never kernel-executable.
 
         let desc = (paddr.as_usize() as u64) | attrs;
-        let l3 = l3_pa as *mut u64;
+        let l3: *mut u64 = pa_to_ptr(l3_pa);
 
         core::ptr::write_volatile(l3.add(l3_idx), desc);
     }
@@ -217,7 +223,7 @@ pub fn unmap_page(root: PhysAddr, vaddr: VirtAddr) -> Option<PhysAddr> {
 
     // SAFETY: root is a valid page table we own.
     unsafe {
-        let l2 = root.as_usize() as *const u64;
+        let l2: *const u64 = pa_to_ptr(root.as_usize());
         let l2_entry = core::ptr::read_volatile(l2.add(l2_idx));
 
         if l2_entry & VALID == 0 {
@@ -225,7 +231,7 @@ pub fn unmap_page(root: PhysAddr, vaddr: VirtAddr) -> Option<PhysAddr> {
         }
 
         let l3_pa = (l2_entry & PA_MASK) as usize;
-        let l3 = l3_pa as *mut u64;
+        let l3: *mut u64 = pa_to_ptr(l3_pa);
         let l3_entry = core::ptr::read_volatile(l3.add(l3_idx));
 
         if l3_entry & VALID == 0 {
@@ -248,7 +254,7 @@ pub fn set_cow(root: PhysAddr, vaddr: VirtAddr) {
 
     // SAFETY: root is a valid page table we own.
     unsafe {
-        let l2 = root.as_usize() as *const u64;
+        let l2: *const u64 = pa_to_ptr(root.as_usize());
         let l2_entry = core::ptr::read_volatile(l2.add(l2_idx));
 
         if l2_entry & VALID == 0 {
@@ -256,7 +262,7 @@ pub fn set_cow(root: PhysAddr, vaddr: VirtAddr) {
         }
 
         let l3_pa = (l2_entry & PA_MASK) as usize;
-        let l3 = l3_pa as *mut u64;
+        let l3: *mut u64 = pa_to_ptr(l3_pa);
         let mut entry = core::ptr::read_volatile(l3.add(l3_idx));
 
         if entry & VALID == 0 {
@@ -279,7 +285,7 @@ pub fn clear_write(root: PhysAddr, vaddr: VirtAddr) {
 
     // SAFETY: root is a valid page table we own.
     unsafe {
-        let l2 = root.as_usize() as *const u64;
+        let l2: *const u64 = pa_to_ptr(root.as_usize());
         let l2_entry = core::ptr::read_volatile(l2.add(l2_idx));
 
         if l2_entry & VALID == 0 {
@@ -287,7 +293,7 @@ pub fn clear_write(root: PhysAddr, vaddr: VirtAddr) {
         }
 
         let l3_pa = (l2_entry & PA_MASK) as usize;
-        let l3 = l3_pa as *mut u64;
+        let l3: *mut u64 = pa_to_ptr(l3_pa);
         let mut entry = core::ptr::read_volatile(l3.add(l3_idx));
 
         if entry & VALID == 0 {
@@ -365,7 +371,7 @@ pub fn is_cow(root: PhysAddr, vaddr: VirtAddr) -> bool {
 
     // SAFETY: root is a valid page table we own.
     unsafe {
-        let l2 = root.as_usize() as *const u64;
+        let l2: *const u64 = pa_to_ptr(root.as_usize());
         let l2_entry = core::ptr::read_volatile(l2.add(l2_idx));
 
         if l2_entry & VALID == 0 {
@@ -373,7 +379,7 @@ pub fn is_cow(root: PhysAddr, vaddr: VirtAddr) -> bool {
         }
 
         let l3_pa = (l2_entry & PA_MASK) as usize;
-        let l3 = l3_pa as *const u64;
+        let l3: *const u64 = pa_to_ptr(l3_pa);
         let entry = core::ptr::read_volatile(l3.add(l3_idx));
 
         entry & SW_COW != 0

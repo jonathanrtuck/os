@@ -259,10 +259,10 @@ pub fn write_phys(pa: usize, offset: usize, data: &[u8]) {
     );
 
     // SAFETY: pa is a physical address returned by page_alloc::alloc_page.
-    // With identity-mapped kernel memory, PA == VA for RAM pages.
-    // Bounds checked above.
+    // phys_to_virt converts to the TTBR1 upper-half VA that maps this page.
     unsafe {
-        let dst = (pa + offset) as *mut u8;
+        let va = super::arch::platform::phys_to_virt(pa + offset);
+        let dst = va as *mut u8;
 
         core::ptr::copy_nonoverlapping(data.as_ptr(), dst, data.len());
     }
@@ -271,9 +271,10 @@ pub fn write_phys(pa: usize, offset: usize, data: &[u8]) {
 /// Zero-fill a physical page. Bare-metal only.
 #[cfg(target_os = "none")]
 pub fn zero_phys(pa: usize, len: usize) {
-    // SAFETY: same identity-map argument as write_phys.
+    // SAFETY: phys_to_virt maps to the TTBR1 VA for this physical page.
     unsafe {
-        let dst = pa as *mut u8;
+        let va = super::arch::platform::phys_to_virt(pa);
+        let dst = va as *mut u8;
 
         core::ptr::write_bytes(dst, 0, len);
     }

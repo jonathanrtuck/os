@@ -84,13 +84,35 @@ const _: () = {
 // ---------------------------------------------------------------------------
 
 /// Install the exception vector table by writing VBAR_EL1.
+///
+/// Before MMU enable, adrp resolves __vectors to a physical address.
+/// After MMU enable, call [`reinit_vbar`] to update VBAR to the
+/// upper-half VA so exceptions resolve correctly when TTBR0 is
+/// switched to a user page table.
 pub fn init() {
+    // SAFETY: __vectors is the 2KB-aligned vector table defined in
+    // exception.S. We only take its address for VBAR_EL1.
     unsafe extern "C" {
         static __vectors: u8;
     }
 
-    // __vectors is the assembly vector table, 2KB-aligned by `.align 11`
-    // in exception.S. The `unsafe extern` block above covers the access.
+    let vbar = (&raw const __vectors) as u64;
+
+    sysreg::set_vbar_el1(vbar);
+    sysreg::isb();
+}
+
+/// Re-set VBAR_EL1 to the upper-half VA after MMU enable.
+///
+/// Must be called from the upper-half VA context (after the MMU
+/// trampoline branches to kernel_main_upper). At that point, adrp
+/// resolves __vectors to the upper-half VA directly.
+pub fn reinit_vbar() {
+    // SAFETY: Same symbol as init(). Address taken, never dereferenced.
+    unsafe extern "C" {
+        static __vectors: u8;
+    }
+
     let vbar = (&raw const __vectors) as u64;
 
     sysreg::set_vbar_el1(vbar);
@@ -106,6 +128,8 @@ pub fn init() {
 /// `source` identifies which of the 16 vector entries was taken (0–15).
 /// The assembly performs full context save/restore around this call, so
 /// returning normally resumes the interrupted code via `eret`.
+// SAFETY: no_mangle is required so exception.S can call this symbol via `bl`.
+// The ABI matches: x0 = &mut TrapFrame (sp), x1 = source ID.
 #[unsafe(no_mangle)]
 extern "C" fn exception_handler(frame: &mut TrapFrame, source: u64) {
     match source {
@@ -206,6 +230,32 @@ pub enum FaultAction {
     Kill,
 }
 
+/// Register fault and IRQ dispatch functions. Must be called after the
+/// kernel has transitioned to upper-half VAs so function pointers resolve
+/// to TTBR1 addresses.
+#[cfg(target_os = "none")]
+pub fn register_handlers() {
+    set_fault_handler(fault_dispatch);
+}
+
+#[cfg(target_os = "none")]
+fn fault_dispatch(fault_addr: u64, is_write: bool, _esr: u64) -> FaultAction {
+    // SAFETY: percpu() requires init_percpu to have been called.
+    // kernel_ptr was set during boot via set_kernel_ptr.
+    let (kernel, current) = unsafe {
+        let pc = super::cpu::percpu();
+        let kernel = &mut *(pc.kernel_ptr as *mut crate::syscall::Kernel);
+        let current = crate::types::ThreadId(pc.current_thread);
+
+        (kernel, current)
+    };
+
+    match crate::fault::handle_data_abort(kernel, current, fault_addr as usize, is_write) {
+        crate::fault::FaultAction::Resolved => FaultAction::Resolved,
+        crate::fault::FaultAction::Kill => FaultAction::Kill,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // SVC fast path handler (called from minimal-save assembly entry)
 // ---------------------------------------------------------------------------
@@ -216,6 +266,8 @@ pub enum FaultAction {
 /// x0-x5 = syscall args, x6 = syscall number.
 /// Returns (error, value) in x0-x1.
 #[cfg(target_os = "none")]
+// SAFETY: no_mangle is required so exception.S can call this symbol via `bl`.
+// The ABI matches the assembly: x0-x5 = args, x6 = syscall number.
 #[unsafe(no_mangle)]
 #[allow(improper_ctypes_definitions)]
 extern "C" fn svc_fast_handler(

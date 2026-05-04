@@ -13,6 +13,9 @@ name = "kernel"
 path = "src/main.rs"
 test = false
 
+[features]
+integration-tests = []
+
 [dependencies]
 lock_api = { version = "0.4", default-features = false }
 talc = { version = "5", default-features = false }

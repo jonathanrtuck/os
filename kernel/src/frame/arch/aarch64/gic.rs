@@ -71,7 +71,7 @@ pub fn init() {
     let core_id = super::cpu::core_id_from_mpidr(sysreg::mpidr_el1());
 
     init_per_core(core_id);
-    init_distributor(platform::GIC_DIST_BASE);
+    init_distributor(platform::device_addr(platform::GIC_DIST_BASE));
 }
 
 /// Initialize per-core GIC state: redistributor + CPU interface.
@@ -87,7 +87,7 @@ pub fn init_per_core(core_id: usize) {
 }
 
 fn redist_base_for_core(core_id: usize) -> usize {
-    platform::GIC_REDIST_BASE + core_id * GICR_STRIDE
+    platform::device_addr(platform::GIC_REDIST_BASE + core_id * GICR_STRIDE)
 }
 
 /// Read ICC_IAR1_EL1 to acknowledge the highest-priority pending interrupt.
@@ -250,14 +250,17 @@ mod tests {
 
     #[test]
     fn redist_core_0_equals_base() {
-        assert_eq!(redist_base_for_core(0), platform::GIC_REDIST_BASE);
+        assert_eq!(
+            redist_base_for_core(0),
+            platform::device_addr(platform::GIC_REDIST_BASE)
+        );
     }
 
     #[test]
     fn redist_core_3() {
         assert_eq!(
             redist_base_for_core(3),
-            platform::GIC_REDIST_BASE + 3 * GICR_STRIDE,
+            platform::device_addr(platform::GIC_REDIST_BASE + 3 * GICR_STRIDE),
         );
     }
 

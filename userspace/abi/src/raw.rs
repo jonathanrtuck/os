@@ -40,8 +40,11 @@ pub fn syscall(num: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -
     let error: u64;
     let value: u64;
 
-    // SAFETY: SVC #0 is the kernel entry point. The kernel validates all
-    // arguments and returns a well-defined (error, value) pair.
+    // SAFETY: SVC #0 is the kernel entry point. The SVC fast path
+    // rearranges registers (moves x8 to x6) and calls into Rust, which
+    // may clobber any caller-saved register. Only x0 (error) and x1
+    // (value) are defined on return. Callee-saved registers (x19-x28)
+    // are preserved by the kernel's Rust calling convention.
     unsafe {
         core::arch::asm!(
             "svc #0",
@@ -52,6 +55,18 @@ pub fn syscall(num: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -
             inout("x3") a3 => _,
             inout("x4") a4 => _,
             inout("x5") a5 => _,
+            out("x6") _,
+            out("x7") _,
+            out("x9") _,
+            out("x10") _,
+            out("x11") _,
+            out("x12") _,
+            out("x13") _,
+            out("x14") _,
+            out("x15") _,
+            out("x16") _,
+            out("x17") _,
+            out("x18") _,
             options(nostack),
         );
     }

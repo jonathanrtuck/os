@@ -82,6 +82,9 @@ pub struct Kernel {
     /// percpu (bare metal) or 0 (host tests). Used by all scheduler calls
     /// instead of hardcoding core 0.
     core_id: usize,
+    /// Number of threads that have not yet exited. When this reaches zero
+    /// on bare metal, the kernel issues PSCI SYSTEM_OFF.
+    pub(crate) alive_threads: u32,
 }
 
 impl Kernel {
@@ -95,6 +98,7 @@ impl Kernel {
             irqs: IrqTable::new(),
             scheduler: Scheduler::new(num_cores),
             core_id: 0,
+            alive_threads: 0,
         }
     }
 
@@ -1283,10 +1287,10 @@ impl Kernel {
             .threads
             .alloc(thread)
             .ok_or(SyscallError::OutOfMemory)?;
-
         let t = self.threads.get_mut(idx).unwrap();
 
         t.id = ThreadId(idx);
+
         Self::init_thread_registers(t, entry, stack_top, arg);
         self.link_thread_to_space(idx, space_id);
 
@@ -1304,7 +1308,11 @@ impl Kernel {
             .handles_mut()
             .allocate(ObjectType::Thread, idx, Rights::ALL, generation)
         {
-            Ok(hid) => Ok(hid.0 as u64),
+            Ok(hid) => {
+                self.alive_threads += 1;
+
+                Ok(hid.0 as u64)
+            }
             Err(e) => {
                 self.unlink_thread_from_space(idx, space_id);
                 self.threads.dealloc(idx);
@@ -1423,7 +1431,11 @@ impl Kernel {
             .handles_mut()
             .allocate(ObjectType::Thread, idx, Rights::ALL, generation)
         {
-            Ok(hid) => Ok(hid.0 as u64),
+            Ok(hid) => {
+                self.alive_threads += 1;
+
+                Ok(hid.0 as u64)
+            }
             Err(e) => {
                 self.unlink_thread_from_space(idx, target_space);
                 self.threads.dealloc(idx);
@@ -1437,6 +1449,14 @@ impl Kernel {
         let code = args[0] as u32;
 
         crate::sched::exit_current(self, current, self.core_id, code);
+
+        self.alive_threads = self.alive_threads.saturating_sub(1);
+
+        #[cfg(target_os = "none")]
+        if self.alive_threads == 0 {
+            crate::println!("INTEGRATION TEST: EXIT {code}");
+            crate::frame::arch::psci::system_off();
+        }
 
         Ok(0)
     }

@@ -120,5 +120,5 @@ pub fn svc_null() -> (u64, u64) {
 /// Writes 0x01 to the pvpanic MMIO register, which tells QEMU/HVF that
 /// the guest has panicked.
 pub fn signal_panic() {
-    mmio::write32(platform::PVPANIC_BASE, 1);
+    mmio::write32(platform::device_addr(platform::PVPANIC_BASE), 1);
 }
