@@ -6,12 +6,12 @@
 
 | Metric | Session 1 | Session 2 | Delta |
 |--------|-----------|-----------|-------|
-| Tests | 540 | 575 | +35 |
+| Tests | 540 | 584 | +44 |
 | Bugs found | 10 | 17 | +7 |
 | Bugs fixed | 10 | 17 | +7 |
 | Invariant checks | 13 | 13 | — |
-| Property tests | 13 | 20 | +7 |
-| Commits on branch | 12 | 20 | +8 |
+| Property tests | 13 | 22 | +9 |
+| Commits on branch | 12 | 32 | +20 |
 
 ### Bugs Fixed (Session 2)
 
@@ -58,7 +58,7 @@
 | 5. Coverage | 80% | 96% syscall.rs, 97-99% core objects. Key gaps filled |
 | 6. Mutation Testing | 50% | handle(71%), endpoint(88%), event(83%). syscall.rs pending |
 | 7. Sanitizers | 50% | ASan: 575 tests pass clean. LSan/UBSan pending |
-| 8. Concurrency | 0% | |
+| 8. Concurrency | 20% | Multi-core scheduling proptests added |
 | 9. Error Injection | 60% | Capacity exhaustion, rollback, error path tests done |
 | 10. Static Analysis | 50% | deny attrs, pedantic clippy reviewed, 2 deps verified |
 | 11. Bare-Metal + Perf | 0% | |
