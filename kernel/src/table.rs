@@ -351,4 +351,47 @@ mod tests {
         assert!(t.dealloc(0).is_none());
         assert!(t.dealloc(99).is_none());
     }
+
+    #[test]
+    fn get_pair_mut_adjacent_indices() {
+        let mut t: ObjectTable<u64, 4> = ObjectTable::new();
+        let (a, _) = t.alloc(100).unwrap();
+        let (b, _) = t.alloc(200).unwrap();
+
+        assert_eq!(a, 0);
+        assert_eq!(b, 1);
+
+        let (ma, rb) = t.get_pair_mut(a, b).unwrap();
+
+        *ma = 101;
+
+        assert_eq!(*rb, 200);
+
+        let (mb, ra) = t.get_pair_mut(b, a).unwrap();
+
+        *mb = 201;
+
+        assert_eq!(*ra, 101);
+        assert_eq!(*t.get(a).unwrap(), 101);
+        assert_eq!(*t.get(b).unwrap(), 201);
+    }
+
+    #[test]
+    fn get_pair_mut_max_index_distance() {
+        let mut t: ObjectTable<u64, 8> = ObjectTable::new();
+
+        for i in 0..8 {
+            t.alloc(i as u64 * 10).unwrap();
+        }
+
+        let (m0, r7) = t.get_pair_mut(0, 7).unwrap();
+
+        assert_eq!(*m0, 0);
+        assert_eq!(*r7, 70);
+
+        let (m7, r0) = t.get_pair_mut(7, 0).unwrap();
+
+        assert_eq!(*m7, 70);
+        assert_eq!(*r0, 0);
+    }
 }
