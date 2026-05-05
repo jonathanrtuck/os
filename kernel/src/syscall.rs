@@ -271,6 +271,18 @@ impl Kernel {
         Ok(staged)
     }
 
+    fn reinstall_handles(&mut self, space_id: AddressSpaceId, mut staged: StagedHandles) {
+        if let Some(space) = self.spaces.get_mut(space_id.0) {
+            let ht = space.handles_mut();
+
+            for i in 0..staged.count as usize {
+                if let Some(h) = staged.handles[i].take() {
+                    let _ = ht.install(h);
+                }
+            }
+        }
+    }
+
     fn install_handles(
         &mut self,
         space_id: AddressSpaceId,
@@ -895,7 +907,15 @@ impl Kernel {
                 .get_mut(obj_id)
                 .ok_or(SyscallError::InvalidHandle)?;
 
-            event.add_waiter(current, mask)?;
+            if let Err(e) = event.add_waiter(current, mask) {
+                for &prev_id in &obj_ids[..i] {
+                    if let Some(prev_event) = self.events.get_mut(prev_id) {
+                        prev_event.remove_waiter(current);
+                    }
+                }
+
+                return Err(e);
+            }
 
             obj_ids[i] = obj_id;
         }
@@ -970,6 +990,19 @@ impl Kernel {
         }
 
         let ep_obj_id = handle.object_id;
+
+        let ep = self
+            .endpoints
+            .get(ep_obj_id)
+            .ok_or(SyscallError::InvalidHandle)?;
+
+        if ep.is_peer_closed() {
+            return Err(SyscallError::PeerClosed);
+        }
+        if ep.is_full() {
+            return Err(SyscallError::BufferFull);
+        }
+
         let message = user_mem::read_user_message(msg_ptr, msg_len)?;
         let staged = self.remove_handles_atomic(space_id, handles_ptr, handles_count)?;
         let priority = self
@@ -990,7 +1023,9 @@ impl Kernel {
             .endpoints
             .get_mut(ep_obj_id)
             .ok_or(SyscallError::InvalidHandle)?;
-        let signal_info = ep.enqueue_call(call)?;
+        let signal_info = ep
+            .enqueue_call(call)
+            .expect("enqueue_call failed after pre-check passed");
         let active_server = ep.active_server();
         let recv_waiters = ep.drain_recv_waiters();
 
@@ -1223,7 +1258,11 @@ impl Kernel {
 
         let staged = self.remove_handles_atomic(space_id, handles_ptr, handles_count)?;
 
-        user_mem::write_user_bytes(caller_reply_buf, reply_msg.as_bytes())?;
+        if let Err(e) = user_mem::write_user_bytes(caller_reply_buf, reply_msg.as_bytes()) {
+            self.reinstall_handles(space_id, staged);
+
+            return Err(e);
+        }
 
         if staged.count > 0 {
             let caller_space_id = self
@@ -1241,8 +1280,6 @@ impl Kernel {
 
             for i in 0..staged.count as usize {
                 if let Some(h) = staged.handles[i].take() {
-                    // Pre-check at line ~1196 guarantees sufficient free slots.
-                    // With &mut Kernel, no concurrent modification is possible.
                     let _ = caller_ht.install(h);
                 }
             }
@@ -1651,8 +1688,11 @@ impl Kernel {
             #[cfg(target_os = "none")]
             self.free_kernel_stack(tid);
 
-            if let Some(t) = self.threads.get_mut(tid) {
+            if let Some(t) = self.threads.get_mut(tid)
+                && t.state() != crate::thread::ThreadRunState::Exited
+            {
                 t.exit(0);
+                self.alive_threads = self.alive_threads.saturating_sub(1);
             }
 
             self.scheduler.remove(ThreadId(tid));
