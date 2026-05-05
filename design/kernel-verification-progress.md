@@ -53,16 +53,16 @@
 | 0. Spec Review | 90% | 0.1 done (7 bugs), 0.4 done (9 error paths). 0.2 partial |
 | 1. Unsafe Audit | 100% | 81 blocks in 15 files — ALL CLEAN |
 | 2. Property Testing | 90% | 20 proptests inc. multi-object, scheduler, IPC transfer |
-| 3. Fuzzing | 90% | 44M runs in 1hr, zero crashes. Structured target pending |
-| 4. Miri | 90% | 111+ tests pass clean. UB fix confirmed. No UB in any core module |
+| 3. Fuzzing | 95% | 44M runs (sequence) + 100K (structured), zero crashes |
+| 4. Miri | 95% | 206 tests pass clean (handle+endpoint+event+vmo+table+addr_space+95 syscall) |
 | 5. Coverage | 80% | 96% syscall.rs, 97-99% core objects. Key gaps filled |
-| 6. Mutation Testing | 30% | handle.rs: 15 caught, 6 missed → 3 tests added. More files queued |
+| 6. Mutation Testing | 50% | handle(71%), endpoint(88%), event(83%). syscall.rs pending |
 | 7. Sanitizers | 50% | ASan: 575 tests pass clean. LSan/UBSan pending |
 | 8. Concurrency | 0% | |
 | 9. Error Injection | 60% | Capacity exhaustion, rollback, error path tests done |
 | 10. Static Analysis | 50% | deny attrs, pedantic clippy reviewed, 2 deps verified |
 | 11. Bare-Metal + Perf | 0% | |
-| 12. Regression Infra | 10% | Pre-commit hook works |
+| 12. Regression Infra | 40% | Pre-commit hook + Makefile targets (gate, miri, asan, fuzz, coverage) |
 
 ### Next Session Priorities
 
