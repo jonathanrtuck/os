@@ -1844,8 +1844,16 @@ impl Kernel {
 
         #[cfg(target_os = "none")]
         if self.alive_threads == 0 {
-            crate::println!("INTEGRATION TEST: EXIT {code}");
-            crate::frame::arch::psci::system_off();
+            #[cfg(feature = "integration-tests")]
+            {
+                crate::println!("INTEGRATION TEST: EXIT {code}");
+                crate::frame::arch::psci::system_off();
+            }
+
+            #[cfg(not(feature = "integration-tests"))]
+            loop {
+                crate::frame::arch::halt();
+            }
         }
 
         Ok(0)

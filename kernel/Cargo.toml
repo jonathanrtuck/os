@@ -16,6 +16,7 @@ test = false
 [features]
 integration-tests = []
 fuzzing = []
+bench = []
 
 [dependencies]
 lock_api = { version = "0.4", default-features = false }

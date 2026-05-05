@@ -282,9 +282,18 @@ pub fn activate_secondaries() {
         }
     }
 
-    let online = CORES_ONLINE.load(Ordering::Acquire) + 1;
+    let raw = CORES_ONLINE.load(Ordering::Acquire);
+    let expected = count - 1;
 
-    crate::println!("{}/{} cores online", online, count);
+    if raw != expected {
+        crate::println!(
+            "cpu: CORES_ONLINE anomaly: got {:#x}, expected {} (bug #21)",
+            raw,
+            expected,
+        );
+    }
+
+    crate::println!("{}/{} cores online", raw + 1, count);
 }
 
 /// Phase 1: secondary core boot at physical address. Sets up exception

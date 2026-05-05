@@ -33,6 +33,7 @@ pub const DISABLED: i32 = -10;
 ///
 /// Returns `Ok(())` on `PSCI_SUCCESS`, `Err(code)` on failure.
 #[cfg(target_os = "none")]
+#[inline(never)]
 pub fn cpu_on(target_cpu: u64, entry_point: u64, context_id: u64) -> Result<(), i32> {
     let ret: i64;
 
@@ -92,6 +93,7 @@ pub fn system_off() -> ! {
 /// Describe a PSCI error code for diagnostics.
 pub fn error_name(code: i32) -> &'static str {
     match code {
+        SUCCESS => "SUCCESS",
         NOT_SUPPORTED => "NOT_SUPPORTED",
         INVALID_PARAMETERS => "INVALID_PARAMETERS",
         DENIED => "DENIED",
@@ -135,6 +137,7 @@ mod tests {
 
     #[test]
     fn error_name_covers_all_codes() {
+        assert_eq!(error_name(SUCCESS), "SUCCESS");
         assert_eq!(error_name(NOT_SUPPORTED), "NOT_SUPPORTED");
         assert_eq!(error_name(ALREADY_ON), "ALREADY_ON");
         assert_eq!(error_name(42), "UNKNOWN");

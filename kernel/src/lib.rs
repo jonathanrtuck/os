@@ -77,7 +77,10 @@ pub mod invariants;
 pub mod irq;
 #[cfg(test)]
 mod pipeline;
-#[cfg(all(target_os = "none", debug_assertions))]
+#[cfg(any(
+    all(target_os = "none", debug_assertions),
+    feature = "integration-tests"
+))]
 pub mod post;
 pub mod print;
 #[cfg(test)]

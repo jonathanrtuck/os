@@ -23,7 +23,7 @@ fmt:
 	cargo +nightly fmt
 
 bench:
-	cargo run -p kernel --release
+	cargo run -p kernel --release --features bench
 
 integration-test:
 	@scripts/integration-test

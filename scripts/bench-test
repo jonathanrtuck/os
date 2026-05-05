@@ -32,8 +32,8 @@ info() { printf "${DIM}info${RESET}  %s\n" "$1"; }
 
 # ── Build ──────────────────────────────────────────────────────────
 
-info "building kernel (release)..."
-cargo build -p kernel --release 2>&1 | tail -1
+info "building kernel (release, bench)..."
+cargo build -p kernel --release --features bench 2>&1 | tail -1
 pass "build"
 
 # ── Run benchmarks ─────────────────────────────────────────────────
