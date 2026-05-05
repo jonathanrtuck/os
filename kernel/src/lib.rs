@@ -37,6 +37,8 @@ pub mod irq;
 #[cfg(test)]
 mod pipeline;
 pub mod print;
+#[cfg(test)]
+mod proptests;
 pub mod sched;
 pub mod syscall;
 pub mod table;
