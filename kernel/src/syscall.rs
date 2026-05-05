@@ -7690,4 +7690,621 @@ mod tests {
 
         inv(&k);
     }
+
+    // -- Phase 8: Preemption simulation and advanced concurrency --
+
+    #[test]
+    fn preemption_sim_interleaved_create_destroy_across_cores() {
+        crate::frame::arch::page_table::reset_asid_pool();
+
+        let mut k = Box::new(Kernel::new(4));
+        let space = AddressSpace::new(AddressSpaceId(0), 1, 0);
+        k.spaces.alloc(space);
+
+        let t0 = Thread::new(
+            ThreadId(0),
+            Some(AddressSpaceId(0)),
+            Priority::Medium,
+            0,
+            0,
+            0,
+        );
+        k.threads.alloc(t0);
+        k.threads
+            .get_mut(0)
+            .unwrap()
+            .set_state(ThreadRunState::Running);
+        k.scheduler.core_mut(0).set_current(Some(ThreadId(0)));
+
+        for i in 0..100u64 {
+            let create_core = (i % 4) as usize;
+            let destroy_core = ((i + 1) % 4) as usize;
+
+            let (err, vmo) = k.dispatch(
+                ThreadId(0),
+                create_core,
+                num::VMO_CREATE,
+                &[4096, 0, 0, 0, 0, 0],
+            );
+            assert_eq!(err, 0);
+            let (err, evt) = k.dispatch(ThreadId(0), create_core, num::EVENT_CREATE, &[0; 6]);
+            assert_eq!(err, 0);
+            let (err, ep) = k.dispatch(ThreadId(0), destroy_core, num::ENDPOINT_CREATE, &[0; 6]);
+            assert_eq!(err, 0);
+
+            let (err, _) = k.dispatch(
+                ThreadId(0),
+                destroy_core,
+                num::HANDLE_CLOSE,
+                &[vmo, 0, 0, 0, 0, 0],
+            );
+            assert_eq!(err, 0);
+            let (err, _) = k.dispatch(
+                ThreadId(0),
+                create_core,
+                num::HANDLE_CLOSE,
+                &[evt, 0, 0, 0, 0, 0],
+            );
+            assert_eq!(err, 0);
+            let (err, _) = k.dispatch(
+                ThreadId(0),
+                destroy_core,
+                num::HANDLE_CLOSE,
+                &[ep, 0, 0, 0, 0, 0],
+            );
+            assert_eq!(err, 0);
+        }
+
+        crate::invariants::assert_valid(&*k);
+        assert_eq!(k.vmos.count(), 0);
+        assert_eq!(k.events.count(), 0);
+        assert_eq!(k.endpoints.count(), 0);
+    }
+
+    #[test]
+    fn preemption_sim_thread_create_in_across_cores() {
+        crate::frame::arch::page_table::reset_asid_pool();
+
+        let mut k = Box::new(Kernel::new(4));
+        let space = AddressSpace::new(AddressSpaceId(0), 1, 0);
+        k.spaces.alloc(space);
+
+        let t0 = Thread::new(
+            ThreadId(0),
+            Some(AddressSpaceId(0)),
+            Priority::Medium,
+            0,
+            0,
+            0,
+        );
+        k.threads.alloc(t0);
+        k.threads
+            .get_mut(0)
+            .unwrap()
+            .set_state(ThreadRunState::Running);
+        k.scheduler.core_mut(0).set_current(Some(ThreadId(0)));
+
+        let (err, space_hid) = k.dispatch(ThreadId(0), 0, num::SPACE_CREATE, &[0; 6]);
+        assert_eq!(err, 0);
+
+        for i in 0..10u64 {
+            let core = (i % 4) as usize;
+
+            let (err, ep_hid) = k.dispatch(ThreadId(0), core, num::ENDPOINT_CREATE, &[0; 6]);
+            assert_eq!(err, 0);
+
+            let ep_handle_ids = [ep_hid as u32];
+            let (err, thread_hid) = k.dispatch(
+                ThreadId(0),
+                core,
+                num::THREAD_CREATE_IN,
+                &[
+                    space_hid,
+                    0x1000,
+                    0x2000,
+                    ep_handle_ids.as_ptr() as u64,
+                    1,
+                    0,
+                ],
+            );
+            assert_eq!(err, 0);
+
+            let close_core = ((i + 2) % 4) as usize;
+            let (err, _) = k.dispatch(
+                ThreadId(0),
+                close_core,
+                num::HANDLE_CLOSE,
+                &[thread_hid, 0, 0, 0, 0, 0],
+            );
+            assert_eq!(err, 0);
+            let (err, _) = k.dispatch(
+                ThreadId(0),
+                close_core,
+                num::HANDLE_CLOSE,
+                &[ep_hid, 0, 0, 0, 0, 0],
+            );
+            assert_eq!(err, 0);
+        }
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn preemption_sim_ipc_call_from_alternating_cores() {
+        crate::frame::arch::page_table::reset_asid_pool();
+
+        let mut k = Box::new(Kernel::new(2));
+        let space = AddressSpace::new(AddressSpaceId(0), 1, 0);
+        k.spaces.alloc(space);
+
+        let t0 = Thread::new(
+            ThreadId(0),
+            Some(AddressSpaceId(0)),
+            Priority::Medium,
+            0,
+            0,
+            0,
+        );
+        k.threads.alloc(t0);
+        k.threads
+            .get_mut(0)
+            .unwrap()
+            .set_state(ThreadRunState::Running);
+        k.scheduler.core_mut(0).set_current(Some(ThreadId(0)));
+
+        let (err, ep_hid) = k.dispatch(ThreadId(0), 0, num::ENDPOINT_CREATE, &[0; 6]);
+        assert_eq!(err, 0);
+
+        for round in 0..20u8 {
+            let call_core = (round % 2) as usize;
+            let recv_core = ((round + 1) % 2) as usize;
+
+            let mut msg_buf = [0u8; 128];
+            msg_buf[0] = round;
+
+            let (err, _) = k.dispatch(
+                ThreadId(0),
+                call_core,
+                num::CALL,
+                &[ep_hid, msg_buf.as_mut_ptr() as u64, 1, 0, 0, 0],
+            );
+            assert_eq!(err, 0, "CALL round {round} failed");
+
+            let mut recv_buf = [0u8; 128];
+            let (err, packed) = k.dispatch(
+                ThreadId(0),
+                recv_core,
+                num::RECV,
+                &[ep_hid, recv_buf.as_mut_ptr() as u64, 128, 0, 0, 0],
+            );
+            assert_eq!(err, 0, "RECV round {round} failed");
+
+            let msg_len = (packed & 0xFFFF_FFFF) as usize;
+            assert_eq!(msg_len, 1);
+            assert_eq!(recv_buf[0], round);
+
+            let reply_cap = packed >> 32;
+            let reply_msg = [round + 100];
+            let (err, _) = k.dispatch(
+                ThreadId(0),
+                recv_core,
+                num::REPLY,
+                &[ep_hid, reply_cap, reply_msg.as_ptr() as u64, 1, 0, 0],
+            );
+            assert_eq!(err, 0, "REPLY round {round} failed");
+
+            let tid = k
+                .scheduler
+                .pick_next(recv_core)
+                .expect("caller should be woken");
+            assert_eq!(tid, ThreadId(0));
+            k.threads
+                .get_mut(0)
+                .unwrap()
+                .set_state(ThreadRunState::Running);
+            k.scheduler.core_mut(0).set_current(Some(tid));
+        }
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn ipc_max_complexity_full_message_max_handles() {
+        let mut k = setup_kernel();
+        let ep_hid = create_endpoint(&mut k);
+
+        let mut transfer_hids = [0u32; config::MAX_IPC_HANDLES];
+        for slot in &mut transfer_hids {
+            *slot = create_event(&mut k) as u32;
+        }
+
+        let msg = [0xABu8; 128];
+        let mut call_buf = [0u8; 128];
+        call_buf[..128].copy_from_slice(&msg);
+
+        let (err, _) = call(
+            &mut k,
+            num::CALL,
+            &[
+                ep_hid,
+                call_buf.as_mut_ptr() as u64,
+                128,
+                transfer_hids.as_ptr() as u64,
+                config::MAX_IPC_HANDLES as u64,
+                0,
+            ],
+        );
+        assert_eq!(err, 0, "CALL failed");
+
+        for &hid in &transfer_hids {
+            let result = k.spaces.get(0).unwrap().handles().lookup(HandleId(hid));
+            assert!(
+                result.is_err(),
+                "handle {hid} should be removed from sender after transfer"
+            );
+        }
+
+        let mut recv_buf = [0u8; 128];
+        let mut recv_handles = [0u32; config::MAX_IPC_HANDLES];
+        let (err, packed) = call(
+            &mut k,
+            num::RECV,
+            &[
+                ep_hid,
+                recv_buf.as_mut_ptr() as u64,
+                128,
+                recv_handles.as_mut_ptr() as u64,
+                config::MAX_IPC_HANDLES as u64,
+                0,
+            ],
+        );
+        assert_eq!(err, 0, "RECV failed");
+
+        let msg_len = (packed & 0xFFFF) as usize;
+        let h_count = ((packed >> 16) & 0xFFFF) as usize;
+        assert_eq!(msg_len, 128, "full 128-byte message");
+        assert_eq!(h_count, config::MAX_IPC_HANDLES, "all handles transferred");
+        assert_eq!(&recv_buf[..128], &msg, "message data integrity");
+
+        let reply_cap = packed >> 32;
+        let (err, _) = call(&mut k, num::REPLY, &[ep_hid, reply_cap, 0, 0, 0, 0]);
+        assert_eq!(err, 0, "REPLY failed");
+        resume_caller(&mut k);
+
+        inv(&k);
+    }
+
+    #[test]
+    fn priority_inheritance_via_call_boosts_server() {
+        crate::frame::arch::page_table::reset_asid_pool();
+
+        let mut k = Box::new(Kernel::new(1));
+        let space = AddressSpace::new(AddressSpaceId(0), 1, 0);
+        k.spaces.alloc(space);
+
+        let server = Thread::new(ThreadId(0), Some(AddressSpaceId(0)), Priority::Low, 0, 0, 0);
+        k.threads.alloc(server);
+        k.threads
+            .get_mut(0)
+            .unwrap()
+            .set_state(ThreadRunState::Running);
+        k.scheduler.core_mut(0).set_current(Some(ThreadId(0)));
+
+        let (err, ep_hid) = k.dispatch(ThreadId(0), 0, num::ENDPOINT_CREATE, &[0; 6]);
+        assert_eq!(err, 0);
+
+        let ep_obj = k
+            .spaces
+            .get(0)
+            .unwrap()
+            .handles()
+            .lookup(HandleId(ep_hid as u32))
+            .unwrap()
+            .object_id;
+
+        let dummy = Thread::new(
+            ThreadId(0),
+            Some(AddressSpaceId(0)),
+            Priority::Medium,
+            0x1000,
+            0x2000,
+            0,
+        );
+        let (dummy_idx, _) = k.threads.alloc(dummy).unwrap();
+        k.threads.get_mut(dummy_idx).unwrap().id = ThreadId(dummy_idx);
+        k.threads
+            .get_mut(dummy_idx)
+            .unwrap()
+            .set_state(ThreadRunState::Blocked);
+
+        let msg_obj = crate::endpoint::Message::from_bytes(&[1u8; 4]).unwrap();
+        let pending = crate::endpoint::PendingCall {
+            caller: ThreadId(dummy_idx),
+            priority: Priority::Medium,
+            message: msg_obj,
+            handles: [const { None }; config::MAX_IPC_HANDLES],
+            handle_count: 0,
+            badge: 0,
+            reply_buf: 0,
+        };
+        k.endpoints
+            .get_mut(ep_obj)
+            .unwrap()
+            .enqueue_call(pending)
+            .unwrap();
+
+        let mut recv_buf = [0u8; 128];
+        let (err, _) = k.dispatch(
+            ThreadId(0),
+            0,
+            num::RECV,
+            &[ep_hid, recv_buf.as_mut_ptr() as u64, 128, 0, 0, 0],
+        );
+        assert_eq!(err, 0);
+
+        assert!(
+            k.endpoints.get(ep_obj).unwrap().active_server().is_some(),
+            "server should be active after RECV"
+        );
+
+        let high_caller = Thread::new(
+            ThreadId(0),
+            Some(AddressSpaceId(0)),
+            Priority::High,
+            0x3000,
+            0x4000,
+            0,
+        );
+        let (high_idx, _) = k.threads.alloc(high_caller).unwrap();
+        k.threads.get_mut(high_idx).unwrap().id = ThreadId(high_idx);
+        k.threads
+            .get_mut(high_idx)
+            .unwrap()
+            .set_state(ThreadRunState::Running);
+
+        k.threads
+            .get_mut(0)
+            .unwrap()
+            .set_state(ThreadRunState::Ready);
+        k.scheduler.enqueue(0, ThreadId(0), Priority::Low);
+        k.scheduler
+            .core_mut(0)
+            .set_current(Some(ThreadId(high_idx)));
+
+        let ep_gen = k
+            .spaces
+            .get(0)
+            .unwrap()
+            .handles()
+            .lookup(HandleId(ep_hid as u32))
+            .unwrap()
+            .generation;
+        let ep_handle = crate::handle::Handle {
+            object_type: crate::types::ObjectType::Endpoint,
+            object_id: ep_obj,
+            generation: ep_gen,
+            rights: crate::types::Rights::ALL,
+            badge: 0,
+        };
+        k.endpoints.get_mut(ep_obj).unwrap().add_ref();
+        let caller_ep_hid = k
+            .spaces
+            .get_mut(0)
+            .unwrap()
+            .handles_mut()
+            .install(ep_handle)
+            .unwrap();
+
+        let mut caller_buf = [0u8; 128];
+        caller_buf[0] = 0xAB;
+        let (err, _) = k.dispatch(
+            ThreadId(high_idx),
+            0,
+            num::CALL,
+            &[
+                caller_ep_hid.0 as u64,
+                caller_buf.as_mut_ptr() as u64,
+                1,
+                0,
+                0,
+                0,
+            ],
+        );
+        assert_eq!(err, 0);
+
+        let server_effective = k.threads.get(0).unwrap().effective_priority();
+        assert!(
+            server_effective >= Priority::High,
+            "server should inherit High from caller, got {server_effective:?}"
+        );
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn space_destroy_interleaved_with_object_ops_on_other_core() {
+        crate::frame::arch::page_table::reset_asid_pool();
+
+        let mut k = Box::new(Kernel::new(2));
+        let space = AddressSpace::new(AddressSpaceId(0), 1, 0);
+        k.spaces.alloc(space);
+
+        let t0 = Thread::new(
+            ThreadId(0),
+            Some(AddressSpaceId(0)),
+            Priority::Medium,
+            0,
+            0,
+            0,
+        );
+        k.threads.alloc(t0);
+        k.threads
+            .get_mut(0)
+            .unwrap()
+            .set_state(ThreadRunState::Running);
+        k.scheduler.core_mut(0).set_current(Some(ThreadId(0)));
+
+        let (err, space_hid) = k.dispatch(ThreadId(0), 0, num::SPACE_CREATE, &[0; 6]);
+        assert_eq!(err, 0);
+
+        let (err, vmo1) = k.dispatch(ThreadId(0), 0, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
+        assert_eq!(err, 0);
+        let (err, evt1) = k.dispatch(ThreadId(0), 1, num::EVENT_CREATE, &[0; 6]);
+        assert_eq!(err, 0);
+        let (err, ep1) = k.dispatch(ThreadId(0), 0, num::ENDPOINT_CREATE, &[0; 6]);
+        assert_eq!(err, 0);
+
+        let (err, _) = k.dispatch(
+            ThreadId(0),
+            1,
+            num::SPACE_DESTROY,
+            &[space_hid, 0, 0, 0, 0, 0],
+        );
+        assert_eq!(err, 0);
+
+        let (err, _) = k.dispatch(ThreadId(0), 0, num::HANDLE_CLOSE, &[vmo1, 0, 0, 0, 0, 0]);
+        assert_eq!(err, 0);
+        let (err, _) = k.dispatch(ThreadId(0), 1, num::HANDLE_CLOSE, &[evt1, 0, 0, 0, 0, 0]);
+        assert_eq!(err, 0);
+        let (err, _) = k.dispatch(ThreadId(0), 0, num::HANDLE_CLOSE, &[ep1, 0, 0, 0, 0, 0]);
+        assert_eq!(err, 0);
+
+        let (err, vmo2) = k.dispatch(ThreadId(0), 1, num::VMO_CREATE, &[8192, 0, 0, 0, 0, 0]);
+        assert_eq!(err, 0);
+        let (err, _) = k.dispatch(ThreadId(0), 0, num::HANDLE_CLOSE, &[vmo2, 0, 0, 0, 0, 0]);
+        assert_eq!(err, 0);
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn thread_set_priority_during_active_ipc() {
+        let mut k = setup_kernel();
+        let ep_hid = create_endpoint(&mut k);
+
+        let ep_obj = k
+            .spaces
+            .get(0)
+            .unwrap()
+            .handles()
+            .lookup(HandleId(ep_hid as u32))
+            .unwrap()
+            .object_id;
+
+        let caller = Thread::new(
+            ThreadId(0),
+            Some(AddressSpaceId(0)),
+            Priority::Low,
+            0x1000,
+            0x2000,
+            0,
+        );
+        let (caller_idx, _) = k.threads.alloc(caller).unwrap();
+        k.threads.get_mut(caller_idx).unwrap().id = ThreadId(caller_idx);
+        k.threads
+            .get_mut(caller_idx)
+            .unwrap()
+            .set_state(ThreadRunState::Blocked);
+
+        let thr_handle = crate::handle::Handle {
+            object_type: crate::types::ObjectType::Thread,
+            object_id: caller_idx,
+            generation: k.threads.generation(caller_idx),
+            rights: crate::types::Rights::ALL,
+            badge: 0,
+        };
+        let thr_hid = k
+            .spaces
+            .get_mut(0)
+            .unwrap()
+            .handles_mut()
+            .install(thr_handle)
+            .unwrap();
+
+        let msg = [42u8; 4];
+        let msg_obj = crate::endpoint::Message::from_bytes(&msg).unwrap();
+        let pending = crate::endpoint::PendingCall {
+            caller: ThreadId(caller_idx as u32),
+            priority: Priority::Low,
+            message: msg_obj,
+            handles: [const { None }; config::MAX_IPC_HANDLES],
+            handle_count: 0,
+            badge: 0,
+            reply_buf: 0,
+        };
+        k.endpoints
+            .get_mut(ep_obj)
+            .unwrap()
+            .enqueue_call(pending)
+            .unwrap();
+
+        let (err, _) = call(
+            &mut k,
+            num::THREAD_SET_PRIORITY,
+            &[thr_hid.0 as u64, Priority::High as u64, 0, 0, 0, 0],
+        );
+        assert_eq!(err, 0);
+
+        assert_eq!(
+            k.threads.get(caller_idx).unwrap().priority(),
+            Priority::High
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn preemption_sim_event_signal_clear_interleaved_cores() {
+        crate::frame::arch::page_table::reset_asid_pool();
+
+        let mut k = Box::new(Kernel::new(4));
+        let space = AddressSpace::new(AddressSpaceId(0), 1, 0);
+        k.spaces.alloc(space);
+
+        let t0 = Thread::new(
+            ThreadId(0),
+            Some(AddressSpaceId(0)),
+            Priority::Medium,
+            0,
+            0,
+            0,
+        );
+        k.threads.alloc(t0);
+        k.threads
+            .get_mut(0)
+            .unwrap()
+            .set_state(ThreadRunState::Running);
+        k.scheduler.core_mut(0).set_current(Some(ThreadId(0)));
+
+        let (err, evt) = k.dispatch(ThreadId(0), 0, num::EVENT_CREATE, &[0; 6]);
+        assert_eq!(err, 0);
+
+        for i in 0..50u64 {
+            let signal_core = (i % 4) as usize;
+            let clear_core = ((i + 2) % 4) as usize;
+
+            let bits = 1u64 << (i % 64);
+
+            let (err, _) = k.dispatch(
+                ThreadId(0),
+                signal_core,
+                num::EVENT_SIGNAL,
+                &[evt, bits, 0, 0, 0, 0],
+            );
+            assert_eq!(err, 0);
+
+            let (err, _) = k.dispatch(
+                ThreadId(0),
+                clear_core,
+                num::EVENT_CLEAR,
+                &[evt, bits, 0, 0, 0, 0],
+            );
+            assert_eq!(err, 0);
+        }
+
+        let (err, _) = k.dispatch(ThreadId(0), 0, num::HANDLE_CLOSE, &[evt, 0, 0, 0, 0, 0]);
+        assert_eq!(err, 0);
+
+        crate::invariants::assert_valid(&*k);
+    }
 }
