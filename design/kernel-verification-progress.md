@@ -56,7 +56,7 @@
 | 3. Fuzzing | 90% | 44M runs in 1hr, zero crashes. Structured target pending |
 | 4. Miri | 80% | UB fix confirmed. 5 previously-failing tests pass clean |
 | 5. Coverage | 80% | 96% syscall.rs, 97-99% core objects. Key gaps filled |
-| 6. Mutation Testing | 0% | |
+| 6. Mutation Testing | 30% | handle.rs: 15 caught, 6 missed → 3 tests added. More files queued |
 | 7. Sanitizers | 50% | ASan: 575 tests pass clean. LSan/UBSan pending |
 | 8. Concurrency | 0% | |
 | 9. Error Injection | 60% | Capacity exhaustion, rollback, error path tests done |
@@ -66,12 +66,11 @@
 
 ### Next Session Priorities
 
-1. Phase 1: unsafe audit (81 blocks in frame/ — systematic SAFETY comment verification)
-2. Phase 2: more state machine property tests (scheduler, multi-space IPC)
-3. Phase 3: 1-hour fuzz run
-4. Phase 6: mutation testing (cargo-mutants on critical files)
-5. Phase 9: OOM injection at every allocation point (not just capacity limits)
-6. Phase 0.4: complete error code audit (every syscall × every error return)
+1. Phase 6: continue mutation testing on remaining critical files (endpoint.rs, event.rs, syscall.rs, sched.rs)
+2. Phase 8: concurrency verification (Loom for sync primitives, multi-core scheduler stress)
+3. Phase 11: bare-metal benchmarks (cycle-accurate per-syscall measurement)
+4. Phase 12: regression infrastructure (Makefile targets, nightly gate)
+5. Phase 9: OOM injection at specific allocation points in multi-step syscalls
 
 ---
 
