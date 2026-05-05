@@ -39,6 +39,8 @@ pub mod invariants;
 pub mod irq;
 #[cfg(test)]
 mod pipeline;
+#[cfg(all(target_os = "none", debug_assertions))]
+pub mod post;
 pub mod print;
 #[cfg(test)]
 mod proptests;

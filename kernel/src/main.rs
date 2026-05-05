@@ -70,6 +70,9 @@ extern "C" fn kernel_main_upper() -> ! {
 
     arch::set_kernel_ptr(&mut *kern as *mut _ as *mut u8);
 
+    #[cfg(debug_assertions)]
+    kernel::post::run(&mut kern);
+
     kernel::bench::run(&mut kern);
 
     match kernel::bootstrap::create_init(&mut kern, init_binary) {
