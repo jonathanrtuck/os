@@ -4351,6 +4351,25 @@ mod tests {
     }
 
     #[test]
+    fn recv_no_pending_calls_returns_timed_out() {
+        let mut k = setup_kernel();
+        let ep_hid = create_endpoint(&mut k);
+
+        let mut buf = [0u8; 128];
+
+        assert_err(
+            call(
+                &mut k,
+                num::RECV,
+                &[ep_hid, buf.as_mut_ptr() as u64, 128, 0, 0, 0],
+            ),
+            SyscallError::TimedOut,
+        );
+
+        inv(&k);
+    }
+
+    #[test]
     fn reply_wrong_type() {
         let mut k = setup_kernel();
         let vmo = create_vmo(&mut k);
@@ -6282,7 +6301,11 @@ mod tests {
             &[ep_hid, recv_buf.as_mut_ptr() as u64, 128, 0, 0, 0],
         );
 
-        assert_ne!(err, 0, "recv with no pending calls should not succeed");
+        assert_eq!(
+            err,
+            SyscallError::TimedOut as u64,
+            "recv with no pending calls on a live endpoint returns TimedOut"
+        );
 
         let (err, _) = call(&mut k, num::SPACE_DESTROY, &[space_hid, 0, 0, 0, 0, 0]);
 
