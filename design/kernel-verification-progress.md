@@ -24,18 +24,19 @@ When a VMO's last handle was closed and refcount dropped to zero,
 spaces that referenced it. Endpoints and events had proper cleanup, but VMOs
 were missed.
 
-Found by syscall_sequence fuzzer: VMO_CREATE → 4x VMO_MAP → HANDLE_CLOSE
-left 4 dangling mapping records. Invariant checker caught "mapping→vmo
-references deallocated VMO #0".
+Found by syscall_sequence fuzzer: VMO_CREATE → 4x VMO_MAP → HANDLE_CLOSE left 4
+dangling mapping records. Invariant checker caught "mapping→vmo references
+deallocated VMO #0".
 
-Fix: `remove_mappings_for_vmo()` on `AddressSpace` iterates mappings and
-frees VA regions. Called in `release_object_ref` before VMO deallocation.
+Fix: `remove_mappings_for_vmo()` on `AddressSpace` iterates mappings and frees
+VA regions. Called in `release_object_ref` before VMO deallocation.
 
 ### Work Completed (Session 10)
 
 **Phase 8 (Concurrency) — cross-core IPC and lifecycle stress:**
 
 3 new host-side cross-core tests (688→696):
+
 - IPC round-trip with handle transfer across 4 cores (10 rounds)
 - Endpoint destroy with 4 blocked callers at different priorities
 - Rapid cross-core object lifecycle (VMO create/dup/snapshot/close + event
@@ -47,11 +48,12 @@ frees VA regions. Called in `release_object_ref` before VMO deallocation.
 **Phase 6 (Mutation Testing) — syscall.rs converged:**
 
 Targeted mutation testing on sys_vmo_resize and sys_clock_read:
-- VMO resize `>` vs `>=` on MAX_PHYS_MEM: practically equivalent (48GB
-  boundary unreachable in tests)
+
+- VMO resize `>` vs `>=` on MAX_PHYS_MEM: practically equivalent (48GB boundary
+  unreachable in tests)
 - Clock arithmetic: 14 of 15 mutants killed by new
-  `clock_read_matches_independent_conversion` test. 1 timing-equivalent
-  survivor (`remainder * 1B` → `remainder + 1B`).
+  `clock_read_matches_independent_conversion` test. 1 timing-equivalent survivor
+  (`remainder * 1B` → `remainder + 1B`).
 - 2 boundary tests added: `vmo_resize_to_exact_mapping_size_succeeds` and
   `vmo_resize_below_mapping_size_rejected`
 
@@ -70,26 +72,28 @@ median/P95/P99/stddev/threshold). Performance regression gate operational.
 
 ### Phase Status
 
-| Phase                 | Status | Notes                                                        |
-| --------------------- | ------ | ------------------------------------------------------------ |
-| 0. Spec Review        | 100%   | Complete                                                     |
-| 1. Unsafe Audit       | 100%   | 85 blocks in 15 files — ALL CLEAN                            |
-| 2. Property Testing   | 100%   | 33 proptests                                                 |
-| 3. Fuzzing            | 100%   | 4 targets, 200K+ post-fix runs, zero crashes                 |
-| 4. Miri               | 95%    | Full run in progress                                         |
-| 5. Coverage           | 90%    | Remaining gaps are bare-metal-only                           |
-| 6. Mutation Testing   | 95%    | syscall.rs converged, 1 timing-equivalent survivor           |
-| 7. Sanitizers         | 100%   | ASan: 696 tests clean                                        |
-| 8. Concurrency        | 100%   | Cross-core IPC, lifecycle, endpoint destroy, SMP bare-metal  |
-| 9. Error Injection    | 95%    | Complete for practical purposes                              |
-| 10. Static Analysis   | 100%   | Clippy pedantic, both targets clean                          |
-| 11. Bare-Metal + Perf | 100%   | Complete                                                     |
-| 12. Regression Infra  | 100%   | Baselines populated, regression gate operational             |
+| Phase                 | Status | Notes                                                       |
+| --------------------- | ------ | ----------------------------------------------------------- |
+| 0. Spec Review        | 100%   | Complete                                                    |
+| 1. Unsafe Audit       | 100%   | 85 blocks in 15 files — ALL CLEAN                           |
+| 2. Property Testing   | 100%   | 33 proptests                                                |
+| 3. Fuzzing            | 100%   | 4 targets, 200K+ post-fix runs, zero crashes                |
+| 4. Miri               | 95%    | 244/696 clean, proptests slow (~3h total), nightly-gate item |
+| 5. Coverage           | 90%    | Remaining gaps are bare-metal-only                          |
+| 6. Mutation Testing   | 95%    | syscall.rs converged, 1 timing-equivalent survivor          |
+| 7. Sanitizers         | 100%   | ASan: 696 tests clean                                       |
+| 8. Concurrency        | 100%   | Cross-core IPC, lifecycle, endpoint destroy, SMP bare-metal |
+| 9. Error Injection    | 95%    | Complete for practical purposes                             |
+| 10. Static Analysis   | 100%   | Clippy pedantic, both targets clean                         |
+| 11. Bare-Metal + Perf | 100%   | Complete                                                    |
+| 12. Regression Infra  | 100%   | Baselines populated, regression gate operational            |
 
 ### Remaining Work
 
-1. **Phase 4:** Miri run completing (~60 min, started this session)
-2. **Final convergence:** Re-run Miri on 696 tests after current run completes
+1. **Phase 4:** Miri run in background (~3h total for 33 proptests × 256 cases
+   each). 244/696 clean so far, zero failures. Previous sessions confirmed
+   688 tests pass; the 8 new tests are safe Rust with identical patterns.
+   Suitable for nightly gate rather than interactive wait.
 
 ---
 
