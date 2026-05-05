@@ -2252,17 +2252,15 @@ mod tests {
         hid
     }
 
-    fn do_call(k: &mut Kernel, ep_hid: u64, msg: &[u8]) -> u64 {
-        let mut call_buf = [0u8; 128];
-
-        call_buf[..msg.len()].copy_from_slice(msg);
+    fn do_call(k: &mut Kernel, ep_hid: u64, msg: &[u8], reply_buf: &mut [u8; 128]) {
+        reply_buf[..msg.len()].copy_from_slice(msg);
 
         let (err, _) = call(
             k,
             num::CALL,
             &[
                 ep_hid,
-                call_buf.as_mut_ptr() as u64,
+                reply_buf.as_mut_ptr() as u64,
                 msg.len() as u64,
                 0,
                 0,
@@ -2271,8 +2269,6 @@ mod tests {
         );
 
         assert_eq!(err, 0, "CALL failed");
-
-        call_buf.as_ptr() as u64
     }
 
     fn do_recv(k: &mut Kernel, ep_hid: u64, out_buf: &mut [u8; 128]) -> (usize, u64) {
@@ -4819,7 +4815,10 @@ mod tests {
         for round in 0..10u8 {
             let request = [b'P', b'I', b'N', b'G', round];
 
-            do_call(&mut k, ep, &request);
+            let mut reply_buf = [0u8; 128];
+
+            do_call(&mut k, ep, &request, &mut reply_buf);
+
             let mut recv_buf = [0u8; 128];
             let (msg_len, reply_cap) = do_recv(&mut k, ep, &mut recv_buf);
 
@@ -4845,8 +4844,9 @@ mod tests {
 
         for round in 0..100u16 {
             let request = round.to_le_bytes();
+            let mut call_reply_buf = [0u8; 128];
 
-            do_call(&mut k, ep, &request);
+            do_call(&mut k, ep, &request, &mut call_reply_buf);
 
             let mut recv_buf = [0u8; 128];
             let (msg_len, reply_cap) = do_recv(&mut k, ep, &mut recv_buf);
@@ -4875,7 +4875,9 @@ mod tests {
         for size in [0, 1, 2, 4, 8, 16, 32, 64, 127, 128] {
             let request: alloc::vec::Vec<u8> = (0..size).map(|i| (i & 0xFF) as u8).collect();
 
-            do_call(&mut k, ep, &request);
+            let mut call_reply_buf = [0u8; 128];
+
+            do_call(&mut k, ep, &request, &mut call_reply_buf);
 
             let mut recv_buf = [0u8; 128];
             let (msg_len, reply_cap) = do_recv(&mut k, ep, &mut recv_buf);
@@ -4981,8 +4983,9 @@ mod tests {
 
         for round in 0..20u8 {
             let msg = [round; 4];
+            let mut call_reply_buf = [0u8; 128];
 
-            do_call(&mut k, ep, &msg);
+            do_call(&mut k, ep, &msg, &mut call_reply_buf);
 
             let mut recv_buf = [0u8; 128];
             let (msg_len, reply_cap) = do_recv(&mut k, ep, &mut recv_buf);
@@ -5014,7 +5017,9 @@ mod tests {
         let mut k = setup_kernel();
         let ep = create_endpoint(&mut k);
 
-        do_call(&mut k, ep, b"first");
+        let mut call_reply_buf = [0u8; 128];
+
+        do_call(&mut k, ep, b"first", &mut call_reply_buf);
 
         let mut recv_buf = [0u8; 128];
         let (_, reply_cap) = do_recv(&mut k, ep, &mut recv_buf);
@@ -5036,7 +5041,9 @@ mod tests {
         let ep1 = create_endpoint(&mut k);
         let ep2 = create_endpoint(&mut k);
 
-        do_call(&mut k, ep1, b"ep1-msg");
+        let mut reply1 = [0u8; 128];
+
+        do_call(&mut k, ep1, b"ep1-msg", &mut reply1);
 
         let mut buf1 = [0u8; 128];
         let (len1, rc1) = do_recv(&mut k, ep1, &mut buf1);
@@ -5045,7 +5052,10 @@ mod tests {
 
         do_reply(&mut k, ep1, rc1, b"r1");
         resume_caller(&mut k);
-        do_call(&mut k, ep2, b"ep2-msg");
+
+        let mut reply2 = [0u8; 128];
+
+        do_call(&mut k, ep2, b"ep2-msg", &mut reply2);
 
         let mut buf2 = [0u8; 128];
         let (len2, rc2) = do_recv(&mut k, ep2, &mut buf2);
@@ -5138,7 +5148,9 @@ mod tests {
         ));
 
         for round in 0..5 {
-            do_call(&mut k, ep, &[round as u8]);
+            let mut call_reply_buf = [0u8; 128];
+
+            do_call(&mut k, ep, &[round as u8], &mut call_reply_buf);
 
             let bits = k.events.get(0).unwrap().bits();
 

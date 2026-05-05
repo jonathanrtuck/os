@@ -417,6 +417,95 @@ mod tests {
         }
 
         #[test]
+        fn dup_close_refcount_consistency(dup_count in 1usize..=8) {
+            let mut k = setup_kernel();
+            let (_, hid) = call(
+                &mut k,
+                num::ENDPOINT_CREATE,
+                &[0; 6],
+            );
+            let obj_id = k
+                .spaces
+                .get(0)
+                .unwrap()
+                .handles()
+                .lookup(HandleId(hid as u32))
+                .unwrap()
+                .object_id;
+
+            let mut handles = alloc::vec![hid];
+
+            for _ in 0..dup_count {
+                let (err, dup_hid) = call(
+                    &mut k,
+                    num::HANDLE_DUP,
+                    &[hid, Rights::ALL.0 as u64, 0, 0, 0, 0],
+                );
+
+                if err != 0 { break; }
+
+                handles.push(dup_hid);
+            }
+
+            let expected_refcount = handles.len();
+
+            prop_assert_eq!(
+                k.endpoints.get(obj_id).unwrap().refcount(),
+                expected_refcount,
+                "refcount must equal handle count"
+            );
+
+            for (i, &h) in handles.iter().enumerate() {
+                let (err, _) = call(&mut k, num::HANDLE_CLOSE, &[h, 0, 0, 0, 0, 0]);
+
+                prop_assert_eq!(err, 0);
+
+                if i < handles.len() - 1 {
+                    prop_assert!(
+                        k.endpoints.get(obj_id).is_some(),
+                        "endpoint freed prematurely at close {i}/{expected_refcount}"
+                    );
+                } else {
+                    prop_assert!(
+                        k.endpoints.get(obj_id).is_none(),
+                        "endpoint not freed after last close"
+                    );
+                }
+            }
+
+            inv(&k);
+        }
+
+        #[test]
+        fn ipc_call_then_close_endpoint_preserves_invariants(
+            msg_len in 0usize..=128,
+        ) {
+            let mut k = setup_kernel();
+            let (_, ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
+            let mut buf = [0u8; 128];
+
+            let (err, _) = call(
+                &mut k,
+                num::CALL,
+                &[ep_hid, buf.as_mut_ptr() as u64, msg_len.min(128) as u64, 0, 0, 0],
+            );
+
+            prop_assert_eq!(err, 0);
+
+            let (err, _) = call(&mut k, num::HANDLE_CLOSE, &[ep_hid, 0, 0, 0, 0, 0]);
+
+            prop_assert_eq!(err, 0);
+
+            let t = k.threads.get_mut(0).unwrap();
+
+            if let Some(e) = t.take_wakeup_error() {
+                prop_assert_eq!(e, SyscallError::PeerClosed);
+            }
+
+            inv(&k);
+        }
+
+        #[test]
         fn generation_revocation_prevents_stale_access(iterations in 1usize..=20) {
             let mut k = setup_kernel();
             let mut prev_hid = None;
