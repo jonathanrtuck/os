@@ -1,74 +1,69 @@
 # Kernel Verification Progress
 
-## Current Session: 1 — 2026-05-04
+## Session 1 — 2026-05-04 — COMPLETE
 
-**Active:** 1-hour fuzz run (syscall_sequence) + Miri on syscall tests, both
-in background.
+### Results
 
-### Completed This Session
+| Metric | Before | After |
+|--------|--------|-------|
+| Tests | 524 | 540 |
+| Bugs found | 0 | 10 |
+| Bugs fixed | 0 | 10 |
+| Invariant checks | 8 | 13 |
+| Property tests | 0 | 13 |
+| Fuzz targets with invariant checking | 0 | 2 |
+| Miri-verified modules | 0 | 5 (71 tests) |
+| Commits on branch | 0 | 12 |
 
-**Bugs Fixed: 7 total**
+### Bugs Fixed
 
-| # | Severity | Bug | Fix |
-|---|----------|-----|-----|
-| 1 | CRITICAL | sys_call handle leak on full endpoint | Pre-check endpoint state |
-| 2 | CRITICAL | sys_reply handle leak on write failure | Reinstall on error |
-| 3 | CRITICAL | space_destroy alive_threads not decremented | Fixed |
-| 4 | HIGH | event_wait_common waiter leak on partial failure | Rollback |
-| 5 | HIGH | space_destroy: killed threads left in endpoint recv_waiters | Scan+remove |
-| 6 | HIGH | sys_reply silent handle install failure | debug_assert |
-| 7 | HIGH | VMO resize below active mapping size (FUZZ-FOUND) | Reject resize |
+| # | Severity | Bug | Commit |
+|---|----------|-----|--------|
+| 1 | CRITICAL | sys_call handle leak on full endpoint | bca8d1c |
+| 2 | CRITICAL | sys_reply handle leak on write failure | bca8d1c |
+| 3 | CRITICAL | space_destroy alive_threads not decremented | bca8d1c |
+| 4 | HIGH | event_wait_common waiter leak on partial failure | bca8d1c |
+| 5 | HIGH | space_destroy: killed threads left in endpoint recv_waiters | ff3fd3a |
+| 6 | HIGH | sys_reply silent handle install failure | 8ac3a68 |
+| 7 | HIGH | VMO resize below active mapping size (FUZZ-FOUND) | 2d350cf |
+| 8 | HIGH | IRQ bindings survive event destruction | 4b1ae78 |
+| 9 | HIGH | endpoint.bound_event survives event destruction | 4b1ae78 |
+| 10 | HIGH | event.bound_endpoint survives endpoint destruction | 4b1ae78 |
 
-**Phases Completed/In Progress:**
+### Phase Status
 
-- Phase 0 (Spec Review): 0.3 done (5 new invariants), 4 bugs found+fixed.
-  Remaining: 0.1 interaction matrix, 0.2 state machines, 0.4 error audit
-- Phase 2 (Property Testing): DONE — 13 proptest property tests
-- Phase 3 (Fuzzing): Fuzz targets overhauled with invariant checking. 1-hour
-  run in progress. Already found 1 real bug (VMO resize-while-mapped).
-- Phase 4 (Miri): 71 tests pass under Miri (handle, vmo, event, endpoint,
-  table modules). No UB found. Syscall tests running in background.
-- Phase 10 (Static Analysis): deny(unused_must_use, unreachable_patterns),
-  fuzzing feature flag
+| Phase | Status | Notes |
+|-------|--------|-------|
+| 0. Spec Review | 40% | 0.3 done (invariants). 0.1/0.2/0.4 remaining |
+| 1. Unsafe Audit | 0% | 104 blocks in frame/ |
+| 2. Property Testing | 80% | 13 proptests. More state machine tests needed |
+| 3. Fuzzing | 70% | Invariant checking added. 2-min clean run. 1-hour pending |
+| 4. Miri | 60% | 71 tests pass, no UB. Syscall tests blocked by asm |
+| 5. Coverage | 0% | |
+| 6. Mutation Testing | 0% | |
+| 7. Sanitizers | 0% | |
+| 8. Concurrency | 0% | |
+| 9. Error Injection | 0% | |
+| 10. Static Analysis | 30% | deny attrs added. Pedantic clippy, cargo-audit remaining |
+| 11. Bare-Metal + Perf | 0% | |
+| 12. Regression Infra | 10% | Pre-commit hook works. Makefile targets needed |
 
-**Test Count: 540** (was 524 at session start, +16 tests)
+### Analyzed but NOT a bug
 
-### Git Log (kernel-verification branch)
+- `recv_deliver` dequeue without requeue on failure: analyzed and determined to
+  be correct behavior. If the server's buffer is too small or write fails, that's
+  a server error — the call is consumed, the caller stays blocked, and the reply
+  cap is valid. The server can retry recv or reply with an error. This matches
+  seL4/QNX sync IPC semantics.
 
-```
-e1dc38a fix(kernel): fuzz harness skip scheduling-changing syscalls
-2d350cf fix(kernel): VMO resize-while-mapped bug + fuzz target hardening
-8ac3a68 fix(kernel): sys_reply debug_assert on handle install
-ff3fd3a fix(kernel): space_destroy removes killed threads from endpoint recv_waiters
-3cbeb2f feat(kernel): deny(unused_must_use, unreachable_patterns) + fuzzing cfg
-7334f7e feat(kernel): fuzz targets overhauled with invariant checking (Phase 3)
-6d415f2 feat(kernel): 13 property-based tests via proptest (Phase 2)
-d2da40a test(kernel): 3 regression tests for Phase 0 bug fixes
-bca8d1c fix(kernel): 4 bugs fixed (spec review Phase 0)
-31c308e feat(kernel): verification plan + 5 new invariant checks
-```
+### Next Session Priorities
 
-### Known Remaining Bugs
+1. Start the 1-hour fuzz run and check results
+2. Phase 1: unsafe audit (104 blocks — highest remaining leverage)
+3. Phase 5: coverage measurement (find what's untested)
+4. Phase 6: mutation testing (find tests that don't actually test anything)
+5. Continue fixing any bugs found by fuzzing
+6. Phase 9: error injection (capacity exhaustion, OOM at every allocation point)
 
-From agent analysis — not yet fixed:
-- recv_deliver: dequeue without requeue on install_handles failure
-- IRQ bindings survive event destruction (stale event_id)
-- endpoint.bound_event survives event destruction (stale EventId)
-- event.bound_endpoint survives endpoint destruction (stale EndpointId)
-
-### Remaining Phases
-
-- Phase 0: 0.1 interaction matrix, 0.2 state machines, 0.4 error audit
-- Phase 1: Unsafe audit (104 blocks in frame/)
-- Phase 5: Coverage measurement
-- Phase 6: Mutation testing
-- Phase 7: Sanitizers (ASan/LSan/UBSan on test suite)
-- Phase 8: Concurrency verification
-- Phase 9: Error injection
-- Phase 10: Pedantic clippy, cargo-audit (remaining)
-- Phase 11: Bare-metal verification + performance
-- Phase 12: Regression infrastructure
-
-**To resume:** Read this file, `git log --oneline kernel-verification`,
-continue with remaining phases. Check if fuzz artifacts exist at
-`kernel/fuzz/artifacts/syscall_sequence/` — any crash file = new bug to fix.
+**To resume:** `git log --oneline kernel-verification`, check
+`kernel/fuzz/artifacts/` for crash files, continue from priorities above.
