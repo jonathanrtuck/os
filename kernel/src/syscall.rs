@@ -826,6 +826,10 @@ impl Kernel {
                 if let Some(vmo) = self.vmos.get_mut(object_id)
                     && vmo.release_ref()
                 {
+                    let vmo_id = crate::types::VmoId(object_id);
+                    for (_, space) in self.spaces.iter_allocated_mut() {
+                        space.remove_mappings_for_vmo(vmo_id);
+                    }
                     self.vmos.dealloc(object_id);
                 }
             }
@@ -8304,6 +8308,412 @@ mod tests {
 
         let (err, _) = k.dispatch(ThreadId(0), 0, num::HANDLE_CLOSE, &[evt, 0, 0, 0, 0, 0]);
         assert_eq!(err, 0);
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    // -- Bug #20 regression: VMO deallocation cleans up mappings --
+
+    #[test]
+    fn vmo_close_removes_mappings() {
+        let mut k = setup_kernel();
+        let perms = (Rights::READ.0 | Rights::MAP.0) as u64;
+
+        let (err, vmo) = call(&mut k, num::VMO_CREATE, &[4096 * 3, 0, 0, 0, 0, 0]);
+        assert_eq!(err, 0);
+
+        let (err, va1) = call(&mut k, num::VMO_MAP, &[vmo, 0, perms, 0, 0, 0]);
+        assert_eq!(err, 0);
+
+        let (err, va2) = call(&mut k, num::VMO_MAP, &[vmo, 0, perms, 0, 0, 0]);
+        assert_eq!(err, 0);
+
+        assert!(va1 != va2, "two mappings at different VAs");
+
+        let (err, _) = call(&mut k, num::HANDLE_CLOSE, &[vmo, 0, 0, 0, 0, 0]);
+        assert_eq!(err, 0);
+
+        let space = k.spaces.get(0).unwrap();
+        assert_eq!(
+            space.mapping_count(),
+            0,
+            "VMO deallocation must remove all mappings to it"
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn vmo_close_with_dup_keeps_mappings_until_last_ref() {
+        let mut k = setup_kernel();
+        let perms = (Rights::READ.0 | Rights::MAP.0) as u64;
+
+        let (err, vmo) = call(&mut k, num::VMO_CREATE, &[4096 * 3, 0, 0, 0, 0, 0]);
+        assert_eq!(err, 0);
+
+        let (err, dup) = call(
+            &mut k,
+            num::HANDLE_DUP,
+            &[vmo, Rights::ALL.0 as u64, 0, 0, 0, 0],
+        );
+        assert_eq!(err, 0);
+
+        let (err, _va) = call(&mut k, num::VMO_MAP, &[vmo, 0, perms, 0, 0, 0]);
+        assert_eq!(err, 0);
+
+        let (err, _) = call(&mut k, num::HANDLE_CLOSE, &[vmo, 0, 0, 0, 0, 0]);
+        assert_eq!(err, 0);
+
+        assert_eq!(
+            k.spaces.get(0).unwrap().mapping_count(),
+            1,
+            "mapping survives while dup handle exists"
+        );
+
+        let (err, _) = call(&mut k, num::HANDLE_CLOSE, &[dup, 0, 0, 0, 0, 0]);
+        assert_eq!(err, 0);
+
+        assert_eq!(
+            k.spaces.get(0).unwrap().mapping_count(),
+            0,
+            "mapping removed when last VMO ref dropped"
+        );
+
+        inv(&k);
+    }
+
+    // -- Mutation-killing: boundary tests --
+
+    #[test]
+    fn vmo_resize_to_exact_mapping_size_succeeds() {
+        let mut k = setup_kernel();
+        let rw = (Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0) as u64;
+        let two_pages = (config::PAGE_SIZE * 2) as u64;
+
+        let (err, vmo) = call(&mut k, num::VMO_CREATE, &[two_pages, 0, 0, 0, 0, 0]);
+        assert_eq!(err, 0);
+
+        let (err, _va) = call(&mut k, num::VMO_MAP, &[vmo, 0, rw, 0, 0, 0]);
+        assert_eq!(err, 0);
+
+        let (err, _) = call(&mut k, num::VMO_RESIZE, &[vmo, two_pages, 0, 0, 0, 0]);
+        assert_eq!(err, 0, "resize to exact mapping size must succeed");
+
+        inv(&k);
+    }
+
+    #[test]
+    fn vmo_resize_below_mapping_size_rejected() {
+        let mut k = setup_kernel();
+        let rw = (Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0) as u64;
+        let two_pages = (config::PAGE_SIZE * 2) as u64;
+        let one_page = config::PAGE_SIZE as u64;
+
+        let (err, vmo) = call(&mut k, num::VMO_CREATE, &[two_pages, 0, 0, 0, 0, 0]);
+        assert_eq!(err, 0);
+
+        let (err, _va) = call(&mut k, num::VMO_MAP, &[vmo, 0, rw, 0, 0, 0]);
+        assert_eq!(err, 0);
+
+        let (err, _) = call(&mut k, num::VMO_RESIZE, &[vmo, one_page, 0, 0, 0, 0]);
+        assert_eq!(
+            err,
+            SyscallError::InvalidArgument as u64,
+            "resize below mapping size must fail"
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn clock_read_matches_independent_conversion() {
+        let mut k = setup_kernel();
+
+        let freq = crate::frame::arch::timer::frequency();
+        assert!(freq > 0, "timer frequency must be positive");
+
+        let ticks_before = crate::frame::arch::timer::now();
+        let (err, ns) = call(&mut k, num::CLOCK_READ, &[0; 6]);
+        assert_eq!(err, 0);
+        let ticks_after = crate::frame::arch::timer::now();
+
+        let convert = |t: u64| -> u64 {
+            let secs = t / freq;
+            let rem = t % freq;
+            secs * 1_000_000_000 + rem * 1_000_000_000 / freq
+        };
+
+        let ns_lo = convert(ticks_before);
+        let ns_hi = convert(ticks_after);
+
+        assert!(
+            ns >= ns_lo && ns <= ns_hi,
+            "clock_read ({ns}) should be between independent conversions ({ns_lo}..{ns_hi})"
+        );
+    }
+
+    #[test]
+    fn cross_core_ipc_roundtrip_with_handle_transfer() {
+        crate::frame::arch::page_table::reset_asid_pool();
+
+        let mut k = Box::new(Kernel::new(4));
+        let space = AddressSpace::new(AddressSpaceId(0), 1, 0);
+        k.spaces.alloc(space);
+
+        let t0 = Thread::new(
+            ThreadId(0),
+            Some(AddressSpaceId(0)),
+            Priority::Medium,
+            0,
+            0,
+            0,
+        );
+        k.threads.alloc(t0);
+        k.threads
+            .get_mut(0)
+            .unwrap()
+            .set_state(ThreadRunState::Running);
+        k.scheduler.core_mut(0).set_current(Some(ThreadId(0)));
+
+        let (err, ep_hid) = k.dispatch(ThreadId(0), 0, num::ENDPOINT_CREATE, &[0; 6]);
+        assert_eq!(err, 0);
+
+        for round in 0..10u64 {
+            let call_core = (round % 4) as usize;
+            let recv_core = ((round + 1) % 4) as usize;
+            let reply_core = ((round + 2) % 4) as usize;
+
+            let (err, xfer_hid) = k.dispatch(ThreadId(0), call_core, num::EVENT_CREATE, &[0; 6]);
+            assert_eq!(err, 0, "create event for transfer round {round}");
+
+            let xfer_ids = [xfer_hid as u32];
+            let mut msg = [0u8; 16];
+            msg[0] = round as u8;
+
+            let (err, _) = k.dispatch(
+                ThreadId(0),
+                call_core,
+                num::CALL,
+                &[
+                    ep_hid,
+                    msg.as_mut_ptr() as u64,
+                    1,
+                    xfer_ids.as_ptr() as u64,
+                    1,
+                    0,
+                ],
+            );
+            assert_eq!(err, 0, "CALL round {round}");
+
+            let mut recv_buf = [0u8; 128];
+            let mut recv_handles = [0u32; config::MAX_IPC_HANDLES];
+            let (err, packed) = k.dispatch(
+                ThreadId(0),
+                recv_core,
+                num::RECV,
+                &[
+                    ep_hid,
+                    recv_buf.as_mut_ptr() as u64,
+                    128,
+                    recv_handles.as_mut_ptr() as u64,
+                    config::MAX_IPC_HANDLES as u64,
+                    0,
+                ],
+            );
+            assert_eq!(err, 0, "RECV round {round}");
+
+            let msg_len = (packed & 0xFFFF) as usize;
+            let h_count = ((packed >> 16) & 0xFFFF) as usize;
+            assert_eq!(msg_len, 1);
+            assert_eq!(h_count, 1, "one handle transferred");
+            assert_eq!(recv_buf[0], round as u8);
+
+            let transferred_hid = recv_handles[0] as u64;
+            let (err, _) = k.dispatch(
+                ThreadId(0),
+                recv_core,
+                num::HANDLE_CLOSE,
+                &[transferred_hid, 0, 0, 0, 0, 0],
+            );
+            assert_eq!(err, 0, "close transferred handle");
+
+            let reply_cap = packed >> 32;
+            let (err, _) = k.dispatch(
+                ThreadId(0),
+                reply_core,
+                num::REPLY,
+                &[ep_hid, reply_cap, 0, 0, 0, 0],
+            );
+            assert_eq!(err, 0, "REPLY round {round}");
+
+            let tid = k
+                .scheduler
+                .pick_next(reply_core)
+                .expect("caller should be woken");
+            assert_eq!(tid, ThreadId(0));
+            k.threads
+                .get_mut(0)
+                .unwrap()
+                .set_state(ThreadRunState::Running);
+            k.scheduler.core_mut(0).set_current(Some(tid));
+        }
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn endpoint_destroy_while_callers_blocked_across_cores() {
+        crate::frame::arch::page_table::reset_asid_pool();
+
+        let mut k = Box::new(Kernel::new(4));
+        let space = AddressSpace::new(AddressSpaceId(0), 1, 0);
+        k.spaces.alloc(space);
+
+        let t0 = Thread::new(
+            ThreadId(0),
+            Some(AddressSpaceId(0)),
+            Priority::Medium,
+            0,
+            0,
+            0,
+        );
+        k.threads.alloc(t0);
+        k.threads
+            .get_mut(0)
+            .unwrap()
+            .set_state(ThreadRunState::Running);
+        k.scheduler.core_mut(0).set_current(Some(ThreadId(0)));
+
+        let (err, ep_hid) = k.dispatch(ThreadId(0), 0, num::ENDPOINT_CREATE, &[0; 6]);
+        assert_eq!(err, 0);
+
+        let ep_obj = k
+            .spaces
+            .get(0)
+            .unwrap()
+            .handles()
+            .lookup(HandleId(ep_hid as u32))
+            .unwrap()
+            .object_id;
+
+        let priorities = [
+            Priority::Idle,
+            Priority::Low,
+            Priority::Medium,
+            Priority::High,
+        ];
+        for i in 0..4u32 {
+            let prio = priorities[i as usize];
+            let caller = Thread::new(
+                ThreadId(0),
+                Some(AddressSpaceId(0)),
+                prio,
+                0x1000 * (i as usize + 1),
+                0x2000 * (i as usize + 1),
+                0,
+            );
+            let (idx, _) = k.threads.alloc(caller).unwrap();
+            k.threads.get_mut(idx).unwrap().id = ThreadId(idx);
+            k.threads
+                .get_mut(idx)
+                .unwrap()
+                .set_state(ThreadRunState::Blocked);
+
+            let msg_obj = crate::endpoint::Message::from_bytes(&[i as u8; 4]).unwrap();
+            let pending = crate::endpoint::PendingCall {
+                caller: ThreadId(idx),
+                priority: prio,
+                message: msg_obj,
+                handles: [const { None }; config::MAX_IPC_HANDLES],
+                handle_count: 0,
+                badge: 0,
+                reply_buf: 0,
+            };
+            k.endpoints
+                .get_mut(ep_obj)
+                .unwrap()
+                .enqueue_call(pending)
+                .unwrap();
+        }
+
+        assert_eq!(k.endpoints.get(ep_obj).unwrap().pending_call_count(), 4);
+
+        let destroy_core = 3;
+        let (err, _) = k.dispatch(
+            ThreadId(0),
+            destroy_core,
+            num::HANDLE_CLOSE,
+            &[ep_hid, 0, 0, 0, 0, 0],
+        );
+        assert_eq!(err, 0);
+
+        assert!(
+            k.endpoints.get(ep_obj).is_none(),
+            "endpoint destroyed after last handle closed"
+        );
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn rapid_cross_core_object_lifecycle_stress() {
+        crate::frame::arch::page_table::reset_asid_pool();
+
+        let mut k = Box::new(Kernel::new(4));
+        let space = AddressSpace::new(AddressSpaceId(0), 1, 0);
+        k.spaces.alloc(space);
+
+        let t0 = Thread::new(
+            ThreadId(0),
+            Some(AddressSpaceId(0)),
+            Priority::Medium,
+            0,
+            0,
+            0,
+        );
+        k.threads.alloc(t0);
+        k.threads
+            .get_mut(0)
+            .unwrap()
+            .set_state(ThreadRunState::Running);
+        k.scheduler.core_mut(0).set_current(Some(ThreadId(0)));
+
+        for cycle in 0..25u64 {
+            let c1 = (cycle % 4) as usize;
+            let c2 = ((cycle + 1) % 4) as usize;
+            let c3 = ((cycle + 2) % 4) as usize;
+            let c4 = ((cycle + 3) % 4) as usize;
+
+            let (err, vmo) = k.dispatch(ThreadId(0), c1, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
+            assert_eq!(err, 0);
+
+            let (err, dup) = k.dispatch(
+                ThreadId(0),
+                c2,
+                num::HANDLE_DUP,
+                &[vmo, crate::types::Rights::ALL.0 as u64, 0, 0, 0, 0],
+            );
+            assert_eq!(err, 0);
+
+            let (err, snap) = k.dispatch(ThreadId(0), c3, num::VMO_SNAPSHOT, &[vmo, 0, 0, 0, 0, 0]);
+            assert_eq!(err, 0);
+
+            let (err, _) = k.dispatch(ThreadId(0), c4, num::HANDLE_CLOSE, &[vmo, 0, 0, 0, 0, 0]);
+            assert_eq!(err, 0);
+            let (err, _) = k.dispatch(ThreadId(0), c1, num::HANDLE_CLOSE, &[dup, 0, 0, 0, 0, 0]);
+            assert_eq!(err, 0);
+            let (err, _) = k.dispatch(ThreadId(0), c2, num::HANDLE_CLOSE, &[snap, 0, 0, 0, 0, 0]);
+            assert_eq!(err, 0);
+
+            let (err, evt) = k.dispatch(ThreadId(0), c3, num::EVENT_CREATE, &[0; 6]);
+            assert_eq!(err, 0);
+            let (err, _) = k.dispatch(ThreadId(0), c4, num::EVENT_SIGNAL, &[evt, 0xFF, 0, 0, 0, 0]);
+            assert_eq!(err, 0);
+            let (err, _) = k.dispatch(ThreadId(0), c1, num::EVENT_CLEAR, &[evt, 0xFF, 0, 0, 0, 0]);
+            assert_eq!(err, 0);
+            let (err, _) = k.dispatch(ThreadId(0), c2, num::HANDLE_CLOSE, &[evt, 0, 0, 0, 0, 0]);
+            assert_eq!(err, 0);
+        }
 
         crate::invariants::assert_valid(&*k);
     }
