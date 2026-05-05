@@ -5703,4 +5703,117 @@ mod tests {
 
         inv(&k);
     }
+
+    // =========================================================================
+    // BUG REGRESSION TESTS — each test exercises a bug found by Phase 0
+    // adversarial spec review. If any of these fail, the fix has regressed.
+    // =========================================================================
+
+    #[test]
+    fn regression_call_on_peer_closed_preserves_handles() {
+        let mut k = setup_kernel();
+        let ep = create_endpoint(&mut k);
+        let vmo = create_vmo(&mut k);
+
+        let dup = assert_ok(call(
+            &mut k,
+            num::HANDLE_DUP,
+            &[vmo, Rights::ALL.0 as u64, 0, 0, 0, 0],
+        ));
+
+        let initial_handle_count = k.spaces.get(0).unwrap().handles().count();
+
+        let ep_obj_id = k
+            .spaces
+            .get(0)
+            .unwrap()
+            .handles()
+            .lookup(HandleId(ep as u32))
+            .unwrap()
+            .object_id;
+
+        k.endpoints.get_mut(ep_obj_id).unwrap().close_peer();
+
+        let handle_ids = [dup as u32];
+        let handles_ptr = handle_ids.as_ptr() as usize as u64;
+        let result = call(&mut k, num::CALL, &[ep, 0, 0, handles_ptr, 1, 0]);
+
+        assert_eq!(result.0, SyscallError::PeerClosed as u64);
+
+        let after_handle_count = k.spaces.get(0).unwrap().handles().count();
+
+        assert_eq!(
+            initial_handle_count, after_handle_count,
+            "handles must not be leaked when call fails on peer-closed endpoint"
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn regression_space_destroy_decrements_alive_threads() {
+        let mut k = setup_kernel();
+
+        let space = assert_ok(call(&mut k, num::SPACE_CREATE, &[0; 6]));
+        let thread = assert_ok(call(
+            &mut k,
+            num::THREAD_CREATE_IN,
+            &[space, 0x1000, 0x2000, 0, 0, 0],
+        ));
+        let _ = thread;
+
+        let before = k.alive_threads;
+
+        assert_ok(call(&mut k, num::SPACE_DESTROY, &[space, 0, 0, 0, 0, 0]));
+
+        assert_eq!(
+            k.alive_threads,
+            before - 1,
+            "space_destroy must decrement alive_threads for killed threads"
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn regression_event_wait_waiter_leak_on_partial_failure() {
+        let mut k = setup_kernel();
+
+        let evt0 = create_event(&mut k);
+        let evt1 = create_event(&mut k);
+
+        let evt0_obj_id = k
+            .spaces
+            .get(0)
+            .unwrap()
+            .handles()
+            .lookup(HandleId(evt0 as u32))
+            .unwrap()
+            .object_id;
+        let evt1_obj_id = k
+            .spaces
+            .get(0)
+            .unwrap()
+            .handles()
+            .lookup(HandleId(evt1 as u32))
+            .unwrap()
+            .object_id;
+
+        let event = k.events.get_mut(evt1_obj_id).unwrap();
+
+        for i in 0..config::MAX_WAITERS_PER_EVENT {
+            event.add_waiter(ThreadId(1000 + i as u32), 0b1).unwrap();
+        }
+
+        let result = call(&mut k, num::EVENT_WAIT, &[evt0, 0b1, evt1, 0b1, 0, 0]);
+
+        assert_eq!(result.0, SyscallError::BufferFull as u64);
+
+        let evt0_waiters = k.events.get(evt0_obj_id).unwrap().waiter_count();
+
+        assert_eq!(
+            evt0_waiters, 0,
+            "event 0 should have no leftover waiters after partial multi-wait failure"
+        );
+    }
 }
