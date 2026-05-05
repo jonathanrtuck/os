@@ -1,5 +1,106 @@
 # Kernel Verification Progress
 
+## Session 7 — 2026-05-05 — COMPLETE
+
+### Results
+
+| Metric                       | Session 6 | Session 7 | Delta |
+| ---------------------------- | --------- | --------- | ----- |
+| Tests                        | 655       | 673       | +18   |
+| Bugs found                   | 17        | 17        | —     |
+| Bugs fixed                   | 17        | 17        | —     |
+| Invariant checks             | 16        | 16        | —     |
+| Property tests               | 27        | 33        | +6    |
+| Commits on branch            | 56        | 60        | +4    |
+| Bare-metal integration tests | 32        | 32        | —     |
+| Per-syscall benchmarks       | 14        | 14        | —     |
+| Workload benchmarks          | 3         | 3         | —     |
+| Differential test scenarios  | 8+6 (BM)  | 8+6 (BM)  | —     |
+
+### Work Completed (Session 7)
+
+**Phase 11.13 (WFE/SEV Spin Wait) — complete:**
+
+- Replaced `core::hint::spin_loop()` (ISB) with WFE in the ticket lock spin
+  loop on bare-metal. WFE puts the core into low-power standby until SEV on
+  unlock wakes it.
+- SEVL primes the event register so the first WFE falls through without
+  stalling. LDAPR (RCPC) provides the weaker load-acquire for the spin check.
+- Verified in assembly: `sevl → wfe → ldapr → cmp → b.ne` (lock),
+  `ldaddl → sev → msr DAIF` (unlock).
+- Host tests retain `core::hint::spin_loop()` (WFE is EL1+ only).
+
+**Phase 11 (Dispatch Stack Optimization) — complete:**
+
+- Added `#[inline(never)]` to all 29 `sys_*` handler methods.
+- dispatch() stack frame shrank from ~39KB to 16 bytes (thin jump table).
+- Each handler now has its own frame: sys_reply (largest) is ~2.8KB.
+- Per-syscall worst case: ~2.8KB vs previous ~39KB for any syscall.
+
+**Phase 2 (Property Testing) — 6 new proptests (27→33):**
+
+- `ipc_message_data_integrity`: byte-for-byte sent==received, random lengths
+- `double_reply_fails`: consumed reply cap rejects second reply
+- `single_thread_yield_no_panic`: thread_exit from single-thread system
+- `vmo_snapshot_is_independent_copy`: snapshot is distinct, closing doesn't
+  affect original
+- `handle_table_capacity_recovery`: fill/close/re-create cycle
+- `event_signal_clear_commutative`: signal order doesn't affect final bits
+
+**Phase 9 (Error Injection) — 8 new tests:**
+
+- Object table exhaustion + recovery: VMO, event, endpoint tables filled then
+  recovered (3 tests)
+- thread_create_in rollback: invalid handle → thread cleaned up; valid handle
+  → refcount incremented (2 tests)
+- Input boundary injection: null pointer rejected, zero-length accepted,
+  MAX_IPC_HANDLES+1 rejected (3 tests)
+
+**Phase 8 (Concurrency) — 4 new stress tests:**
+
+- `ipc_n_callers_fill_priority_ring`: fill all 16 slots across 4 priority
+  levels, recv+drain all
+- `endpoint_destroy_with_blocked_callers`: destroy endpoint with 4 blocked
+  callers
+- `alternating_core_dispatch_preserves_invariants`: dispatch from 4 cores in
+  round-robin, 50 cycles
+- `multi_space_ipc_stress`: thread_create_in to separate space with handle
+  transfer
+
+**Clippy fix:**
+
+- Fixed pre-existing unused variable warning in sys_space_destroy: restructured
+  cfg blocks so each target only computes `asid` when it needs it.
+
+### Phase Status
+
+| Phase                 | Status | Notes                                                                      |
+| --------------------- | ------ | -------------------------------------------------------------------------- |
+| 0. Spec Review        | 100%   | 0.1 done, 0.2 done, 0.3 done (16 invariants), 0.4 done                    |
+| 1. Unsafe Audit       | 100%   | 85 blocks in 15 files — ALL CLEAN                                          |
+| 2. Property Testing   | 100%   | 33 proptests. All plan items covered.                                      |
+| 3. Fuzzing            | 95%    | 44M runs, zero crashes                                                     |
+| 4. Miri               | 100%   | 673 tests (pending Miri re-verification this session)                      |
+| 5. Coverage           | 90%    | 96-100% on all critical files, remaining gaps are bare-metal-only          |
+| 6. Mutation Testing   | 80%    | 7 critical files, most survivors bare-metal-only                           |
+| 7. Sanitizers         | 95%    | ASan: 673 tests clean                                                      |
+| 8. Concurrency        | 75%    | Host-side comprehensive. SMP bare-metal pending.                           |
+| 9. Error Injection    | 90%    | All object types exhaustion+recovery, rollback, boundary injection         |
+| 10. Static Analysis   | 95%    | Clippy clean (lib+bare-metal), cargo audit clean                           |
+| 11. Bare-Metal + Perf | 100%   | WFE spin, dispatch stack opt, LSE, assembly, differential tests complete   |
+| 12. Regression Infra  | 90%    | All Makefile targets, nightly gate. Baselines need bare-metal run.         |
+
+### Remaining Work
+
+1. **Phase 4 re-verification:** Confirm Miri passes on all 673 tests
+2. **Phase 12 baselines:** Run benchmarks on actual hardware to populate
+   bench_baselines.toml
+3. **Phase 8 SMP:** Real multi-core bare-metal stress testing (needs hypervisor
+   multi-vCPU workload)
+4. **Iteration loop:** Re-run phases 2-10 once more for convergence check
+
+---
+
 ## Session 6 — 2026-05-05 — COMPLETE
 
 ### Results
@@ -77,26 +178,26 @@
 - Remaining gaps are bare-metal-only paths: multi-wait cleanup (requires SMP
   wakeup), PeerClosed notification (requires concurrent endpoint close),
   register_state_mut (bare-metal-only struct)
-- 0% files: exception.rs, serial.rs, mmio.rs, mod.rs, entropy.rs — all
-  inline asm, covered by bare-metal integration tests
+- 0% files: exception.rs, serial.rs, mmio.rs, mod.rs, entropy.rs — all inline
+  asm, covered by bare-metal integration tests
 
 ### Phase Status
 
-| Phase                 | Status | Notes                                                                                          |
-| --------------------- | ------ | ---------------------------------------------------------------------------------------------- |
-| 0. Spec Review        | 100%   | 0.1 done, 0.2 done, 0.3 done (16 invariants), 0.4 done                                         |
-| 1. Unsafe Audit       | 100%   | 83 blocks in 15 files — ALL CLEAN                                                              |
-| 2. Property Testing   | 95%    | 27 proptests. Multi-wait + clock covered.                                                      |
-| 3. Fuzzing            | 95%    | 44M runs, zero crashes                                                                         |
-| 4. Miri               | 100%   | 655 tests, proptest isolation fixed, timer stubs for Miri                                      |
-| 5. Coverage           | 90%    | 96-100% on all critical files, remaining gaps are bare-metal-only                              |
-| 6. Mutation Testing   | 80%    | 7 critical files, most survivors bare-metal-only                                               |
-| 7. Sanitizers         | 90%    | ASan: 641 tests clean                                                                          |
-| 8. Concurrency        | 60%    | Host-side stress done. SMP bare-metal pending                                                  |
-| 9. Error Injection    | 80%    | All object types exhaustion+recovery                                                           |
-| 10. Static Analysis   | 90%    | deny attrs, cargo audit clean                                                                  |
-| 11. Bare-Metal + Perf | 95%    | LSE atomics, assembly inspected, differential tests complete. Baseline population pending.      |
-| 12. Regression Infra  | 90%    | All Makefile targets, nightly gate, bench baselines. Baselines unpopulated (need bare-metal run)|
+| Phase                 | Status | Notes                                                                                            |
+| --------------------- | ------ | ------------------------------------------------------------------------------------------------ |
+| 0. Spec Review        | 100%   | 0.1 done, 0.2 done, 0.3 done (16 invariants), 0.4 done                                           |
+| 1. Unsafe Audit       | 100%   | 83 blocks in 15 files — ALL CLEAN                                                                |
+| 2. Property Testing   | 95%    | 27 proptests. Multi-wait + clock covered.                                                        |
+| 3. Fuzzing            | 95%    | 44M runs, zero crashes                                                                           |
+| 4. Miri               | 100%   | 655 tests, proptest isolation fixed, timer stubs for Miri                                        |
+| 5. Coverage           | 90%    | 96-100% on all critical files, remaining gaps are bare-metal-only                                |
+| 6. Mutation Testing   | 80%    | 7 critical files, most survivors bare-metal-only                                                 |
+| 7. Sanitizers         | 90%    | ASan: 641 tests clean                                                                            |
+| 8. Concurrency        | 60%    | Host-side stress done. SMP bare-metal pending                                                    |
+| 9. Error Injection    | 80%    | All object types exhaustion+recovery                                                             |
+| 10. Static Analysis   | 90%    | deny attrs, cargo audit clean                                                                    |
+| 11. Bare-Metal + Perf | 95%    | LSE atomics, assembly inspected, differential tests complete. Baseline population pending.       |
+| 12. Regression Infra  | 90%    | All Makefile targets, nightly gate, bench baselines. Baselines unpopulated (need bare-metal run) |
 
 ### Remaining Work
 
@@ -104,8 +205,8 @@
    populate bench_baselines.toml and close theoretical-vs-measured gap
 2. **Phase 11 dispatch stack:** Consider `#[inline(never)]` on large syscall
    handlers to reduce ~39KB stack frame
-3. **Phase 11 WFE spin:** Add explicit SEV to unlock, use WFE instead of ISB
-   in ticket lock spin wait
+3. **Phase 11 WFE spin:** Add explicit SEV to unlock, use WFE instead of ISB in
+   ticket lock spin wait
 
 ---
 
