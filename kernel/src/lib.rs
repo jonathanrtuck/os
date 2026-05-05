@@ -15,6 +15,7 @@
 #![deny(unsafe_code)]
 #![deny(unused_must_use)]
 #![deny(unreachable_patterns)]
+#![deny(unused_unsafe)]
 
 extern crate alloc;
 
