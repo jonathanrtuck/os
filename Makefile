@@ -2,7 +2,8 @@
 HOST_TARGET := aarch64-apple-darwin
 
 .PHONY: test build check clippy fmt bench clean integration-test \
-        miri asan fuzz mutants coverage gate nightly
+        miri asan fuzz mutants coverage gate nightly \
+        stress bench-check audit integration-release
 
 # -- Core targets --
 
@@ -48,10 +49,24 @@ coverage:
 mutants:
 	CARGO_BUILD_TARGET=$(HOST_TARGET) cargo mutants -p kernel --timeout 30
 
+# -- Bare-metal targets --
+
+integration-release:
+	@scripts/integration-test --release
+
+stress:
+	@scripts/integration-test --stress 100
+
+bench-check:
+	@echo "TODO: bench + baseline comparison (Phase 11.16)"
+
+audit:
+	cargo audit
+
 # -- Gates --
 
 gate: clippy test build
 	@echo "Gate passed: clippy + tests + build"
 
-nightly: gate miri asan fuzz coverage
+nightly: gate miri asan fuzz coverage integration-test integration-release stress
 	@echo "Nightly gate passed: all verification targets"
