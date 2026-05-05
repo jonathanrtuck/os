@@ -6981,4 +6981,74 @@ mod tests {
 
         crate::invariants::assert_valid(&*k);
     }
+
+    #[test]
+    fn thread_create_in_with_handles_increments_refcounts() {
+        let mut k = setup_kernel();
+        let (_, space_hid) = call(&mut k, num::SPACE_CREATE, &[0; 6]);
+        let (_, vmo_hid) = call(&mut k, num::VMO_CREATE, &[config::PAGE_SIZE as u64, 0, 0, 0, 0, 0]);
+        let (_, ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
+
+        let vmo_obj = k
+            .spaces
+            .get(0)
+            .unwrap()
+            .handles()
+            .lookup(HandleId(vmo_hid as u32))
+            .unwrap()
+            .object_id;
+        let ep_obj = k
+            .spaces
+            .get(0)
+            .unwrap()
+            .handles()
+            .lookup(HandleId(ep_hid as u32))
+            .unwrap()
+            .object_id;
+
+        assert_eq!(k.vmos.get(vmo_obj).unwrap().refcount(), 1);
+        assert_eq!(k.endpoints.get(ep_obj).unwrap().refcount(), 1);
+
+        let handle_ids = [vmo_hid as u32, ep_hid as u32];
+        let (err, _) = call(
+            &mut k,
+            num::THREAD_CREATE_IN,
+            &[
+                space_hid,
+                0x1000,
+                0x2000,
+                0,
+                handle_ids.as_ptr() as u64,
+                2,
+            ],
+        );
+
+        assert_eq!(err, 0);
+        assert_eq!(
+            k.vmos.get(vmo_obj).unwrap().refcount(),
+            2,
+            "VMO refcount should be 2 after cloning handle into child space"
+        );
+        assert_eq!(
+            k.endpoints.get(ep_obj).unwrap().refcount(),
+            2,
+            "endpoint refcount should be 2 after cloning handle into child space"
+        );
+
+        let (err, _) = call(&mut k, num::SPACE_DESTROY, &[space_hid, 0, 0, 0, 0, 0]);
+
+        assert_eq!(err, 0);
+        assert_eq!(
+            k.vmos.get(vmo_obj).unwrap().refcount(),
+            1,
+            "VMO refcount should return to 1 after space destroy"
+        );
+        assert_eq!(
+            k.endpoints.get(ep_obj).unwrap().refcount(),
+            1,
+            "endpoint refcount should return to 1 after space destroy"
+        );
+
+        crate::invariants::assert_valid(&*k);
+    }
 }
