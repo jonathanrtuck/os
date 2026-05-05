@@ -1,5 +1,86 @@
 # Kernel Verification Progress
 
+## Session 8 — 2026-05-05 — IN PROGRESS
+
+### Results
+
+| Metric                       | Session 7 | Session 8 | Delta |
+| ---------------------------- | --------- | --------- | ----- |
+| Tests                        | 673       | 680       | +7    |
+| Bugs found                   | 17        | 18        | +1    |
+| Bugs fixed                   | 17        | 18        | +1    |
+| Invariant checks             | 16        | 16        | —     |
+| Property tests               | 33        | 33        | —     |
+| Commits on branch            | 60        | 61        | +1    |
+| Bare-metal integration tests | 32        | 32        | —     |
+| Per-syscall benchmarks       | 14        | 14        | —     |
+| Workload benchmarks          | 3         | 3         | —     |
+| Fuzz targets                 | 3         | 4         | +1    |
+
+### Bug #18: ASID Leak in sys_space_create
+
+Both error paths in `sys_space_create` leaked ASIDs from the global pool:
+1. Space table full: Box<AddressSpace> dropped without freeing ASID
+2. Handle table full: spaces.dealloc() returned space but ASID not freed
+
+With only 128 ASIDs, repeated failed space creation would exhaust the
+pool and prevent any new spaces from being created.
+
+### Work Completed (Session 8)
+
+**Phase 10 (Static Analysis) — clippy pedantic enabled:**
+
+- Added `#![warn(clippy::pedantic)]` at crate level with targeted allows
+- Fixed all 24 actionable warnings: format string inlining, let-else, map_or
+- Clean on both host (aarch64-apple-darwin) and bare-metal (aarch64-unknown-none)
+
+**Phase 9 (Error Injection) — 7 new tests (673→680):**
+
+- ASID leak regression (space table full, handle table full)
+- VMO map without MAP right, WRITE perm without WRITE right
+- Handle dup with zero rights (attenuation verified)
+- Handle boundary IDs (MAX_HANDLES, u32::MAX)
+- VMO resize to u64::MAX rejected
+
+**Phase 3 (Fuzzing) — multi-thread target added:**
+
+- New `syscall_multi_thread` fuzz target: 2 threads, 2 address spaces
+- Proper scheduler state management (Ready→Running before dispatch)
+- IPC (CALL/RECV), event, handle operations across threads
+- 1M runs zero crashes, invariant checking after every sequence
+
+**Phase 7 (Sanitizers) — convergence verified:**
+
+- ASan: 680 tests clean
+- Miri: 6 new tests verified clean (full 680-test run pending)
+
+### Phase Status
+
+| Phase                 | Status | Notes                                                                    |
+| --------------------- | ------ | ------------------------------------------------------------------------ |
+| 0. Spec Review        | 100%   | Complete                                                                  |
+| 1. Unsafe Audit       | 100%   | 85 blocks in 15 files — ALL CLEAN                                        |
+| 2. Property Testing   | 100%   | 33 proptests                                                             |
+| 3. Fuzzing            | 100%   | 4 targets, 1M+ runs each, zero crashes                                  |
+| 4. Miri               | 95%    | Full 680-test run pending                                                |
+| 5. Coverage           | 90%    | Remaining gaps are bare-metal-only                                       |
+| 6. Mutation Testing   | 80%    | syscall.rs re-run pending                                                |
+| 7. Sanitizers         | 100%   | ASan: 680 tests clean                                                    |
+| 8. Concurrency        | 75%    | Host-side comprehensive. SMP bare-metal pending.                         |
+| 9. Error Injection    | 95%    | ASID leak found+fixed, boundary injection expanded                       |
+| 10. Static Analysis   | 100%   | Clippy pedantic enabled, both targets clean                              |
+| 11. Bare-Metal + Perf | 100%   | Complete                                                                 |
+| 12. Regression Infra  | 90%    | Baselines need hardware run                                              |
+
+### Remaining Work
+
+1. **Phase 4:** Full Miri run on 680 tests (running in background)
+2. **Phase 6:** Mutation testing convergence on syscall.rs (running)
+3. **Phase 8:** SMP bare-metal (needs hypervisor multi-vCPU)
+4. **Phase 12:** Benchmark baselines (needs hardware run)
+
+---
+
 ## Session 7 — 2026-05-05 — COMPLETE
 
 ### Results
