@@ -38,6 +38,22 @@ pub fn verify(kernel: &Kernel) -> Vec<Violation> {
     check_scheduler_uniqueness(kernel, &mut violations);
     check_thread_state_consistency(kernel, &mut violations);
     check_mapping_consistency(kernel, &mut violations);
+    check_ipc_blocked_thread_consistency(kernel, &mut violations);
+    check_event_waiter_validity(kernel, &mut violations);
+    check_irq_binding_consistency(kernel, &mut violations);
+    check_vmo_mapping_range_validity(kernel, &mut violations);
+
+    violations
+}
+
+/// Extended verification that includes object reachability (leak detection).
+/// Call this only when all objects should be reachable — e.g., after full
+/// lifecycle tests. NOT suitable for per-syscall checking because handle_close
+/// does not automatically destroy objects (space_destroy does).
+pub fn verify_no_leaks(kernel: &Kernel) -> Vec<Violation> {
+    let mut violations = verify(kernel);
+
+    check_object_reachability(kernel, &mut violations);
 
     violations
 }
@@ -295,6 +311,194 @@ fn check_mapping_consistency(kernel: &Kernel, violations: &mut Vec<Violation>) {
                     ),
                 });
             }
+        }
+    }
+}
+
+fn check_ipc_blocked_thread_consistency(kernel: &Kernel, violations: &mut Vec<Violation>) {
+    for (ep_idx, ep) in kernel.endpoints.iter_allocated() {
+        for caller_tid in ep.all_caller_thread_ids() {
+            match kernel.threads.get(caller_tid.0) {
+                None => {
+                    violations.push(Violation {
+                        category: "ipc-caller",
+                        detail: format!(
+                            "endpoint #{} references deallocated caller thread #{}",
+                            ep_idx, caller_tid.0
+                        ),
+                    });
+                }
+                Some(thread) => {
+                    if thread.state() != ThreadRunState::Blocked {
+                        violations.push(Violation {
+                            category: "ipc-caller",
+                            detail: format!(
+                                "endpoint #{} has caller thread #{} in state {:?}, expected Blocked",
+                                ep_idx,
+                                caller_tid.0,
+                                thread.state()
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+
+        for waiter_tid in ep.all_recv_waiter_ids() {
+            match kernel.threads.get(waiter_tid.0) {
+                None => {
+                    violations.push(Violation {
+                        category: "ipc-waiter",
+                        detail: format!(
+                            "endpoint #{} references deallocated recv waiter thread #{}",
+                            ep_idx, waiter_tid.0
+                        ),
+                    });
+                }
+                Some(thread) => {
+                    if thread.state() != ThreadRunState::Blocked {
+                        violations.push(Violation {
+                            category: "ipc-waiter",
+                            detail: format!(
+                                "endpoint #{} has recv waiter thread #{} in state {:?}, expected Blocked",
+                                ep_idx,
+                                waiter_tid.0,
+                                thread.state()
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn check_event_waiter_validity(kernel: &Kernel, violations: &mut Vec<Violation>) {
+    for (evt_idx, event) in kernel.events.iter_allocated() {
+        for waiter_tid in event.all_waiter_thread_ids() {
+            match kernel.threads.get(waiter_tid.0) {
+                None => {
+                    violations.push(Violation {
+                        category: "event-waiter",
+                        detail: format!(
+                            "event #{} references deallocated waiter thread #{}",
+                            evt_idx, waiter_tid.0
+                        ),
+                    });
+                }
+                Some(thread) => {
+                    if thread.state() != ThreadRunState::Blocked {
+                        violations.push(Violation {
+                            category: "event-waiter",
+                            detail: format!(
+                                "event #{} has waiter thread #{} in state {:?}, expected Blocked",
+                                evt_idx,
+                                waiter_tid.0,
+                                thread.state()
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn check_irq_binding_consistency(kernel: &Kernel, violations: &mut Vec<Violation>) {
+    for intid in 0..crate::config::MAX_IRQS {
+        if let Some(binding) = kernel.irqs.binding_at(intid) {
+            if !kernel.events.is_allocated(binding.event_id.0) {
+                violations.push(Violation {
+                    category: "irq-binding",
+                    detail: format!(
+                        "IRQ #{} bound to deallocated event #{}",
+                        intid, binding.event_id.0
+                    ),
+                });
+            }
+        }
+    }
+}
+
+fn check_vmo_mapping_range_validity(kernel: &Kernel, violations: &mut Vec<Violation>) {
+    for (space_idx, space) in kernel.spaces.iter_allocated() {
+        for (i, m) in space.mappings().iter().enumerate() {
+            if let Some(vmo) = kernel.vmos.get(m.vmo_id.0) {
+                let aligned_vmo_size = vmo.size().next_multiple_of(crate::config::PAGE_SIZE);
+
+                if m.size > aligned_vmo_size {
+                    violations.push(Violation {
+                        category: "mapping-range",
+                        detail: format!(
+                            "space {} mapping {} maps {} bytes but VMO #{} is only {} bytes \
+                             (page-aligned: {})",
+                            space_idx,
+                            i,
+                            m.size,
+                            m.vmo_id.0,
+                            vmo.size(),
+                            aligned_vmo_size,
+                        ),
+                    });
+                }
+            }
+        }
+    }
+}
+
+fn check_object_reachability(kernel: &Kernel, violations: &mut Vec<Violation>) {
+    let mut vmo_refs = BTreeSet::new();
+    let mut endpoint_refs = BTreeSet::new();
+    let mut event_refs = BTreeSet::new();
+
+    for (_, space) in kernel.spaces.iter_allocated() {
+        for (_, handle) in space.handles().iter_handles() {
+            match handle.object_type {
+                ObjectType::Vmo => {
+                    vmo_refs.insert(handle.object_id);
+                }
+                ObjectType::Endpoint => {
+                    endpoint_refs.insert(handle.object_id);
+                }
+                ObjectType::Event => {
+                    event_refs.insert(handle.object_id);
+                }
+                ObjectType::Thread | ObjectType::AddressSpace => {}
+            }
+        }
+    }
+
+    for (idx, _) in kernel.vmos.iter_allocated() {
+        if !vmo_refs.contains(&idx) {
+            let is_mapped = kernel
+                .spaces
+                .iter_allocated()
+                .any(|(_, space)| space.mappings().iter().any(|m| m.vmo_id.0 == idx));
+
+            if !is_mapped {
+                violations.push(Violation {
+                    category: "orphan-vmo",
+                    detail: format!("VMO #{} has no handles and no mappings (orphaned)", idx),
+                });
+            }
+        }
+    }
+
+    for (idx, _) in kernel.endpoints.iter_allocated() {
+        if !endpoint_refs.contains(&idx) {
+            violations.push(Violation {
+                category: "orphan-endpoint",
+                detail: format!("endpoint #{} has no handles (orphaned)", idx),
+            });
+        }
+    }
+
+    for (idx, _) in kernel.events.iter_allocated() {
+        if !event_refs.contains(&idx) {
+            violations.push(Violation {
+                category: "orphan-event",
+                detail: format!("event #{} has no handles (orphaned)", idx),
+            });
         }
     }
 }

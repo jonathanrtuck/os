@@ -115,6 +115,15 @@ impl IrqTable {
         Ok(())
     }
 
+    /// Inspect a binding at a given INTID (for invariant checking).
+    #[cfg(test)]
+    pub fn binding_at(&self, intid: usize) -> Option<IrqSignal> {
+        self.bindings.get(intid)?.as_ref().map(|b| IrqSignal {
+            event_id: b.event_id,
+            signal_bits: b.signal_bits,
+        })
+    }
+
     /// Return INTIDs bound to a given event whose signal_bits overlap
     /// with `cleared_bits`. Used by event_clear to auto-unmask IRQs.
     pub fn intids_for_event_bits(&self, event_id: EventId, cleared_bits: u64) -> ([u32; 4], usize) {
