@@ -1280,7 +1280,9 @@ impl Kernel {
 
             for i in 0..staged.count as usize {
                 if let Some(h) = staged.handles[i].take() {
-                    let _ = caller_ht.install(h);
+                    let result = caller_ht.install(h);
+
+                    debug_assert!(result.is_ok(), "handle install failed despite pre-check");
                 }
             }
         }
