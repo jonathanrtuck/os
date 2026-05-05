@@ -1,5 +1,114 @@
 # Kernel Verification Progress
 
+## Session 6 — 2026-05-05 — COMPLETE
+
+### Results
+
+| Metric                       | Session 5 | Session 6 | Delta |
+| ---------------------------- | --------- | --------- | ----- |
+| Tests                        | 655       | 655       | —     |
+| Bugs found                   | 17        | 17        | —     |
+| Bugs fixed                   | 17        | 17        | —     |
+| Invariant checks             | 16        | 16        | —     |
+| Property tests               | 27        | 27        | —     |
+| Commits on branch            | 52        | 56        | +4    |
+| Bare-metal integration tests | 26        | 32        | +6    |
+| Per-syscall benchmarks       | 14        | 14        | —     |
+| Workload benchmarks          | 3         | 3         | —     |
+| Differential test scenarios  | 8 (host)  | 8+6 (BM)  | +6    |
+
+### Work Completed (Session 6)
+
+**Phase 4 (Miri) — proptest isolation fixed:**
+
+- Created `kernel/proptest.toml` with `fork = false` (Miri can't fork)
+- Added Miri stubs in `timer.rs`: `now()` uses `AtomicU64` monotonic counter,
+  `frequency()` returns 24 MHz constant. All timer sysreg calls gated on
+  `#[cfg(not(miri))]`
+- Updated Makefile miri target: `MIRIFLAGS=-Zmiri-isolation-error=warn`
+- `clock_read_returns_value` passes under Miri. Full 655-test run no longer
+  blocked by proptest getcwd isolation error.
+
+**Phase 11.14 (Assembly Inspection) — complete:**
+
+- Documented full disassembly analysis in `design/hot-path-asm.md`
+- SVC fast handler: 17 instructions, optimal (STP pairs, no waste)
+- dispatch(): 5009 instructions, ~39 KB stack frame (all 30 handlers inlined)
+  - Jump table routing (2-instruction dispatch) — good
+  - Stack probing ~27 cycles overhead from large frame
+  - Optimization note: `#[inline(never)]` on large handlers would reduce frame
+- HandleTable::install: 25 instructions, uses `umaddl` + 64-bit loads
+- HandleTable::remove: 40 instructions, clean free-list ops
+
+**Phase 11.13 (M4 Pro Optimizations) — LSE atomics enabled:**
+
+- Added `target-feature=+lse,+lse2,+rcpc` to `.cargo/config.toml` for
+  `aarch64-unknown-none` target
+- **Zero LL/SC instructions remain** in the release binary. All atomics now use
+  single-instruction LSE: `ldaddal` (ticket lock acquire), `ldaddl` (release),
+  `swp` (FP ownership), `casalb` (CAS), `ldaddalh` (page refcount)
+- RCPC enabled: spin wait uses `ldapr` (weaker load-acquire) instead of `ldar`
+- Spin wait uses `isb` from `core::hint::spin_loop()`. WFE+SEV optimization
+  documented as future improvement.
+
+**Phase 11.7 (Differential Testing) — bare-metal side complete:**
+
+- 6 differential test scenarios added to integration test binary (exit codes
+  300-358):
+  1. `diff_object_lifecycle`: VMO create/info/dup/close lifecycle
+  2. `diff_event_signal_clear`: signal, wait, clear, re-wait
+  3. `diff_endpoint_bind_close`: endpoint+event binding and cleanup
+  4. `diff_error_codes`: InvalidHandle, WrongType, zero VMO, seal+resize, rights
+  5. `diff_vmo_snapshot_seal_resize`: snapshot/resize/seal interaction
+  6. `diff_handle_slot_reuse`: close+realloc doesn't corrupt other handles
+- Updated `scripts/integration-test` exit code mappings for 300-range
+- IPC blocking and system info scenarios already covered by existing tests
+
+**Phase 5 (Coverage) — gap analysis complete:**
+
+- Fresh coverage measurement after session 6 changes:
+  - `syscall.rs`: 96.4% line / 99.7% branch (292/8180 uncovered)
+  - `handle.rs`: 98.7% line / 100% branch
+  - `endpoint.rs`: 98.5% line / 96.8% branch
+  - `event.rs`: 99.6% line / 100% branch
+  - `sched.rs`: 100% line / 100% branch
+  - `table.rs`: 99.3% line / 100% branch
+  - `irq.rs`: 99.6% line / 100% branch
+- Remaining gaps are bare-metal-only paths: multi-wait cleanup (requires SMP
+  wakeup), PeerClosed notification (requires concurrent endpoint close),
+  register_state_mut (bare-metal-only struct)
+- 0% files: exception.rs, serial.rs, mmio.rs, mod.rs, entropy.rs — all
+  inline asm, covered by bare-metal integration tests
+
+### Phase Status
+
+| Phase                 | Status | Notes                                                                                          |
+| --------------------- | ------ | ---------------------------------------------------------------------------------------------- |
+| 0. Spec Review        | 100%   | 0.1 done, 0.2 done, 0.3 done (16 invariants), 0.4 done                                         |
+| 1. Unsafe Audit       | 100%   | 83 blocks in 15 files — ALL CLEAN                                                              |
+| 2. Property Testing   | 95%    | 27 proptests. Multi-wait + clock covered.                                                      |
+| 3. Fuzzing            | 95%    | 44M runs, zero crashes                                                                         |
+| 4. Miri               | 100%   | 655 tests, proptest isolation fixed, timer stubs for Miri                                      |
+| 5. Coverage           | 90%    | 96-100% on all critical files, remaining gaps are bare-metal-only                              |
+| 6. Mutation Testing   | 80%    | 7 critical files, most survivors bare-metal-only                                               |
+| 7. Sanitizers         | 90%    | ASan: 641 tests clean                                                                          |
+| 8. Concurrency        | 60%    | Host-side stress done. SMP bare-metal pending                                                  |
+| 9. Error Injection    | 80%    | All object types exhaustion+recovery                                                           |
+| 10. Static Analysis   | 90%    | deny attrs, cargo audit clean                                                                  |
+| 11. Bare-Metal + Perf | 95%    | LSE atomics, assembly inspected, differential tests complete. Baseline population pending.      |
+| 12. Regression Infra  | 90%    | All Makefile targets, nightly gate, bench baselines. Baselines unpopulated (need bare-metal run)|
+
+### Remaining Work
+
+1. **Phase 11 bare-metal measurement:** Run benchmarks on actual hardware to
+   populate bench_baselines.toml and close theoretical-vs-measured gap
+2. **Phase 11 dispatch stack:** Consider `#[inline(never)]` on large syscall
+   handlers to reduce ~39KB stack frame
+3. **Phase 11 WFE spin:** Add explicit SEV to unlock, use WFE instead of ISB
+   in ticket lock spin wait
+
+---
+
 ## Session 5 — 2026-05-05 — COMPLETE
 
 ### Results
@@ -22,12 +131,12 @@
 **Phase 0.3 (Invariant Enumeration) — complete:**
 
 - 3 new invariants added to `invariants::verify()` (13→16 total):
-  1. Refcount consistency: object refcount >= handle count across all
-     spaces (catches dangling handles from missing add_ref calls)
+  1. Refcount consistency: object refcount >= handle count across all spaces
+     (catches dangling handles from missing add_ref calls)
   2. Endpoint-event binding bidirectionality: if endpoint→event is set,
      event→endpoint must point back, and vice versa
-  3. Priority inheritance: active server's effective priority >= highest
-     pending caller's priority
+  3. Priority inheritance: active server's effective priority >= highest pending
+     caller's priority
 - Fixed pipeline test that installed handles without incrementing refcount
   (caught by the new refcount invariant)
 
@@ -41,11 +150,10 @@
 
 **Phase 11.7 (Differential Testing) — host side complete:**
 
-- 8 canonical syscall sequences that must produce identical results on both
-  host (`dispatch()`) and bare-metal (real SVC):
-  - Object lifecycle, event signal/clear/check, endpoint binding,
-    system info, error codes, VMO snapshot/seal/resize, IPC blocking,
-    handle table slot reuse
+- 8 canonical syscall sequences that must produce identical results on both host
+  (`dispatch()`) and bare-metal (real SVC):
+  - Object lifecycle, event signal/clear/check, endpoint binding, system info,
+    error codes, VMO snapshot/seal/resize, IPC blocking, handle table slot reuse
 - Bare-metal side: mirror these in integration tests (next session)
 
 **Phase 11.15 (Workload Benchmarks):**
@@ -53,8 +161,8 @@
 - 3 compound workload benchmarks added to `bench.rs`:
   1. Document editing: VMO create → snapshot → event signal/clear → close
   2. IPC storm: 10 rapid call enqueues per iteration with queue drain
-  3. Object lifecycle churn: 8 objects (4 VMO + 2 event + 2 endpoint),
-     create + close in reverse order
+  3. Object lifecycle churn: 8 objects (4 VMO + 2 event + 2 endpoint), create +
+     close in reverse order
 
 **Phase 11.6 (Watchdog Lockup Detector):**
 
@@ -63,37 +171,23 @@
 - Panics if syscall exceeds 10M ticks (~400µs at 24MHz) with diagnostic
 - Gated on `#[cfg(all(debug_assertions, target_os = "none"))]`
 
-### Phase Status
+### Phase Status (Session 5)
 
-| Phase                 | Status | Notes                                                                                           |
-| --------------------- | ------ | ----------------------------------------------------------------------------------------------- |
-| 0. Spec Review        | 100%   | 0.1 done, 0.2 done, 0.3 done (16 invariants), 0.4 done                                        |
-| 1. Unsafe Audit       | 100%   | 83 blocks in 15 files — ALL CLEAN                                                              |
-| 2. Property Testing   | 95%    | 27 proptests. Multi-wait + clock covered.                                                      |
-| 3. Fuzzing            | 95%    | 44M runs, zero crashes                                                                         |
-| 4. Miri               | 95%    | 655 tests (proptest isolation issue under nightly, not a kernel bug)                            |
-| 5. Coverage           | 80%    | 96% syscall.rs, 97-99% core objects                                                            |
-| 6. Mutation Testing   | 80%    | 7 critical files, most survivors bare-metal-only                                               |
-| 7. Sanitizers         | 90%    | ASan: 641 tests clean                                                                          |
-| 8. Concurrency        | 60%    | Host-side stress done. SMP bare-metal pending                                                  |
-| 9. Error Injection    | 80%    | All object types exhaustion+recovery                                                           |
-| 10. Static Analysis   | 90%    | deny attrs, cargo audit clean                                                                  |
-| 11. Bare-Metal + Perf | 85%    | Watchdog, differential tests, workload benchmarks done. Assembly inspection + M4 opts pending.  |
+| Phase                 | Status | Notes                                                                                            |
+| --------------------- | ------ | ------------------------------------------------------------------------------------------------ |
+| 0. Spec Review        | 100%   | 0.1 done, 0.2 done, 0.3 done (16 invariants), 0.4 done                                           |
+| 1. Unsafe Audit       | 100%   | 83 blocks in 15 files — ALL CLEAN                                                                |
+| 2. Property Testing   | 95%    | 27 proptests. Multi-wait + clock covered.                                                        |
+| 3. Fuzzing            | 95%    | 44M runs, zero crashes                                                                           |
+| 4. Miri               | 95%    | 655 tests (proptest isolation issue under nightly, not a kernel bug)                             |
+| 5. Coverage           | 80%    | 96% syscall.rs, 97-99% core objects                                                              |
+| 6. Mutation Testing   | 80%    | 7 critical files, most survivors bare-metal-only                                                 |
+| 7. Sanitizers         | 90%    | ASan: 641 tests clean                                                                            |
+| 8. Concurrency        | 60%    | Host-side stress done. SMP bare-metal pending                                                    |
+| 9. Error Injection    | 80%    | All object types exhaustion+recovery                                                             |
+| 10. Static Analysis   | 90%    | deny attrs, cargo audit clean                                                                    |
+| 11. Bare-Metal + Perf | 85%    | Watchdog, differential tests, workload benchmarks done. Assembly inspection + M4 opts pending.   |
 | 12. Regression Infra  | 90%    | All Makefile targets, nightly gate, bench baselines. Baselines unpopulated (need bare-metal run) |
-
-### Remaining Work
-
-1. **Phase 11.14 (Assembly inspection):** Inspect hot path disassembly for
-   missed optimizations
-2. **Phase 11.13 (M4 Pro optimizations):** Cache-line packing, LSE atomics
-   verification, prefetch evaluation
-3. **Phase 11.7 bare-metal side:** Mirror the 8 differential scenarios in the
-   integration test binary
-4. **Phase 11 bare-metal measurement:** Run benchmarks on actual hardware to
-   populate bench_baselines.toml
-5. **Phase 5 remaining:** Coverage gap analysis after session 5 changes
-6. **Phase 4 remaining:** Miri proptest isolation workaround (skip proptests
-   under Miri, or set isolation-error=warn in Makefile)
 
 ---
 
