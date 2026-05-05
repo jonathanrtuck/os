@@ -1497,12 +1497,31 @@ impl Kernel {
         }
 
         let event_obj_id = EventId(event_handle.object_id);
+        let ep_obj_id = ep_handle.object_id;
         let ep = self
             .endpoints
-            .get_mut(ep_handle.object_id)
+            .get_mut(ep_obj_id)
             .ok_or(SyscallError::InvalidHandle)?;
 
         ep.bind_event(event_obj_id)?;
+
+        let event = self
+            .events
+            .get_mut(event_obj_id.0)
+            .ok_or(SyscallError::InvalidHandle)?;
+
+        if let Err(e) = event.bind_endpoint(EndpointId(ep_obj_id)) {
+            if let Some(ep) = self.endpoints.get_mut(ep_obj_id) {
+                ep.unbind_event();
+            }
+
+            return Err(e);
+        }
+
+        let ep = self
+            .endpoints
+            .get(ep_obj_id)
+            .ok_or(SyscallError::InvalidHandle)?;
 
         if ep.has_pending_calls()
             && let Some(event) = self.events.get_mut(event_obj_id.0)
@@ -6305,6 +6324,169 @@ mod tests {
         assert!(
             k.endpoints.get(ep_obj_id).is_none(),
             "endpoint must be freed when last handle is closed"
+        );
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn event_wait_buffer_path() {
+        let mut k = setup_kernel();
+        let (_, evt0) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+        let (_, evt1) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+
+        call(&mut k, num::EVENT_SIGNAL, &[evt0, 0b10, 0, 0, 0, 0]);
+
+        let wait_buf: [u32; 6] = [evt0 as u32, 0b10, 0, evt1 as u32, 0b01, 0];
+        let result = call(
+            &mut k,
+            num::EVENT_WAIT,
+            &[wait_buf.as_ptr() as u64, 2, 0, 0, 0, 0],
+        );
+
+        assert_eq!(result.0, 0);
+        assert_eq!(result.1, evt0);
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn handle_close_endpoint_with_bound_event() {
+        let mut k = setup_kernel();
+        let (_, ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
+        let (_, evt_hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+
+        let ep_obj_id = k
+            .spaces
+            .get(0)
+            .unwrap()
+            .handles()
+            .lookup(HandleId(ep_hid as u32))
+            .unwrap()
+            .object_id;
+        let evt_obj_id = k
+            .spaces
+            .get(0)
+            .unwrap()
+            .handles()
+            .lookup(HandleId(evt_hid as u32))
+            .unwrap()
+            .object_id;
+
+        let (err, _) = call(
+            &mut k,
+            num::ENDPOINT_BIND_EVENT,
+            &[ep_hid, evt_hid, 0, 0, 0, 0],
+        );
+
+        assert_eq!(err, 0);
+        assert!(k.endpoints.get(ep_obj_id).unwrap().bound_event().is_some());
+
+        let (err, _) = call(&mut k, num::HANDLE_CLOSE, &[ep_hid, 0, 0, 0, 0, 0]);
+
+        assert_eq!(err, 0);
+        assert!(
+            k.endpoints.get(ep_obj_id).is_none(),
+            "endpoint should be freed"
+        );
+        assert!(
+            k.events.get(evt_obj_id).unwrap().bound_endpoint().is_none(),
+            "event's bound_endpoint should be cleared when endpoint is destroyed"
+        );
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn handle_close_event_with_bound_endpoint() {
+        let mut k = setup_kernel();
+        let (_, ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
+        let (_, evt_hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+
+        let ep_obj_id = k
+            .spaces
+            .get(0)
+            .unwrap()
+            .handles()
+            .lookup(HandleId(ep_hid as u32))
+            .unwrap()
+            .object_id;
+        let evt_obj_id = k
+            .spaces
+            .get(0)
+            .unwrap()
+            .handles()
+            .lookup(HandleId(evt_hid as u32))
+            .unwrap()
+            .object_id;
+
+        call(
+            &mut k,
+            num::ENDPOINT_BIND_EVENT,
+            &[ep_hid, evt_hid, 0, 0, 0, 0],
+        );
+
+        let (err, _) = call(&mut k, num::HANDLE_CLOSE, &[evt_hid, 0, 0, 0, 0, 0]);
+
+        assert_eq!(err, 0);
+        assert!(k.events.get(evt_obj_id).is_none(), "event should be freed");
+        assert!(
+            k.endpoints.get(ep_obj_id).unwrap().bound_event().is_none(),
+            "endpoint's bound_event should be cleared when event is destroyed"
+        );
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn handle_close_event_with_irq_binding() {
+        let mut k = setup_kernel();
+        let (_, evt_hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+        let evt_obj_id = k
+            .spaces
+            .get(0)
+            .unwrap()
+            .handles()
+            .lookup(HandleId(evt_hid as u32))
+            .unwrap()
+            .object_id;
+
+        let (err, _) = call(&mut k, num::EVENT_BIND_IRQ, &[evt_hid, 32, 0b1, 0, 0, 0]);
+
+        assert_eq!(err, 0);
+        assert!(k.irqs.binding_at(32).is_some());
+
+        let (err, _) = call(&mut k, num::HANDLE_CLOSE, &[evt_hid, 0, 0, 0, 0, 0]);
+
+        assert_eq!(err, 0);
+        assert!(k.events.get(evt_obj_id).is_none());
+        assert!(
+            k.irqs.binding_at(32).is_none(),
+            "IRQ binding must be removed when event is destroyed"
+        );
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn vmo_resize_blocked_by_active_mapping() {
+        let mut k = setup_kernel();
+        let page = config::PAGE_SIZE as u64;
+        let (_, vmo_hid) = call(&mut k, num::VMO_CREATE, &[page * 4, 0, 0, 0, 0, 0]);
+        let (err, _) = call(
+            &mut k,
+            num::VMO_MAP,
+            &[vmo_hid, 0, Rights::READ.0 as u64, 0, 0, 0],
+        );
+
+        assert_eq!(err, 0);
+
+        let (err, _) = call(&mut k, num::VMO_RESIZE, &[vmo_hid, page, 0, 0, 0, 0]);
+
+        assert_eq!(
+            err,
+            SyscallError::InvalidArgument as u64,
+            "resize below active mapping size must fail"
         );
 
         crate::invariants::assert_valid(&*k);
