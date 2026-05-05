@@ -6,12 +6,12 @@
 
 | Metric | Session 1 | Session 2 | Delta |
 |--------|-----------|-----------|-------|
-| Tests | 540 | 559 | +19 |
-| Bugs found | 10 | 15 | +5 |
-| Bugs fixed | 10 | 15 | +5 |
+| Tests | 540 | 575 | +35 |
+| Bugs found | 10 | 17 | +7 |
+| Bugs fixed | 10 | 17 | +7 |
 | Invariant checks | 13 | 13 | — |
-| Property tests | 13 | 13 | — |
-| Commits on branch | 12 | 16 | +4 |
+| Property tests | 13 | 20 | +7 |
+| Commits on branch | 12 | 20 | +8 |
 
 ### Bugs Fixed (Session 2)
 
@@ -22,6 +22,13 @@
 | 13 | HIGH | handle_close doesn't clean up objects — endpoints/events/VMOs leak when last handle closed | cb1b2fa |
 | 14 | HIGH | endpoint_bind_event only sets ep.bound_event, not evt.bound_endpoint — unidirectional binding | 40e784b |
 | 15 | MEDIUM | PriorityRing test helper reads wrong slots on wraparound | 07ed74d |
+
+### Bugs Fixed (Session 2, continued)
+
+| # | Severity | Bug | Commit |
+|---|----------|-----|--------|
+| 16 | HIGH | do_call test helper dangling reply buffer (Miri UB) | 82a91d6 |
+| 17 | MEDIUM | ASID pool never freed in test mode, causing test isolation failures | f41fd9a |
 
 ### Infrastructure Added (Session 2)
 
@@ -34,22 +41,26 @@
 - **thread_create_in increments refcount** — cloned handles tracked correctly
 - **Bidirectional event-endpoint binding** — both sides now know about each other
 - **Coverage measurement** — 96%+ line coverage on syscall handlers, 97-99% on object modules
+- **Miri UB fix confirmed** — 5 previously-failing tests pass clean
+- **ASID pool test isolation** — reset_asid_pool() + test-mode free_asid in space_destroy
+- **Error code audit** — 9 untested error paths now covered
+- **5 new property tests** — multi-object interaction, scheduler, IPC transfer refcount
 
 ### Phase Status
 
 | Phase | Status | Notes |
 |-------|--------|-------|
-| 0. Spec Review | 80% | 0.1 interaction matrix done (5 bugs found). 0.2/0.4 partial |
-| 1. Unsafe Audit | 0% | 81 blocks in frame/ (down from 104 — cleanup) |
-| 2. Property Testing | 80% | 13 proptests. State machine tests needed |
+| 0. Spec Review | 90% | 0.1 done (7 bugs), 0.4 done (9 error paths). 0.2 partial |
+| 1. Unsafe Audit | 0% | 81 blocks in frame/ |
+| 2. Property Testing | 90% | 20 proptests inc. multi-object, scheduler, IPC transfer |
 | 3. Fuzzing | 70% | Invariant checking added. 1-hour run still pending |
-| 4. Miri | 60% | 71 tests pass, no UB |
-| 5. Coverage | 80% | Measured. 96% on syscall.rs, 97-99% on core objects |
+| 4. Miri | 80% | UB fix confirmed. 5 previously-failing tests pass clean |
+| 5. Coverage | 80% | 96% syscall.rs, 97-99% core objects. Key gaps filled |
 | 6. Mutation Testing | 0% | |
 | 7. Sanitizers | 0% | |
 | 8. Concurrency | 0% | |
-| 9. Error Injection | 40% | Capacity exhaustion + rollback tests done |
-| 10. Static Analysis | 50% | deny attrs done, pedantic clippy reviewed, 2 deps verified |
+| 9. Error Injection | 60% | Capacity exhaustion, rollback, error path tests done |
+| 10. Static Analysis | 50% | deny attrs, pedantic clippy reviewed, 2 deps verified |
 | 11. Bare-Metal + Perf | 0% | |
 | 12. Regression Infra | 10% | Pre-commit hook works |
 
