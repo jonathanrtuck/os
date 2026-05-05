@@ -46,8 +46,15 @@ fuzz_target!(|data: &[u8]| {
             *arg = u64::from_le_bytes(chunk[arg_offset..arg_offset + 8].try_into().unwrap());
         }
 
-        let (error, _) = k.dispatch(ThreadId(0), syscall_num, &args);
+        let (error, _) = k.dispatch(ThreadId(0), 0, syscall_num, &args);
 
         assert!(error <= 12);
     }
+
+    let violations = kernel::invariants::verify(&k);
+    assert!(
+        violations.is_empty(),
+        "invariant violations: {:?}",
+        violations
+    );
 });

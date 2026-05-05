@@ -6,7 +6,7 @@
 //! waiter/counter agreement, thread linked-list validity, and scheduler
 //! uniqueness.
 //!
-//! This module is `#[cfg(test)]` only — zero cost in the kernel binary.
+//! This module is `#[cfg(any(test, fuzzing))]` only — zero cost in the kernel binary.
 
 use alloc::{collections::BTreeSet, format, string::String, vec::Vec};
 

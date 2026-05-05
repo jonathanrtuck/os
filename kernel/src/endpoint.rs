@@ -533,7 +533,7 @@ impl Endpoint {
         self.bound_event = None;
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, fuzzing))]
     pub fn verify_internal_counts(&self) -> Result<(), &'static str> {
         let actual_active = self.active_replies.iter().filter(|s| s.is_some()).count();
 
@@ -556,7 +556,7 @@ impl Endpoint {
         Ok(())
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, fuzzing))]
     pub fn all_caller_thread_ids(&self) -> alloc::vec::Vec<crate::types::ThreadId> {
         let mut ids = alloc::vec::Vec::new();
 
@@ -577,7 +577,7 @@ impl Endpoint {
         ids
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, fuzzing))]
     pub fn all_recv_waiter_ids(&self) -> alloc::vec::Vec<crate::types::ThreadId> {
         self.recv_waiters.iter().filter_map(|s| *s).collect()
     }
