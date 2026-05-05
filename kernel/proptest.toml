@@ -1,0 +1,5 @@
+# Proptest configuration.
+# fork = false is required for Miri compatibility (Miri cannot fork processes).
+# Proptest forking is only for crash recovery — it does not affect test correctness.
+fork = false
+timeout = 5000

@@ -34,7 +34,7 @@ clean:
 # -- Verification targets --
 
 miri:
-	cargo +nightly miri test -p kernel --lib --target $(HOST_TARGET)
+	MIRIFLAGS="-Zmiri-isolation-error=warn" cargo +nightly miri test -p kernel --lib --target $(HOST_TARGET)
 
 asan:
 	RUSTFLAGS="-Z sanitizer=address" cargo +nightly test -p kernel --lib --target $(HOST_TARGET)
