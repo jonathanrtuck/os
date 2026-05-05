@@ -53,11 +53,11 @@
 | 0. Spec Review | 90% | 0.1 done (7 bugs), 0.4 done (9 error paths). 0.2 partial |
 | 1. Unsafe Audit | 100% | 81 blocks in 15 files — ALL CLEAN |
 | 2. Property Testing | 90% | 20 proptests inc. multi-object, scheduler, IPC transfer |
-| 3. Fuzzing | 70% | Invariant checking added. 1-hour run still pending |
+| 3. Fuzzing | 90% | 44M runs in 1hr, zero crashes. Structured target pending |
 | 4. Miri | 80% | UB fix confirmed. 5 previously-failing tests pass clean |
 | 5. Coverage | 80% | 96% syscall.rs, 97-99% core objects. Key gaps filled |
 | 6. Mutation Testing | 0% | |
-| 7. Sanitizers | 0% | |
+| 7. Sanitizers | 50% | ASan: 575 tests pass clean. LSan/UBSan pending |
 | 8. Concurrency | 0% | |
 | 9. Error Injection | 60% | Capacity exhaustion, rollback, error path tests done |
 | 10. Static Analysis | 50% | deny attrs, pedantic clippy reviewed, 2 deps verified |
