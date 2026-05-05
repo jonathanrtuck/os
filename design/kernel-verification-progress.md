@@ -1,5 +1,69 @@
 # Kernel Verification Progress
 
+## Session 2 — 2026-05-04 — IN PROGRESS
+
+### Results
+
+| Metric | Session 1 | Session 2 | Delta |
+|--------|-----------|-----------|-------|
+| Tests | 540 | 559 | +19 |
+| Bugs found | 10 | 15 | +5 |
+| Bugs fixed | 10 | 15 | +5 |
+| Invariant checks | 13 | 13 | — |
+| Property tests | 13 | 13 | — |
+| Commits on branch | 12 | 16 | +4 |
+
+### Bugs Fixed (Session 2)
+
+| # | Severity | Bug | Commit |
+|---|----------|-----|--------|
+| 11 | CRITICAL | Caller blocked on sys_call gets Ok(0) on endpoint destruction — indistinguishable from valid reply | 07ed74d |
+| 12 | CRITICAL | Transferred handles permanently lost when close_peer drains pending calls | 07ed74d |
+| 13 | HIGH | handle_close doesn't clean up objects — endpoints/events/VMOs leak when last handle closed | cb1b2fa |
+| 14 | HIGH | endpoint_bind_event only sets ep.bound_event, not evt.bound_endpoint — unidirectional binding | 40e784b |
+| 15 | MEDIUM | PriorityRing test helper reads wrong slots on wraparound | 07ed74d |
+
+### Infrastructure Added (Session 2)
+
+- **Thread.wakeup_error field** — async error communication to blocked threads
+- **Reference counting for Endpoints and Events** — refcount init=1, add_ref/release_ref
+- **release_object_ref / add_object_ref helpers** — centralized object lifecycle management
+- **close_endpoint_peer / destroy_event helpers** — extracted from space_destroy for reuse
+- **handle_close now triggers object cleanup** — VMOs, endpoints, events properly freed
+- **handle_dup increments refcount** — prevents premature free with multiple handles
+- **thread_create_in increments refcount** — cloned handles tracked correctly
+- **Bidirectional event-endpoint binding** — both sides now know about each other
+- **Coverage measurement** — 96%+ line coverage on syscall handlers, 97-99% on object modules
+
+### Phase Status
+
+| Phase | Status | Notes |
+|-------|--------|-------|
+| 0. Spec Review | 80% | 0.1 interaction matrix done (5 bugs found). 0.2/0.4 partial |
+| 1. Unsafe Audit | 0% | 81 blocks in frame/ (down from 104 — cleanup) |
+| 2. Property Testing | 80% | 13 proptests. State machine tests needed |
+| 3. Fuzzing | 70% | Invariant checking added. 1-hour run still pending |
+| 4. Miri | 60% | 71 tests pass, no UB |
+| 5. Coverage | 80% | Measured. 96% on syscall.rs, 97-99% on core objects |
+| 6. Mutation Testing | 0% | |
+| 7. Sanitizers | 0% | |
+| 8. Concurrency | 0% | |
+| 9. Error Injection | 40% | Capacity exhaustion + rollback tests done |
+| 10. Static Analysis | 50% | deny attrs done, pedantic clippy reviewed, 2 deps verified |
+| 11. Bare-Metal + Perf | 0% | |
+| 12. Regression Infra | 10% | Pre-commit hook works |
+
+### Next Session Priorities
+
+1. Phase 1: unsafe audit (81 blocks in frame/ — systematic SAFETY comment verification)
+2. Phase 2: more state machine property tests (scheduler, multi-space IPC)
+3. Phase 3: 1-hour fuzz run
+4. Phase 6: mutation testing (cargo-mutants on critical files)
+5. Phase 9: OOM injection at every allocation point (not just capacity limits)
+6. Phase 0.4: complete error code audit (every syscall × every error return)
+
+---
+
 ## Session 1 — 2026-05-04 — COMPLETE
 
 ### Results
@@ -30,24 +94,6 @@
 | 9 | HIGH | endpoint.bound_event survives event destruction | 4b1ae78 |
 | 10 | HIGH | event.bound_endpoint survives endpoint destruction | 4b1ae78 |
 
-### Phase Status
-
-| Phase | Status | Notes |
-|-------|--------|-------|
-| 0. Spec Review | 40% | 0.3 done (invariants). 0.1/0.2/0.4 remaining |
-| 1. Unsafe Audit | 0% | 104 blocks in frame/ |
-| 2. Property Testing | 80% | 13 proptests. More state machine tests needed |
-| 3. Fuzzing | 70% | Invariant checking added. 2-min clean run. 1-hour pending |
-| 4. Miri | 60% | 71 tests pass, no UB. Syscall tests blocked by asm |
-| 5. Coverage | 0% | |
-| 6. Mutation Testing | 0% | |
-| 7. Sanitizers | 0% | |
-| 8. Concurrency | 0% | |
-| 9. Error Injection | 0% | |
-| 10. Static Analysis | 30% | deny attrs added. Pedantic clippy, cargo-audit remaining |
-| 11. Bare-Metal + Perf | 0% | |
-| 12. Regression Infra | 10% | Pre-commit hook works. Makefile targets needed |
-
 ### Analyzed but NOT a bug
 
 - `recv_deliver` dequeue without requeue on failure: analyzed and determined to
@@ -56,14 +102,5 @@
   cap is valid. The server can retry recv or reply with an error. This matches
   seL4/QNX sync IPC semantics.
 
-### Next Session Priorities
-
-1. Start the 1-hour fuzz run and check results
-2. Phase 1: unsafe audit (104 blocks — highest remaining leverage)
-3. Phase 5: coverage measurement (find what's untested)
-4. Phase 6: mutation testing (find tests that don't actually test anything)
-5. Continue fixing any bugs found by fuzzing
-6. Phase 9: error injection (capacity exhaustion, OOM at every allocation point)
-
-**To resume:** `git log --oneline kernel-verification`, check
-`kernel/fuzz/artifacts/` for crash files, continue from priorities above.
+**To resume:** `git log --oneline kernel-verification`, read this file, continue
+from priorities above.
