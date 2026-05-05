@@ -67,6 +67,8 @@ map_exit_code() {
         33[0-9]) echo "diff_error_codes" ;;
         34[0-9]) echo "diff_vmo_snapshot_seal_resize" ;;
         35[0-9]) echo "diff_handle_slot_reuse" ;;
+        42[0-7]) echo "smp_ipc_stress" ;;
+        43[01]) echo "smp_ipc_server" ;;
         40[0-7]) echo "smp_stress_setup" ;;
         41[0-7]) echo "smp_stress_worker" ;;
         57005) echo "panic (0xDEAD)" ;;

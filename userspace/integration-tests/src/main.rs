@@ -531,6 +531,75 @@ fn diff_handle_slot_reuse() {
     assert_ok(abi::handle::close(h3), 358);
 }
 
+// ── SMP IPC stress test ─────────────────────────────────────────
+
+const IPC_SMP_ROUNDS: usize = 50;
+
+fn test_smp_ipc_stress() {
+    let num_cores = assert_ok(abi::system::info(abi::system::INFO_NUM_CORES), 420) as usize;
+
+    if num_cores < 2 {
+        return;
+    }
+
+    let ep = assert_ok(abi::ipc::endpoint_create(), 421);
+
+    let stack_vmo = assert_ok(abi::vmo::create(PAGE_SIZE * 4, 0), 422);
+    let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
+    let stack_va = assert_ok(abi::vmo::map(stack_vmo, 0, rw), 423);
+    let stack_top = stack_va + PAGE_SIZE * 4;
+
+    let arg = (ep.0 as usize) | (IPC_SMP_ROUNDS << 16);
+    let server = assert_ok(
+        abi::thread::create(ipc_smp_server_entry as *const () as usize, stack_top, arg),
+        424,
+    );
+
+    let _ = abi::thread::set_affinity(server, 1);
+
+    for round in 0..IPC_SMP_ROUNDS {
+        let mut buf = [0u8; MSG_SIZE];
+        let payload = (round as u64).to_le_bytes();
+        buf[..8].copy_from_slice(&payload);
+
+        let result = abi::ipc::call(ep, &mut buf, 8, &[]);
+        if result.is_err() {
+            fail(425);
+        }
+
+        let reply_val = u64::from_le_bytes(buf[..8].try_into().unwrap());
+        if reply_val != round as u64 + 1000 {
+            fail(426);
+        }
+    }
+
+    assert_ok(abi::handle::close(ep), 427);
+}
+
+extern "C" fn ipc_smp_server_entry(arg: usize) -> ! {
+    let ep = Handle((arg & 0xFFFF) as u32);
+    let rounds = arg >> 16;
+
+    for _ in 0..rounds {
+        let mut msg_buf = [0u8; MSG_SIZE];
+        let mut handles_buf = [0u32; 4];
+
+        let recv = match abi::ipc::recv(ep, &mut msg_buf, &mut handles_buf) {
+            Ok(r) => r,
+            Err(_) => abi::thread::exit(430),
+        };
+
+        let val = u64::from_le_bytes(msg_buf[..8].try_into().unwrap());
+        let reply_val = (val + 1000).to_le_bytes();
+
+        if abi::ipc::reply(ep, recv.reply_cap, &reply_val, &[]).is_err() {
+            abi::thread::exit(431);
+        }
+    }
+
+    abi::thread::exit(0);
+}
+
 // ── SMP stress test ──────────────────────────────────────────────
 
 const SMP_ITERATIONS: usize = 200;
@@ -671,6 +740,9 @@ extern "C" fn _start() -> ! {
     diff_error_codes();
     diff_vmo_snapshot_seal_resize();
     diff_handle_slot_reuse();
+
+    // SMP IPC stress (cross-core IPC round-trips)
+    test_smp_ipc_stress();
 
     // SMP stress (multiple cores, concurrent object ops)
     test_smp_stress();
