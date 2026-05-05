@@ -1,6 +1,88 @@
 # Kernel Verification Progress
 
-## Session 2 — 2026-05-04 — IN PROGRESS
+## Session 3 — 2026-05-04 — COMPLETE
+
+### Results
+
+| Metric | Session 2 | Session 3 | Delta |
+|--------|-----------|-----------|-------|
+| Tests | 584 | 641 | +57 |
+| Bugs found | 17 | 17 | — |
+| Bugs fixed | 17 | 17 | — |
+| Invariant checks | 13 | 13 | — |
+| Property tests | 22 | 22 | — |
+| Commits on branch | 32 | 39 | +7 |
+
+### Work Completed (Session 3)
+
+**Phase 6 (Mutation Testing) — expanded across 7 files:**
+- table.rs: 1 mutant killed (is_allocated false case), 1 equivalent (< vs <= guarded by assert_ne)
+- sched.rs: 1 killed (yield with 2 threads), 2 bare-metal-only
+- address_space.rs: 16 killed of 26 (VA allocator boundaries, mapping shifts, find_mapping, DestroyMappings)
+- irq.rs: intids_for_event_bits fully tested, unbind/ack boundary checks added
+- fault.rs: 3 killed (non-zero page index, pager path), 6 bare-metal-only
+- bootstrap.rs: 5 killed (alive_threads, handle/mapping rights, stack size), 20+ bare-metal-only
+- syscall.rs: clock_read arithmetic (10 mutants targeted), event multi-wait encoding (14 targeted)
+
+**Phase 7 (Sanitizers) — platform-complete:**
+- ASan: 628→641 tests pass clean (zero memory errors)
+- LSan/UBSan: not available on macOS/aarch64
+- TSan: requires -Zbuild-std (limited value for single-threaded host tests)
+
+**Phase 8 (Concurrency) — host-side complete:**
+- Multi-core thread creation verifies least-loaded-core scheduling (2 cores)
+- Cross-core event signal/wake test
+- Rapid create/destroy 100 cycles (zero leaked objects)
+- IPC call/recv/reply 50 rapid rounds
+- Loom not feasible (sync primitives are inline asm, not abstracted)
+
+**Phase 9 (Error Injection) — expanded:**
+- VMO table exhaustion and recovery
+- Event table exhaustion and recovery
+- Space table exhaustion and recovery
+- thread_create_in with invalid handle rollback verification
+
+**Phase 10 (Static Analysis) — complete:**
+- Added #![deny(unused_unsafe)] lint
+- Framekernel discipline verified (only frame/ has allow(unsafe_code))
+- cargo audit: 0 vulnerabilities in 88 crate dependencies
+
+**Phase 0.2 (State Machine Completeness) — complete:**
+- Thread: 4 states, 9 valid transitions, Exited is absorbing, all states can reach Exited
+- Endpoint: close_peer drains all pending calls, active replies, recv waiters
+- Event: signal/clear/wait/refcount — simple, complete
+- VMO: create/seal/resize/snapshot/map — all transitions defined
+- All state machines: no unreachable states, no absorbing states other than destroyed
+
+### Phase Status
+
+| Phase | Status | Notes |
+|-------|--------|-------|
+| 0. Spec Review | 95% | 0.1 done, 0.2 done (state machines complete), 0.4 done |
+| 1. Unsafe Audit | 100% | 81 blocks in 15 files — ALL CLEAN |
+| 2. Property Testing | 90% | 22 proptests |
+| 3. Fuzzing | 95% | 44M runs (sequence) + 100K (structured), zero crashes |
+| 4. Miri | 95% | Running with 641 tests (pending session 3 verification) |
+| 5. Coverage | 80% | 96% syscall.rs, 97-99% core objects |
+| 6. Mutation Testing | 80% | 7 critical files tested, most survivors are bare-metal-only or equivalent |
+| 7. Sanitizers | 90% | ASan: 641 tests clean. LSan/UBSan unavailable on macOS |
+| 8. Concurrency | 60% | Host-side stress tests done. Loom not feasible. SMP bare-metal pending |
+| 9. Error Injection | 80% | All object types: exhaustion+recovery. Multi-step rollback verified |
+| 10. Static Analysis | 90% | deny attrs, cargo audit clean. Pedantic clippy: 79 cast warnings (safe) |
+| 11. Bare-Metal + Perf | 0% | Next priority |
+| 12. Regression Infra | 40% | Pre-commit hook + Makefile targets |
+
+### Next Session Priorities
+
+1. Phase 11: bare-metal integration tests, benchmarks, cycle-accurate measurement
+2. Phase 12: nightly gate, performance regression thresholds
+3. Phase 4: re-verify Miri with 641 tests
+4. Phase 2: additional proptests for multi-wait, clock_read edge cases
+5. Remaining mutation testing survivors (boundary precision in partition_point)
+
+---
+
+## Session 2 — 2026-05-04 — COMPLETE
 
 ### Results
 
