@@ -50,5 +50,7 @@ pub mod table;
 pub mod thread;
 pub mod types;
 #[cfg(test)]
+mod differential;
+#[cfg(test)]
 mod verification;
 pub mod vmo;
