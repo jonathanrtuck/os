@@ -93,6 +93,12 @@ impl VaAllocator {
             let region_end = start + len;
 
             if addr >= start && end <= region_end {
+                let fragments = (addr > start) as usize + (end < region_end) as usize;
+
+                if self.len - 1 + fragments > config::MAX_VA_REGIONS {
+                    return Err(SyscallError::OutOfMemory);
+                }
+
                 self.remove_at(i);
 
                 if end < region_end {
@@ -122,29 +128,34 @@ impl VaAllocator {
         debug_assert!(
             pos == 0 || {
                 let (ps, pl) = self.regions[pos - 1];
+
                 ps + pl <= addr
             },
             "free: overlaps previous free region (double-free?)"
         );
 
-        self.insert_at(pos, (addr, size));
+        let merge_prev = pos > 0 && {
+            let (ps, pl) = self.regions[pos - 1];
 
-        if pos + 1 < self.len {
-            let (cur_start, cur_len) = self.regions[pos];
-            let (next_start, next_len) = self.regions[pos + 1];
+            ps + pl == addr
+        };
+        let merge_next = pos < self.len && addr + size == self.regions[pos].0;
 
-            if cur_start + cur_len == next_start {
-                self.regions[pos] = (cur_start, cur_len + next_len);
-                self.remove_at(pos + 1);
-            }
-        }
-        if pos > 0 {
-            let (prev_start, prev_len) = self.regions[pos - 1];
-            let (cur_start, cur_len) = self.regions[pos];
+        match (merge_prev, merge_next) {
+            (true, true) => {
+                let next_len = self.regions[pos].1;
 
-            if prev_start + prev_len == cur_start {
-                self.regions[pos - 1] = (prev_start, prev_len + cur_len);
+                self.regions[pos - 1].1 += size + next_len;
                 self.remove_at(pos);
+            }
+            (true, false) => {
+                self.regions[pos - 1].1 += size;
+            }
+            (false, true) => {
+                self.regions[pos] = (addr, size + self.regions[pos].1);
+            }
+            (false, false) => {
+                self.insert_at(pos, (addr, size));
             }
         }
     }
@@ -157,7 +168,7 @@ impl VaAllocator {
     }
 
     fn insert_at(&mut self, pos: usize, val: (usize, usize)) {
-        debug_assert!(self.len < config::MAX_VA_REGIONS, "VA free list overflow");
+        assert!(self.len < config::MAX_VA_REGIONS, "VA free list overflow");
 
         self.regions.copy_within(pos..self.len, pos + 1);
         self.regions[pos] = val;
@@ -211,7 +222,7 @@ impl MappingArray {
     }
 
     fn insert(&mut self, pos: usize, record: MappingRecord) {
-        debug_assert!(self.len < config::MAX_MAPPINGS);
+        assert!(self.len < config::MAX_MAPPINGS, "mapping list overflow");
 
         self.entries.copy_within(pos..self.len, pos + 1);
         self.entries[pos] = record;
@@ -651,6 +662,46 @@ mod tests {
             va.allocate(0x4_0000, 0x10_0000),
             Err(SyscallError::InvalidArgument)
         );
+    }
+
+    #[test]
+    fn va_region_overflow_returns_error() {
+        let page = config::PAGE_SIZE;
+        let mut va = VaAllocator::new(USER_VA_BASE, 4096 * page);
+
+        for i in 0..config::MAX_VA_REGIONS - 1 {
+            let addr = USER_VA_BASE + (4 * i + 1) * page;
+            va.allocate(page, addr).unwrap();
+        }
+
+        assert_eq!(va.len, config::MAX_VA_REGIONS);
+
+        let overflow_addr = USER_VA_BASE + (4 * (config::MAX_VA_REGIONS - 1) + 1) * page;
+
+        assert_eq!(
+            va.allocate(page, overflow_addr),
+            Err(SyscallError::OutOfMemory)
+        );
+    }
+
+    #[test]
+    fn va_free_at_capacity_merges_safely() {
+        let page = config::PAGE_SIZE;
+        let mut va = VaAllocator::new(USER_VA_BASE, 4096 * page);
+
+        for i in 0..config::MAX_VA_REGIONS - 1 {
+            let addr = USER_VA_BASE + (4 * i + 1) * page;
+
+            va.allocate(page, addr).unwrap();
+        }
+
+        assert_eq!(va.len, config::MAX_VA_REGIONS);
+
+        let freed_addr = USER_VA_BASE + (4 * 5 + 1) * page;
+
+        va.free(freed_addr, page);
+
+        assert!(va.len < config::MAX_VA_REGIONS);
     }
 
     #[test]

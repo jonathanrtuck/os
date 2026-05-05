@@ -41,8 +41,9 @@ pub const BITMAP_WORDS: usize = MAX_PHYS_PAGES / 64;
 // MAX_ADDRESS_SPACES (128): ~12 spaces at peak. 128 = ~10x headroom.
 // MAX_PAGES_INLINE (32): covers VMOs up to 512 KiB (32 × 16 KiB).
 //   Most documents are < 100 KiB. Overflow to heap for larger VMOs.
-// MAX_VA_REGIONS (64): per-space VA free list. 64 regions covers ~10
-//   mapped VMOs per space with fragmentation headroom.
+// MAX_VA_REGIONS (MAX_MAPPINGS + 1): per-space VA free list. With N
+//   active mappings, at most N+1 free regions exist (one between each
+//   pair of mappings, plus endpoints). Sized to the worst case.
 // MAX_MAPPINGS (128): per-space mapping records. Covers OS service
 //   worst case (50 docs + undo snapshots + scene graph + stacks).
 // MAX_WAITERS_PER_EVENT (16): concurrent waiters on one event.
@@ -57,8 +58,8 @@ pub const MAX_THREADS: usize = 512;
 pub const MAX_EVENTS: usize = 1024;
 pub const MAX_ENDPOINTS: usize = 256;
 pub const MAX_PAGES_INLINE: usize = 32;
-pub const MAX_VA_REGIONS: usize = 64;
 pub const MAX_MAPPINGS: usize = 128;
+pub const MAX_VA_REGIONS: usize = MAX_MAPPINGS + 1;
 pub const MAX_WAITERS_PER_EVENT: usize = 16;
 pub const MAX_PENDING_PER_ENDPOINT: usize = 16;
 pub const MAX_RECV_WAITERS: usize = 4;
