@@ -273,25 +273,16 @@ mod tests {
             thread.stack_top(),
             bootstrap::INIT_STACK_VA + bootstrap::INIT_STACK_SIZE
         );
-
-        let mut found = false;
-
-        for core in 0..k.scheduler.num_cores() {
-            if let Some(next) = k.scheduler.pick_next(core) {
-                assert_eq!(next, tid);
-
-                k.threads
-                    .get_mut(next.0)
-                    .unwrap()
-                    .set_state(crate::thread::ThreadRunState::Running);
-                k.scheduler.core_mut(core).set_current(Some(next));
-                found = true;
-
-                break;
-            }
-        }
-
-        assert!(found, "init thread not found in any run queue");
+        assert_eq!(
+            thread.state(),
+            crate::thread::ThreadRunState::Running,
+            "init should be marked Running"
+        );
+        assert_eq!(
+            k.scheduler.core(0).current(),
+            Some(tid),
+            "init should be set as current on core 0"
+        );
 
         crate::invariants::assert_valid(&*k);
     }

@@ -41,24 +41,35 @@ pub fn cpu_on(target_cpu: u64, entry_point: u64, context_id: u64) -> Result<(), 
     // side effects (a core powers on) — no `nomem`.
     // Register convention per PSCI spec DEN0022E §5.1.3:
     //   x0 = function_id, x1 = target_cpu, x2 = entry_point, x3 = context_id.
-    //   Return value in x0.
+    //   Return value in x0. SMCCC: x4-x17 may be clobbered.
     unsafe {
         core::arch::asm!(
             "hvc #0",
             inout("x0") CPU_ON as u64 => ret,
-            in("x1") target_cpu,
-            in("x2") entry_point,
-            in("x3") context_id,
+            inout("x1") target_cpu => _,
+            inout("x2") entry_point => _,
+            inout("x3") context_id => _,
             out("x4") _,
+            out("x5") _,
+            out("x6") _,
+            out("x7") _,
+            out("x8") _,
+            out("x9") _,
+            out("x10") _,
+            out("x11") _,
+            out("x12") _,
+            out("x13") _,
+            out("x14") _,
+            out("x15") _,
+            out("x16") _,
+            out("x17") _,
             options(nostack),
         );
     }
 
-    if ret >= SUCCESS as i64 {
-        Ok(())
-    } else {
-        Err(ret as i32)
-    }
+    let ret32 = ret as i32;
+
+    if ret32 >= SUCCESS { Ok(()) } else { Err(ret32) }
 }
 
 /// Shut down the system via PSCI SYSTEM_OFF.

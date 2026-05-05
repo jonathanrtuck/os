@@ -7,7 +7,7 @@
 
 #[cfg(any(target_os = "none", test))]
 use alloc::boxed::Box;
-use alloc::{collections::VecDeque, vec::Vec};
+use alloc::vec::Vec;
 
 #[cfg(any(target_os = "none", test))]
 use crate::frame::arch::register_state::RegisterState;
@@ -262,9 +262,85 @@ impl Thread {
     }
 }
 
+const QUEUE_CAP: usize = 128;
+
+struct FixedRing {
+    buf: [ThreadId; QUEUE_CAP],
+    head: u16,
+    len: u16,
+}
+
+impl FixedRing {
+    const fn new() -> Self {
+        FixedRing {
+            buf: [ThreadId(0); QUEUE_CAP],
+            head: 0,
+            len: 0,
+        }
+    }
+
+    fn push_back(&mut self, id: ThreadId) {
+        debug_assert!((self.len as usize) < QUEUE_CAP, "run queue overflow");
+
+        let tail = (self.head as usize + self.len as usize) % QUEUE_CAP;
+
+        self.buf[tail] = id;
+        self.len += 1;
+    }
+
+    fn pop_front(&mut self) -> Option<ThreadId> {
+        if self.len == 0 {
+            return None;
+        }
+
+        let id = self.buf[self.head as usize];
+
+        self.head = ((self.head as usize + 1) % QUEUE_CAP) as u16;
+        self.len -= 1;
+
+        Some(id)
+    }
+
+    fn remove(&mut self, id: ThreadId) -> bool {
+        let len = self.len as usize;
+
+        for i in 0..len {
+            let idx = (self.head as usize + i) % QUEUE_CAP;
+
+            if self.buf[idx] == id {
+                for j in i..len - 1 {
+                    let src = (self.head as usize + j + 1) % QUEUE_CAP;
+                    let dst = (self.head as usize + j) % QUEUE_CAP;
+
+                    self.buf[dst] = self.buf[src];
+                }
+
+                self.len -= 1;
+
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    #[cfg(test)]
+    fn iter(&self) -> impl Iterator<Item = ThreadId> + '_ {
+        (0..self.len as usize).map(|i| self.buf[(self.head as usize + i) % QUEUE_CAP])
+    }
+}
+
 /// Per-core run queue with priority-level FIFO queues.
 pub struct RunQueue {
-    queues: [VecDeque<ThreadId>; NUM_PRIORITY_LEVELS],
+    queues: [FixedRing; NUM_PRIORITY_LEVELS],
     current: Option<ThreadId>,
 }
 
@@ -272,7 +348,7 @@ pub struct RunQueue {
 impl RunQueue {
     pub fn new() -> Self {
         RunQueue {
-            queues: core::array::from_fn(|_| VecDeque::new()),
+            queues: [const { FixedRing::new() }; NUM_PRIORITY_LEVELS],
             current: None,
         }
     }
@@ -292,15 +368,7 @@ impl RunQueue {
 
     /// Remove a specific thread from its priority queue (for blocking).
     pub fn dequeue(&mut self, thread: ThreadId, priority: Priority) -> bool {
-        let q = &mut self.queues[priority_index(priority)];
-
-        if let Some(pos) = q.iter().position(|&t| t == thread) {
-            q.remove(pos);
-
-            true
-        } else {
-            false
-        }
+        self.queues[priority_index(priority)].remove(thread)
     }
 
     /// Pick the highest-priority ready thread (removes from queue).
@@ -336,7 +404,7 @@ impl RunQueue {
         let mut ids = alloc::vec::Vec::new();
 
         for q in &self.queues {
-            ids.extend(q.iter().copied());
+            ids.extend(q.iter());
         }
 
         ids
@@ -389,9 +457,7 @@ impl Scheduler {
             }
 
             for q in &mut core.queues {
-                if let Some(pos) = q.iter().position(|&t| t == thread) {
-                    q.remove(pos);
-
+                if q.remove(thread) {
                     return;
                 }
             }
@@ -781,5 +847,171 @@ mod tests {
         t.boost_priority(Priority::Low);
 
         assert_eq!(t.effective_priority(), Priority::High);
+    }
+
+    // ── State machine: every valid transition ──
+
+    #[test]
+    fn state_ready_to_running() {
+        let mut t = make_thread(0, Priority::Medium);
+
+        t.set_state(ThreadRunState::Running);
+
+        assert_eq!(t.state(), ThreadRunState::Running);
+    }
+
+    #[test]
+    fn state_ready_to_blocked() {
+        let mut t = make_thread(0, Priority::Medium);
+
+        t.set_state(ThreadRunState::Blocked);
+
+        assert_eq!(t.state(), ThreadRunState::Blocked);
+    }
+
+    #[test]
+    fn state_ready_to_exited() {
+        let mut t = make_thread(0, Priority::Medium);
+
+        t.set_state(ThreadRunState::Exited);
+
+        assert_eq!(t.state(), ThreadRunState::Exited);
+    }
+
+    #[test]
+    fn state_running_to_blocked() {
+        let mut t = make_thread(0, Priority::Medium);
+
+        t.set_state(ThreadRunState::Running);
+        t.set_state(ThreadRunState::Blocked);
+
+        assert_eq!(t.state(), ThreadRunState::Blocked);
+    }
+
+    #[test]
+    fn state_running_to_ready() {
+        let mut t = make_thread(0, Priority::Medium);
+
+        t.set_state(ThreadRunState::Running);
+        t.set_state(ThreadRunState::Ready);
+
+        assert_eq!(t.state(), ThreadRunState::Ready);
+    }
+
+    #[test]
+    fn state_running_to_exited() {
+        let mut t = make_thread(0, Priority::Medium);
+
+        t.set_state(ThreadRunState::Running);
+        t.set_state(ThreadRunState::Exited);
+
+        assert_eq!(t.state(), ThreadRunState::Exited);
+    }
+
+    #[test]
+    fn state_blocked_to_ready() {
+        let mut t = make_thread(0, Priority::Medium);
+
+        t.set_state(ThreadRunState::Running);
+        t.set_state(ThreadRunState::Blocked);
+        t.set_state(ThreadRunState::Ready);
+
+        assert_eq!(t.state(), ThreadRunState::Ready);
+    }
+
+    #[test]
+    fn state_blocked_to_exited() {
+        let mut t = make_thread(0, Priority::Medium);
+
+        t.set_state(ThreadRunState::Running);
+        t.set_state(ThreadRunState::Blocked);
+        t.set_state(ThreadRunState::Exited);
+
+        assert_eq!(t.state(), ThreadRunState::Exited);
+    }
+
+    // ── State machine: invalid transitions (debug_assert) ──
+
+    #[test]
+    #[should_panic(expected = "invalid state transition")]
+    fn state_exited_to_running_panics() {
+        let mut t = make_thread(0, Priority::Medium);
+
+        t.set_state(ThreadRunState::Exited);
+        t.set_state(ThreadRunState::Running);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid state transition")]
+    fn state_exited_to_ready_panics() {
+        let mut t = make_thread(0, Priority::Medium);
+
+        t.set_state(ThreadRunState::Exited);
+        t.set_state(ThreadRunState::Ready);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid state transition")]
+    fn state_blocked_to_running_panics() {
+        let mut t = make_thread(0, Priority::Medium);
+
+        t.set_state(ThreadRunState::Running);
+        t.set_state(ThreadRunState::Blocked);
+        t.set_state(ThreadRunState::Running);
+    }
+
+    // ── FixedRing edge cases ──
+
+    #[test]
+    fn fixed_ring_fill_to_capacity() {
+        let mut sched = Scheduler::new(1);
+
+        for i in 0..128 {
+            sched.enqueue(0, ThreadId(i), Priority::Medium);
+        }
+
+        assert_eq!(sched.core(0).total_ready(), 128);
+
+        for i in 0..128 {
+            assert_eq!(sched.pick_next(0), Some(ThreadId(i)));
+        }
+
+        assert!(sched.pick_next(0).is_none());
+    }
+
+    #[test]
+    fn fixed_ring_remove_first_middle_last() {
+        let mut sched = Scheduler::new(1);
+
+        for i in 0..5 {
+            sched.enqueue(0, ThreadId(i), Priority::Medium);
+        }
+
+        assert!(sched.core_mut(0).dequeue(ThreadId(0), Priority::Medium));
+        assert!(sched.core_mut(0).dequeue(ThreadId(2), Priority::Medium));
+        assert!(sched.core_mut(0).dequeue(ThreadId(4), Priority::Medium));
+        assert_eq!(sched.pick_next(0), Some(ThreadId(1)));
+        assert_eq!(sched.pick_next(0), Some(ThreadId(3)));
+        assert!(sched.pick_next(0).is_none());
+    }
+
+    #[test]
+    fn fixed_ring_wraparound() {
+        let mut sched = Scheduler::new(1);
+
+        for i in 0..120 {
+            sched.enqueue(0, ThreadId(i), Priority::Medium);
+        }
+
+        for _ in 0..120 {
+            sched.pick_next(0).unwrap();
+        }
+
+        for i in 200..210 {
+            sched.enqueue(0, ThreadId(i), Priority::Medium);
+        }
+
+        assert_eq!(sched.pick_next(0), Some(ThreadId(200)));
+        assert_eq!(sched.core(0).total_ready(), 9);
     }
 }

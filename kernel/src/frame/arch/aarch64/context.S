@@ -9,6 +9,7 @@
 //   fp_regs      at offset 280   (32 * 16 = 512 bytes)
 //   fpcr         at offset 792
 //   fpsr         at offset 800
+//   kernel_sp    at offset 816   (SP_EL1 — kernel stack pointer)
 
 .section .text
 
@@ -37,11 +38,13 @@ __context_switch:
     stp     x27, x28, [x0, #(27*8)]
     stp     x29, x30, [x0, #(29*8)]
 
-    // Save SP_EL0 and TPIDR_EL0.
+    // Save SP_EL0, TPIDR_EL0, and kernel SP (SP_EL1).
     mrs     x9, sp_el0
     str     x9, [x0, #248]          // RegisterState.sp
     mrs     x9, tpidr_el0
     str     x9, [x0, #272]          // RegisterState.tpidr
+    mov     x9, sp
+    str     x9, [x0, #816]          // RegisterState.kernel_sp
 
     // Load callee-saved GPRs from new state.
     ldp     x19, x20, [x1, #(19*8)]
@@ -51,11 +54,13 @@ __context_switch:
     ldp     x27, x28, [x1, #(27*8)]
     ldp     x29, x30, [x1, #(29*8)]
 
-    // Restore SP_EL0 and TPIDR_EL0.
+    // Restore SP_EL0, TPIDR_EL0, and kernel SP.
     ldr     x9, [x1, #248]
     msr     sp_el0, x9
     ldr     x9, [x1, #272]
     msr     tpidr_el0, x9
+    ldr     x9, [x1, #816]          // RegisterState.kernel_sp
+    mov     sp, x9
 
     ret
 

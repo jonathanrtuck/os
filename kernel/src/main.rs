@@ -10,6 +10,8 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 use core::panic::PanicInfo;
 
 use kernel::{frame::arch, println};
@@ -63,9 +65,10 @@ extern "C" fn kernel_main_upper() -> ! {
 
     // Bootstrap the init service.
     let init_binary = include_bytes!(concat!(env!("OUT_DIR"), "/init.bin"));
-    let mut kern = kernel::syscall::Kernel::new(arch::platform::core_count());
+    let mut kern =
+        alloc::boxed::Box::new(kernel::syscall::Kernel::new(arch::platform::core_count()));
 
-    arch::set_kernel_ptr(&mut kern as *mut _ as *mut u8);
+    arch::set_kernel_ptr(&mut *kern as *mut _ as *mut u8);
 
     kernel::bench::run();
 

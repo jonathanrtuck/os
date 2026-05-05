@@ -1,11 +1,8 @@
-//! Handle table — per-address-space capability table with lock-free allocation.
+//! Handle table — per-address-space capability table.
 //!
-//! O(1) allocate (CAS pop from atomic free stack), O(1) close (CAS push),
+//! O(1) allocate (pop from free stack), O(1) close (push back),
 //! O(1) lookup (direct index). Generation-count revocation is tracked by
-//! ObjectTable, not here. Single-threaded CAS degenerates to unconditional
-//! success.
-
-use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+//! ObjectTable, not here.
 
 use crate::{
     config,
@@ -27,9 +24,9 @@ pub struct Handle {
 /// Per-address-space handle table. Fixed-size array, O(1) lookup and alloc.
 pub struct HandleTable {
     entries: [Option<Handle>; config::MAX_HANDLES],
-    free_head: AtomicU32,
-    free_next: [AtomicU32; config::MAX_HANDLES],
-    count: AtomicUsize,
+    free_head: u32,
+    free_next: [u32; config::MAX_HANDLES],
+    count: usize,
 }
 
 #[allow(clippy::new_without_default)]
@@ -37,15 +34,15 @@ impl HandleTable {
     pub fn new() -> Self {
         HandleTable {
             entries: core::array::from_fn(|_| None),
-            free_head: AtomicU32::new(if config::MAX_HANDLES > 0 { 0 } else { EMPTY }),
+            free_head: if config::MAX_HANDLES > 0 { 0 } else { EMPTY },
             free_next: core::array::from_fn(|i| {
-                AtomicU32::new(if i + 1 < config::MAX_HANDLES {
+                if i + 1 < config::MAX_HANDLES {
                     (i + 1) as u32
                 } else {
                     EMPTY
-                })
+                }
             }),
-            count: AtomicUsize::new(0),
+            count: 0,
         }
     }
 
@@ -68,33 +65,26 @@ impl HandleTable {
         generation: u64,
         badge: u32,
     ) -> Result<HandleId, SyscallError> {
-        loop {
-            let head = self.free_head.load(Ordering::Acquire);
+        let head = self.free_head;
 
-            if head == EMPTY {
-                return Err(SyscallError::OutOfMemory);
-            }
-
-            let next = self.free_next[head as usize].load(Ordering::Relaxed);
-
-            if self
-                .free_head
-                .compare_exchange_weak(head, next, Ordering::AcqRel, Ordering::Relaxed)
-                .is_ok()
-            {
-                self.free_next[head as usize].store(EMPTY, Ordering::Relaxed);
-                self.entries[head as usize] = Some(Handle {
-                    object_type,
-                    object_id,
-                    rights,
-                    generation,
-                    badge,
-                });
-                self.count.fetch_add(1, Ordering::Relaxed);
-
-                return Ok(HandleId(head));
-            }
+        if head == EMPTY {
+            return Err(SyscallError::OutOfMemory);
         }
+
+        let next = self.free_next[head as usize];
+
+        self.free_head = next;
+        self.free_next[head as usize] = EMPTY;
+        self.entries[head as usize] = Some(Handle {
+            object_type,
+            object_id,
+            rights,
+            generation,
+            badge,
+        });
+        self.count += 1;
+
+        Ok(HandleId(head))
     }
 
     /// Allocate a handle at a specific index (for bootstrap initial_handles).
@@ -108,35 +98,30 @@ impl HandleTable {
 
         self.unlink_from_free_list(index);
         self.entries[index] = Some(handle);
-        self.count.fetch_add(1, Ordering::Relaxed);
+        self.count += 1;
 
         Ok(HandleId(index as u32))
     }
 
     fn unlink_from_free_list(&mut self, target: usize) {
         let target_u32 = target as u32;
-        let head = self.free_head.load(Ordering::Relaxed);
 
-        if head == target_u32 {
-            let next = self.free_next[target].load(Ordering::Relaxed);
-
-            self.free_head.store(next, Ordering::Relaxed);
-            self.free_next[target].store(EMPTY, Ordering::Relaxed);
+        if self.free_head == target_u32 {
+            self.free_head = self.free_next[target];
+            self.free_next[target] = EMPTY;
 
             return;
         }
 
-        let mut cur = head;
+        let mut cur = self.free_head;
 
         while cur != EMPTY {
             let cur_idx = cur as usize;
-            let next = self.free_next[cur_idx].load(Ordering::Relaxed);
+            let next = self.free_next[cur_idx];
 
             if next == target_u32 {
-                let target_next = self.free_next[target].load(Ordering::Relaxed);
-
-                self.free_next[cur_idx].store(target_next, Ordering::Relaxed);
-                self.free_next[target].store(EMPTY, Ordering::Relaxed);
+                self.free_next[cur_idx] = self.free_next[target];
+                self.free_next[target] = EMPTY;
 
                 return;
             }
@@ -188,21 +173,9 @@ impl HandleTable {
             .take()
             .ok_or(SyscallError::InvalidHandle)?;
 
-        loop {
-            let head = self.free_head.load(Ordering::Relaxed);
-
-            self.free_next[idx].store(head, Ordering::Relaxed);
-
-            if self
-                .free_head
-                .compare_exchange_weak(head, idx as u32, Ordering::Release, Ordering::Relaxed)
-                .is_ok()
-            {
-                break;
-            }
-        }
-
-        self.count.fetch_sub(1, Ordering::Relaxed);
+        self.free_next[idx] = self.free_head;
+        self.free_head = idx as u32;
+        self.count -= 1;
 
         Ok(handle)
     }
@@ -228,7 +201,7 @@ impl HandleTable {
     }
 
     pub fn count(&self) -> usize {
-        self.count.load(Ordering::Relaxed)
+        self.count
     }
 
     pub fn iter_handles(&self) -> impl Iterator<Item = (HandleId, &Handle)> {
@@ -239,7 +212,7 @@ impl HandleTable {
     }
 
     pub fn free_slot_count(&self) -> usize {
-        config::MAX_HANDLES - self.count()
+        config::MAX_HANDLES - self.count
     }
 }
 

@@ -30,3 +30,58 @@ pub fn enter_userspace(state: &RegisterState) -> ! {
     // and SP (user stack). The assembly loads all registers and issues eret.
     unsafe { __enter_userspace(state as *const _) }
 }
+
+/// Trampoline for newly created threads entering userspace after context_switch.
+///
+/// When `context_switch` restores a new thread's callee-saved registers and
+/// `ret`s to x30, this function is the target. It reads the current thread
+/// from per-CPU data and enters userspace with the thread's full RegisterState.
+#[cfg(target_os = "none")]
+#[unsafe(no_mangle)]
+extern "C" fn new_thread_enter() -> ! {
+    // SAFETY: percpu() requires init_percpu to have been called. This runs
+    // after context_switch on the same core, well after boot. kernel_ptr
+    // was set during boot via set_kernel_ptr.
+    let rs = unsafe {
+        let pc = super::cpu::percpu();
+        let kernel = &*(pc.kernel_ptr as *const crate::syscall::Kernel);
+        let thread = kernel
+            .threads
+            .get(pc.current_thread)
+            .expect("new_thread_enter: current thread not found");
+
+        thread
+            .register_state()
+            .expect("new_thread_enter: no RegisterState")
+    };
+
+    enter_userspace(rs)
+}
+
+/// Address of the new-thread trampoline, for use in `init_thread_registers`.
+#[cfg(target_os = "none")]
+pub fn new_thread_trampoline() -> usize {
+    new_thread_enter as *const () as usize
+}
+
+/// Allocate a per-thread kernel stack and return (base_va, top_va).
+///
+/// Each thread gets its own kernel stack so that blocking context switches
+/// don't corrupt other threads' saved frames on a shared stack.
+#[cfg(target_os = "none")]
+pub fn alloc_kernel_stack() -> Option<(usize, usize)> {
+    let pages = crate::config::KERNEL_STACK_PAGES;
+    let base_pa = super::page_alloc::alloc_contiguous(pages)?;
+
+    for i in 0..pages {
+        crate::frame::user_mem::zero_phys(
+            base_pa.as_usize() + i * crate::config::PAGE_SIZE,
+            crate::config::PAGE_SIZE,
+        );
+    }
+
+    let base_va = super::platform::phys_to_virt(base_pa.as_usize());
+    let top_va = base_va + pages * crate::config::PAGE_SIZE;
+
+    Some((base_va, top_va))
+}

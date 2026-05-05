@@ -27,6 +27,9 @@ pub struct RegisterState {
     pub fpcr: u64,
     /// Floating-point status register.
     pub fpsr: u64,
+    /// Kernel stack pointer (SP_EL1) — saved/restored during context_switch
+    /// so each thread resumes at its correct kernel stack depth.
+    pub kernel_sp: u64,
 }
 
 impl RegisterState {
@@ -41,8 +44,9 @@ impl RegisterState {
 }
 
 const _: () = {
-    assert!(core::mem::size_of::<RegisterState>() == 816);
+    assert!(core::mem::size_of::<RegisterState>() == 832);
     assert!(core::mem::offset_of!(RegisterState, fp_regs) == 288);
+    assert!(core::mem::offset_of!(RegisterState, kernel_sp) == 816);
 };
 
 #[cfg(test)]
@@ -51,6 +55,6 @@ mod tests {
 
     #[test]
     fn register_state_size() {
-        assert_eq!(core::mem::size_of::<RegisterState>(), 816);
+        assert_eq!(core::mem::size_of::<RegisterState>(), 832);
     }
 }

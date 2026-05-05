@@ -272,6 +272,12 @@ extern "C" fn _start() -> ! {
     test_vmo_snapshot();
     test_vmo_seal();
     test_endpoint_bind_event();
+    test_event_signal_and_wait();
+    test_event_clear();
+    test_handle_close();
+    test_space_create();
+    test_vmo_map_and_access();
+    test_ipc_call_recv_reply();
 
     // All tests passed.
     abi::thread::exit(0);

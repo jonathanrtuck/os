@@ -4,8 +4,6 @@
 //! the lifecycle boundary: destroying a space kills its threads, closes its
 //! handles, and unmaps its VMOs. No separate "process" kernel object exists.
 
-use alloc::vec::Vec;
-
 use crate::{
     config,
     handle::HandleTable,
@@ -22,7 +20,7 @@ const USER_VA_END: usize = 1 << 36;
 const USER_VA_SIZE: usize = USER_VA_END - USER_VA_BASE;
 
 /// A record of a VMO mapped into an address space.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MappingRecord {
     pub vmo_id: VmoId,
     pub va_start: usize,
@@ -30,27 +28,27 @@ pub struct MappingRecord {
     pub rights: Rights,
 }
 
-/// First-fit VA allocator over a sorted free list.
-///
-/// Free regions are `(start, length)` pairs kept sorted by start address.
-/// Allocation is first-fit; deallocation coalesces adjacent regions.
+/// First-fit VA allocator over a sorted free list (fixed-size, no heap).
 pub struct VaAllocator {
-    free_list: Vec<(usize, usize)>,
+    regions: [(usize, usize); config::MAX_VA_REGIONS],
+    len: usize,
 }
 
 impl VaAllocator {
     pub fn new(base: usize, size: usize) -> Self {
-        let mut free_list = Vec::new();
+        let mut va = VaAllocator {
+            regions: [(0, 0); config::MAX_VA_REGIONS],
+            len: 0,
+        };
 
         if size > 0 {
-            free_list.push((base, size));
+            va.regions[0] = (base, size);
+            va.len = 1;
         }
 
-        VaAllocator { free_list }
+        va
     }
 
-    /// Allocate a VA range. `hint=0`: first-fit. `hint!=0`: reserve exact address.
-    /// Size is page-aligned internally.
     pub fn allocate(&mut self, size: usize, hint: usize) -> Result<usize, SyscallError> {
         let aligned = size.next_multiple_of(config::PAGE_SIZE);
 
@@ -65,14 +63,14 @@ impl VaAllocator {
     }
 
     fn allocate_first_fit(&mut self, size: usize) -> Result<usize, SyscallError> {
-        for i in 0..self.free_list.len() {
-            let (start, len) = self.free_list[i];
+        for i in 0..self.len {
+            let (start, len) = self.regions[i];
 
             if len >= size {
                 if len == size {
-                    self.free_list.remove(i);
+                    self.remove_at(i);
                 } else {
-                    self.free_list[i] = (start + size, len - size);
+                    self.regions[i] = (start + size, len - size);
                 }
 
                 return Ok(start);
@@ -90,12 +88,12 @@ impl VaAllocator {
             .checked_add(size)
             .ok_or(SyscallError::InvalidArgument)?;
 
-        for i in 0..self.free_list.len() {
-            let (start, len) = self.free_list[i];
+        for i in 0..self.len {
+            let (start, len) = self.regions[i];
             let region_end = start + len;
 
             if addr >= start && end <= region_end {
-                self.free_list.remove(i);
+                self.remove_at(i);
 
                 if end < region_end {
                     self.insert_sorted(end, region_end - end);
@@ -111,55 +109,69 @@ impl VaAllocator {
         Err(SyscallError::InvalidArgument)
     }
 
-    /// Free a VA range, coalescing with adjacent free regions.
     pub fn free(&mut self, addr: usize, size: usize) {
         debug_assert!(addr.checked_add(size).is_some(), "free: addr+size overflow");
 
-        let pos = self.free_list.partition_point(|&(s, _)| s < addr);
+        let list = &self.regions[..self.len];
+        let pos = list.partition_point(|&(s, _)| s < addr);
 
-        // Overlap check: the freed region must not overlap existing free regions.
         debug_assert!(
-            pos >= self.free_list.len() || addr + size <= self.free_list[pos].0,
+            pos >= self.len || addr + size <= self.regions[pos].0,
             "free: overlaps next free region (double-free?)"
         );
         debug_assert!(
             pos == 0 || {
-                let (ps, pl) = self.free_list[pos - 1];
+                let (ps, pl) = self.regions[pos - 1];
                 ps + pl <= addr
             },
             "free: overlaps previous free region (double-free?)"
         );
 
-        self.free_list.insert(pos, (addr, size));
+        self.insert_at(pos, (addr, size));
 
-        if pos + 1 < self.free_list.len() {
-            let (cur_start, cur_len) = self.free_list[pos];
-            let (next_start, next_len) = self.free_list[pos + 1];
+        if pos + 1 < self.len {
+            let (cur_start, cur_len) = self.regions[pos];
+            let (next_start, next_len) = self.regions[pos + 1];
 
             if cur_start + cur_len == next_start {
-                self.free_list[pos] = (cur_start, cur_len + next_len);
-                self.free_list.remove(pos + 1);
+                self.regions[pos] = (cur_start, cur_len + next_len);
+                self.remove_at(pos + 1);
             }
         }
         if pos > 0 {
-            let (prev_start, prev_len) = self.free_list[pos - 1];
-            let (cur_start, cur_len) = self.free_list[pos];
+            let (prev_start, prev_len) = self.regions[pos - 1];
+            let (cur_start, cur_len) = self.regions[pos];
 
             if prev_start + prev_len == cur_start {
-                self.free_list[pos - 1] = (prev_start, prev_len + cur_len);
-                self.free_list.remove(pos);
+                self.regions[pos - 1] = (prev_start, prev_len + cur_len);
+                self.remove_at(pos);
             }
         }
     }
 
     fn insert_sorted(&mut self, start: usize, len: usize) {
-        let pos = self.free_list.partition_point(|&(s, _)| s < start);
+        let list = &self.regions[..self.len];
+        let pos = list.partition_point(|&(s, _)| s < start);
 
-        self.free_list.insert(pos, (start, len));
+        self.insert_at(pos, (start, len));
+    }
+
+    fn insert_at(&mut self, pos: usize, val: (usize, usize)) {
+        debug_assert!(self.len < config::MAX_VA_REGIONS, "VA free list overflow");
+
+        self.regions.copy_within(pos..self.len, pos + 1);
+        self.regions[pos] = val;
+        self.len += 1;
+    }
+
+    fn remove_at(&mut self, pos: usize) {
+        self.regions.copy_within(pos + 1..self.len, pos);
+        self.len -= 1;
+        self.regions[self.len] = (0, 0);
     }
 
     pub fn free_regions(&self) -> &[(usize, usize)] {
-        &self.free_list
+        &self.regions[..self.len]
     }
 }
 
@@ -169,16 +181,65 @@ pub trait DestroyCallback {
     fn kill_threads_in_space(&mut self, space_id: AddressSpaceId);
 }
 
+/// Fixed-size sorted mapping array.
+struct MappingArray {
+    entries: [MappingRecord; config::MAX_MAPPINGS],
+    len: usize,
+}
+
+impl MappingArray {
+    const EMPTY: MappingRecord = MappingRecord {
+        vmo_id: VmoId(0),
+        va_start: 0,
+        size: 0,
+        rights: Rights::NONE,
+    };
+
+    fn new() -> Self {
+        MappingArray {
+            entries: [const { Self::EMPTY }; config::MAX_MAPPINGS],
+            len: 0,
+        }
+    }
+
+    fn as_slice(&self) -> &[MappingRecord] {
+        &self.entries[..self.len]
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn insert(&mut self, pos: usize, record: MappingRecord) {
+        debug_assert!(self.len < config::MAX_MAPPINGS);
+
+        self.entries.copy_within(pos..self.len, pos + 1);
+        self.entries[pos] = record;
+        self.len += 1;
+    }
+
+    fn remove(&mut self, pos: usize) -> MappingRecord {
+        let record = self.entries[pos];
+
+        self.entries.copy_within(pos + 1..self.len, pos);
+        self.len -= 1;
+        self.entries[self.len] = Self::EMPTY;
+
+        record
+    }
+
+    fn partition_point(&self, pred: impl Fn(&MappingRecord) -> bool) -> usize {
+        self.as_slice().partition_point(|m| pred(m))
+    }
+}
+
 /// An address space — isolation boundary and lifecycle owner.
-///
-/// Contains a page table root (physical address), ASID for TLB tagging,
-/// a per-space handle table, VA allocator, and mapping records.
 pub struct AddressSpace {
     pub id: AddressSpaceId,
     asid: u8,
     page_table_root: usize,
     handles: HandleTable,
-    mappings: Vec<MappingRecord>,
+    mappings: MappingArray,
     va_allocator: VaAllocator,
     thread_head: Option<u32>,
 }
@@ -191,7 +252,7 @@ impl AddressSpace {
             asid,
             page_table_root,
             handles: HandleTable::new(),
-            mappings: Vec::new(),
+            mappings: MappingArray::new(),
             va_allocator: VaAllocator::new(USER_VA_BASE, USER_VA_SIZE),
             thread_head: None,
         }
@@ -227,16 +288,13 @@ impl AddressSpace {
     }
 
     pub fn mappings(&self) -> &[MappingRecord] {
-        &self.mappings
+        self.mappings.as_slice()
     }
 
     pub fn mapping_count(&self) -> usize {
         self.mappings.len()
     }
 
-    /// Map a VMO region into this address space.
-    /// `addr_hint=0`: kernel picks the address (first-fit).
-    /// `addr_hint!=0`: map at that exact address (must be free and page-aligned).
     pub fn map_vmo(
         &mut self,
         vmo_id: VmoId,
@@ -268,11 +326,11 @@ impl AddressSpace {
         Ok(va)
     }
 
-    /// Unmap a region by its start virtual address.
     pub fn unmap(&mut self, addr: usize) -> Result<MappingRecord, SyscallError> {
         let pos = self.mappings.partition_point(|m| m.va_start < addr);
+        let slice = self.mappings.as_slice();
 
-        if pos >= self.mappings.len() || self.mappings[pos].va_start != addr {
+        if pos >= slice.len() || slice[pos].va_start != addr {
             return Err(SyscallError::NotFound);
         }
 
@@ -283,25 +341,47 @@ impl AddressSpace {
         Ok(record)
     }
 
-    /// Find the mapping containing `addr` (for page fault handling).
-    /// O(log n) via binary search on the sorted mapping array.
     pub fn find_mapping(&self, addr: usize) -> Option<&MappingRecord> {
         let idx = self
             .mappings
             .partition_point(|m| m.va_start + m.size <= addr);
 
         self.mappings
+            .as_slice()
             .get(idx)
             .filter(|m| addr >= m.va_start && addr < m.va_start + m.size)
     }
 
-    /// Destroy the address space. Kills threads via callback, returns
-    /// mappings and handle table for the caller to clean up VMO refcounts
-    /// and trigger peer-closed events.
-    pub fn destroy(self, callback: &mut dyn DestroyCallback) -> (Vec<MappingRecord>, HandleTable) {
+    pub fn destroy(self, callback: &mut dyn DestroyCallback) -> (DestroyMappings, HandleTable) {
         callback.kill_threads_in_space(self.id);
 
-        (self.mappings, self.handles)
+        (
+            DestroyMappings {
+                entries: self.mappings.entries,
+                len: self.mappings.len,
+            },
+            self.handles,
+        )
+    }
+}
+
+/// Mappings returned by address space destruction, for VMO cleanup.
+pub struct DestroyMappings {
+    entries: [MappingRecord; config::MAX_MAPPINGS],
+    len: usize,
+}
+
+impl DestroyMappings {
+    pub fn as_slice(&self) -> &[MappingRecord] {
+        &self.entries[..self.len]
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
     }
 }
 
@@ -318,8 +398,6 @@ mod tests {
     impl DestroyCallback for NoopCallback {
         fn kill_threads_in_space(&mut self, _: AddressSpaceId) {}
     }
-
-    // -- AddressSpace lifecycle --
 
     #[test]
     fn create_and_inspect() {
@@ -486,7 +564,6 @@ mod tests {
             Err(SyscallError::OutOfMemory)
         );
 
-        // Free one, remap
         let va = space.mappings()[0].va_start;
 
         space.unmap(va).unwrap();
@@ -517,7 +594,6 @@ mod tests {
 
         assert_eq!(a, 0x5_0000);
 
-        // Region before and after the hint should still be free
         let b = va.allocate(0x4000, 0).unwrap();
 
         assert_eq!(b, 0x1_0000);
@@ -550,7 +626,7 @@ mod tests {
 
         va.free(a, 0x4_0000);
         va.free(c, 0x4_0000);
-        va.free(b, 0x4_0000); // bridges a and c
+        va.free(b, 0x4_0000);
 
         let regions = va.free_regions();
 

@@ -138,12 +138,15 @@ pub fn create_init(kernel: &mut Kernel, init_binary: &[u8]) -> Result<ThreadId, 
         .ok_or(SyscallError::OutOfMemory)?;
 
     kernel.threads.get_mut(thread_idx).unwrap().id = ThreadId(thread_idx);
-
-    let core = kernel.scheduler.least_loaded_core();
-
+    kernel
+        .threads
+        .get_mut(thread_idx)
+        .unwrap()
+        .set_state(crate::thread::ThreadRunState::Running);
     kernel
         .scheduler
-        .enqueue(core, ThreadId(thread_idx), Priority::Medium);
+        .core_mut(0)
+        .set_current(Some(ThreadId(thread_idx)));
 
     kernel.alive_threads += 1;
 
@@ -225,12 +228,12 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_enqueues_thread() {
+    fn bootstrap_sets_current_thread() {
         let mut k = setup_kernel();
+        let tid = create_init(&mut k, fake_init_binary()).unwrap();
 
-        create_init(&mut k, fake_init_binary()).unwrap();
-
-        assert_eq!(k.scheduler.core(0).total_ready(), 1);
+        assert_eq!(k.scheduler.core(0).current(), Some(tid));
+        assert_eq!(k.scheduler.core(0).total_ready(), 0);
 
         crate::invariants::assert_valid(&*k);
     }

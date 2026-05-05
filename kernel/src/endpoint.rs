@@ -387,6 +387,21 @@ impl Endpoint {
         // and then find no slot, the call is lost and the caller deadlocks.
         let free_slot = self.active_replies.iter().position(|s| s.is_none())?;
         let call = self.send_queue.dequeue_highest()?;
+
+        // Advance past any ID that collides with a currently-active reply cap.
+        loop {
+            let collides = self
+                .active_replies
+                .iter()
+                .any(|s| s.as_ref().is_some_and(|r| r.cap_id.0 == self.next_reply_id));
+
+            if !collides {
+                break;
+            }
+
+            self.next_reply_id = self.next_reply_id.wrapping_add(1);
+        }
+
         let cap_id = ReplyCapId(self.next_reply_id);
 
         self.next_reply_id = self.next_reply_id.wrapping_add(1);
@@ -1074,5 +1089,28 @@ mod tests {
         assert!(blocked.contains(&ThreadId(3)));
         assert!(blocked.contains(&ThreadId(10)));
         assert!(blocked.contains(&ThreadId(11)));
+    }
+
+    #[test]
+    fn reply_cap_id_skips_active_collision_on_wraparound() {
+        let mut ep = make_endpoint(0);
+
+        ep.next_reply_id = u32::MAX - 1;
+
+        for i in 0..3u32 {
+            ep.enqueue_call(make_call(i, Priority::Medium, 0)).unwrap();
+        }
+
+        let (_, cap0) = ep.dequeue_call().unwrap();
+        let (_, cap1) = ep.dequeue_call().unwrap();
+        let (_, cap2) = ep.dequeue_call().unwrap();
+
+        assert_ne!(cap0, cap1);
+        assert_ne!(cap1, cap2);
+        assert_ne!(cap0, cap2);
+
+        assert_eq!(ep.consume_reply(cap0).unwrap().0, ThreadId(0));
+        assert_eq!(ep.consume_reply(cap1).unwrap().0, ThreadId(1));
+        assert_eq!(ep.consume_reply(cap2).unwrap().0, ThreadId(2));
     }
 }

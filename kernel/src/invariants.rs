@@ -37,6 +37,7 @@ pub fn verify(kernel: &Kernel) -> Vec<Violation> {
     check_thread_space_linked_lists(kernel, &mut violations);
     check_scheduler_uniqueness(kernel, &mut violations);
     check_thread_state_consistency(kernel, &mut violations);
+    check_mapping_consistency(kernel, &mut violations);
 
     violations
 }
@@ -251,6 +252,48 @@ fn check_thread_state_consistency(kernel: &Kernel, violations: &mut Vec<Violatio
                         detail: format!("thread {} is Exited but still in a run queue", idx),
                     });
                 }
+            }
+        }
+    }
+}
+
+fn check_mapping_consistency(kernel: &Kernel, violations: &mut Vec<Violation>) {
+    for (space_idx, space) in kernel.spaces.iter_allocated() {
+        let mappings = space.mappings();
+
+        for i in 0..mappings.len() {
+            let m = &mappings[i];
+
+            if m.size == 0 {
+                violations.push(Violation {
+                    category: "mapping",
+                    detail: format!("space {} mapping {} has zero size", space_idx, i),
+                });
+            }
+
+            if i + 1 < mappings.len() && m.va_start + m.size > mappings[i + 1].va_start {
+                violations.push(Violation {
+                    category: "mapping",
+                    detail: format!(
+                        "space {} mappings {} and {} overlap: [{:#x}..{:#x}) vs [{:#x}..)",
+                        space_idx,
+                        i,
+                        i + 1,
+                        m.va_start,
+                        m.va_start + m.size,
+                        mappings[i + 1].va_start
+                    ),
+                });
+            }
+
+            if !kernel.vmos.is_allocated(m.vmo_id.0) {
+                violations.push(Violation {
+                    category: "mapping→vmo",
+                    detail: format!(
+                        "space {} mapping {} references deallocated VMO #{}",
+                        space_idx, i, m.vmo_id.0
+                    ),
+                });
             }
         }
     }

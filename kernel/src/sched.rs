@@ -63,6 +63,7 @@ pub fn exit_current(kernel: &mut Kernel, current: ThreadId, core_id: usize, code
 /// On bare metal, saves current thread's registers and loads the new thread's
 /// via `frame::arch::context::context_switch()`. On host (tests), this is a
 /// state-machine-only operation — no actual register switching.
+#[inline(never)]
 fn switch_away(kernel: &mut Kernel, _current: ThreadId, core_id: usize) {
     let next_id = match kernel.scheduler.pick_next(core_id) {
         Some(id) => id,
@@ -75,16 +76,17 @@ fn switch_away(kernel: &mut Kernel, _current: ThreadId, core_id: usize) {
     let next = kernel.threads.get_mut(next_id.0).unwrap();
 
     next.set_state(ThreadRunState::Running);
-
-    #[cfg(target_os = "none")]
-    if _current != next_id {
-        do_context_switch(kernel, _current, next_id);
-    }
-
     kernel
         .scheduler
         .core_mut(core_id)
         .set_current(Some(next_id));
+
+    #[cfg(target_os = "none")]
+    if _current != next_id {
+        crate::frame::arch::cpu::set_current_thread(next_id.0);
+
+        do_context_switch(kernel, _current, next_id);
+    }
 }
 
 /// Bare-metal context switch — saves current thread's RegisterState,

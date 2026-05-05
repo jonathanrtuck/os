@@ -143,19 +143,21 @@ impl Vmo {
         Ok(())
     }
 
-    /// Resize the VMO. Fails if sealed.
-    pub fn resize(&mut self, new_size: usize) -> Result<Vec<usize>, SyscallError> {
+    /// Resize the VMO. Calls `free_page` for each freed physical page on shrink.
+    pub fn resize(
+        &mut self,
+        new_size: usize,
+        mut free_page: impl FnMut(usize),
+    ) -> Result<(), SyscallError> {
         if self.sealed {
             return Err(SyscallError::AlreadySealed);
         }
 
         let new_page_count = new_size.div_ceil(crate::config::PAGE_SIZE);
-        let old_page_count = self.pages.len();
-        let mut freed = Vec::new();
 
-        if new_page_count < old_page_count {
+        if new_page_count < self.pages.len() {
             for addr in self.pages.drain(new_page_count..).flatten() {
-                freed.push(addr);
+                free_page(addr);
             }
         } else {
             self.pages.resize(new_page_count, None);
@@ -163,7 +165,7 @@ impl Vmo {
 
         self.size = new_size;
 
-        Ok(freed)
+        Ok(())
     }
 
     /// Set the userspace pager endpoint. Only valid before any page is allocated.
@@ -286,7 +288,10 @@ mod tests {
 
         vmo.seal().unwrap();
 
-        assert_eq!(vmo.resize(PAGE_SIZE), Err(SyscallError::AlreadySealed));
+        assert_eq!(
+            vmo.resize(PAGE_SIZE, |_| {}),
+            Err(SyscallError::AlreadySealed)
+        );
     }
 
     #[test]
@@ -301,9 +306,9 @@ mod tests {
     #[test]
     fn resize_grow() {
         let mut vmo = make_vmo(2);
-        let freed = vmo.resize(4 * PAGE_SIZE).unwrap();
 
-        assert!(freed.is_empty());
+        vmo.resize(4 * PAGE_SIZE, |_| {}).unwrap();
+
         assert_eq!(vmo.page_count(), 4);
     }
 
@@ -314,7 +319,9 @@ mod tests {
         vmo.alloc_page_at(2, || Some(0xCC)).unwrap();
         vmo.alloc_page_at(3, || Some(0xDD)).unwrap();
 
-        let freed = vmo.resize(2 * PAGE_SIZE).unwrap();
+        let mut freed = vec![];
+
+        vmo.resize(2 * PAGE_SIZE, |pa| freed.push(pa)).unwrap();
 
         assert_eq!(freed, vec![0xCC, 0xDD]);
         assert_eq!(vmo.page_count(), 2);
