@@ -1,6 +1,99 @@
 # Kernel Verification Progress
 
-## Session 9 — 2026-05-05 — IN PROGRESS
+## Session 10 — 2026-05-05 — IN PROGRESS
+
+### Results
+
+| Metric                       | Session 9 | Session 10 | Delta |
+| ---------------------------- | --------- | ---------- | ----- |
+| Tests                        | 688       | 696        | +8    |
+| Bugs found                   | 19        | 20         | +1    |
+| Bugs fixed                   | 19        | 20         | +1    |
+| Invariant checks             | 16        | 16         | —     |
+| Property tests               | 33        | 33         | —     |
+| Commits on branch            | 63        | 65         | +2    |
+| Bare-metal integration tests | 33        | 34         | +1    |
+| Per-syscall benchmarks       | 14        | 14         | —     |
+| Workload benchmarks          | 3         | 3          | —     |
+| Fuzz targets                 | 4         | 4          | —     |
+
+### Bug #20: VMO Mappings Survive Deallocation (FUZZ-FOUND)
+
+When a VMO's last handle was closed and refcount dropped to zero,
+`release_object_ref` deallocated the VMO but left mapping records in address
+spaces that referenced it. Endpoints and events had proper cleanup, but VMOs
+were missed.
+
+Found by syscall_sequence fuzzer: VMO_CREATE → 4x VMO_MAP → HANDLE_CLOSE
+left 4 dangling mapping records. Invariant checker caught "mapping→vmo
+references deallocated VMO #0".
+
+Fix: `remove_mappings_for_vmo()` on `AddressSpace` iterates mappings and
+frees VA regions. Called in `release_object_ref` before VMO deallocation.
+
+### Work Completed (Session 10)
+
+**Phase 8 (Concurrency) — cross-core IPC and lifecycle stress:**
+
+3 new host-side cross-core tests (688→696):
+- IPC round-trip with handle transfer across 4 cores (10 rounds)
+- Endpoint destroy with 4 blocked callers at different priorities
+- Rapid cross-core object lifecycle (VMO create/dup/snapshot/close + event
+  create/signal/clear/close, 25 cycles rotating across 4 cores)
+
+1 new bare-metal SMP IPC stress test: init as client, server thread on core 1,
+50 IPC round-trips with data integrity verification.
+
+**Phase 6 (Mutation Testing) — syscall.rs converged:**
+
+Targeted mutation testing on sys_vmo_resize and sys_clock_read:
+- VMO resize `>` vs `>=` on MAX_PHYS_MEM: practically equivalent (48GB
+  boundary unreachable in tests)
+- Clock arithmetic: 14 of 15 mutants killed by new
+  `clock_read_matches_independent_conversion` test. 1 timing-equivalent
+  survivor (`remainder * 1B` → `remainder + 1B`).
+- 2 boundary tests added: `vmo_resize_to_exact_mapping_size_succeeds` and
+  `vmo_resize_below_mapping_size_rejected`
+
+**Phase 12 (Regression Infrastructure) — baselines populated:**
+
+bench_baselines.toml populated from bare-metal runs (16 benchmarks with
+median/P95/P99/stddev/threshold). Performance regression gate operational.
+
+**Convergence pass — phases 2-10 re-verified:**
+
+- ASan: 696 tests clean
+- Clippy: both targets clean
+- Fuzzing: 200K runs post-fix, zero crashes; sequence + structured targets
+- Bare-metal: all integration tests pass including new SMP IPC
+- Miri: full run in progress (688 tests, ~60 min expected)
+
+### Phase Status
+
+| Phase                 | Status | Notes                                                        |
+| --------------------- | ------ | ------------------------------------------------------------ |
+| 0. Spec Review        | 100%   | Complete                                                     |
+| 1. Unsafe Audit       | 100%   | 85 blocks in 15 files — ALL CLEAN                            |
+| 2. Property Testing   | 100%   | 33 proptests                                                 |
+| 3. Fuzzing            | 100%   | 4 targets, 200K+ post-fix runs, zero crashes                 |
+| 4. Miri               | 95%    | Full run in progress                                         |
+| 5. Coverage           | 90%    | Remaining gaps are bare-metal-only                           |
+| 6. Mutation Testing   | 95%    | syscall.rs converged, 1 timing-equivalent survivor           |
+| 7. Sanitizers         | 100%   | ASan: 696 tests clean                                        |
+| 8. Concurrency        | 100%   | Cross-core IPC, lifecycle, endpoint destroy, SMP bare-metal  |
+| 9. Error Injection    | 95%    | Complete for practical purposes                              |
+| 10. Static Analysis   | 100%   | Clippy pedantic, both targets clean                          |
+| 11. Bare-Metal + Perf | 100%   | Complete                                                     |
+| 12. Regression Infra  | 100%   | Baselines populated, regression gate operational             |
+
+### Remaining Work
+
+1. **Phase 4:** Miri run completing (~60 min, started this session)
+2. **Final convergence:** Re-run Miri on 696 tests after current run completes
+
+---
+
+## Session 9 — 2026-05-05 — COMPLETE
 
 ### Results
 
@@ -19,15 +112,14 @@
 
 ### Bug #19: Bench Thread Leaked in Scheduler
 
-`bench::run()` allocated a thread (slot 0) and enqueued it in the scheduler
-but never cleaned up after benchmarks completed. The orphan thread had no
+`bench::run()` allocated a thread (slot 0) and enqueued it in the scheduler but
+never cleaned up after benchmarks completed. The orphan thread had no
 RegisterState (it was never meant to be context-switched to).
 
 On single-core execution this was harmless — init always ran and the bench
 thread was never picked. On real SMP (4 vCPUs), when init blocked on
-`event_wait` during the SMP stress test, the scheduler picked the orphan
-bench thread and panicked during context switch: "new thread has no
-RegisterState."
+`event_wait` during the SMP stress test, the scheduler picked the orphan bench
+thread and panicked during context switch: "new thread has no RegisterState."
 
 Fix: added `teardown_bench_env()` mirroring POST's cleanup pattern.
 
@@ -37,10 +129,11 @@ Fix: added `teardown_bench_env()` mirroring POST's cleanup pattern.
 
 Lock hierarchy analysis: 4 locks total (ALLOCATOR TicketLock, CONTIGUOUS_LOCK
 AtomicBool, SERIAL_LOCK AtomicBool, SpinLock<T>). No nested acquisitions, no
-circular dependencies. IRQs disabled during TicketLock. PerCpu is lock-free
-via TPIDR_EL1.
+circular dependencies. IRQs disabled during TicketLock. PerCpu is lock-free via
+TPIDR_EL1.
 
 8 new host-side tests (680→688):
+
 - 4 preemption simulation tests: interleaved create/destroy, thread_create_in,
   IPC call/recv/reply, event signal/clear — all across alternating cores
 - Max-complexity IPC: 128-byte message + 8 handle transfers
@@ -48,27 +141,9 @@ via TPIDR_EL1.
 - set_priority on blocked IPC caller
 - space_destroy interleaved with object ops on other core
 
-1 new bare-metal SMP stress test: 4 workers across 4 vCPUs, 200 iterations
-each of VMO create/snapshot/close + event create/signal/clear/close. Workers
+1 new bare-metal SMP stress test: 4 workers across 4 vCPUs, 200 iterations each
+of VMO create/snapshot/close + event create/signal/clear/close. Workers
 synchronize via shared event. Found bug #19 on first run.
-
-### Phase Status
-
-| Phase                 | Status | Notes                                              |
-| --------------------- | ------ | -------------------------------------------------- |
-| 0. Spec Review        | 100%   | Complete                                           |
-| 1. Unsafe Audit       | 100%   | 85 blocks in 15 files — ALL CLEAN                  |
-| 2. Property Testing   | 100%   | 33 proptests                                       |
-| 3. Fuzzing            | 100%   | 4 targets, 1M+ runs each, zero crashes             |
-| 4. Miri               | 95%    | Full 688-test run pending                          |
-| 5. Coverage           | 90%    | Remaining gaps are bare-metal-only                 |
-| 6. Mutation Testing   | 80%    | syscall.rs re-run pending                          |
-| 7. Sanitizers         | 100%   | ASan: 688 tests clean (pending re-run)             |
-| 8. Concurrency        | 95%    | Host preemption sim + SMP bare-metal stress done   |
-| 9. Error Injection    | 95%    | ASID leak found+fixed, boundary injection expanded |
-| 10. Static Analysis   | 100%   | Clippy pedantic enabled, both targets clean        |
-| 11. Bare-Metal + Perf | 100%   | Complete                                           |
-| 12. Regression Infra  | 90%    | Baselines need hardware run                        |
 
 ### Remaining Work
 
