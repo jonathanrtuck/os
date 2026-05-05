@@ -1068,6 +1068,14 @@ impl Kernel {
 
         crate::sched::block_current(self, current, self.core_id);
 
+        if let Some(err) = self
+            .threads
+            .get_mut(current.0)
+            .and_then(|t| t.take_wakeup_error())
+        {
+            return Err(err);
+        }
+
         Ok(0)
     }
 
@@ -1114,6 +1122,14 @@ impl Kernel {
 
         ep.add_recv_waiter(current)?;
         crate::sched::block_current(self, current, self.core_id);
+
+        if let Some(err) = self
+            .threads
+            .get_mut(current.0)
+            .and_then(|t| t.take_wakeup_error())
+        {
+            return Err(err);
+        }
 
         if let Some(result) = self.try_dequeue_and_deliver(
             obj_id,
@@ -1746,10 +1762,59 @@ impl Kernel {
                             evt.unbind_endpoint();
                         }
 
-                        let blocked = ep.close_peer();
+                        let mut close_result = ep.close_peer();
 
-                        for tid in blocked.as_slice() {
-                            crate::sched::wake(self, *tid, self.core_id);
+                        for canceled in close_result.canceled_callers_mut() {
+                            if let Some(caller) = canceled.take() {
+                                if caller.handle_count > 0 {
+                                    let caller_space = self
+                                        .threads
+                                        .get(caller.thread_id.0)
+                                        .and_then(|t| t.address_space());
+
+                                    if let Some(sid) = caller_space {
+                                        self.reinstall_handles(
+                                            sid,
+                                            StagedHandles {
+                                                handles: caller.handles,
+                                                count: caller.handle_count,
+                                            },
+                                        );
+                                    }
+                                }
+
+                                if let Some(t) = self.threads.get_mut(caller.thread_id.0) {
+                                    t.set_wakeup_error(SyscallError::PeerClosed);
+
+                                    #[cfg(any(target_os = "none", test))]
+                                    if let Some(rs) = t.register_state_mut() {
+                                        rs.gprs[0] = SyscallError::PeerClosed as u64;
+                                    }
+                                }
+
+                                crate::sched::wake(self, caller.thread_id, self.core_id);
+                            }
+                        }
+
+                        for &tid in close_result.reply_callers() {
+                            if let Some(t) = self.threads.get_mut(tid.0) {
+                                t.set_wakeup_error(SyscallError::PeerClosed);
+
+                                #[cfg(any(target_os = "none", test))]
+                                if let Some(rs) = t.register_state_mut() {
+                                    rs.gprs[0] = SyscallError::PeerClosed as u64;
+                                }
+                            }
+
+                            crate::sched::wake(self, tid, self.core_id);
+                        }
+
+                        for &tid in close_result.recv_waiters() {
+                            if let Some(t) = self.threads.get_mut(tid.0) {
+                                t.set_wakeup_error(SyscallError::PeerClosed);
+                            }
+
+                            crate::sched::wake(self, tid, self.core_id);
                         }
                     }
                 }
@@ -5855,5 +5920,194 @@ mod tests {
             evt0_waiters, 0,
             "event 0 should have no leftover waiters after partial multi-wait failure"
         );
+    }
+
+    // -- Endpoint destruction during blocked call (Phase 0 bug fixes) --
+
+    #[test]
+    fn caller_gets_peer_closed_on_endpoint_destroy() {
+        let mut k = setup_kernel();
+
+        k.threads.get_mut(0).unwrap().init_register_state();
+
+        let (_, ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
+
+        let ep_obj_id = k
+            .spaces
+            .get(0)
+            .unwrap()
+            .handles()
+            .lookup(HandleId(ep_hid as u32))
+            .unwrap()
+            .object_id;
+
+        let (_, space_hid) = call(&mut k, num::SPACE_CREATE, &[0; 6]);
+        let ep_handle_ids = [ep_hid as u32];
+        let (_, _) = call(
+            &mut k,
+            num::THREAD_CREATE_IN,
+            &[
+                space_hid,
+                0x1000,
+                0x2000,
+                0,
+                ep_handle_ids.as_ptr() as u64,
+                1,
+            ],
+        );
+
+        let mut buf = [0u8; 128];
+        let (err, _) = call(
+            &mut k,
+            num::CALL,
+            &[ep_hid, buf.as_mut_ptr() as u64, 4, 0, 0, 0],
+        );
+
+        assert_eq!(err, 0);
+        assert!(
+            k.endpoints.get(ep_obj_id).unwrap().pending_call_count() > 0,
+            "call should be pending in the endpoint"
+        );
+
+        let (err, _) = call(&mut k, num::SPACE_DESTROY, &[space_hid, 0, 0, 0, 0, 0]);
+
+        assert_eq!(err, 0);
+
+        let thread = k.threads.get_mut(0).unwrap();
+
+        assert_eq!(
+            thread.take_wakeup_error(),
+            Some(SyscallError::PeerClosed),
+            "blocked caller must get PeerClosed when endpoint is destroyed"
+        );
+
+        #[cfg(any(target_os = "none", test))]
+        {
+            let rs = k.threads.get(0).unwrap().register_state().unwrap();
+
+            assert_eq!(
+                rs.gprs[0],
+                SyscallError::PeerClosed as u64,
+                "register state x0 must reflect PeerClosed error"
+            );
+        }
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn handles_recovered_when_endpoint_destroyed_during_call() {
+        let mut k = setup_kernel();
+        let (_, ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
+        let (_, space_hid) = call(&mut k, num::SPACE_CREATE, &[0; 6]);
+        let ep_handle_ids = [ep_hid as u32];
+        let (_, _) = call(
+            &mut k,
+            num::THREAD_CREATE_IN,
+            &[
+                space_hid,
+                0x1000,
+                0x2000,
+                0,
+                ep_handle_ids.as_ptr() as u64,
+                1,
+            ],
+        );
+
+        let (_, vmo_hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
+
+        let (err, _) = k.dispatch(ThreadId(0), 0, num::HANDLE_INFO, &[vmo_hid, 0, 0, 0, 0, 0]);
+
+        assert_eq!(err, 0, "VMO handle should be valid before call");
+
+        let handle_ids = [vmo_hid as u32];
+        let mut buf = [0u8; 128];
+        let (err, _) = call(
+            &mut k,
+            num::CALL,
+            &[
+                ep_hid,
+                buf.as_mut_ptr() as u64,
+                0,
+                handle_ids.as_ptr() as u64,
+                1,
+                0,
+            ],
+        );
+
+        assert_eq!(err, 0);
+
+        let (err, _) = k.dispatch(ThreadId(0), 0, num::HANDLE_INFO, &[vmo_hid, 0, 0, 0, 0, 0]);
+
+        assert_eq!(
+            err,
+            SyscallError::InvalidHandle as u64,
+            "handle should be removed during call"
+        );
+
+        let (err, _) = call(&mut k, num::SPACE_DESTROY, &[space_hid, 0, 0, 0, 0, 0]);
+
+        assert_eq!(err, 0);
+
+        let space = k.spaces.get(0).unwrap();
+        let mut found_vmo = false;
+
+        for (_, h) in space.handles().iter_handles() {
+            if h.object_type == ObjectType::Vmo {
+                found_vmo = true;
+
+                break;
+            }
+        }
+
+        assert!(
+            found_vmo,
+            "transferred VMO handle must be reinstalled after endpoint destruction"
+        );
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn recv_waiter_gets_peer_closed_on_endpoint_destroy() {
+        let mut k = setup_kernel();
+        let (_, ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
+        let (_, space_hid) = call(&mut k, num::SPACE_CREATE, &[0; 6]);
+        let ep_handle_ids = [ep_hid as u32];
+        let (_, _) = call(
+            &mut k,
+            num::THREAD_CREATE_IN,
+            &[
+                space_hid,
+                0x1000,
+                0x2000,
+                0,
+                ep_handle_ids.as_ptr() as u64,
+                1,
+            ],
+        );
+
+        let mut recv_buf = [0u8; 128];
+        let (err, _) = call(
+            &mut k,
+            num::RECV,
+            &[ep_hid, recv_buf.as_mut_ptr() as u64, 128, 0, 0, 0],
+        );
+
+        assert_ne!(err, 0, "recv with no pending calls should not succeed");
+
+        let (err, _) = call(&mut k, num::SPACE_DESTROY, &[space_hid, 0, 0, 0, 0, 0]);
+
+        assert_eq!(err, 0);
+
+        let thread = k.threads.get_mut(0).unwrap();
+
+        assert_eq!(
+            thread.take_wakeup_error(),
+            Some(SyscallError::PeerClosed),
+            "recv waiter must get PeerClosed when endpoint is destroyed"
+        );
+
+        crate::invariants::assert_valid(&*k);
     }
 }

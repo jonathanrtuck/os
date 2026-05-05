@@ -231,9 +231,10 @@ mod tests {
 
         assert_eq!(ep.recv_waiter_count(), 1);
 
-        let blocked = ep.close_peer();
+        let result = ep.close_peer();
+        let all_ids: alloc::vec::Vec<_> = result.all_thread_ids().collect();
 
-        assert!(blocked.contains(&s.comp_thread));
+        assert!(all_ids.contains(&s.comp_thread));
         assert!(ep.is_peer_closed());
 
         crate::invariants::assert_valid(&*s.kernel);

@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 
 #[cfg(any(target_os = "none", test))]
 use crate::frame::arch::register_state::RegisterState;
-use crate::types::{AddressSpaceId, EventId, Priority, ThreadId, TopologyHint};
+use crate::types::{AddressSpaceId, EventId, Priority, SyscallError, ThreadId, TopologyHint};
 
 /// Number of priority levels: Idle, Low, Medium, High.
 const NUM_PRIORITY_LEVELS: usize = 4;
@@ -47,6 +47,7 @@ pub struct Thread {
     fp_dirty: bool,
     wait_events: [u32; crate::config::MAX_MULTI_WAIT],
     wait_count: u8,
+    wakeup_error: Option<SyscallError>,
     space_next: Option<u32>,
     space_prev: Option<u32>,
     #[cfg(any(target_os = "none", test))]
@@ -80,6 +81,7 @@ impl Thread {
             fp_dirty: false,
             wait_events: [0; crate::config::MAX_MULTI_WAIT],
             wait_count: 0,
+            wakeup_error: None,
             space_next: None,
             space_prev: None,
             #[cfg(any(target_os = "none", test))]
@@ -237,6 +239,14 @@ impl Thread {
         self.wait_count = 0;
 
         result
+    }
+
+    pub fn set_wakeup_error(&mut self, error: SyscallError) {
+        self.wakeup_error = Some(error);
+    }
+
+    pub fn take_wakeup_error(&mut self) -> Option<SyscallError> {
+        self.wakeup_error.take()
     }
 
     /// Terminate the thread with an exit code.

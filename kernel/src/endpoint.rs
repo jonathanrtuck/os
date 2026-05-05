@@ -121,16 +121,6 @@ impl PrioritySendQueue {
 
         None
     }
-
-    fn drain_callers(&mut self, out: &mut impl FnMut(ThreadId)) {
-        for level in 0..NUM_PRIORITY_LEVELS {
-            while let Some(call) = self.rings[level].pop() {
-                out(call.caller);
-            }
-        }
-
-        self.total = 0;
-    }
 }
 
 /// Inline storage for drained recv waiters — no heap allocation on the IPC hot path.
@@ -236,44 +226,59 @@ struct ActiveReply {
     reply_buf: usize,
 }
 
-const MAX_CLOSE_LIST: usize =
-    config::MAX_PENDING_PER_ENDPOINT + config::MAX_PENDING_PER_ENDPOINT + config::MAX_RECV_WAITERS;
-
-/// Stack-allocated list of thread IDs returned by close_peer.
-pub struct CloseList {
-    items: [ThreadId; MAX_CLOSE_LIST],
-    len: usize,
+/// A caller whose call was canceled — includes handles to recover.
+pub struct CanceledCaller {
+    pub thread_id: ThreadId,
+    pub handles: [Option<Handle>; config::MAX_IPC_HANDLES],
+    pub handle_count: u8,
 }
 
-impl CloseList {
+/// Result of closing an endpoint's peer end. Separates callers with recoverable
+/// handles (from the send queue) from callers awaiting reply and recv waiters
+/// (which don't have handles to recover).
+pub struct CloseResult {
+    canceled: [Option<CanceledCaller>; config::MAX_PENDING_PER_ENDPOINT],
+    canceled_len: usize,
+    reply_callers: [ThreadId; config::MAX_PENDING_PER_ENDPOINT],
+    reply_caller_len: usize,
+    recv_waiters: [ThreadId; config::MAX_RECV_WAITERS],
+    recv_waiter_len: usize,
+}
+
+impl CloseResult {
     fn new() -> Self {
-        CloseList {
-            items: [ThreadId(0); MAX_CLOSE_LIST],
-            len: 0,
+        CloseResult {
+            canceled: [const { None }; config::MAX_PENDING_PER_ENDPOINT],
+            canceled_len: 0,
+            reply_callers: [ThreadId(0); config::MAX_PENDING_PER_ENDPOINT],
+            reply_caller_len: 0,
+            recv_waiters: [ThreadId(0); config::MAX_RECV_WAITERS],
+            recv_waiter_len: 0,
         }
     }
 
-    fn push(&mut self, tid: ThreadId) {
-        if self.len < MAX_CLOSE_LIST {
-            self.items[self.len] = tid;
-            self.len += 1;
-        }
+    pub fn canceled_callers(&self) -> &[Option<CanceledCaller>] {
+        &self.canceled[..self.canceled_len]
     }
 
-    pub fn as_slice(&self) -> &[ThreadId] {
-        &self.items[..self.len]
+    pub fn canceled_callers_mut(&mut self) -> &mut [Option<CanceledCaller>] {
+        &mut self.canceled[..self.canceled_len]
     }
 
-    pub fn len(&self) -> usize {
-        self.len
+    pub fn reply_callers(&self) -> &[ThreadId] {
+        &self.reply_callers[..self.reply_caller_len]
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
+    pub fn recv_waiters(&self) -> &[ThreadId] {
+        &self.recv_waiters[..self.recv_waiter_len]
     }
 
-    pub fn contains(&self, tid: &ThreadId) -> bool {
-        self.as_slice().contains(tid)
+    pub fn all_thread_ids(&self) -> impl Iterator<Item = ThreadId> + '_ {
+        self.canceled[..self.canceled_len]
+            .iter()
+            .filter_map(|c| c.as_ref().map(|c| c.thread_id))
+            .chain(self.reply_callers[..self.reply_caller_len].iter().copied())
+            .chain(self.recv_waiters[..self.recv_waiter_len].iter().copied())
     }
 }
 
@@ -489,32 +494,51 @@ impl Endpoint {
         list
     }
 
-    /// Close the peer end. Returns all blocked thread IDs:
-    /// callers in send queue + callers awaiting reply + recv waiters.
-    pub fn close_peer(&mut self) -> CloseList {
+    /// Close the peer end. Returns structured close result preserving handles
+    /// from pending calls so they can be recovered by the caller.
+    pub fn close_peer(&mut self) -> CloseResult {
         self.peer_closed = true;
 
-        let mut blocked = CloseList::new();
+        let mut result = CloseResult::new();
 
-        self.send_queue.drain_callers(&mut |tid| blocked.push(tid));
+        for level in 0..NUM_PRIORITY_LEVELS {
+            while let Some(call) = self.send_queue.rings[level].pop() {
+                if result.canceled_len < config::MAX_PENDING_PER_ENDPOINT {
+                    result.canceled[result.canceled_len] = Some(CanceledCaller {
+                        thread_id: call.caller,
+                        handles: call.handles,
+                        handle_count: call.handle_count,
+                    });
+                    result.canceled_len += 1;
+                }
+            }
+        }
+
+        self.send_queue.total = 0;
 
         for slot in &mut self.active_replies {
-            if let Some(reply) = slot.take() {
-                blocked.push(reply.caller);
+            if let Some(reply) = slot.take()
+                && result.reply_caller_len < config::MAX_PENDING_PER_ENDPOINT
+            {
+                result.reply_callers[result.reply_caller_len] = reply.caller;
+                result.reply_caller_len += 1;
             }
         }
 
         self.active_reply_count = 0;
 
         for slot in &mut self.recv_waiters {
-            if let Some(tid) = slot.take() {
-                blocked.push(tid);
+            if let Some(tid) = slot.take()
+                && result.recv_waiter_len < config::MAX_RECV_WAITERS
+            {
+                result.recv_waiters[result.recv_waiter_len] = tid;
+                result.recv_waiter_len += 1;
             }
         }
 
         self.recv_waiter_count = 0;
 
-        blocked
+        result
     }
 
     /// Bind an event to this endpoint (for channel-event integration).
@@ -561,8 +585,10 @@ impl Endpoint {
         let mut ids = alloc::vec::Vec::new();
 
         for ring in &self.send_queue.rings {
-            for slot in &ring.slots[..ring.len as usize] {
-                if let Some(call) = slot {
+            for i in 0..ring.len as usize {
+                let idx = (ring.head as usize + i) % SLOTS_PER_PRIORITY;
+
+                if let Some(call) = &ring.slots[idx] {
                     ids.push(call.caller);
                 }
             }
@@ -734,12 +760,13 @@ mod tests {
         ep.dequeue_call().unwrap(); // one call moves to active_replies
         ep.add_recv_waiter(ThreadId(10)).unwrap();
 
-        let blocked = ep.close_peer();
+        let result = ep.close_peer();
+        let all_ids: alloc::vec::Vec<_> = result.all_thread_ids().collect();
 
-        assert_eq!(blocked.len(), 4);
-        assert!(blocked.contains(&ThreadId(1)));
-        assert!(blocked.contains(&ThreadId(2)));
-        assert!(blocked.contains(&ThreadId(10)));
+        assert_eq!(all_ids.len(), 4);
+        assert!(all_ids.contains(&ThreadId(1)));
+        assert!(all_ids.contains(&ThreadId(2)));
+        assert!(all_ids.contains(&ThreadId(10)));
     }
 
     #[test]
@@ -1077,18 +1104,26 @@ mod tests {
         ep.add_recv_waiter(ThreadId(10)).unwrap();
         ep.add_recv_waiter(ThreadId(11)).unwrap();
 
-        let blocked = ep.close_peer();
+        let result = ep.close_peer();
+        let all_ids: alloc::vec::Vec<_> = result.all_thread_ids().collect();
 
         // Expected blocked threads:
         //   send queue: 1, 3
         //   active replies: 2 (dequeued but not replied)
         //   recv waiters: 10, 11
-        assert_eq!(blocked.len(), 5);
-        assert!(blocked.contains(&ThreadId(1)));
-        assert!(blocked.contains(&ThreadId(2)));
-        assert!(blocked.contains(&ThreadId(3)));
-        assert!(blocked.contains(&ThreadId(10)));
-        assert!(blocked.contains(&ThreadId(11)));
+        assert_eq!(all_ids.len(), 5);
+        assert!(all_ids.contains(&ThreadId(1)));
+        assert!(all_ids.contains(&ThreadId(2)));
+        assert!(all_ids.contains(&ThreadId(3)));
+        assert!(all_ids.contains(&ThreadId(10)));
+        assert!(all_ids.contains(&ThreadId(11)));
+
+        // Canceled callers (from send queue) must have their handles preserved.
+        assert_eq!(result.canceled_callers().len(), 2);
+        // Reply callers (already in-flight) have no handles to recover.
+        assert_eq!(result.reply_callers().len(), 1);
+        assert_eq!(result.reply_callers()[0], ThreadId(2));
+        assert_eq!(result.recv_waiters().len(), 2);
     }
 
     #[test]
@@ -1112,5 +1147,56 @@ mod tests {
         assert_eq!(ep.consume_reply(cap0).unwrap().0, ThreadId(0));
         assert_eq!(ep.consume_reply(cap1).unwrap().0, ThreadId(1));
         assert_eq!(ep.consume_reply(cap2).unwrap().0, ThreadId(2));
+    }
+
+    #[test]
+    fn all_caller_thread_ids_after_wraparound() {
+        let mut ep = make_endpoint(0);
+
+        ep.enqueue_call(make_call(1, Priority::Medium, 0)).unwrap();
+        ep.enqueue_call(make_call(2, Priority::Medium, 0)).unwrap();
+        ep.dequeue_call().unwrap();
+        ep.dequeue_call().unwrap();
+
+        ep.enqueue_call(make_call(3, Priority::Medium, 0)).unwrap();
+        ep.enqueue_call(make_call(4, Priority::Medium, 0)).unwrap();
+
+        let ids = ep.all_caller_thread_ids();
+
+        assert_eq!(ids.len(), 4);
+        assert!(ids.contains(&ThreadId(3)));
+        assert!(ids.contains(&ThreadId(4)));
+    }
+
+    #[test]
+    fn close_peer_preserves_handles_for_recovery() {
+        let mut ep = make_endpoint(0);
+        let mut handles = [const { None }; config::MAX_IPC_HANDLES];
+
+        handles[0] = Some(make_handle(42));
+        handles[1] = Some(make_handle(43));
+
+        let call = PendingCall {
+            caller: ThreadId(1),
+            priority: Priority::Medium,
+            message: Message::empty(),
+            handles,
+            handle_count: 2,
+            badge: 0,
+            reply_buf: 0,
+        };
+
+        ep.enqueue_call(call).unwrap();
+
+        let mut result = ep.close_peer();
+
+        assert_eq!(result.canceled_callers().len(), 1);
+
+        let canceled = result.canceled_callers_mut()[0].take().unwrap();
+
+        assert_eq!(canceled.thread_id, ThreadId(1));
+        assert_eq!(canceled.handle_count, 2);
+        assert_eq!(canceled.handles[0].as_ref().unwrap().object_id, 42);
+        assert_eq!(canceled.handles[1].as_ref().unwrap().object_id, 43);
     }
 }
