@@ -54,7 +54,7 @@
 | 1. Unsafe Audit | 100% | 81 blocks in 15 files — ALL CLEAN |
 | 2. Property Testing | 90% | 20 proptests inc. multi-object, scheduler, IPC transfer |
 | 3. Fuzzing | 90% | 44M runs in 1hr, zero crashes. Structured target pending |
-| 4. Miri | 80% | UB fix confirmed. 5 previously-failing tests pass clean |
+| 4. Miri | 90% | 111+ tests pass clean. UB fix confirmed. No UB in any core module |
 | 5. Coverage | 80% | 96% syscall.rs, 97-99% core objects. Key gaps filled |
 | 6. Mutation Testing | 30% | handle.rs: 15 caught, 6 missed → 3 tests added. More files queued |
 | 7. Sanitizers | 50% | ASan: 575 tests pass clean. LSan/UBSan pending |
