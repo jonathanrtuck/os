@@ -102,7 +102,7 @@ impl<T, const MAX: usize> ObjectTable<T, MAX> {
         self.generations.get(idx as usize).copied().unwrap_or(0)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, fuzzing))]
     pub fn iter_allocated(&self) -> impl Iterator<Item = (u32, &T)> {
         self.entries
             .iter()
@@ -110,7 +110,14 @@ impl<T, const MAX: usize> ObjectTable<T, MAX> {
             .filter_map(|(i, slot)| slot.as_deref().map(|v| (i as u32, v)))
     }
 
-    #[cfg(test)]
+    pub fn iter_allocated_mut(&mut self) -> impl Iterator<Item = (u32, &mut T)> {
+        self.entries
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(i, slot)| slot.as_deref_mut().map(|v| (i as u32, v)))
+    }
+
+    #[cfg(any(test, fuzzing))]
     pub fn is_allocated(&self, idx: u32) -> bool {
         self.entries.get(idx as usize).is_some_and(|s| s.is_some())
     }

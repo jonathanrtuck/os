@@ -1685,6 +1685,10 @@ impl Kernel {
                 }
             }
 
+            for (_, ep) in self.endpoints.iter_allocated_mut() {
+                ep.remove_recv_waiter(ThreadId(tid));
+            }
+
             #[cfg(target_os = "none")]
             self.free_kernel_stack(tid);
 
