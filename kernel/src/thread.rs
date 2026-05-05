@@ -350,7 +350,7 @@ impl FixedRing {
         self.len as usize
     }
 
-    #[cfg(any(test, fuzzing))]
+    #[cfg(any(test, fuzzing, debug_assertions))]
     fn iter(&self) -> impl Iterator<Item = ThreadId> + '_ {
         (0..self.len as usize).map(|i| self.buf[(self.head as usize + i) % QUEUE_CAP])
     }
@@ -423,7 +423,7 @@ impl RunQueue {
         self.queues.iter().map(|q| q.len()).sum()
     }
 
-    #[cfg(any(test, fuzzing))]
+    #[cfg(any(test, fuzzing, debug_assertions))]
     pub fn all_queued_thread_ids(&self) -> alloc::vec::Vec<ThreadId> {
         let mut ids = alloc::vec::Vec::new();
 

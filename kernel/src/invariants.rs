@@ -6,7 +6,7 @@
 //! waiter/counter agreement, thread linked-list validity, and scheduler
 //! uniqueness.
 //!
-//! This module is `#[cfg(any(test, fuzzing))]` only — zero cost in the kernel binary.
+//! Available in test, fuzzing, and debug builds. Zero cost in release kernel binary.
 
 use alloc::{collections::BTreeSet, format, string::String, vec::Vec};
 
@@ -174,12 +174,6 @@ fn check_thread_space_linked_lists(kernel: &Kernel, violations: &mut Vec<Violati
                 });
             }
 
-            if let Some(prev) = thread.space_prev() {
-                if !visited.contains(&prev) && Some(prev) != space.thread_head().filter(|_| false) {
-                    // prev should either be already visited or be unreachable (head has no prev)
-                }
-            }
-
             cursor = thread.space_next();
         }
     }
@@ -191,16 +185,16 @@ fn check_scheduler_uniqueness(kernel: &Kernel, violations: &mut Vec<Violation>) 
     for core_id in 0..kernel.scheduler.num_cores() {
         let rq = kernel.scheduler.core(core_id);
 
-        if let Some(current) = rq.current() {
-            if !seen.insert(current) {
-                violations.push(Violation {
-                    category: "scheduler",
-                    detail: format!(
-                        "thread {} is current on core {} but already seen",
-                        current.0, core_id
-                    ),
-                });
-            }
+        if let Some(current) = rq.current()
+            && !seen.insert(current)
+        {
+            violations.push(Violation {
+                category: "scheduler",
+                detail: format!(
+                    "thread {} is current on core {} but already seen",
+                    current.0, core_id
+                ),
+            });
         }
 
         for tid in rq.all_queued_thread_ids() {
@@ -406,16 +400,16 @@ fn check_event_waiter_validity(kernel: &Kernel, violations: &mut Vec<Violation>)
 
 fn check_irq_binding_consistency(kernel: &Kernel, violations: &mut Vec<Violation>) {
     for intid in 0..crate::config::MAX_IRQS {
-        if let Some(binding) = kernel.irqs.binding_at(intid) {
-            if !kernel.events.is_allocated(binding.event_id.0) {
-                violations.push(Violation {
-                    category: "irq-binding",
-                    detail: format!(
-                        "IRQ #{} bound to deallocated event #{}",
-                        intid, binding.event_id.0
-                    ),
-                });
-            }
+        if let Some(binding) = kernel.irqs.binding_at(intid)
+            && !kernel.events.is_allocated(binding.event_id.0)
+        {
+            violations.push(Violation {
+                category: "irq-binding",
+                detail: format!(
+                    "IRQ #{} bound to deallocated event #{}",
+                    intid, binding.event_id.0
+                ),
+            });
         }
     }
 }

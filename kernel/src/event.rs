@@ -203,7 +203,7 @@ impl Event {
         self.bound_endpoint = None;
     }
 
-    #[cfg(any(test, fuzzing))]
+    #[cfg(any(test, fuzzing, debug_assertions))]
     pub fn verify_internal_counts(&self) -> Result<(), &'static str> {
         let actual = self.waiters.iter().filter(|s| s.is_some()).count();
 
@@ -214,7 +214,7 @@ impl Event {
         Ok(())
     }
 
-    #[cfg(any(test, fuzzing))]
+    #[cfg(any(test, fuzzing, debug_assertions))]
     pub fn all_waiter_thread_ids(&self) -> alloc::vec::Vec<crate::types::ThreadId> {
         self.waiters
             .iter()

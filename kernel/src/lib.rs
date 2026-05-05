@@ -34,7 +34,7 @@ pub mod fault;
 #[allow(unsafe_code)]
 pub mod frame;
 pub mod handle;
-#[cfg(any(test, fuzzing))]
+#[cfg(any(test, fuzzing, debug_assertions))]
 pub mod invariants;
 pub mod irq;
 #[cfg(test)]

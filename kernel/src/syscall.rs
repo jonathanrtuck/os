@@ -359,10 +359,27 @@ impl Kernel {
             _ => Err(SyscallError::InvalidArgument),
         };
 
-        match result {
+        let outcome = match result {
             Ok(value) => (0, value),
             Err(e) => (e as u64, 0),
+        };
+
+        #[cfg(all(debug_assertions, target_os = "none"))]
+        {
+            let violations = crate::invariants::verify(self);
+
+            if !violations.is_empty() {
+                crate::println!("INVARIANT VIOLATION after syscall {syscall_num}:");
+
+                for v in &violations {
+                    crate::println!("  {v}");
+                }
+
+                panic!("kernel invariant violated");
+            }
         }
+
+        outcome
     }
 
     // -- VMO syscalls --
