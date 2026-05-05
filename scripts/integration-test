@@ -61,6 +61,12 @@ map_exit_code() {
         160|161|162|163|164|165|166|167|168) echo "ipc_call_recv_reply" ;;
         200|201) echo "ipc_caller_thread" ;;
         180|181|182|183|184) echo "capacity_recovery" ;;
+        30[0-9]) echo "diff_object_lifecycle" ;;
+        31[0-9]) echo "diff_event_signal_clear" ;;
+        32[0-9]) echo "diff_endpoint_bind_close" ;;
+        33[0-9]) echo "diff_error_codes" ;;
+        34[0-9]) echo "diff_vmo_snapshot_seal_resize" ;;
+        35[0-9]) echo "diff_handle_slot_reuse" ;;
         57005) echo "panic (0xDEAD)" ;;
         *) echo "unknown (code $code)" ;;
     esac

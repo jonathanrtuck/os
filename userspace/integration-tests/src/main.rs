@@ -394,6 +394,143 @@ fn test_capacity_recovery() {
     assert_ok(abi::handle::close(recovered), 184);
 }
 
+// ── Differential tests (host vs bare-metal) ─────────────────────
+// These mirror the scenarios in kernel/src/differential.rs.
+
+fn diff_object_lifecycle() {
+    let vmo = assert_ok(abi::vmo::create(PAGE_SIZE, 0), 300);
+
+    let info = assert_ok(abi::handle::info(vmo), 301);
+    assert_true(info.object_type == ObjectType::Vmo, 302);
+    assert_true(info.rights == Rights::ALL, 303);
+
+    let dup = assert_ok(abi::handle::dup(vmo, Rights::READ), 304);
+    assert_true(dup.0 != vmo.0, 305);
+
+    let dup_info = assert_ok(abi::handle::info(dup), 306);
+    assert_true(dup_info.rights == Rights::READ, 307);
+
+    assert_ok(abi::handle::close(dup), 308);
+    assert_err(
+        abi::handle::info(dup).map(|i| i.rights.0 as u64),
+        SyscallError::InvalidHandle,
+        309,
+    );
+
+    assert_ok(abi::handle::info(vmo).map(|_| 0), 310);
+    assert_ok(abi::handle::close(vmo), 311);
+}
+
+fn diff_event_signal_clear() {
+    let ev = assert_ok(abi::event::create(), 312);
+
+    assert_ok(abi::event::signal(ev, 0x5), 313);
+
+    let fired = assert_ok(abi::event::wait(&[(ev, 0x4)]), 314);
+    assert_true(fired.0 == ev.0, 315);
+
+    assert_ok(abi::event::clear(ev, 0x1), 316);
+
+    // Bit 0x4 still set — wait should succeed immediately.
+    let fired = assert_ok(abi::event::wait(&[(ev, 0x4)]), 317);
+    assert_true(fired.0 == ev.0, 318);
+
+    assert_ok(abi::handle::close(ev), 319);
+}
+
+fn diff_endpoint_bind_close() {
+    let ep = assert_ok(abi::ipc::endpoint_create(), 320);
+
+    let info = assert_ok(abi::handle::info(ep), 321);
+    assert_true(info.object_type == ObjectType::Endpoint, 322);
+
+    let ev = assert_ok(abi::event::create(), 323);
+    assert_ok(abi::ipc::endpoint_bind_event(ep, ev), 324);
+
+    assert_ok(abi::handle::close(ep), 325);
+    assert_ok(abi::handle::close(ev), 326);
+}
+
+fn diff_error_codes() {
+    // Invalid handle
+    assert_err(
+        abi::handle::info(Handle(999)).map(|i| i.rights.0 as u64),
+        SyscallError::InvalidHandle,
+        330,
+    );
+
+    // Wrong handle type — VMO handle for event operation
+    let vmo = assert_ok(abi::vmo::create(PAGE_SIZE, 0), 331);
+    assert_err(
+        abi::event::signal(vmo, 0x1).map(|_| 0),
+        SyscallError::WrongHandleType,
+        332,
+    );
+
+    // VMO create with zero size
+    assert_err(
+        abi::vmo::create(0, 0).map(|h| h.0 as u64),
+        SyscallError::InvalidArgument,
+        333,
+    );
+
+    // Seal then resize
+    assert_ok(abi::vmo::seal(vmo), 334);
+    assert_err(
+        abi::vmo::resize(vmo, PAGE_SIZE * 2).map(|_| 0),
+        SyscallError::AlreadySealed,
+        335,
+    );
+
+    // Rights escalation
+    let read_only = assert_ok(abi::handle::dup(vmo, Rights::READ), 336);
+    assert_err(
+        abi::handle::dup(read_only, Rights::ALL).map(|h| h.0 as u64),
+        SyscallError::InsufficientRights,
+        337,
+    );
+
+    assert_ok(abi::handle::close(vmo), 338);
+    assert_ok(abi::handle::close(read_only), 339);
+}
+
+fn diff_vmo_snapshot_seal_resize() {
+    let vmo = assert_ok(abi::vmo::create(PAGE_SIZE, 0), 340);
+    let snap = assert_ok(abi::vmo::snapshot(vmo), 341);
+
+    let info = assert_ok(abi::handle::info(snap), 342);
+    assert_true(info.object_type == ObjectType::Vmo, 343);
+
+    assert_ok(abi::vmo::resize(vmo, PAGE_SIZE * 2), 344);
+
+    assert_ok(abi::vmo::seal(snap), 345);
+    assert_err(
+        abi::vmo::resize(snap, PAGE_SIZE).map(|_| 0),
+        SyscallError::AlreadySealed,
+        346,
+    );
+
+    assert_ok(abi::handle::close(vmo), 347);
+    assert_ok(abi::handle::close(snap), 348);
+}
+
+fn diff_handle_slot_reuse() {
+    let h1 = assert_ok(abi::vmo::create(PAGE_SIZE, 0), 350);
+    let h2 = assert_ok(abi::vmo::create(PAGE_SIZE, 0), 351);
+    assert_true(h1.0 != h2.0, 352);
+
+    assert_ok(abi::handle::close(h1), 353);
+
+    let h3 = assert_ok(abi::vmo::create(PAGE_SIZE, 0), 354);
+
+    // h2 is still valid regardless of h1's reuse.
+    assert_ok(abi::handle::info(h2).map(|_| 0), 355);
+    assert_ok(abi::handle::info(h3).map(|_| 0), 356);
+
+    assert_ok(abi::handle::close(h2), 357);
+    assert_ok(abi::handle::close(h3), 358);
+}
+
 // ── Entry point ───────────────────────────────────────────────────
 
 #[unsafe(no_mangle)]
@@ -443,6 +580,14 @@ extern "C" fn _start() -> ! {
 
     // Capacity limit and recovery
     test_capacity_recovery();
+
+    // Differential tests (host vs bare-metal)
+    diff_object_lifecycle();
+    diff_event_signal_clear();
+    diff_endpoint_bind_close();
+    diff_error_codes();
+    diff_vmo_snapshot_seal_resize();
+    diff_handle_slot_reuse();
 
     // All tests passed.
     abi::thread::exit(0);
