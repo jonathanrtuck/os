@@ -22,3 +22,8 @@ doc = false
 name = "syscall_sequence"
 path = "fuzz_targets/syscall_sequence.rs"
 doc = false
+
+[[bin]]
+name = "syscall_structured"
+path = "fuzz_targets/syscall_structured.rs"
+doc = false
