@@ -1006,7 +1006,7 @@ positives.
 Host-target tests verify logic; bare-metal tests verify the system. This is the
 primary verification environment, not a supplement to host testing.
 
-### 11.1 Integration Test Expansion
+### 11.1 Integration Test Expansion [DONE]
 
 The current integration test boots the kernel and checks a single exit marker.
 Expand to:
@@ -1026,7 +1026,7 @@ Expand to:
 - **Clean shutdown:** all threads exit, kernel issues PSCI SYSTEM_OFF, exit code
   0
 
-### 11.2 Serial Output Verification
+### 11.2 Serial Output Verification [DONE]
 
 Each integration test prints a structured line to serial:
 
@@ -1038,7 +1038,7 @@ TEST test_name: FAIL reason
 The test script (`scripts/integration-test`) parses these lines and reports
 per-test results, not just pass/fail for the whole boot.
 
-### 11.3 Boot-Time Self-Test (POST)
+### 11.3 Boot-Time Self-Test (POST) [DONE]
 
 Before accepting userspace work, the kernel runs a smoke test at boot in debug
 builds:
@@ -1060,7 +1060,7 @@ Cost: ~10,000 cycles (~2µs at 4.5 GHz). Negligible compared to boot time.
 Enabled by: `#[cfg(debug_assertions)]` — zero cost in release builds. Can
 optionally be a `--self-test` boot flag for release builds.
 
-### 11.4 Debug-Build Runtime Invariant Checking
+### 11.4 Debug-Build Runtime Invariant Checking [DONE]
 
 In debug bare-metal builds, run `invariants::verify()` after every syscall
 dispatch — not just in `#[cfg(test)]`. This transforms bare-metal execution from
@@ -1089,7 +1089,7 @@ effects. The cost is significant (full kernel state scan after every syscall),
 which is why it's debug-only. But the bugs it catches are the ones that survive
 everything else.
 
-### 11.5 Stress Boot
+### 11.5 Stress Boot [DONE]
 
 Boot the kernel 100 times in a loop. Any non-zero exit, hang (timeout), or
 unexpected serial output is a failure. This catches initialization races, stack
@@ -1133,14 +1133,14 @@ implementations for host (`copy_nonoverlapping`) and bare-metal (LDTR/STTR with
 fault recovery). The logic is the same but the mechanism is different — exactly
 where bugs hide.
 
-### 11.8 Release vs Debug
+### 11.8 Release vs Debug [DONE]
 
 Run all integration tests in both debug and release mode. Optimizer bugs
 (especially around `unsafe` code and inline assembly) often only manifest in
 release builds. The `options(nomem)` misuse described in CLAUDE.md is exactly
 this class of bug.
 
-### 11.9 Cycle-Accurate Benchmarks (Every Syscall)
+### 11.9 Cycle-Accurate Benchmarks (Every Syscall) [DONE]
 
 The current bench suite has one benchmark (null syscall). For each of the 30
 syscalls, measure cycle cost on the actual M4 Pro P-core using CNTVCT_EL0 with
@@ -1182,7 +1182,7 @@ due to different hardware and measurement methodology):
 - seL4 on Cortex-A57: ~240 cycles null IPC
 - Zircon: ~1500-2000 cycles channel_call (much heavier abstraction)
 
-### 11.10 Theoretical Minimum Analysis
+### 11.10 Theoretical Minimum Analysis [DONE]
 
 For each hot path, compute the minimum possible cycle cost given what the
 hardware requires. This is the floor we're optimizing toward.
@@ -1240,7 +1240,7 @@ Measure the actual cache/TLB behavior of hot paths:
   With only ~160 DTLB entries covering 2.5 MB, the kernel must minimize its VA
   footprint.
 
-### 11.12 Compile-Time Struct Layout Assertions
+### 11.12 Compile-Time Struct Layout Assertions [DONE]
 
 The `TrapFrame` already uses `offset_of!` + `size_of` assertions to catch layout
 drift against the assembly. Extend this pattern to every performance- critical
@@ -1356,7 +1356,7 @@ These workloads reveal performance characteristics that microbenchmarks miss —
 especially cache conflicts between the handle table, object tables, scheduler
 queues, and page tables when they're all active simultaneously.
 
-### 11.16 Performance Regression Thresholds
+### 11.16 Performance Regression Thresholds [DONE]
 
 Replace the current 10x threshold with statistically grounded per-benchmark
 thresholds:
@@ -1398,7 +1398,7 @@ When a measured value exceeds the threshold:
 
 **Goal:** Every bug found becomes a permanent guard against recurrence.
 
-### 12.1 Commit Gate (Pre-Commit)
+### 12.1 Commit Gate (Pre-Commit) [DONE]
 
 Expand the existing pre-commit gate:
 
@@ -1427,7 +1427,7 @@ MIRIFLAGS="-Zmiri-leak-check" \
 cargo build -p kernel
 ```
 
-### 12.2 Nightly Gate
+### 12.2 Nightly Gate [DONE]
 
 Run nightly (or weekly, depending on machine budget):
 
@@ -1456,7 +1456,7 @@ scripts/bench-test          # runs all benchmarks, compares to baselines
 for i in $(seq 1 100); do scripts/integration-test || exit 1; done
 ```
 
-### 12.3 Performance as a Regression Gate
+### 12.3 Performance as a Regression Gate [DONE]
 
 A performance regression is treated like a correctness regression — it is
 investigated, root-caused, and fixed before moving on. The process:
@@ -1473,7 +1473,7 @@ investigated, root-caused, and fixed before moving on. The process:
 5. After major optimization work: re-run all benchmarks 1,000× to establish
    stable new baselines
 
-### 12.4 Makefile Targets
+### 12.4 Makefile Targets [DONE]
 
 ```makefile
 test:           # Fast: unit + syscall + pipeline + verification tests
