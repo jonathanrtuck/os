@@ -6491,4 +6491,146 @@ mod tests {
 
         crate::invariants::assert_valid(&*k);
     }
+
+    // -- Error injection: capacity exhaustion --
+
+    #[test]
+    fn handle_table_exhaustion_and_recovery() {
+        let mut k = setup_kernel();
+        let mut last_good = 0u64;
+
+        for i in 0..config::MAX_HANDLES {
+            let (err, hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+
+            if err != 0 {
+                assert_eq!(
+                    err,
+                    SyscallError::OutOfMemory as u64,
+                    "expected OutOfMemory at handle {i}"
+                );
+
+                break;
+            }
+
+            last_good = hid;
+        }
+
+        assert!(last_good > 0, "should have created at least one event");
+
+        call(&mut k, num::HANDLE_CLOSE, &[last_good, 0, 0, 0, 0, 0]);
+
+        let (err, _) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+
+        assert_eq!(err, 0, "should succeed after freeing a slot");
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn endpoint_table_exhaustion() {
+        let mut k = setup_kernel();
+        let mut created = 0;
+
+        for _ in 0..config::MAX_ENDPOINTS + 1 {
+            let (err, _) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
+
+            if err != 0 {
+                assert_eq!(err, SyscallError::OutOfMemory as u64);
+
+                break;
+            }
+
+            created += 1;
+        }
+
+        assert!(
+            created <= config::MAX_ENDPOINTS,
+            "should not exceed MAX_ENDPOINTS"
+        );
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn thread_create_rollback_on_handle_table_full() {
+        let mut k = setup_kernel();
+
+        for _ in 0..config::MAX_HANDLES - 1 {
+            let (err, _) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+
+            if err != 0 {
+                break;
+            }
+        }
+
+        let initial_thread_count = k.threads.count();
+        let (err, _) = call(&mut k, num::THREAD_CREATE, &[0x1000, 0x2000, 0, 0, 0, 0]);
+
+        if err != 0 {
+            assert_eq!(
+                k.threads.count(),
+                initial_thread_count,
+                "thread table should not grow on failed create"
+            );
+        }
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn error_inject_vmo_snapshot_rollback_handles_full() {
+        let mut k = setup_kernel();
+        let (_, vmo_hid) = call(
+            &mut k,
+            num::VMO_CREATE,
+            &[config::PAGE_SIZE as u64, 0, 0, 0, 0, 0],
+        );
+
+        for _ in 0..config::MAX_HANDLES - 2 {
+            let (err, _) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+
+            if err != 0 {
+                break;
+            }
+        }
+
+        let initial_vmo_count = k.vmos.count();
+        let (err, _) = call(&mut k, num::VMO_SNAPSHOT, &[vmo_hid, 0, 0, 0, 0, 0]);
+
+        if err != 0 {
+            assert_eq!(
+                k.vmos.count(),
+                initial_vmo_count,
+                "VMO table should not grow on failed snapshot"
+            );
+        }
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn error_inject_space_create_rollback_handles_full() {
+        let mut k = setup_kernel();
+
+        for _ in 0..config::MAX_HANDLES - 1 {
+            let (err, _) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+
+            if err != 0 {
+                break;
+            }
+        }
+
+        let initial_space_count = k.spaces.count();
+        let (err, _) = call(&mut k, num::SPACE_CREATE, &[0; 6]);
+
+        if err != 0 {
+            assert_eq!(
+                k.spaces.count(),
+                initial_space_count,
+                "space table should not grow on failed create"
+            );
+        }
+
+        crate::invariants::assert_valid(&*k);
+    }
 }
