@@ -1,7 +1,10 @@
 # Host target for running tests (the workspace default is aarch64-unknown-none).
 HOST_TARGET := aarch64-apple-darwin
 
-.PHONY: test build check clippy fmt bench clean integration-test
+.PHONY: test build check clippy fmt bench clean integration-test \
+        miri asan fuzz mutants coverage gate nightly
+
+# -- Core targets --
 
 test:
 	cargo test -p kernel --lib --target $(HOST_TARGET)
@@ -26,3 +29,29 @@ integration-test:
 
 clean:
 	cargo clean
+
+# -- Verification targets --
+
+miri:
+	cargo +nightly miri test -p kernel --lib --target $(HOST_TARGET)
+
+asan:
+	RUSTFLAGS="-Z sanitizer=address" cargo +nightly test -p kernel --lib --target $(HOST_TARGET)
+
+fuzz:
+	cd kernel && cargo +nightly fuzz run syscall_sequence -- -max_total_time=3600
+
+coverage:
+	RUSTFLAGS="-C instrument-coverage" cargo test -p kernel --lib --target $(HOST_TARGET)
+	@echo "Run grcov or llvm-cov to generate report from .profraw files"
+
+mutants:
+	CARGO_BUILD_TARGET=$(HOST_TARGET) cargo mutants -p kernel --timeout 30
+
+# -- Gates --
+
+gate: clippy test build
+	@echo "Gate passed: clippy + tests + build"
+
+nightly: gate miri asan fuzz coverage
+	@echo "Nightly gate passed: all verification targets"
