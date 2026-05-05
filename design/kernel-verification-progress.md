@@ -1,6 +1,86 @@
 # Kernel Verification Progress
 
-## Session 8 — 2026-05-05 — IN PROGRESS
+## Session 9 — 2026-05-05 — IN PROGRESS
+
+### Results
+
+| Metric                       | Session 8 | Session 9 | Delta |
+| ---------------------------- | --------- | --------- | ----- |
+| Tests                        | 680       | 688       | +8    |
+| Bugs found                   | 18        | 19        | +1    |
+| Bugs fixed                   | 18        | 19        | +1    |
+| Invariant checks             | 16        | 16        | —     |
+| Property tests               | 33        | 33        | —     |
+| Commits on branch            | 61        | 63        | +2    |
+| Bare-metal integration tests | 32        | 33        | +1    |
+| Per-syscall benchmarks       | 14        | 14        | —     |
+| Workload benchmarks          | 3         | 3         | —     |
+| Fuzz targets                 | 4         | 4         | —     |
+
+### Bug #19: Bench Thread Leaked in Scheduler
+
+`bench::run()` allocated a thread (slot 0) and enqueued it in the scheduler
+but never cleaned up after benchmarks completed. The orphan thread had no
+RegisterState (it was never meant to be context-switched to).
+
+On single-core execution this was harmless — init always ran and the bench
+thread was never picked. On real SMP (4 vCPUs), when init blocked on
+`event_wait` during the SMP stress test, the scheduler picked the orphan
+bench thread and panicked during context switch: "new thread has no
+RegisterState."
+
+Fix: added `teardown_bench_env()` mirroring POST's cleanup pattern.
+
+### Work Completed (Session 9)
+
+**Phase 8 (Concurrency) — SMP bare-metal stress test + host preemption:**
+
+Lock hierarchy analysis: 4 locks total (ALLOCATOR TicketLock, CONTIGUOUS_LOCK
+AtomicBool, SERIAL_LOCK AtomicBool, SpinLock<T>). No nested acquisitions, no
+circular dependencies. IRQs disabled during TicketLock. PerCpu is lock-free
+via TPIDR_EL1.
+
+8 new host-side tests (680→688):
+- 4 preemption simulation tests: interleaved create/destroy, thread_create_in,
+  IPC call/recv/reply, event signal/clear — all across alternating cores
+- Max-complexity IPC: 128-byte message + 8 handle transfers
+- Priority inheritance via CALL: Low server boosted to High
+- set_priority on blocked IPC caller
+- space_destroy interleaved with object ops on other core
+
+1 new bare-metal SMP stress test: 4 workers across 4 vCPUs, 200 iterations
+each of VMO create/snapshot/close + event create/signal/clear/close. Workers
+synchronize via shared event. Found bug #19 on first run.
+
+### Phase Status
+
+| Phase                 | Status | Notes                                              |
+| --------------------- | ------ | -------------------------------------------------- |
+| 0. Spec Review        | 100%   | Complete                                           |
+| 1. Unsafe Audit       | 100%   | 85 blocks in 15 files — ALL CLEAN                  |
+| 2. Property Testing   | 100%   | 33 proptests                                       |
+| 3. Fuzzing            | 100%   | 4 targets, 1M+ runs each, zero crashes             |
+| 4. Miri               | 95%    | Full 688-test run pending                          |
+| 5. Coverage           | 90%    | Remaining gaps are bare-metal-only                 |
+| 6. Mutation Testing   | 80%    | syscall.rs re-run pending                          |
+| 7. Sanitizers         | 100%   | ASan: 688 tests clean (pending re-run)             |
+| 8. Concurrency        | 95%    | Host preemption sim + SMP bare-metal stress done   |
+| 9. Error Injection    | 95%    | ASID leak found+fixed, boundary injection expanded |
+| 10. Static Analysis   | 100%   | Clippy pedantic enabled, both targets clean        |
+| 11. Bare-Metal + Perf | 100%   | Complete                                           |
+| 12. Regression Infra  | 90%    | Baselines need hardware run                        |
+
+### Remaining Work
+
+1. **Phase 4:** Full Miri run on 688 tests
+2. **Phase 6:** Mutation testing convergence on syscall.rs
+3. **Phase 8:** Additional SMP scenarios (IPC between cores, handle transfer)
+4. **Phase 12:** Benchmark baselines (need hardware run)
+5. **Convergence pass:** Re-run phases 2-10
+
+---
+
+## Session 8 — 2026-05-05 — COMPLETE
 
 ### Results
 
@@ -20,11 +100,12 @@
 ### Bug #18: ASID Leak in sys_space_create
 
 Both error paths in `sys_space_create` leaked ASIDs from the global pool:
+
 1. Space table full: Box<AddressSpace> dropped without freeing ASID
 2. Handle table full: spaces.dealloc() returned space but ASID not freed
 
-With only 128 ASIDs, repeated failed space creation would exhaust the
-pool and prevent any new spaces from being created.
+With only 128 ASIDs, repeated failed space creation would exhaust the pool and
+prevent any new spaces from being created.
 
 ### Work Completed (Session 8)
 
@@ -32,7 +113,8 @@ pool and prevent any new spaces from being created.
 
 - Added `#![warn(clippy::pedantic)]` at crate level with targeted allows
 - Fixed all 24 actionable warnings: format string inlining, let-else, map_or
-- Clean on both host (aarch64-apple-darwin) and bare-metal (aarch64-unknown-none)
+- Clean on both host (aarch64-apple-darwin) and bare-metal
+  (aarch64-unknown-none)
 
 **Phase 9 (Error Injection) — 7 new tests (673→680):**
 
@@ -56,21 +138,21 @@ pool and prevent any new spaces from being created.
 
 ### Phase Status
 
-| Phase                 | Status | Notes                                                                    |
-| --------------------- | ------ | ------------------------------------------------------------------------ |
-| 0. Spec Review        | 100%   | Complete                                                                  |
-| 1. Unsafe Audit       | 100%   | 85 blocks in 15 files — ALL CLEAN                                        |
-| 2. Property Testing   | 100%   | 33 proptests                                                             |
-| 3. Fuzzing            | 100%   | 4 targets, 1M+ runs each, zero crashes                                  |
-| 4. Miri               | 95%    | Full 680-test run pending                                                |
-| 5. Coverage           | 90%    | Remaining gaps are bare-metal-only                                       |
-| 6. Mutation Testing   | 80%    | syscall.rs re-run pending                                                |
-| 7. Sanitizers         | 100%   | ASan: 680 tests clean                                                    |
-| 8. Concurrency        | 75%    | Host-side comprehensive. SMP bare-metal pending.                         |
-| 9. Error Injection    | 95%    | ASID leak found+fixed, boundary injection expanded                       |
-| 10. Static Analysis   | 100%   | Clippy pedantic enabled, both targets clean                              |
-| 11. Bare-Metal + Perf | 100%   | Complete                                                                 |
-| 12. Regression Infra  | 90%    | Baselines need hardware run                                              |
+| Phase                 | Status | Notes                                              |
+| --------------------- | ------ | -------------------------------------------------- |
+| 0. Spec Review        | 100%   | Complete                                           |
+| 1. Unsafe Audit       | 100%   | 85 blocks in 15 files — ALL CLEAN                  |
+| 2. Property Testing   | 100%   | 33 proptests                                       |
+| 3. Fuzzing            | 100%   | 4 targets, 1M+ runs each, zero crashes             |
+| 4. Miri               | 95%    | Full 680-test run pending                          |
+| 5. Coverage           | 90%    | Remaining gaps are bare-metal-only                 |
+| 6. Mutation Testing   | 80%    | syscall.rs re-run pending                          |
+| 7. Sanitizers         | 100%   | ASan: 680 tests clean                              |
+| 8. Concurrency        | 75%    | Host-side comprehensive. SMP bare-metal pending.   |
+| 9. Error Injection    | 95%    | ASID leak found+fixed, boundary injection expanded |
+| 10. Static Analysis   | 100%   | Clippy pedantic enabled, both targets clean        |
+| 11. Bare-Metal + Perf | 100%   | Complete                                           |
+| 12. Regression Infra  | 90%    | Baselines need hardware run                        |
 
 ### Remaining Work
 
