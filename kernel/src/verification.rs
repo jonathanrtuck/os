@@ -1856,23 +1856,29 @@ mod tests {
 
         for _ in 0..config::MAX_VMOS {
             let (err, hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
+
             if err != 0 {
                 break;
             }
+
             handles.push(hid);
         }
 
         let count = handles.len();
+
         assert!(count > 0);
 
         let (err, _) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
+
         assert_ne!(err, 0, "should fail when VMO table is full");
 
         let last = handles.pop().unwrap();
         let (err, _) = call(&mut k, num::HANDLE_CLOSE, &[last, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
 
         let (err, _) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, 0, "should recover after closing one VMO");
 
         crate::invariants::assert_valid(&*k);
@@ -1885,23 +1891,29 @@ mod tests {
 
         for _ in 0..config::MAX_EVENTS {
             let (err, hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+
             if err != 0 {
                 break;
             }
+
             handles.push(hid);
         }
 
         let count = handles.len();
+
         assert!(count > 0);
 
         let (err, _) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+
         assert_ne!(err, 0, "should fail when event table is full");
 
         let last = handles.pop().unwrap();
         let (err, _) = call(&mut k, num::HANDLE_CLOSE, &[last, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
 
         let (err, _) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+
         assert_eq!(err, 0, "should recover after closing one event");
 
         crate::invariants::assert_valid(&*k);
@@ -1914,23 +1926,29 @@ mod tests {
 
         for _ in 0..config::MAX_ENDPOINTS {
             let (err, hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
+
             if err != 0 {
                 break;
             }
+
             handles.push(hid);
         }
 
         let count = handles.len();
+
         assert!(count > 0);
 
         let (err, _) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
+
         assert_ne!(err, 0, "should fail when endpoint table is full");
 
         let last = handles.pop().unwrap();
         let (err, _) = call(&mut k, num::HANDLE_CLOSE, &[last, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
 
         let (err, _) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
+
         assert_eq!(err, 0, "should recover after closing one endpoint");
 
         crate::invariants::assert_valid(&*k);
@@ -1943,13 +1961,12 @@ mod tests {
     #[test]
     fn thread_create_in_rollback_on_invalid_handle() {
         let mut k = setup_kernel();
-
         let (err, space_hid) = call(&mut k, num::SPACE_CREATE, &[0; 6]);
+
         assert_eq!(err, 0);
 
         let invalid_handle_id = 999u32;
         let handle_ids = [invalid_handle_id];
-
         let thread_count_before = k.threads.count();
         let (err, _) = call(
             &mut k,
@@ -1970,11 +1987,12 @@ mod tests {
     #[test]
     fn thread_create_in_success_increments_refcount() {
         let mut k = setup_kernel();
-
         let (err, space_hid) = call(&mut k, num::SPACE_CREATE, &[0; 6]);
+
         assert_eq!(err, 0);
 
         let (err, vmo_hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
 
         let vmo_obj_id = k
@@ -1986,16 +2004,17 @@ mod tests {
             .unwrap()
             .object_id;
         let rc_before = k.vmos.get(vmo_obj_id).unwrap().refcount();
-
         let handle_ids = [vmo_hid as u32];
         let (err, _) = call(
             &mut k,
             num::THREAD_CREATE_IN,
             &[space_hid, 0x1000, 0x2000, 0, handle_ids.as_ptr() as u64, 1],
         );
+
         assert_eq!(err, 0);
 
         let rc_after = k.vmos.get(vmo_obj_id).unwrap().refcount();
+
         assert_eq!(
             rc_after,
             rc_before + 1,
@@ -2013,12 +2032,15 @@ mod tests {
     fn null_pointer_rejected_for_ipc_calls() {
         let mut k = setup_kernel();
         let (err, ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
+
         assert_eq!(err, 0);
 
         let (err, _) = call(&mut k, num::CALL, &[ep_hid, 0, 8, 0, 0, 0]);
+
         assert_ne!(err, 0, "CALL with null msg_ptr and nonzero len must fail");
 
         let (err, _) = call(&mut k, num::RECV, &[ep_hid, 0, 128, 0, 0, 0]);
+
         assert_ne!(err, 0, "RECV with null out_buf and nonzero cap must fail");
 
         crate::invariants::assert_valid(&*k);
@@ -2028,6 +2050,7 @@ mod tests {
     fn zero_length_message_accepted() {
         let mut k = setup_kernel();
         let (err, ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
+
         assert_eq!(err, 0);
 
         let mut buf = [0u8; 128];
@@ -2036,6 +2059,7 @@ mod tests {
             num::CALL,
             &[ep_hid, buf.as_mut_ptr() as u64, 0, 0, 0, 0],
         );
+
         assert_eq!(err, 0, "zero-length CALL must succeed");
 
         let (err, packed) = call(
@@ -2043,9 +2067,11 @@ mod tests {
             num::RECV,
             &[ep_hid, buf.as_mut_ptr() as u64, 128, 0, 0, 0],
         );
+
         assert_eq!(err, 0, "RECV must succeed");
 
         let msg_len = (packed & 0xFFFF_FFFF) as usize;
+
         assert_eq!(msg_len, 0, "received message must be zero-length");
 
         crate::invariants::assert_valid(&*k);
@@ -2055,10 +2081,12 @@ mod tests {
     fn max_ipc_handles_boundary() {
         let mut k = setup_kernel();
         let (err, ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
+
         assert_eq!(err, 0);
 
         let too_many = config::MAX_IPC_HANDLES + 1;
         let (err, _) = call(&mut k, num::CALL, &[ep_hid, 0, 0, 0, too_many as u64, 0]);
+
         assert_eq!(
             err,
             SyscallError::InvalidArgument as u64,
@@ -2082,16 +2110,20 @@ mod tests {
 
         for _ in 0..config::MAX_HANDLES {
             let (err, _) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
+
             if err != 0 {
                 break;
             }
         }
 
         let (err, _) = call(&mut k, num::SPACE_CREATE, &[0; 6]);
+
         assert_ne!(err, 0, "space_create must fail when handle table is full");
 
         page_table::reset_asid_pool();
+
         let asid = page_table::alloc_asid();
+
         assert!(
             asid.is_some(),
             "ASID pool must not leak ASIDs on failed space_create"
@@ -2111,14 +2143,17 @@ mod tests {
 
         for _ in 0..config::MAX_ADDRESS_SPACES {
             let (err, hid) = call(&mut k, num::SPACE_CREATE, &[0; 6]);
+
             if err != 0 {
                 break;
             }
+
             space_handles.push(hid);
         }
 
         let pre_count = space_handles.len();
         let (err, _) = call(&mut k, num::SPACE_CREATE, &[0; 6]);
+
         assert_ne!(err, 0, "space_create must fail when space table is full");
 
         for hid in &space_handles {
@@ -2126,6 +2161,7 @@ mod tests {
         }
 
         page_table::reset_asid_pool();
+
         for _ in 0..pre_count + 1 {
             assert!(
                 page_table::alloc_asid().is_some(),
@@ -2143,8 +2179,8 @@ mod tests {
     #[test]
     fn vmo_map_without_map_right_rejected() {
         let mut k = setup_kernel();
-
         let (err, vmo_hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
 
         let read_only_rights = Rights::READ.0 as u64;
@@ -2153,9 +2189,11 @@ mod tests {
             num::HANDLE_DUP,
             &[vmo_hid, read_only_rights, 0, 0, 0, 0],
         );
+
         assert_eq!(err, 0);
 
         let (err, _) = call(&mut k, num::VMO_MAP, &[dup_hid, 0, 0, 0, 0, 0]);
+
         assert_ne!(err, 0, "VMO map without MAP right must fail");
 
         crate::invariants::assert_valid(&*k);
@@ -2164,16 +2202,18 @@ mod tests {
     #[test]
     fn vmo_map_write_without_write_right_rejected() {
         let mut k = setup_kernel();
-
         let (err, vmo_hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
 
         let map_only = (Rights::MAP.0 | Rights::READ.0) as u64;
         let (err, dup_hid) = call(&mut k, num::HANDLE_DUP, &[vmo_hid, map_only, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
 
         let write_perms = Rights::WRITE.0 as u64;
         let (err, _) = call(&mut k, num::VMO_MAP, &[dup_hid, 0, write_perms, 0, 0, 0]);
+
         assert_ne!(
             err, 0,
             "VMO map with WRITE perm without WRITE right must fail"
@@ -2185,17 +2225,20 @@ mod tests {
     #[test]
     fn handle_dup_with_zero_rights() {
         let mut k = setup_kernel();
-
         let (err, vmo_hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
 
         let (err, dup_hid) = call(&mut k, num::HANDLE_DUP, &[vmo_hid, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, 0, "dup with zero rights must succeed (attenuation)");
 
         let (err, _) = call(&mut k, num::HANDLE_INFO, &[dup_hid, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, 0, "handle_info must succeed even with zero rights");
 
         let (err, _) = call(&mut k, num::VMO_MAP, &[dup_hid, 0, 0, 0, 0, 0]);
+
         assert_ne!(err, 0, "zero-rights handle must fail MAP operation");
 
         crate::invariants::assert_valid(&*k);
@@ -2204,15 +2247,17 @@ mod tests {
     #[test]
     fn handle_boundary_ids() {
         let mut k = setup_kernel();
-
         let max_handle = config::MAX_HANDLES as u64;
         let (err, _) = call(&mut k, num::HANDLE_INFO, &[max_handle, 0, 0, 0, 0, 0]);
+
         assert_ne!(err, 0, "handle ID at MAX_HANDLES must fail");
 
         let (err, _) = call(&mut k, num::HANDLE_INFO, &[u32::MAX as u64, 0, 0, 0, 0, 0]);
+
         assert_ne!(err, 0, "handle ID at u32::MAX must fail");
 
         let (err, _) = call(&mut k, num::HANDLE_CLOSE, &[max_handle, 0, 0, 0, 0, 0]);
+
         assert_ne!(err, 0, "close handle ID at MAX_HANDLES must fail");
 
         crate::invariants::assert_valid(&*k);
@@ -2221,11 +2266,12 @@ mod tests {
     #[test]
     fn vmo_resize_to_usize_max_rejected() {
         let mut k = setup_kernel();
-
         let (err, vmo_hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
 
         let (err, _) = call(&mut k, num::VMO_RESIZE, &[vmo_hid, u64::MAX, 0, 0, 0, 0]);
+
         assert_ne!(err, 0, "VMO resize to u64::MAX must fail");
 
         crate::invariants::assert_valid(&*k);

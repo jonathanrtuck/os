@@ -208,6 +208,7 @@ mod tests {
 
         // Maintain refcount when installing handles outside the syscall layer.
         s.kernel.vmos.get_mut(s.shared_vmo.0).unwrap().add_ref();
+
         let svc_space = s.kernel.spaces.get_mut(s.svc_space.0).unwrap();
         let full_hid = svc_space
             .handles_mut()
@@ -215,6 +216,7 @@ mod tests {
             .unwrap();
 
         s.kernel.vmos.get_mut(s.shared_vmo.0).unwrap().add_ref();
+
         let svc_space = s.kernel.spaces.get_mut(s.svc_space.0).unwrap();
         let read_only_hid = svc_space
             .handles_mut()

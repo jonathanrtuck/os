@@ -72,7 +72,6 @@ extern "C" fn kernel_main_upper() -> ! {
 
     #[cfg(debug_assertions)]
     kernel::post::run(&mut kern);
-
     kernel::bench::run(&mut kern);
 
     match kernel::bootstrap::create_init(&mut kern, init_binary) {

@@ -102,6 +102,7 @@ fn bench_create_close(
         let (err, handle) = kern.dispatch(current, 0, create_num, &create_args);
 
         arch::isb();
+
         *s = arch::read_cycle_counter().wrapping_sub(start);
 
         if err == 0 {
@@ -159,7 +160,6 @@ pub fn run(kern: &mut Kernel) {
     crate::println!("--- benchmarks ---");
 
     let current = setup_bench_env(kern);
-
     let mut results = alloc::vec::Vec::new();
 
     // ── Trap overhead ─────────────────────────────────────────────
@@ -177,6 +177,7 @@ pub fn run(kern: &mut Kernel) {
             let _ = arch::svc_null();
 
             arch::isb();
+
             *s = arch::read_cycle_counter().wrapping_sub(start);
         }
 
@@ -309,6 +310,7 @@ pub fn run(kern: &mut Kernel) {
             );
 
             arch::isb();
+
             *s = arch::read_cycle_counter().wrapping_sub(start);
 
             if err == 0 {
@@ -345,6 +347,7 @@ pub fn run(kern: &mut Kernel) {
             let (err, snap) = kern.dispatch(current, 0, num::VMO_SNAPSHOT, &[vmo_h, 0, 0, 0, 0, 0]);
 
             arch::isb();
+
             *s = arch::read_cycle_counter().wrapping_sub(start);
 
             if err == 0 {
@@ -463,11 +466,13 @@ fn bench_document_editing(kern: &mut Kernel, current: ThreadId) -> BenchResult {
 
     for s in &mut samples {
         arch::isb();
+
         let start = arch::read_cycle_counter();
 
         document_editing_iteration(kern, current, page);
 
         arch::isb();
+
         *s = arch::read_cycle_counter().wrapping_sub(start);
     }
 
@@ -490,7 +495,6 @@ fn document_editing_iteration(kern: &mut Kernel, current: ThreadId, page: u64) {
 
     kern.dispatch(current, 0, num::EVENT_SIGNAL, &[evt, 0x1, 0, 0, 0, 0]);
     kern.dispatch(current, 0, num::EVENT_CLEAR, &[evt, 0x1, 0, 0, 0, 0]);
-
     kern.dispatch(current, 0, num::HANDLE_CLOSE, &[evt, 0, 0, 0, 0, 0]);
     kern.dispatch(current, 0, num::HANDLE_CLOSE, &[snap, 0, 0, 0, 0, 0]);
     kern.dispatch(current, 0, num::HANDLE_CLOSE, &[vmo, 0, 0, 0, 0, 0]);
@@ -507,11 +511,13 @@ fn bench_ipc_storm(kern: &mut Kernel, current: ThreadId) -> BenchResult {
 
     for s in &mut samples {
         arch::isb();
+
         let start = arch::read_cycle_counter();
 
         ipc_storm_iteration(kern, current, ep);
 
         arch::isb();
+
         *s = arch::read_cycle_counter().wrapping_sub(start);
     }
 
@@ -574,11 +580,13 @@ fn bench_object_lifecycle_churn(kern: &mut Kernel, current: ThreadId) -> BenchRe
 
     for s in &mut samples {
         arch::isb();
+
         let start = arch::read_cycle_counter();
 
         object_churn_iteration(kern, current);
 
         arch::isb();
+
         *s = arch::read_cycle_counter().wrapping_sub(start);
     }
 
@@ -599,14 +607,17 @@ fn object_churn_iteration(kern: &mut Kernel, current: ThreadId) {
     // Create 4 VMOs + 2 events + 2 endpoints
     for h in &mut handles[..4] {
         let (_, hid) = kern.dispatch(current, 0, num::VMO_CREATE, &[page, 0, 0, 0, 0, 0]);
+
         *h = hid;
     }
     for h in &mut handles[4..6] {
         let (_, hid) = kern.dispatch(current, 0, num::EVENT_CREATE, &[0; 6]);
+
         *h = hid;
     }
     for h in &mut handles[6..8] {
         let (_, hid) = kern.dispatch(current, 0, num::ENDPOINT_CREATE, &[0; 6]);
+
         *h = hid;
     }
 

@@ -81,6 +81,7 @@ fn test_clock_monotonic() {
         let now = assert_ok(abi::system::clock_read(), 24);
 
         assert_true(now >= prev, 25);
+
         prev = now;
     }
 }
@@ -159,7 +160,6 @@ fn test_vmo_resize() {
     let vmo = assert_ok(abi::vmo::create(PAGE_SIZE, 0), 133);
 
     assert_ok(abi::vmo::resize(vmo, PAGE_SIZE * 2), 134);
-
     // Resize back down.
     assert_ok(abi::vmo::resize(vmo, PAGE_SIZE), 135);
 }
@@ -291,7 +291,6 @@ fn test_ipc_call_recv_reply() {
         ),
         164,
     );
-
     let mut msg_buf = [0u8; MSG_SIZE];
     let mut handles_buf = [0u32; 4];
     let recv = assert_ok(abi::ipc::recv(ep, &mut msg_buf, &mut handles_buf), 165);
@@ -337,7 +336,6 @@ fn test_event_cross_thread() {
     let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
     let stack_va = assert_ok(abi::vmo::map(stack_vmo, 0, rw), 172);
     let stack_top = stack_va + PAGE_SIZE * 2;
-
     let _thread = assert_ok(
         abi::thread::create(
             event_signaler_entry as *const () as usize,
@@ -346,7 +344,6 @@ fn test_event_cross_thread() {
         ),
         173,
     );
-
     // Wait for the signaler thread to fire bit 0x42.
     let fired = assert_ok(abi::event::wait(&[(ev, 0x42)]), 174);
 
@@ -355,7 +352,6 @@ fn test_event_cross_thread() {
 
 extern "C" fn event_signaler_entry(event_handle: usize) -> ! {
     let ev = Handle(event_handle as u32);
-
     // Signal the event so the main thread wakes up.
     let _ = abi::event::signal(ev, 0x42);
 
@@ -399,24 +395,24 @@ fn test_capacity_recovery() {
 
 fn diff_object_lifecycle() {
     let vmo = assert_ok(abi::vmo::create(PAGE_SIZE, 0), 300);
-
     let info = assert_ok(abi::handle::info(vmo), 301);
+
     assert_true(info.object_type == ObjectType::Vmo, 302);
     assert_true(info.rights == Rights::ALL, 303);
 
     let dup = assert_ok(abi::handle::dup(vmo, Rights::READ), 304);
+
     assert_true(dup.0 != vmo.0, 305);
 
     let dup_info = assert_ok(abi::handle::info(dup), 306);
-    assert_true(dup_info.rights == Rights::READ, 307);
 
+    assert_true(dup_info.rights == Rights::READ, 307);
     assert_ok(abi::handle::close(dup), 308);
     assert_err(
         abi::handle::info(dup).map(|i| i.rights.0 as u64),
         SyscallError::InvalidHandle,
         309,
     );
-
     assert_ok(abi::handle::info(vmo).map(|_| 0), 310);
     assert_ok(abi::handle::close(vmo), 311);
 }
@@ -427,26 +423,26 @@ fn diff_event_signal_clear() {
     assert_ok(abi::event::signal(ev, 0x5), 313);
 
     let fired = assert_ok(abi::event::wait(&[(ev, 0x4)]), 314);
-    assert_true(fired.0 == ev.0, 315);
 
+    assert_true(fired.0 == ev.0, 315);
     assert_ok(abi::event::clear(ev, 0x1), 316);
 
     // Bit 0x4 still set — wait should succeed immediately.
     let fired = assert_ok(abi::event::wait(&[(ev, 0x4)]), 317);
-    assert_true(fired.0 == ev.0, 318);
 
+    assert_true(fired.0 == ev.0, 318);
     assert_ok(abi::handle::close(ev), 319);
 }
 
 fn diff_endpoint_bind_close() {
     let ep = assert_ok(abi::ipc::endpoint_create(), 320);
-
     let info = assert_ok(abi::handle::info(ep), 321);
+
     assert_true(info.object_type == ObjectType::Endpoint, 322);
 
     let ev = assert_ok(abi::event::create(), 323);
-    assert_ok(abi::ipc::endpoint_bind_event(ep, ev), 324);
 
+    assert_ok(abi::ipc::endpoint_bind_event(ep, ev), 324);
     assert_ok(abi::handle::close(ep), 325);
     assert_ok(abi::handle::close(ev), 326);
 }
@@ -461,19 +457,18 @@ fn diff_error_codes() {
 
     // Wrong handle type — VMO handle for event operation
     let vmo = assert_ok(abi::vmo::create(PAGE_SIZE, 0), 331);
+
     assert_err(
         abi::event::signal(vmo, 0x1).map(|_| 0),
         SyscallError::WrongHandleType,
         332,
     );
-
     // VMO create with zero size
     assert_err(
         abi::vmo::create(0, 0).map(|h| h.0 as u64),
         SyscallError::InvalidArgument,
         333,
     );
-
     // Seal then resize
     assert_ok(abi::vmo::seal(vmo), 334);
     assert_err(
@@ -484,12 +479,12 @@ fn diff_error_codes() {
 
     // Rights escalation
     let read_only = assert_ok(abi::handle::dup(vmo, Rights::READ), 336);
+
     assert_err(
         abi::handle::dup(read_only, Rights::ALL).map(|h| h.0 as u64),
         SyscallError::InsufficientRights,
         337,
     );
-
     assert_ok(abi::handle::close(vmo), 338);
     assert_ok(abi::handle::close(read_only), 339);
 }
@@ -497,19 +492,16 @@ fn diff_error_codes() {
 fn diff_vmo_snapshot_seal_resize() {
     let vmo = assert_ok(abi::vmo::create(PAGE_SIZE, 0), 340);
     let snap = assert_ok(abi::vmo::snapshot(vmo), 341);
-
     let info = assert_ok(abi::handle::info(snap), 342);
+
     assert_true(info.object_type == ObjectType::Vmo, 343);
-
     assert_ok(abi::vmo::resize(vmo, PAGE_SIZE * 2), 344);
-
     assert_ok(abi::vmo::seal(snap), 345);
     assert_err(
         abi::vmo::resize(snap, PAGE_SIZE).map(|_| 0),
         SyscallError::AlreadySealed,
         346,
     );
-
     assert_ok(abi::handle::close(vmo), 347);
     assert_ok(abi::handle::close(snap), 348);
 }
@@ -517,8 +509,8 @@ fn diff_vmo_snapshot_seal_resize() {
 fn diff_handle_slot_reuse() {
     let h1 = assert_ok(abi::vmo::create(PAGE_SIZE, 0), 350);
     let h2 = assert_ok(abi::vmo::create(PAGE_SIZE, 0), 351);
-    assert_true(h1.0 != h2.0, 352);
 
+    assert_true(h1.0 != h2.0, 352);
     assert_ok(abi::handle::close(h1), 353);
 
     let h3 = assert_ok(abi::vmo::create(PAGE_SIZE, 0), 354);
@@ -526,7 +518,6 @@ fn diff_handle_slot_reuse() {
     // h2 is still valid regardless of h1's reuse.
     assert_ok(abi::handle::info(h2).map(|_| 0), 355);
     assert_ok(abi::handle::info(h3).map(|_| 0), 356);
-
     assert_ok(abi::handle::close(h2), 357);
     assert_ok(abi::handle::close(h3), 358);
 }
@@ -543,31 +534,31 @@ fn test_smp_ipc_stress() {
     }
 
     let ep = assert_ok(abi::ipc::endpoint_create(), 421);
-
     let stack_vmo = assert_ok(abi::vmo::create(PAGE_SIZE * 4, 0), 422);
     let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
     let stack_va = assert_ok(abi::vmo::map(stack_vmo, 0, rw), 423);
     let stack_top = stack_va + PAGE_SIZE * 4;
-
     let arg = (ep.0 as usize) | (IPC_SMP_ROUNDS << 16);
     let server = assert_ok(
         abi::thread::create(ipc_smp_server_entry as *const () as usize, stack_top, arg),
         424,
     );
-
     let _ = abi::thread::set_affinity(server, 1);
 
     for round in 0..IPC_SMP_ROUNDS {
         let mut buf = [0u8; MSG_SIZE];
         let payload = (round as u64).to_le_bytes();
+
         buf[..8].copy_from_slice(&payload);
 
         let result = abi::ipc::call(ep, &mut buf, 8, &[]);
+
         if result.is_err() {
             fail(425);
         }
 
         let reply_val = u64::from_le_bytes(buf[..8].try_into().unwrap());
+
         if reply_val != round as u64 + 1000 {
             fail(426);
         }
@@ -583,12 +574,10 @@ extern "C" fn ipc_smp_server_entry(arg: usize) -> ! {
     for _ in 0..rounds {
         let mut msg_buf = [0u8; MSG_SIZE];
         let mut handles_buf = [0u32; 4];
-
         let recv = match abi::ipc::recv(ep, &mut msg_buf, &mut handles_buf) {
             Ok(r) => r,
             Err(_) => abi::thread::exit(430),
         };
-
         let val = u64::from_le_bytes(msg_buf[..8].try_into().unwrap());
         let reply_val = (val + 1000).to_le_bytes();
 
@@ -612,7 +601,6 @@ fn test_smp_stress() {
     }
 
     let worker_count = if num_cores > 4 { 4 } else { num_cores };
-
     let sync_event = assert_ok(abi::event::create(), 401);
 
     for i in 0..worker_count {
@@ -620,22 +608,18 @@ fn test_smp_stress() {
         let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
         let stack_va = assert_ok(abi::vmo::map(stack_vmo, 0, rw), 403);
         let stack_top = stack_va + PAGE_SIZE * 4;
-
         let arg = (sync_event.0 as usize) | (i << 16) | (SMP_ITERATIONS << 32);
-
         let thread = assert_ok(
             abi::thread::create(smp_worker_entry as *const () as usize, stack_top, arg),
             404,
         );
-
         let _ = abi::thread::set_affinity(thread, i as u64);
     }
 
     let done_mask: u64 = (1u64 << worker_count) - 1;
-
     let fired = assert_ok(abi::event::wait(&[(sync_event, done_mask)]), 405);
-    assert_true(fired.0 == sync_event.0, 406);
 
+    assert_true(fired.0 == sync_event.0, 406);
     assert_ok(abi::handle::close(sync_event), 407);
 }
 

@@ -864,7 +864,6 @@ impl Kernel {
         let Some(ep) = self.endpoints.get_mut(ep_id) else {
             return;
         };
-
         let mut close_result = ep.close_peer();
 
         for canceled in close_result.canceled_callers_mut() {
@@ -1196,7 +1195,6 @@ impl Kernel {
         }
 
         let ep_obj_id = handle.object_id;
-
         let ep = self
             .endpoints
             .get(ep_obj_id)
@@ -1764,7 +1762,6 @@ impl Kernel {
 
             let mut installed_refs = [(ObjectType::Vmo, 0u32); config::MAX_IPC_HANDLES];
             let mut installed_count = 0;
-
             let install_result: Result<(), SyscallError> = (|| {
                 let target = self
                     .spaces
@@ -4354,7 +4351,6 @@ mod tests {
     fn recv_no_pending_calls_returns_timed_out() {
         let mut k = setup_kernel();
         let ep_hid = create_endpoint(&mut k);
-
         let mut buf = [0u8; 128];
 
         assert_err(
@@ -4907,7 +4903,6 @@ mod tests {
 
         for round in 0..10u8 {
             let request = [b'P', b'I', b'N', b'G', round];
-
             let mut reply_buf = [0u8; 128];
 
             do_call(&mut k, ep, &request, &mut reply_buf);
@@ -4967,7 +4962,6 @@ mod tests {
 
         for size in [0, 1, 2, 4, 8, 16, 32, 64, 127, 128] {
             let request: alloc::vec::Vec<u8> = (0..size).map(|i| (i & 0xFF) as u8).collect();
-
             let mut call_reply_buf = [0u8; 128];
 
             do_call(&mut k, ep, &request, &mut call_reply_buf);
@@ -5028,6 +5022,7 @@ mod tests {
                 .get_mut(tid)
                 .unwrap()
                 .set_state(crate::thread::ThreadRunState::Blocked);
+
             reply_bufs[i].1 = ThreadId(tid);
 
             let endpoint = k.endpoints.get_mut(ep_obj_id).unwrap();
@@ -5109,7 +5104,6 @@ mod tests {
     fn ipc_reply_cap_not_reusable() {
         let mut k = setup_kernel();
         let ep = create_endpoint(&mut k);
-
         let mut call_reply_buf = [0u8; 128];
 
         do_call(&mut k, ep, b"first", &mut call_reply_buf);
@@ -5133,7 +5127,6 @@ mod tests {
         let mut k = setup_kernel();
         let ep1 = create_endpoint(&mut k);
         let ep2 = create_endpoint(&mut k);
-
         let mut reply1 = [0u8; 128];
 
         do_call(&mut k, ep1, b"ep1-msg", &mut reply1);
@@ -6026,15 +6019,12 @@ mod tests {
         let mut k = setup_kernel();
         let ep = create_endpoint(&mut k);
         let vmo = create_vmo(&mut k);
-
         let dup = assert_ok(call(
             &mut k,
             num::HANDLE_DUP,
             &[vmo, Rights::ALL.0 as u64, 0, 0, 0, 0],
         ));
-
         let initial_handle_count = k.spaces.get(0).unwrap().handles().count();
-
         let ep_obj_id = k
             .spaces
             .get(0)
@@ -6065,7 +6055,6 @@ mod tests {
     #[test]
     fn regression_space_destroy_decrements_alive_threads() {
         let mut k = setup_kernel();
-
         let space = assert_ok(call(&mut k, num::SPACE_CREATE, &[0; 6]));
         let thread = assert_ok(call(
             &mut k,
@@ -6073,7 +6062,6 @@ mod tests {
             &[space, 0x1000, 0x2000, 0, 0, 0],
         ));
         let _ = thread;
-
         let before = k.alive_threads;
 
         assert_ok(call(&mut k, num::SPACE_DESTROY, &[space, 0, 0, 0, 0, 0]));
@@ -6090,10 +6078,8 @@ mod tests {
     #[test]
     fn regression_event_wait_waiter_leak_on_partial_failure() {
         let mut k = setup_kernel();
-
         let evt0 = create_event(&mut k);
         let evt1 = create_event(&mut k);
-
         let evt0_obj_id = k
             .spaces
             .get(0)
@@ -6110,7 +6096,6 @@ mod tests {
             .lookup(HandleId(evt1 as u32))
             .unwrap()
             .object_id;
-
         let event = k.events.get_mut(evt1_obj_id).unwrap();
 
         for i in 0..config::MAX_WAITERS_PER_EVENT {
@@ -6138,7 +6123,6 @@ mod tests {
         k.threads.get_mut(0).unwrap().init_register_state();
 
         let (_, ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
-
         let ep_obj_id = k
             .spaces
             .get(0)
@@ -6147,7 +6131,6 @@ mod tests {
             .lookup(HandleId(ep_hid as u32))
             .unwrap()
             .object_id;
-
         let (_, space_hid) = call(&mut k, num::SPACE_CREATE, &[0; 6]);
         let ep_handle_ids = [ep_hid as u32];
         let (_, _) = call(
@@ -6162,7 +6145,6 @@ mod tests {
                 1,
             ],
         );
-
         let mut buf = [0u8; 128];
         let (err, _) = call(
             &mut k,
@@ -6220,9 +6202,7 @@ mod tests {
                 1,
             ],
         );
-
         let (_, vmo_hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
-
         let (err, _) = k.dispatch(ThreadId(0), 0, num::HANDLE_INFO, &[vmo_hid, 0, 0, 0, 0, 0]);
 
         assert_eq!(err, 0, "VMO handle should be valid before call");
@@ -6293,7 +6273,6 @@ mod tests {
                 1,
             ],
         );
-
         let mut recv_buf = [0u8; 128];
         let (err, _) = call(
             &mut k,
@@ -6464,7 +6443,6 @@ mod tests {
         let mut k = setup_kernel();
         let (_, ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
         let (_, evt_hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
-
         let ep_obj_id = k
             .spaces
             .get(0)
@@ -6481,7 +6459,6 @@ mod tests {
             .lookup(HandleId(evt_hid as u32))
             .unwrap()
             .object_id;
-
         let (err, _) = call(
             &mut k,
             num::ENDPOINT_BIND_EVENT,
@@ -6511,7 +6488,6 @@ mod tests {
         let mut k = setup_kernel();
         let (_, ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
         let (_, evt_hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
-
         let ep_obj_id = k
             .spaces
             .get(0)
@@ -6559,7 +6535,6 @@ mod tests {
             .lookup(HandleId(evt_hid as u32))
             .unwrap()
             .object_id;
-
         let (err, _) = call(&mut k, num::EVENT_BIND_IRQ, &[evt_hid, 32, 0b1, 0, 0, 0]);
 
         assert_eq!(err, 0);
@@ -6762,7 +6737,6 @@ mod tests {
             .lookup(HandleId(ep_hid as u32))
             .unwrap()
             .object_id;
-
         let priorities = [
             Priority::Idle,
             Priority::Low,
@@ -6919,7 +6893,6 @@ mod tests {
             num::RECV,
             &[ep_hid, recv_buf.as_mut_ptr() as u64, 128, 0, 0, 0],
         );
-
         let reply_cap = packed >> 32;
 
         crate::sched::wake(&mut k, ThreadId(0), 0);
@@ -6958,7 +6931,6 @@ mod tests {
             num::RECV,
             &[ep_hid, recv_buf.as_mut_ptr() as u64, 128, 0, 0, 0],
         );
-
         let reply_cap = packed >> 32;
 
         for _ in 0..config::MAX_HANDLES - 2 {
@@ -7025,7 +6997,6 @@ mod tests {
             num::VMO_CREATE,
             &[config::PAGE_SIZE as u64, 0, 0, 0, 0, 0],
         );
-
         let handle_ids = [vmo_hid as u32];
         let mut call_buf = [0u8; 128];
         let (err, _) = call(
@@ -7077,7 +7048,6 @@ mod tests {
             &[config::PAGE_SIZE as u64, 0, 0, 0, 0, 0],
         );
         let (_, ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
-
         let vmo_obj = k
             .spaces
             .get(0)
@@ -7215,7 +7185,6 @@ mod tests {
         let mut k = setup_kernel();
         let (_, space_hid) = call(&mut k, num::SPACE_CREATE, &[0; 6]);
         let initial_thread_count = k.threads.count();
-
         let bad_handle_ids = [9999u32];
         let (err, _) = call(
             &mut k,
@@ -7396,7 +7365,6 @@ mod tests {
     fn ipc_n_callers_fill_priority_ring() {
         let mut k = setup_kernel();
         let ep_hid = create_endpoint(&mut k);
-
         let ep_obj = k
             .spaces
             .get(0)
@@ -7405,17 +7373,18 @@ mod tests {
             .lookup(HandleId(ep_hid as u32))
             .unwrap()
             .object_id;
-
         let priorities = [
             Priority::High,
             Priority::Medium,
             Priority::Low,
             Priority::Idle,
         ];
+
         for i in 0..config::MAX_PENDING_PER_ENDPOINT {
             let pri = priorities[i % 4];
             let t = Thread::new(ThreadId(0), Some(AddressSpaceId(0)), pri, 0x1000, 0x2000, 0);
             let (idx, _) = k.threads.alloc(t).unwrap();
+
             k.threads.get_mut(idx).unwrap().id = ThreadId(idx);
             k.threads
                 .get_mut(idx)
@@ -7433,6 +7402,7 @@ mod tests {
                 badge: 0,
                 reply_buf: 0,
             };
+
             k.endpoints
                 .get_mut(ep_obj)
                 .unwrap()
@@ -7441,6 +7411,7 @@ mod tests {
         }
 
         let pending = k.endpoints.get(ep_obj).unwrap().pending_call_count();
+
         assert_eq!(
             pending as usize,
             config::MAX_PENDING_PER_ENDPOINT,
@@ -7448,6 +7419,7 @@ mod tests {
         );
 
         let mut recv_buf = [0u8; 128];
+
         for i in 0..config::MAX_PENDING_PER_ENDPOINT {
             let (err, packed) = k.dispatch(
                 ThreadId(0),
@@ -7455,17 +7427,21 @@ mod tests {
                 num::RECV,
                 &[ep_hid, recv_buf.as_mut_ptr() as u64, 128, 0, 0, 0],
             );
+
             assert_eq!(err, 0, "RECV {i} failed");
 
             let msg_len = (packed & 0xFFFF_FFFF) as usize;
+
             assert_eq!(msg_len, 4, "message length mismatch on RECV {i}");
 
             let reply_cap = packed >> 32;
             let ep = k.endpoints.get_mut(ep_obj).unwrap();
+
             ep.consume_reply(crate::endpoint::ReplyCapId(reply_cap as u32))
                 .ok();
 
             let caller_tid = ThreadId((i + 1) as u32);
+
             crate::sched::wake(&mut k, caller_tid, 0);
         }
 
@@ -7482,7 +7458,6 @@ mod tests {
     fn endpoint_destroy_with_blocked_callers() {
         let mut k = setup_kernel();
         let ep_hid = create_endpoint(&mut k);
-
         let ep_obj = k
             .spaces
             .get(0)
@@ -7502,6 +7477,7 @@ mod tests {
                 0,
             );
             let (idx, _) = k.threads.alloc(t).unwrap();
+
             k.threads.get_mut(idx).unwrap().id = ThreadId(idx);
             k.threads
                 .get_mut(idx)
@@ -7519,6 +7495,7 @@ mod tests {
                 badge: 0,
                 reply_buf: 0,
             };
+
             k.endpoints
                 .get_mut(ep_obj)
                 .unwrap()
@@ -7533,8 +7510,8 @@ mod tests {
         );
 
         let (err, _) = k.dispatch(ThreadId(0), 0, num::HANDLE_CLOSE, &[ep_hid, 0, 0, 0, 0, 0]);
-        assert_eq!(err, 0);
 
+        assert_eq!(err, 0);
         assert!(
             k.endpoints.get(ep_obj).is_none(),
             "endpoint must be destroyed after last handle closed"
@@ -7549,6 +7526,7 @@ mod tests {
 
         let mut k = Box::new(Kernel::new(4));
         let space = AddressSpace::new(AddressSpaceId(0), 1, 0);
+
         k.spaces.alloc(space);
 
         let t0 = Thread::new(
@@ -7559,6 +7537,7 @@ mod tests {
             0,
             0,
         );
+
         k.threads.alloc(t0);
         k.threads
             .get_mut(0)
@@ -7569,9 +7548,11 @@ mod tests {
         for i in 0..50u64 {
             let core = (i % 4) as usize;
             let (err, hid) = k.dispatch(ThreadId(0), core, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
+
             assert_eq!(err, 0);
 
             let (err, _) = k.dispatch(ThreadId(0), core, num::HANDLE_CLOSE, &[hid, 0, 0, 0, 0, 0]);
+
             assert_eq!(err, 0);
         }
 
@@ -7584,6 +7565,7 @@ mod tests {
 
         let mut k = Box::new(Kernel::new(2));
         let s0 = AddressSpace::new(AddressSpaceId(0), 1, 0);
+
         k.spaces.alloc(s0);
 
         let t0 = Thread::new(
@@ -7594,6 +7576,7 @@ mod tests {
             0,
             0,
         );
+
         k.threads.alloc(t0);
         k.threads
             .get_mut(0)
@@ -7602,9 +7585,11 @@ mod tests {
         k.scheduler.core_mut(0).set_current(Some(ThreadId(0)));
 
         let (err, space_hid) = k.dispatch(ThreadId(0), 0, num::SPACE_CREATE, &[0; 6]);
+
         assert_eq!(err, 0);
 
         let (err, ep_hid) = k.dispatch(ThreadId(0), 0, num::ENDPOINT_CREATE, &[0; 6]);
+
         assert_eq!(err, 0);
 
         let ep_handle_ids = [ep_hid as u32];
@@ -7621,8 +7606,8 @@ mod tests {
                 1,
             ],
         );
-        assert_eq!(err, 0, "thread_create_in to new space must succeed");
 
+        assert_eq!(err, 0, "thread_create_in to new space must succeed");
         assert!(k.threads.count() >= 2);
 
         let (err, _) = k.dispatch(
@@ -7631,6 +7616,7 @@ mod tests {
             num::HANDLE_CLOSE,
             &[thread_hid, 0, 0, 0, 0, 0],
         );
+
         assert_eq!(err, 0);
 
         crate::invariants::assert_valid(&*k);
@@ -7726,6 +7712,7 @@ mod tests {
 
         let mut k = Box::new(Kernel::new(4));
         let space = AddressSpace::new(AddressSpaceId(0), 1, 0);
+
         k.spaces.alloc(space);
 
         let t0 = Thread::new(
@@ -7736,6 +7723,7 @@ mod tests {
             0,
             0,
         );
+
         k.threads.alloc(t0);
         k.threads
             .get_mut(0)
@@ -7746,17 +7734,21 @@ mod tests {
         for i in 0..100u64 {
             let create_core = (i % 4) as usize;
             let destroy_core = ((i + 1) % 4) as usize;
-
             let (err, vmo) = k.dispatch(
                 ThreadId(0),
                 create_core,
                 num::VMO_CREATE,
                 &[4096, 0, 0, 0, 0, 0],
             );
+
             assert_eq!(err, 0);
+
             let (err, evt) = k.dispatch(ThreadId(0), create_core, num::EVENT_CREATE, &[0; 6]);
+
             assert_eq!(err, 0);
+
             let (err, ep) = k.dispatch(ThreadId(0), destroy_core, num::ENDPOINT_CREATE, &[0; 6]);
+
             assert_eq!(err, 0);
 
             let (err, _) = k.dispatch(
@@ -7765,24 +7757,30 @@ mod tests {
                 num::HANDLE_CLOSE,
                 &[vmo, 0, 0, 0, 0, 0],
             );
+
             assert_eq!(err, 0);
+
             let (err, _) = k.dispatch(
                 ThreadId(0),
                 create_core,
                 num::HANDLE_CLOSE,
                 &[evt, 0, 0, 0, 0, 0],
             );
+
             assert_eq!(err, 0);
+
             let (err, _) = k.dispatch(
                 ThreadId(0),
                 destroy_core,
                 num::HANDLE_CLOSE,
                 &[ep, 0, 0, 0, 0, 0],
             );
+
             assert_eq!(err, 0);
         }
 
         crate::invariants::assert_valid(&*k);
+
         assert_eq!(k.vmos.count(), 0);
         assert_eq!(k.events.count(), 0);
         assert_eq!(k.endpoints.count(), 0);
@@ -7794,6 +7792,7 @@ mod tests {
 
         let mut k = Box::new(Kernel::new(4));
         let space = AddressSpace::new(AddressSpaceId(0), 1, 0);
+
         k.spaces.alloc(space);
 
         let t0 = Thread::new(
@@ -7804,6 +7803,7 @@ mod tests {
             0,
             0,
         );
+
         k.threads.alloc(t0);
         k.threads
             .get_mut(0)
@@ -7812,12 +7812,13 @@ mod tests {
         k.scheduler.core_mut(0).set_current(Some(ThreadId(0)));
 
         let (err, space_hid) = k.dispatch(ThreadId(0), 0, num::SPACE_CREATE, &[0; 6]);
+
         assert_eq!(err, 0);
 
         for i in 0..10u64 {
             let core = (i % 4) as usize;
-
             let (err, ep_hid) = k.dispatch(ThreadId(0), core, num::ENDPOINT_CREATE, &[0; 6]);
+
             assert_eq!(err, 0);
 
             let ep_handle_ids = [ep_hid as u32];
@@ -7834,6 +7835,7 @@ mod tests {
                     0,
                 ],
             );
+
             assert_eq!(err, 0);
 
             let close_core = ((i + 2) % 4) as usize;
@@ -7843,13 +7845,16 @@ mod tests {
                 num::HANDLE_CLOSE,
                 &[thread_hid, 0, 0, 0, 0, 0],
             );
+
             assert_eq!(err, 0);
+
             let (err, _) = k.dispatch(
                 ThreadId(0),
                 close_core,
                 num::HANDLE_CLOSE,
                 &[ep_hid, 0, 0, 0, 0, 0],
             );
+
             assert_eq!(err, 0);
         }
 
@@ -7862,6 +7867,7 @@ mod tests {
 
         let mut k = Box::new(Kernel::new(2));
         let space = AddressSpace::new(AddressSpaceId(0), 1, 0);
+
         k.spaces.alloc(space);
 
         let t0 = Thread::new(
@@ -7872,6 +7878,7 @@ mod tests {
             0,
             0,
         );
+
         k.threads.alloc(t0);
         k.threads
             .get_mut(0)
@@ -7880,13 +7887,14 @@ mod tests {
         k.scheduler.core_mut(0).set_current(Some(ThreadId(0)));
 
         let (err, ep_hid) = k.dispatch(ThreadId(0), 0, num::ENDPOINT_CREATE, &[0; 6]);
+
         assert_eq!(err, 0);
 
         for round in 0..20u8 {
             let call_core = (round % 2) as usize;
             let recv_core = ((round + 1) % 2) as usize;
-
             let mut msg_buf = [0u8; 128];
+
             msg_buf[0] = round;
 
             let (err, _) = k.dispatch(
@@ -7895,6 +7903,7 @@ mod tests {
                 num::CALL,
                 &[ep_hid, msg_buf.as_mut_ptr() as u64, 1, 0, 0, 0],
             );
+
             assert_eq!(err, 0, "CALL round {round} failed");
 
             let mut recv_buf = [0u8; 128];
@@ -7904,9 +7913,11 @@ mod tests {
                 num::RECV,
                 &[ep_hid, recv_buf.as_mut_ptr() as u64, 128, 0, 0, 0],
             );
+
             assert_eq!(err, 0, "RECV round {round} failed");
 
             let msg_len = (packed & 0xFFFF_FFFF) as usize;
+
             assert_eq!(msg_len, 1);
             assert_eq!(recv_buf[0], round);
 
@@ -7918,13 +7929,16 @@ mod tests {
                 num::REPLY,
                 &[ep_hid, reply_cap, reply_msg.as_ptr() as u64, 1, 0, 0],
             );
+
             assert_eq!(err, 0, "REPLY round {round} failed");
 
             let tid = k
                 .scheduler
                 .pick_next(recv_core)
                 .expect("caller should be woken");
+
             assert_eq!(tid, ThreadId(0));
+
             k.threads
                 .get_mut(0)
                 .unwrap()
@@ -7939,14 +7953,15 @@ mod tests {
     fn ipc_max_complexity_full_message_max_handles() {
         let mut k = setup_kernel();
         let ep_hid = create_endpoint(&mut k);
-
         let mut transfer_hids = [0u32; config::MAX_IPC_HANDLES];
+
         for slot in &mut transfer_hids {
             *slot = create_event(&mut k) as u32;
         }
 
         let msg = [0xABu8; 128];
         let mut call_buf = [0u8; 128];
+
         call_buf[..128].copy_from_slice(&msg);
 
         let (err, _) = call(
@@ -7961,10 +7976,12 @@ mod tests {
                 0,
             ],
         );
+
         assert_eq!(err, 0, "CALL failed");
 
         for &hid in &transfer_hids {
             let result = k.spaces.get(0).unwrap().handles().lookup(HandleId(hid));
+
             assert!(
                 result.is_err(),
                 "handle {hid} should be removed from sender after transfer"
@@ -7985,17 +8002,21 @@ mod tests {
                 0,
             ],
         );
+
         assert_eq!(err, 0, "RECV failed");
 
         let msg_len = (packed & 0xFFFF) as usize;
         let h_count = ((packed >> 16) & 0xFFFF) as usize;
+
         assert_eq!(msg_len, 128, "full 128-byte message");
         assert_eq!(h_count, config::MAX_IPC_HANDLES, "all handles transferred");
         assert_eq!(&recv_buf[..128], &msg, "message data integrity");
 
         let reply_cap = packed >> 32;
         let (err, _) = call(&mut k, num::REPLY, &[ep_hid, reply_cap, 0, 0, 0, 0]);
+
         assert_eq!(err, 0, "REPLY failed");
+
         resume_caller(&mut k);
 
         inv(&k);
@@ -8007,9 +8028,11 @@ mod tests {
 
         let mut k = Box::new(Kernel::new(1));
         let space = AddressSpace::new(AddressSpaceId(0), 1, 0);
+
         k.spaces.alloc(space);
 
         let server = Thread::new(ThreadId(0), Some(AddressSpaceId(0)), Priority::Low, 0, 0, 0);
+
         k.threads.alloc(server);
         k.threads
             .get_mut(0)
@@ -8018,6 +8041,7 @@ mod tests {
         k.scheduler.core_mut(0).set_current(Some(ThreadId(0)));
 
         let (err, ep_hid) = k.dispatch(ThreadId(0), 0, num::ENDPOINT_CREATE, &[0; 6]);
+
         assert_eq!(err, 0);
 
         let ep_obj = k
@@ -8028,7 +8052,6 @@ mod tests {
             .lookup(HandleId(ep_hid as u32))
             .unwrap()
             .object_id;
-
         let dummy = Thread::new(
             ThreadId(0),
             Some(AddressSpaceId(0)),
@@ -8038,6 +8061,7 @@ mod tests {
             0,
         );
         let (dummy_idx, _) = k.threads.alloc(dummy).unwrap();
+
         k.threads.get_mut(dummy_idx).unwrap().id = ThreadId(dummy_idx);
         k.threads
             .get_mut(dummy_idx)
@@ -8054,6 +8078,7 @@ mod tests {
             badge: 0,
             reply_buf: 0,
         };
+
         k.endpoints
             .get_mut(ep_obj)
             .unwrap()
@@ -8067,8 +8092,8 @@ mod tests {
             num::RECV,
             &[ep_hid, recv_buf.as_mut_ptr() as u64, 128, 0, 0, 0],
         );
-        assert_eq!(err, 0);
 
+        assert_eq!(err, 0);
         assert!(
             k.endpoints.get(ep_obj).unwrap().active_server().is_some(),
             "server should be active after RECV"
@@ -8083,12 +8108,12 @@ mod tests {
             0,
         );
         let (high_idx, _) = k.threads.alloc(high_caller).unwrap();
+
         k.threads.get_mut(high_idx).unwrap().id = ThreadId(high_idx);
         k.threads
             .get_mut(high_idx)
             .unwrap()
             .set_state(ThreadRunState::Running);
-
         k.threads
             .get_mut(0)
             .unwrap()
@@ -8113,7 +8138,9 @@ mod tests {
             rights: crate::types::Rights::ALL,
             badge: 0,
         };
+
         k.endpoints.get_mut(ep_obj).unwrap().add_ref();
+
         let caller_ep_hid = k
             .spaces
             .get_mut(0)
@@ -8121,9 +8148,10 @@ mod tests {
             .handles_mut()
             .install(ep_handle)
             .unwrap();
-
         let mut caller_buf = [0u8; 128];
+
         caller_buf[0] = 0xAB;
+
         let (err, _) = k.dispatch(
             ThreadId(high_idx),
             0,
@@ -8137,9 +8165,11 @@ mod tests {
                 0,
             ],
         );
+
         assert_eq!(err, 0);
 
         let server_effective = k.threads.get(0).unwrap().effective_priority();
+
         assert!(
             server_effective >= Priority::High,
             "server should inherit High from caller, got {server_effective:?}"
@@ -8154,6 +8184,7 @@ mod tests {
 
         let mut k = Box::new(Kernel::new(2));
         let space = AddressSpace::new(AddressSpaceId(0), 1, 0);
+
         k.spaces.alloc(space);
 
         let t0 = Thread::new(
@@ -8164,6 +8195,7 @@ mod tests {
             0,
             0,
         );
+
         k.threads.alloc(t0);
         k.threads
             .get_mut(0)
@@ -8172,13 +8204,19 @@ mod tests {
         k.scheduler.core_mut(0).set_current(Some(ThreadId(0)));
 
         let (err, space_hid) = k.dispatch(ThreadId(0), 0, num::SPACE_CREATE, &[0; 6]);
+
         assert_eq!(err, 0);
 
         let (err, vmo1) = k.dispatch(ThreadId(0), 0, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
+
         let (err, evt1) = k.dispatch(ThreadId(0), 1, num::EVENT_CREATE, &[0; 6]);
+
         assert_eq!(err, 0);
+
         let (err, ep1) = k.dispatch(ThreadId(0), 0, num::ENDPOINT_CREATE, &[0; 6]);
+
         assert_eq!(err, 0);
 
         let (err, _) = k.dispatch(
@@ -8187,18 +8225,27 @@ mod tests {
             num::SPACE_DESTROY,
             &[space_hid, 0, 0, 0, 0, 0],
         );
+
         assert_eq!(err, 0);
 
         let (err, _) = k.dispatch(ThreadId(0), 0, num::HANDLE_CLOSE, &[vmo1, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
+
         let (err, _) = k.dispatch(ThreadId(0), 1, num::HANDLE_CLOSE, &[evt1, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
+
         let (err, _) = k.dispatch(ThreadId(0), 0, num::HANDLE_CLOSE, &[ep1, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
 
         let (err, vmo2) = k.dispatch(ThreadId(0), 1, num::VMO_CREATE, &[8192, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
+
         let (err, _) = k.dispatch(ThreadId(0), 0, num::HANDLE_CLOSE, &[vmo2, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
 
         crate::invariants::assert_valid(&*k);
@@ -8208,7 +8255,6 @@ mod tests {
     fn thread_set_priority_during_active_ipc() {
         let mut k = setup_kernel();
         let ep_hid = create_endpoint(&mut k);
-
         let ep_obj = k
             .spaces
             .get(0)
@@ -8217,7 +8263,6 @@ mod tests {
             .lookup(HandleId(ep_hid as u32))
             .unwrap()
             .object_id;
-
         let caller = Thread::new(
             ThreadId(0),
             Some(AddressSpaceId(0)),
@@ -8227,6 +8272,7 @@ mod tests {
             0,
         );
         let (caller_idx, _) = k.threads.alloc(caller).unwrap();
+
         k.threads.get_mut(caller_idx).unwrap().id = ThreadId(caller_idx);
         k.threads
             .get_mut(caller_idx)
@@ -8247,7 +8293,6 @@ mod tests {
             .handles_mut()
             .install(thr_handle)
             .unwrap();
-
         let msg = [42u8; 4];
         let msg_obj = crate::endpoint::Message::from_bytes(&msg).unwrap();
         let pending = crate::endpoint::PendingCall {
@@ -8259,6 +8304,7 @@ mod tests {
             badge: 0,
             reply_buf: 0,
         };
+
         k.endpoints
             .get_mut(ep_obj)
             .unwrap()
@@ -8270,8 +8316,8 @@ mod tests {
             num::THREAD_SET_PRIORITY,
             &[thr_hid.0 as u64, Priority::High as u64, 0, 0, 0, 0],
         );
-        assert_eq!(err, 0);
 
+        assert_eq!(err, 0);
         assert_eq!(
             k.threads.get(caller_idx).unwrap().priority(),
             Priority::High
@@ -8286,6 +8332,7 @@ mod tests {
 
         let mut k = Box::new(Kernel::new(4));
         let space = AddressSpace::new(AddressSpaceId(0), 1, 0);
+
         k.spaces.alloc(space);
 
         let t0 = Thread::new(
@@ -8296,6 +8343,7 @@ mod tests {
             0,
             0,
         );
+
         k.threads.alloc(t0);
         k.threads
             .get_mut(0)
@@ -8304,20 +8352,20 @@ mod tests {
         k.scheduler.core_mut(0).set_current(Some(ThreadId(0)));
 
         let (err, evt) = k.dispatch(ThreadId(0), 0, num::EVENT_CREATE, &[0; 6]);
+
         assert_eq!(err, 0);
 
         for i in 0..50u64 {
             let signal_core = (i % 4) as usize;
             let clear_core = ((i + 2) % 4) as usize;
-
             let bits = 1u64 << (i % 64);
-
             let (err, _) = k.dispatch(
                 ThreadId(0),
                 signal_core,
                 num::EVENT_SIGNAL,
                 &[evt, bits, 0, 0, 0, 0],
             );
+
             assert_eq!(err, 0);
 
             let (err, _) = k.dispatch(
@@ -8326,10 +8374,12 @@ mod tests {
                 num::EVENT_CLEAR,
                 &[evt, bits, 0, 0, 0, 0],
             );
+
             assert_eq!(err, 0);
         }
 
         let (err, _) = k.dispatch(ThreadId(0), 0, num::HANDLE_CLOSE, &[evt, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
 
         crate::invariants::assert_valid(&*k);
@@ -8341,22 +8391,26 @@ mod tests {
     fn vmo_close_removes_mappings() {
         let mut k = setup_kernel();
         let perms = (Rights::READ.0 | Rights::MAP.0) as u64;
-
         let (err, vmo) = call(&mut k, num::VMO_CREATE, &[4096 * 3, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
 
         let (err, va1) = call(&mut k, num::VMO_MAP, &[vmo, 0, perms, 0, 0, 0]);
+
         assert_eq!(err, 0);
 
         let (err, va2) = call(&mut k, num::VMO_MAP, &[vmo, 0, perms, 0, 0, 0]);
+
         assert_eq!(err, 0);
 
         assert!(va1 != va2, "two mappings at different VAs");
 
         let (err, _) = call(&mut k, num::HANDLE_CLOSE, &[vmo, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
 
         let space = k.spaces.get(0).unwrap();
+
         assert_eq!(
             space.mapping_count(),
             0,
@@ -8370,8 +8424,8 @@ mod tests {
     fn vmo_close_with_dup_keeps_mappings_until_last_ref() {
         let mut k = setup_kernel();
         let perms = (Rights::READ.0 | Rights::MAP.0) as u64;
-
         let (err, vmo) = call(&mut k, num::VMO_CREATE, &[4096 * 3, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
 
         let (err, dup) = call(
@@ -8379,14 +8433,16 @@ mod tests {
             num::HANDLE_DUP,
             &[vmo, Rights::ALL.0 as u64, 0, 0, 0, 0],
         );
+
         assert_eq!(err, 0);
 
         let (err, _va) = call(&mut k, num::VMO_MAP, &[vmo, 0, perms, 0, 0, 0]);
+
         assert_eq!(err, 0);
 
         let (err, _) = call(&mut k, num::HANDLE_CLOSE, &[vmo, 0, 0, 0, 0, 0]);
-        assert_eq!(err, 0);
 
+        assert_eq!(err, 0);
         assert_eq!(
             k.spaces.get(0).unwrap().mapping_count(),
             1,
@@ -8394,8 +8450,8 @@ mod tests {
         );
 
         let (err, _) = call(&mut k, num::HANDLE_CLOSE, &[dup, 0, 0, 0, 0, 0]);
-        assert_eq!(err, 0);
 
+        assert_eq!(err, 0);
         assert_eq!(
             k.spaces.get(0).unwrap().mapping_count(),
             0,
@@ -8412,14 +8468,16 @@ mod tests {
         let mut k = setup_kernel();
         let rw = (Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0) as u64;
         let two_pages = (config::PAGE_SIZE * 2) as u64;
-
         let (err, vmo) = call(&mut k, num::VMO_CREATE, &[two_pages, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
 
         let (err, _va) = call(&mut k, num::VMO_MAP, &[vmo, 0, rw, 0, 0, 0]);
+
         assert_eq!(err, 0);
 
         let (err, _) = call(&mut k, num::VMO_RESIZE, &[vmo, two_pages, 0, 0, 0, 0]);
+
         assert_eq!(err, 0, "resize to exact mapping size must succeed");
 
         inv(&k);
@@ -8431,14 +8489,16 @@ mod tests {
         let rw = (Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0) as u64;
         let two_pages = (config::PAGE_SIZE * 2) as u64;
         let one_page = config::PAGE_SIZE as u64;
-
         let (err, vmo) = call(&mut k, num::VMO_CREATE, &[two_pages, 0, 0, 0, 0, 0]);
+
         assert_eq!(err, 0);
 
         let (err, _va) = call(&mut k, num::VMO_MAP, &[vmo, 0, rw, 0, 0, 0]);
+
         assert_eq!(err, 0);
 
         let (err, _) = call(&mut k, num::VMO_RESIZE, &[vmo, one_page, 0, 0, 0, 0]);
+
         assert_eq!(
             err,
             SyscallError::InvalidArgument as u64,
@@ -8451,21 +8511,21 @@ mod tests {
     #[test]
     fn clock_read_matches_independent_conversion() {
         let mut k = setup_kernel();
-
         let freq = crate::frame::arch::timer::frequency();
+
         assert!(freq > 0, "timer frequency must be positive");
 
         let ticks_before = crate::frame::arch::timer::now();
         let (err, ns) = call(&mut k, num::CLOCK_READ, &[0; 6]);
-        assert_eq!(err, 0);
-        let ticks_after = crate::frame::arch::timer::now();
 
+        assert_eq!(err, 0);
+
+        let ticks_after = crate::frame::arch::timer::now();
         let convert = |t: u64| -> u64 {
             let secs = t / freq;
             let rem = t % freq;
             secs * 1_000_000_000 + rem * 1_000_000_000 / freq
         };
-
         let ns_lo = convert(ticks_before);
         let ns_hi = convert(ticks_after);
 
@@ -8481,6 +8541,7 @@ mod tests {
 
         let mut k = Box::new(Kernel::new(4));
         let space = AddressSpace::new(AddressSpaceId(0), 1, 0);
+
         k.spaces.alloc(space);
 
         let t0 = Thread::new(
@@ -8491,6 +8552,7 @@ mod tests {
             0,
             0,
         );
+
         k.threads.alloc(t0);
         k.threads
             .get_mut(0)
@@ -8499,18 +8561,20 @@ mod tests {
         k.scheduler.core_mut(0).set_current(Some(ThreadId(0)));
 
         let (err, ep_hid) = k.dispatch(ThreadId(0), 0, num::ENDPOINT_CREATE, &[0; 6]);
+
         assert_eq!(err, 0);
 
         for round in 0..10u64 {
             let call_core = (round % 4) as usize;
             let recv_core = ((round + 1) % 4) as usize;
             let reply_core = ((round + 2) % 4) as usize;
-
             let (err, xfer_hid) = k.dispatch(ThreadId(0), call_core, num::EVENT_CREATE, &[0; 6]);
+
             assert_eq!(err, 0, "create event for transfer round {round}");
 
             let xfer_ids = [xfer_hid as u32];
             let mut msg = [0u8; 16];
+
             msg[0] = round as u8;
 
             let (err, _) = k.dispatch(
@@ -8526,6 +8590,7 @@ mod tests {
                     0,
                 ],
             );
+
             assert_eq!(err, 0, "CALL round {round}");
 
             let mut recv_buf = [0u8; 128];
@@ -8543,10 +8608,12 @@ mod tests {
                     0,
                 ],
             );
+
             assert_eq!(err, 0, "RECV round {round}");
 
             let msg_len = (packed & 0xFFFF) as usize;
             let h_count = ((packed >> 16) & 0xFFFF) as usize;
+
             assert_eq!(msg_len, 1);
             assert_eq!(h_count, 1, "one handle transferred");
             assert_eq!(recv_buf[0], round as u8);
@@ -8558,6 +8625,7 @@ mod tests {
                 num::HANDLE_CLOSE,
                 &[transferred_hid, 0, 0, 0, 0, 0],
             );
+
             assert_eq!(err, 0, "close transferred handle");
 
             let reply_cap = packed >> 32;
@@ -8567,13 +8635,16 @@ mod tests {
                 num::REPLY,
                 &[ep_hid, reply_cap, 0, 0, 0, 0],
             );
+
             assert_eq!(err, 0, "REPLY round {round}");
 
             let tid = k
                 .scheduler
                 .pick_next(reply_core)
                 .expect("caller should be woken");
+
             assert_eq!(tid, ThreadId(0));
+
             k.threads
                 .get_mut(0)
                 .unwrap()
@@ -8590,6 +8661,7 @@ mod tests {
 
         let mut k = Box::new(Kernel::new(4));
         let space = AddressSpace::new(AddressSpaceId(0), 1, 0);
+
         k.spaces.alloc(space);
 
         let t0 = Thread::new(
@@ -8600,6 +8672,7 @@ mod tests {
             0,
             0,
         );
+
         k.threads.alloc(t0);
         k.threads
             .get_mut(0)
@@ -8608,6 +8681,7 @@ mod tests {
         k.scheduler.core_mut(0).set_current(Some(ThreadId(0)));
 
         let (err, ep_hid) = k.dispatch(ThreadId(0), 0, num::ENDPOINT_CREATE, &[0; 6]);
+
         assert_eq!(err, 0);
 
         let ep_obj = k
@@ -8618,13 +8692,13 @@ mod tests {
             .lookup(HandleId(ep_hid as u32))
             .unwrap()
             .object_id;
-
         let priorities = [
             Priority::Idle,
             Priority::Low,
             Priority::Medium,
             Priority::High,
         ];
+
         for i in 0..4u32 {
             let prio = priorities[i as usize];
             let caller = Thread::new(
@@ -8636,6 +8710,7 @@ mod tests {
                 0,
             );
             let (idx, _) = k.threads.alloc(caller).unwrap();
+
             k.threads.get_mut(idx).unwrap().id = ThreadId(idx);
             k.threads
                 .get_mut(idx)
@@ -8652,6 +8727,7 @@ mod tests {
                 badge: 0,
                 reply_buf: 0,
             };
+
             k.endpoints
                 .get_mut(ep_obj)
                 .unwrap()
@@ -8668,8 +8744,8 @@ mod tests {
             num::HANDLE_CLOSE,
             &[ep_hid, 0, 0, 0, 0, 0],
         );
-        assert_eq!(err, 0);
 
+        assert_eq!(err, 0);
         assert!(
             k.endpoints.get(ep_obj).is_none(),
             "endpoint destroyed after last handle closed"
@@ -8684,6 +8760,7 @@ mod tests {
 
         let mut k = Box::new(Kernel::new(4));
         let space = AddressSpace::new(AddressSpaceId(0), 1, 0);
+
         k.spaces.alloc(space);
 
         let t0 = Thread::new(
@@ -8694,6 +8771,7 @@ mod tests {
             0,
             0,
         );
+
         k.threads.alloc(t0);
         k.threads
             .get_mut(0)
@@ -8706,8 +8784,8 @@ mod tests {
             let c2 = ((cycle + 1) % 4) as usize;
             let c3 = ((cycle + 2) % 4) as usize;
             let c4 = ((cycle + 3) % 4) as usize;
-
             let (err, vmo) = k.dispatch(ThreadId(0), c1, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
+
             assert_eq!(err, 0);
 
             let (err, dup) = k.dispatch(
@@ -8716,25 +8794,39 @@ mod tests {
                 num::HANDLE_DUP,
                 &[vmo, crate::types::Rights::ALL.0 as u64, 0, 0, 0, 0],
             );
+
             assert_eq!(err, 0);
 
             let (err, snap) = k.dispatch(ThreadId(0), c3, num::VMO_SNAPSHOT, &[vmo, 0, 0, 0, 0, 0]);
+
             assert_eq!(err, 0);
 
             let (err, _) = k.dispatch(ThreadId(0), c4, num::HANDLE_CLOSE, &[vmo, 0, 0, 0, 0, 0]);
+
             assert_eq!(err, 0);
+
             let (err, _) = k.dispatch(ThreadId(0), c1, num::HANDLE_CLOSE, &[dup, 0, 0, 0, 0, 0]);
+
             assert_eq!(err, 0);
+
             let (err, _) = k.dispatch(ThreadId(0), c2, num::HANDLE_CLOSE, &[snap, 0, 0, 0, 0, 0]);
+
             assert_eq!(err, 0);
 
             let (err, evt) = k.dispatch(ThreadId(0), c3, num::EVENT_CREATE, &[0; 6]);
+
             assert_eq!(err, 0);
+
             let (err, _) = k.dispatch(ThreadId(0), c4, num::EVENT_SIGNAL, &[evt, 0xFF, 0, 0, 0, 0]);
+
             assert_eq!(err, 0);
+
             let (err, _) = k.dispatch(ThreadId(0), c1, num::EVENT_CLEAR, &[evt, 0xFF, 0, 0, 0, 0]);
+
             assert_eq!(err, 0);
+
             let (err, _) = k.dispatch(ThreadId(0), c2, num::HANDLE_CLOSE, &[evt, 0, 0, 0, 0, 0]);
+
             assert_eq!(err, 0);
         }
 

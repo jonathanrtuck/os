@@ -204,7 +204,6 @@ fn irq_handler(_frame: &mut TrapFrame) {
 #[cfg(all(debug_assertions, target_os = "none"))]
 fn watchdog_check(pc: &super::cpu::PerCpu) {
     const WATCHDOG_THRESHOLD_TICKS: u64 = 10_000_000;
-
     let entry = pc.last_syscall_entry;
 
     if entry == 0 {
@@ -225,6 +224,7 @@ fn watchdog_check(pc: &super::cpu::PerCpu) {
             elapsed,
             pc.current_thread,
         );
+
         panic!("kernel watchdog: syscall exceeded time threshold");
     }
 }
@@ -330,7 +330,6 @@ extern "C" fn svc_fast_handler(
 
         (kernel, current, pc.core_id as usize)
     };
-
     let result = kernel.dispatch(current_thread, core_id, syscall_num, &args);
 
     // SAFETY: same as above — percpu is valid for this core's lifetime.

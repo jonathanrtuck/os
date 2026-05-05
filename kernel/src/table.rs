@@ -295,7 +295,6 @@ mod tests {
         let mut t: ObjectTable<u64, 4> = ObjectTable::new();
         let (a, _) = t.alloc(10).unwrap();
         let (b, _) = t.alloc(20).unwrap();
-
         let (ma, rb) = t.get_pair_mut(a, b).unwrap();
 
         assert_eq!(*ma, 10);

@@ -339,9 +339,11 @@ impl AddressSpace {
 
     pub fn remove_mappings_for_vmo(&mut self, vmo_id: VmoId) {
         let mut i = 0;
+
         while i < self.mappings.len() {
             if self.mappings.as_slice()[i].vmo_id == vmo_id {
                 let record = self.mappings.remove(i);
+
                 self.va_allocator.free(record.va_start, record.size);
             } else {
                 i += 1;

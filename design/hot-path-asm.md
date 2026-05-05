@@ -1,7 +1,8 @@
 # Hot Path Assembly Inspection — Release Build on M4 Pro
 
-Inspected with `cargo objdump --release -p kernel -- --disassemble-symbols=<sym>`.
-Build: `aarch64-unknown-none` with `target-feature=+lse,+lse2,+rcpc`.
+Inspected with
+`cargo objdump --release -p kernel -- --disassemble-symbols=<sym>`. Build:
+`aarch64-unknown-none` with `target-feature=+lse,+lse2,+rcpc`.
 
 ## SVC Fast Handler (17 instructions)
 
@@ -31,12 +32,12 @@ svc_fast_handler:
 ```
 
 **Assessment: Excellent.** Tight 64-byte frame (half a cache line). STP pairs
-for all saves. No wasted instructions. Watchdog adds 3 instructions (mrs +
-str + str xzr on exit) — acceptable.
+for all saves. No wasted instructions. Watchdog adds 3 instructions (mrs + str +
+str xzr on exit) — acceptable.
 
 **Potential optimization:** The watchdog timestamp is debug-only but currently
-compiled into release. Gating on `debug_assertions` would save 3 instructions
-on the hot path. (Current code already uses cfg for the check, but the timestamp
+compiled into release. Gating on `debug_assertions` would save 3 instructions on
+the hot path. (Current code already uses cfg for the check, but the timestamp
 write is unconditional.)
 
 ## Kernel::dispatch (5009 instructions, ~20 KB)
@@ -44,6 +45,7 @@ write is unconditional.)
 All 30 syscall handlers are inlined by LLVM into a single monolithic function.
 
 **Entry sequence:**
+
 ```asm
 dispatch:
   str  d8, [sp, #-0x70]!      ; save FP callee-saved
@@ -65,21 +67,21 @@ dispatch:
 **Key findings:**
 
 1. **Stack frame: ~39 KB.** This is large. The stack probe loop iterates ~9
-   times (touching each 4 KB page), costing ~27 cycles. Root cause: LLVM
-   inlines all syscall handlers, and the largest (endpoint operations) need
-   ~6 KB for inline Endpoint construction.
+   times (touching each 4 KB page), costing ~27 cycles. Root cause: LLVM inlines
+   all syscall handlers, and the largest (endpoint operations) need ~6 KB for
+   inline Endpoint construction.
 
 2. **Jump table dispatch: good.** `ldrsw` + `br` is a 2-instruction dispatch
    from a PC-relative offset table. Branch predictor can learn this pattern.
 
 3. **Callee-saved register pressure:** 7 STP operations at entry (14 registers
-   + d8). This is the cost of a monolithic function — LLVM needs all these
-   registers for the inlined handlers.
+   - d8). This is the cost of a monolithic function — LLVM needs all these
+     registers for the inlined handlers.
 
 **Optimization opportunity:** Marking the largest syscall handlers (sys_call,
-sys_recv, sys_reply, sys_thread_create_in) as `#[inline(never)]` would let
-LLVM give them separate, smaller stack frames. The dispatch function itself
-would shrink dramatically, and the rarely-used handlers wouldn't inflate the
+sys_recv, sys_reply, sys_thread_create_in) as `#[inline(never)]` would let LLVM
+give them separate, smaller stack frames. The dispatch function itself would
+shrink dramatically, and the rarely-used handlers wouldn't inflate the
 common-case stack. Tradeoff: one extra `bl`/`ret` pair per syscall (~2 cycles),
 but saves ~25 cycles of stack probing for the common case.
 
@@ -121,26 +123,26 @@ remove:
   ret
 ```
 
-**Assessment: Adequate.** Small stack allocation mid-function for byte
-shuffling of handle fields. This could be eliminated with better struct layout
-(packing type/gen/rights into a single u32 instead of individual bytes), but
-the impact is ~2 cycles — not worth the refactor.
+**Assessment: Adequate.** Small stack allocation mid-function for byte shuffling
+of handle fields. This could be eliminated with better struct layout (packing
+type/gen/rights into a single u32 instead of individual bytes), but the impact
+is ~2 cycles — not worth the refactor.
 
 ## LSE Atomics — Fully Enabled
 
 After adding `target-feature=+lse,+lse2,+rcpc`:
 
-| Operation | Before (LL/SC) | After (LSE) | Savings |
-| --- | --- | --- | --- |
-| Ticket lock acquire | ldaxr + add + stlxr + cbnz (4 insn loop) | ldaddal (1 insn) | 3 insn, no retry |
-| Ticket lock release | ldaxr + add + stlxr + cbnz (4 insn loop) | ldaddl (1 insn) | 3 insn, no retry |
-| FP ownership swap | ldxr + stxr + cbnz (3 insn loop) | swp (1 insn) | 2 insn, no retry |
-| Page refcount | ldaxrh + op + stlxrh (3+ insn) | ldaddalh (1 insn) | 2+ insn |
-| CAS operations | ldaxr + cmp + stlxr (3+ insn) | casalb (1 insn) | 2+ insn |
+| Operation           | Before (LL/SC)                           | After (LSE)       | Savings          |
+| ------------------- | ---------------------------------------- | ----------------- | ---------------- |
+| Ticket lock acquire | ldaxr + add + stlxr + cbnz (4 insn loop) | ldaddal (1 insn)  | 3 insn, no retry |
+| Ticket lock release | ldaxr + add + stlxr + cbnz (4 insn loop) | ldaddl (1 insn)   | 3 insn, no retry |
+| FP ownership swap   | ldxr + stxr + cbnz (3 insn loop)         | swp (1 insn)      | 2 insn, no retry |
+| Page refcount       | ldaxrh + op + stlxrh (3+ insn)           | ldaddalh (1 insn) | 2+ insn          |
+| CAS operations      | ldaxr + cmp + stlxr (3+ insn)            | casalb (1 insn)   | 2+ insn          |
 
 **Zero LL/SC instructions remain in the release binary.** This eliminates
-cache-line bouncing under SMP contention entirely — LSE atomics are
-performed in the cache/interconnect without retry loops.
+cache-line bouncing under SMP contention entirely — LSE atomics are performed in
+the cache/interconnect without retry loops.
 
 ## Spin Wait Pattern
 
@@ -156,26 +158,26 @@ The ticket lock spin uses `isb` (from `core::hint::spin_loop()`):
   b.ne   <spin>
 ```
 
-**Note:** `ldapr` (RCPC load-acquire) is used instead of `ldar` — enabled by
-the `+rcpc` target feature. RCPC provides weaker ordering than full `ldar`
-(allows reordering with prior non-dependent loads), which is safe here since
-we only care about the `now_serving` value.
+**Note:** `ldapr` (RCPC load-acquire) is used instead of `ldar` — enabled by the
+`+rcpc` target feature. RCPC provides weaker ordering than full `ldar` (allows
+reordering with prior non-dependent loads), which is safe here since we only
+care about the `now_serving` value.
 
 **Potential optimization:** Replace `isb` with `wfe` + add explicit `sev` to
 unlock. WFE puts the core in a low-power state until an event arrives, vs ISB
-which just flushes the pipeline. Requires adding `sev` instruction to the
-unlock path. Impact: power savings under contention, slight latency improvement
-(WFE wakes on SEV vs ISB re-executes immediately).
+which just flushes the pipeline. Requires adding `sev` instruction to the unlock
+path. Impact: power savings under contention, slight latency improvement (WFE
+wakes on SEV vs ISB re-executes immediately).
 
 ## Summary
 
-| Area | Status | Notes |
-| --- | --- | --- |
-| SVC fast path | Optimal | 17 instructions, STP pairs |
-| LSE atomics | Fixed | Was LL/SC, now single-instruction LSE |
-| Jump table dispatch | Good | 2-instruction syscall routing |
-| Stack frame | Improvable | ~39 KB due to full inlining |
-| HandleTable ops | Good | O(1) free list, umaddl addressing |
-| Spin wait | Acceptable | ISB-based, WFE possible future opt |
-| FP save/restore | Optimal | STP/LDP Q-register pairs |
-| Register save | Good | STP pairs for callee-saved |
+| Area                | Status     | Notes                                 |
+| ------------------- | ---------- | ------------------------------------- |
+| SVC fast path       | Optimal    | 17 instructions, STP pairs            |
+| LSE atomics         | Fixed      | Was LL/SC, now single-instruction LSE |
+| Jump table dispatch | Good       | 2-instruction syscall routing         |
+| Stack frame         | Improvable | ~39 KB due to full inlining           |
+| HandleTable ops     | Good       | O(1) free list, umaddl addressing     |
+| Spin wait           | Acceptable | ISB-based, WFE possible future opt    |
+| FP save/restore     | Optimal    | STP/LDP Q-register pairs              |
+| Register save       | Good       | STP pairs for callee-saved            |

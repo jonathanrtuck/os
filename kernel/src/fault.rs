@@ -309,7 +309,6 @@ mod tests {
         let va = space
             .map_vmo(VmoId(idx), 4 * config::PAGE_SIZE, rw, 0)
             .unwrap();
-
         let action = handle_data_abort(&mut k, ThreadId(0), va + 2 * config::PAGE_SIZE, true);
 
         assert_eq!(action, FaultAction::Resolved);

@@ -48,10 +48,7 @@ fuzz_target!(|data: &[u8]| {
         *arg = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
     }
 
-    let takes_user_ptr = matches!(
-        syscall_num,
-        9 | 10 | 11 | 2 | 14 | 17
-    );
+    let takes_user_ptr = matches!(syscall_num, 9 | 10 | 11 | 2 | 14 | 17);
 
     if takes_user_ptr {
         return;
@@ -62,6 +59,7 @@ fuzz_target!(|data: &[u8]| {
     assert!(error <= 12, "invalid error code: {error}");
 
     let violations = kernel::invariants::verify(&k);
+
     assert!(
         violations.is_empty(),
         "invariant violations: {:?}",

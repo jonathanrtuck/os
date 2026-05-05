@@ -164,6 +164,7 @@ mod tests {
             );
 
             prop_assert_ne!(err, 0, "resize on sealed VMO must never succeed");
+
             inv(&k);
         }
 
@@ -187,6 +188,7 @@ mod tests {
             let snap_size = k.vmos.get(snap_obj_id).unwrap().size();
 
             prop_assert_eq!(snap_size, pages * config::PAGE_SIZE);
+
             inv(&k);
         }
     }
@@ -274,6 +276,7 @@ mod tests {
             let (err, _) = call(&mut k, num::HANDLE_INFO, &[handle_id, 0, 0, 0, 0, 0]);
 
             prop_assert!(err <= SyscallError::NotFound as u64);
+
             inv(&k);
         }
     }
@@ -302,6 +305,7 @@ mod tests {
             let actual = k.events.get(obj_id).unwrap().bits();
 
             prop_assert_eq!(actual, bits1 | bits2);
+
             inv(&k);
         }
 
@@ -327,6 +331,7 @@ mod tests {
             let actual = k.events.get(obj_id).unwrap().bits();
 
             prop_assert_eq!(actual, initial & !clear_mask);
+
             inv(&k);
         }
     }
@@ -345,6 +350,7 @@ mod tests {
             let (err, _) = call(&mut k, syscall_num, &args);
 
             prop_assert_eq!(err, SyscallError::InvalidArgument as u64);
+
             inv(&k);
         }
 
@@ -395,17 +401,23 @@ mod tests {
                             num::VMO_CREATE,
                             &[config::PAGE_SIZE as u64, 0, 0, 0, 0, 0],
                         );
+
                         if e != 0 { break; }
+
                         h
                     }
                     1 => {
                         let (e, h) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
+
                         if e != 0 { break; }
+
                         h
                     }
                     _ => {
                         let (e, h) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+
                         if e != 0 { break; }
+
                         h
                     }
                 };
@@ -485,7 +497,6 @@ mod tests {
             let mut k = setup_kernel();
             let (_, ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
             let mut buf = [0u8; 128];
-
             let (err, _) = call(
                 &mut k,
                 num::CALL,
@@ -683,6 +694,7 @@ mod tests {
                 .object_id;
 
             prop_assert_eq!(k.events.get(obj_id).unwrap().bits(), 0);
+
             inv(&k);
         }
 
@@ -837,6 +849,7 @@ mod tests {
             }
 
             prop_assert!(total_ready > 0 || thread_count == 0);
+
             inv(&k);
         }
 
@@ -905,7 +918,9 @@ mod tests {
 
             for e in &mut evts {
                 let (err, hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+
                 prop_assert_eq!(err, 0);
+
                 *e = hid;
             }
 
@@ -919,6 +934,7 @@ mod tests {
 
             prop_assert_eq!(err, 0);
             prop_assert_eq!(fired, evts[signal_idx]);
+
             inv(&k);
         }
 
@@ -929,7 +945,9 @@ mod tests {
 
             for i in 0..event_count {
                 let (err, hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+
                 prop_assert_eq!(err, 0);
+
                 args[i * 2] = hid;
                 args[i * 2 + 1] = 0b1;
             }
@@ -1033,6 +1051,7 @@ mod tests {
             prop_assert_eq!(err1, 0);
             prop_assert_eq!(err2, 0);
             prop_assert!(t2 >= t1, "clock must be monotonic: {} < {}", t2, t1);
+
             inv(&k);
         }
     }
@@ -1043,6 +1062,7 @@ mod tests {
 
     fn do_call_with_buf(k: &mut Kernel, ep_hid: u64, msg: &[u8], call_buf: &mut [u8; 128]) {
         call_buf[..msg.len()].copy_from_slice(msg);
+
         let (err, _) = call(
             k,
             num::CALL,
@@ -1055,6 +1075,7 @@ mod tests {
                 0,
             ],
         );
+
         assert_eq!(err, 0, "CALL failed");
     }
 
@@ -1064,9 +1085,12 @@ mod tests {
             num::RECV,
             &[ep_hid, out_buf.as_mut_ptr() as u64, 128, 0, 0, 0],
         );
+
         assert_eq!(err, 0, "RECV failed");
+
         let msg_len = (packed & 0xFFFF_FFFF) as usize;
         let reply_cap = packed >> 32;
+
         (msg_len, reply_cap)
     }
 
@@ -1083,6 +1107,7 @@ mod tests {
                 0,
             ],
         );
+
         assert_eq!(err, 0, "REPLY failed");
     }
 
@@ -1096,14 +1121,17 @@ mod tests {
         ) {
             let mut k = setup_kernel();
             let (_, ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
+
             prop_assert_eq!(ep_hid & 0xFFFF_FFFF_0000_0000, 0);
 
             let mut send_msg = [0u8; 128];
+
             for i in 0..msg_len {
                 send_msg[i] = seed.wrapping_add(i as u8);
             }
 
             let mut reply_buf = [0u8; 128];
+
             do_call_with_buf(&mut k, ep_hid, &send_msg[..msg_len], &mut reply_buf);
 
             let mut recv_buf = [0u8; 128];
@@ -1118,9 +1146,11 @@ mod tests {
 
             let mut reply_msg = [0u8; 128];
             let reply_len = msg_len.min(64);
+
             for i in 0..reply_len {
                 reply_msg[i] = seed.wrapping_add(128).wrapping_add(i as u8);
             }
+
             do_reply_with(&mut k, ep_hid, reply_cap, &reply_msg[..reply_len]);
 
             inv(&k);
@@ -1138,9 +1168,9 @@ mod tests {
         fn double_reply_fails(_iteration in 0u32..10) {
             let mut k = setup_kernel();
             let (_, ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
-
             let msg = [0u8; 8];
             let mut reply_buf = [0u8; 128];
+
             do_call_with_buf(&mut k, ep_hid, &msg, &mut reply_buf);
 
             let mut recv_buf = [0u8; 128];
@@ -1153,6 +1183,7 @@ mod tests {
                 num::REPLY,
                 &[ep_hid, reply_cap, [0u8; 4].as_ptr() as u64, 4, 0, 0],
             );
+
             prop_assert_ne!(err, 0, "second reply must fail — reply cap is consumed");
 
             inv(&k);
@@ -1161,8 +1192,8 @@ mod tests {
         #[test]
         fn single_thread_yield_no_panic(_iteration in 0u32..20) {
             let mut k = setup_kernel();
-
             let (err, _) = call(&mut k, num::THREAD_EXIT, &[0; 6]);
+
             prop_assert_eq!(err, 0);
 
             inv(&k);
@@ -1181,11 +1212,12 @@ mod tests {
             let page = config::PAGE_SIZE as u64;
             let size = pages as u64 * page;
             let mut k = setup_kernel();
-
             let (err, orig_hid) = call(&mut k, num::VMO_CREATE, &[size, 0, 0, 0, 0, 0]);
+
             prop_assert_eq!(err, 0);
 
             let (err, snap_hid) = call(&mut k, num::VMO_SNAPSHOT, &[orig_hid, 0, 0, 0, 0, 0]);
+
             prop_assert_eq!(err, 0);
 
             let orig_obj = k.spaces.get(0).unwrap().handles()
@@ -1197,9 +1229,11 @@ mod tests {
 
             let orig_size = k.vmos.get(orig_obj).unwrap().size();
             let snap_size = k.vmos.get(snap_obj).unwrap().size();
+
             prop_assert_eq!(orig_size, snap_size, "snapshot must preserve size");
 
             let (err, _) = call(&mut k, num::HANDLE_CLOSE, &[snap_hid, 0, 0, 0, 0, 0]);
+
             prop_assert_eq!(err, 0);
 
             prop_assert!(
@@ -1227,22 +1261,28 @@ mod tests {
 
             for _ in 0..max.min(fill_count * 32) {
                 let (err, hid) = call(&mut k, num::VMO_CREATE, &[page, 0, 0, 0, 0, 0]);
+
                 if err != 0 { break; }
+
                 handles.push(hid);
             }
 
             if handles.len() >= 2 {
                 let to_close = handles.pop().unwrap();
                 let (err, _) = call(&mut k, num::HANDLE_CLOSE, &[to_close, 0, 0, 0, 0, 0]);
+
                 prop_assert_eq!(err, 0);
 
                 let (err, new_hid) = call(&mut k, num::VMO_CREATE, &[page, 0, 0, 0, 0, 0]);
+
                 prop_assert_eq!(err, 0, "must recover after closing one handle");
+
                 handles.push(new_hid);
             }
 
             for hid in handles.iter().rev() {
                 let (err, _) = call(&mut k, num::HANDLE_CLOSE, &[*hid, 0, 0, 0, 0, 0]);
+
                 prop_assert_eq!(err, 0);
             }
 
@@ -1255,16 +1295,15 @@ mod tests {
             bits2 in boundary_u64(),
         ) {
             let mut k = setup_kernel();
-
             let (err_a, ev_a) = call(&mut k, num::EVENT_CREATE, &[0, 0, 0, 0, 0, 0]);
             let (err_b, ev_b) = call(&mut k, num::EVENT_CREATE, &[0, 0, 0, 0, 0, 0]);
+
             prop_assert_eq!(err_a, 0);
             prop_assert_eq!(err_b, 0);
 
             call(&mut k, num::EVENT_SIGNAL, &[ev_a, bits1, 0, 0, 0, 0]);
             call(&mut k, num::EVENT_SIGNAL, &[ev_a, bits2, 0, 0, 0, 0]);
             call(&mut k, num::EVENT_CLEAR, &[ev_a, bits1, 0, 0, 0, 0]);
-
             call(&mut k, num::EVENT_SIGNAL, &[ev_b, bits2, 0, 0, 0, 0]);
             call(&mut k, num::EVENT_SIGNAL, &[ev_b, bits1, 0, 0, 0, 0]);
             call(&mut k, num::EVENT_CLEAR, &[ev_b, bits1, 0, 0, 0, 0]);
@@ -1273,7 +1312,6 @@ mod tests {
                 .lookup(HandleId(ev_a as u32)).unwrap().object_id;
             let obj_b = k.spaces.get(0).unwrap().handles()
                 .lookup(HandleId(ev_b as u32)).unwrap().object_id;
-
             let bits_a = k.events.get(obj_a).unwrap().bits();
             let bits_b = k.events.get(obj_b).unwrap().bits();
 

@@ -19,7 +19,6 @@ pub fn run(kern: &mut Kernel) {
     crate::println!("POST: running boot-time self-test...");
 
     let current = setup_post_env(kern);
-
     // VMO: create, snapshot, seal, close
     let (err, vmo_h) = kern.dispatch(
         current,

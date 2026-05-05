@@ -21,11 +21,12 @@ struct FuzzState {
 
 fn setup_kernel() -> (Box<Kernel>, FuzzState) {
     let mut k = Box::new(Kernel::new(2));
-
     let space0 = AddressSpace::new(AddressSpaceId(0), 1, 0);
+
     k.spaces.alloc(space0);
 
     let space1 = AddressSpace::new(AddressSpaceId(1), 2, 0);
+
     k.spaces.alloc(space1);
 
     let t0 = Thread::new(
@@ -36,6 +37,7 @@ fn setup_kernel() -> (Box<Kernel>, FuzzState) {
         0,
         0,
     );
+
     k.threads.alloc(t0);
     k.threads
         .get_mut(0)
@@ -51,6 +53,7 @@ fn setup_kernel() -> (Box<Kernel>, FuzzState) {
         0,
         0,
     );
+
     k.threads.alloc(t1);
     k.scheduler.enqueue(1, ThreadId(1), Priority::High);
 
@@ -72,21 +75,18 @@ fuzz_target!(|data: &[u8]| {
         let arg1 = chunk[1];
         let arg2 = chunk[2];
         let thread_sel = chunk[3];
-
         let tid_idx = (thread_sel as usize) % st.active_threads;
         let tid = st.thread_ids[tid_idx];
         let core_id = tid_idx % 2;
+        let thread_state = k.threads.get(tid.0).map(|t| t.state());
 
-        let thread_state = k
-            .threads
-            .get(tid.0)
-            .map(|t| t.state());
         match thread_state {
             Some(kernel::thread::ThreadRunState::Ready) => {
                 k.scheduler.remove(tid);
-                k.threads.get_mut(tid.0).unwrap().set_state(
-                    kernel::thread::ThreadRunState::Running,
-                );
+                k.threads
+                    .get_mut(tid.0)
+                    .unwrap()
+                    .set_state(kernel::thread::ThreadRunState::Running);
                 k.scheduler.core_mut(core_id).set_current(Some(tid));
             }
             Some(kernel::thread::ThreadRunState::Running) => {}
@@ -101,6 +101,7 @@ fuzz_target!(|data: &[u8]| {
                     num::VMO_CREATE,
                     &[config::PAGE_SIZE as u64, 0, 0, 0, 0, 0],
                 );
+
                 if err == 0 && st.handle_count < MAX_HANDLES_TRACKED {
                     st.handles[st.handle_count] = hid;
                     st.handle_count += 1;
@@ -108,6 +109,7 @@ fuzz_target!(|data: &[u8]| {
             }
             1 => {
                 let (err, hid) = k.dispatch(tid, core_id, num::ENDPOINT_CREATE, &[0; 6]);
+
                 if err == 0 && st.handle_count < MAX_HANDLES_TRACKED {
                     st.handles[st.handle_count] = hid;
                     st.handle_count += 1;
@@ -115,6 +117,7 @@ fuzz_target!(|data: &[u8]| {
             }
             2 => {
                 let (err, hid) = k.dispatch(tid, core_id, num::EVENT_CREATE, &[0; 6]);
+
                 if err == 0 && st.handle_count < MAX_HANDLES_TRACKED {
                     st.handles[st.handle_count] = hid;
                     st.handle_count += 1;
@@ -124,12 +127,9 @@ fuzz_target!(|data: &[u8]| {
                 if st.handle_count > 0 {
                     let idx = (arg1 as usize) % st.handle_count;
                     let hid = st.handles[idx];
-                    k.dispatch(
-                        tid,
-                        core_id,
-                        num::HANDLE_CLOSE,
-                        &[hid, 0, 0, 0, 0, 0],
-                    );
+
+                    k.dispatch(tid, core_id, num::HANDLE_CLOSE, &[hid, 0, 0, 0, 0, 0]);
+
                     st.handles[idx] = st.handles[st.handle_count - 1];
                     st.handles[st.handle_count - 1] = u64::MAX;
                     st.handle_count -= 1;
@@ -145,6 +145,7 @@ fuzz_target!(|data: &[u8]| {
                         num::HANDLE_DUP,
                         &[hid, Rights::ALL.0 as u64, 0, 0, 0, 0],
                     );
+
                     if err == 0 && st.handle_count < MAX_HANDLES_TRACKED {
                         st.handles[st.handle_count] = dup;
                         st.handle_count += 1;
@@ -156,30 +157,23 @@ fuzz_target!(|data: &[u8]| {
                     let idx = (arg1 as usize) % st.handle_count;
                     let hid = st.handles[idx];
                     let bits = ((arg2 as u64) << 1) | 1;
-                    k.dispatch(
-                        tid,
-                        core_id,
-                        num::EVENT_SIGNAL,
-                        &[hid, bits, 0, 0, 0, 0],
-                    );
+
+                    k.dispatch(tid, core_id, num::EVENT_SIGNAL, &[hid, bits, 0, 0, 0, 0]);
                 }
             }
             6 => {
                 if st.handle_count > 0 {
                     let idx = (arg1 as usize) % st.handle_count;
                     let hid = st.handles[idx];
-                    k.dispatch(
-                        tid,
-                        core_id,
-                        num::EVENT_CLEAR,
-                        &[hid, u64::MAX, 0, 0, 0, 0],
-                    );
+
+                    k.dispatch(tid, core_id, num::EVENT_CLEAR, &[hid, u64::MAX, 0, 0, 0, 0]);
                 }
             }
             7 => {
                 if st.handle_count > 0 {
                     let idx = (arg1 as usize) % st.handle_count;
                     let hid = st.handles[idx];
+
                     k.dispatch(tid, core_id, num::HANDLE_INFO, &[hid, 0, 0, 0, 0, 0]);
                 }
             }
@@ -188,6 +182,7 @@ fuzz_target!(|data: &[u8]| {
                     let idx = (arg1 as usize) % st.handle_count;
                     let hid = st.handles[idx];
                     let mut buf = [0u8; 64];
+
                     k.dispatch(
                         tid,
                         core_id,
@@ -201,6 +196,7 @@ fuzz_target!(|data: &[u8]| {
                     let idx = (arg1 as usize) % st.handle_count;
                     let hid = st.handles[idx];
                     let mut buf = [0u8; 128];
+
                     k.dispatch(
                         tid,
                         core_id,
@@ -219,6 +215,7 @@ fuzz_target!(|data: &[u8]| {
     }
 
     let violations = kernel::invariants::verify(&k);
+
     assert!(
         violations.is_empty(),
         "invariant violations after {} ops: {:?}",

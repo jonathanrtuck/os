@@ -67,6 +67,7 @@ fuzz_target!(|data: &[u8]| {
     }
 
     let violations = kernel::invariants::verify(&k);
+
     assert!(
         violations.is_empty(),
         "invariant violations: {:?}",

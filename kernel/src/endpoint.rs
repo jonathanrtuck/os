@@ -1132,7 +1132,6 @@ mod tests {
         assert!(all_ids.contains(&ThreadId(3)));
         assert!(all_ids.contains(&ThreadId(10)));
         assert!(all_ids.contains(&ThreadId(11)));
-
         // Canceled callers (from send queue) must have their handles preserved.
         assert_eq!(result.canceled_callers().len(), 2);
         // Reply callers (already in-flight) have no handles to recover.
@@ -1158,7 +1157,6 @@ mod tests {
         assert_ne!(cap0, cap1);
         assert_ne!(cap1, cap2);
         assert_ne!(cap0, cap2);
-
         assert_eq!(ep.consume_reply(cap0).unwrap().0, ThreadId(0));
         assert_eq!(ep.consume_reply(cap1).unwrap().0, ThreadId(1));
         assert_eq!(ep.consume_reply(cap2).unwrap().0, ThreadId(2));
