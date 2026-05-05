@@ -205,11 +205,17 @@ mod tests {
     fn handle_rights_attenuate_on_dup() {
         let mut s = setup_two_services();
         let vmo_gen = s.kernel.vmos.generation(s.shared_vmo.0);
+
+        // Maintain refcount when installing handles outside the syscall layer.
+        s.kernel.vmos.get_mut(s.shared_vmo.0).unwrap().add_ref();
         let svc_space = s.kernel.spaces.get_mut(s.svc_space.0).unwrap();
         let full_hid = svc_space
             .handles_mut()
             .allocate(ObjectType::Vmo, s.shared_vmo.0, Rights::ALL, vmo_gen)
             .unwrap();
+
+        s.kernel.vmos.get_mut(s.shared_vmo.0).unwrap().add_ref();
+        let svc_space = s.kernel.spaces.get_mut(s.svc_space.0).unwrap();
         let read_only_hid = svc_space
             .handles_mut()
             .duplicate(full_hid, Rights::READ)

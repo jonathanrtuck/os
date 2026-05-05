@@ -889,4 +889,151 @@ mod tests {
             inv(&k);
         }
     }
+
+    // =========================================================================
+    // MULTI-WAIT PROPERTIES
+    // =========================================================================
+
+    proptest! {
+        #[test]
+        fn multi_wait_returns_first_signaled(
+            signal_idx in 0usize..3,
+            bits in 1u64..=u64::MAX,
+        ) {
+            let mut k = setup_kernel();
+            let mut evts = [0u64; 3];
+
+            for e in &mut evts {
+                let (err, hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+                prop_assert_eq!(err, 0);
+                *e = hid;
+            }
+
+            call(&mut k, num::EVENT_SIGNAL, &[evts[signal_idx], bits, 0, 0, 0, 0]);
+
+            let (err, fired) = call(
+                &mut k,
+                num::EVENT_WAIT,
+                &[evts[0], bits, evts[1], bits, evts[2], bits],
+            );
+
+            prop_assert_eq!(err, 0);
+            prop_assert_eq!(fired, evts[signal_idx]);
+            inv(&k);
+        }
+
+        #[test]
+        fn multi_wait_blocks_when_none_signaled(event_count in 1usize..=3) {
+            let mut k = setup_kernel();
+            let mut args = [0u64; 6];
+
+            for i in 0..event_count {
+                let (err, hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+                prop_assert_eq!(err, 0);
+                args[i * 2] = hid;
+                args[i * 2 + 1] = 0b1;
+            }
+
+            let (err, _) = call(&mut k, num::EVENT_WAIT, &args);
+
+            prop_assert_eq!(err, 0);
+
+            let t = k.threads.get(0).unwrap();
+
+            prop_assert_eq!(t.state(), crate::thread::ThreadRunState::Blocked);
+            inv(&k);
+        }
+
+        #[test]
+        fn multi_wait_with_mixed_masks(
+            mask1 in boundary_u64(),
+            mask2 in boundary_u64(),
+        ) {
+            let mut k = setup_kernel();
+            let (_, evt1) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+            let (_, evt2) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+
+            call(&mut k, num::EVENT_SIGNAL, &[evt1, 0b10, 0, 0, 0, 0]);
+            call(&mut k, num::EVENT_SIGNAL, &[evt2, 0b01, 0, 0, 0, 0]);
+
+            let (err, fired) = call(
+                &mut k,
+                num::EVENT_WAIT,
+                &[evt1, mask1, evt2, mask2, 0, 0],
+            );
+
+            if mask1 == 0 && mask2 == 0 {
+                prop_assert_ne!(err, 0, "all-zero masks should fail");
+            } else if 0b10 & mask1 != 0 {
+                prop_assert_eq!(err, 0);
+                prop_assert_eq!(fired, evt1);
+            } else if 0b01 & mask2 != 0 {
+                prop_assert_eq!(err, 0);
+                prop_assert_eq!(fired, evt2);
+            }
+
+            inv(&k);
+        }
+
+        #[test]
+        fn multi_wait_cleanup_on_block_then_signal(signal_target in 0usize..2) {
+            let mut k = setup_kernel();
+            let (_, evt1) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+            let (_, evt2) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+
+            // Wait with no bits set — thread blocks.
+            call(
+                &mut k,
+                num::EVENT_WAIT,
+                &[evt1, 0b1, evt2, 0b1, 0, 0],
+            );
+
+            let evts = [evt1, evt2];
+
+            // Signal from "another thread" (we simulate by just calling signal).
+            call(
+                &mut k,
+                num::EVENT_SIGNAL,
+                &[evts[signal_target], 0b1, 0, 0, 0, 0],
+            );
+
+            // Thread 0 is still blocked — it needs to be woken by the scheduler.
+            // In host tests, signal wakes the thread and removes it from the
+            // waiter list. Verify the other event's waiter was cleaned up.
+            let obj1 = k.spaces.get(0).unwrap().handles()
+                .lookup(HandleId(evt1 as u32)).unwrap().object_id;
+            let obj2 = k.spaces.get(0).unwrap().handles()
+                .lookup(HandleId(evt2 as u32)).unwrap().object_id;
+            let non_signaled = if signal_target == 0 { obj2 } else { obj1 };
+
+            // After wakeup, the non-signaled event should have 0 waiters.
+            if k.threads.get(0).unwrap().state() != crate::thread::ThreadRunState::Blocked {
+                prop_assert_eq!(
+                    k.events.get(non_signaled).unwrap().waiter_count(),
+                    0,
+                    "non-signaled event should have no waiters after wakeup"
+                );
+            }
+
+            inv(&k);
+        }
+    }
+
+    // =========================================================================
+    // CLOCK PROPERTIES
+    // =========================================================================
+
+    proptest! {
+        #[test]
+        fn clock_read_is_monotonic(_iteration in 0u32..100) {
+            let mut k = setup_kernel();
+            let (err1, t1) = call(&mut k, num::CLOCK_READ, &[0; 6]);
+            let (err2, t2) = call(&mut k, num::CLOCK_READ, &[0; 6]);
+
+            prop_assert_eq!(err1, 0);
+            prop_assert_eq!(err2, 0);
+            prop_assert!(t2 >= t1, "clock must be monotonic: {} < {}", t2, t1);
+            inv(&k);
+        }
+    }
 }

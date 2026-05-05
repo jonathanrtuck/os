@@ -42,6 +42,9 @@ pub fn verify(kernel: &Kernel) -> Vec<Violation> {
     check_event_waiter_validity(kernel, &mut violations);
     check_irq_binding_consistency(kernel, &mut violations);
     check_vmo_mapping_range_validity(kernel, &mut violations);
+    check_refcount_consistency(kernel, &mut violations);
+    check_endpoint_event_binding_bidirectionality(kernel, &mut violations);
+    check_priority_inheritance_consistency(kernel, &mut violations);
 
     violations
 }
@@ -435,6 +438,169 @@ fn check_vmo_mapping_range_validity(kernel: &Kernel, violations: &mut Vec<Violat
                         ),
                     });
                 }
+            }
+        }
+    }
+}
+
+fn check_refcount_consistency(kernel: &Kernel, violations: &mut Vec<Violation>) {
+    use alloc::collections::BTreeMap;
+
+    let mut vmo_handle_counts: BTreeMap<u32, usize> = BTreeMap::new();
+    let mut endpoint_handle_counts: BTreeMap<u32, usize> = BTreeMap::new();
+    let mut event_handle_counts: BTreeMap<u32, usize> = BTreeMap::new();
+
+    for (_, space) in kernel.spaces.iter_allocated() {
+        for (_, handle) in space.handles().iter_handles() {
+            match handle.object_type {
+                ObjectType::Vmo => {
+                    *vmo_handle_counts.entry(handle.object_id).or_insert(0) += 1;
+                }
+                ObjectType::Endpoint => {
+                    *endpoint_handle_counts.entry(handle.object_id).or_insert(0) += 1;
+                }
+                ObjectType::Event => {
+                    *event_handle_counts.entry(handle.object_id).or_insert(0) += 1;
+                }
+                ObjectType::Thread | ObjectType::AddressSpace => {}
+            }
+        }
+    }
+
+    // refcount >= handle_count: objects may have kernel-internal references
+    // beyond handles (e.g., bootstrap-created objects without handles, or
+    // mapped VMOs). But handles must never exceed refcount — that would mean
+    // dangling handle access.
+    for (idx, vmo) in kernel.vmos.iter_allocated() {
+        let handle_count = vmo_handle_counts.get(&idx).copied().unwrap_or(0);
+
+        if vmo.refcount() < handle_count {
+            violations.push(Violation {
+                category: "refcount-vmo",
+                detail: format!(
+                    "VMO #{} refcount {} < {} handles (dangling handles)",
+                    idx,
+                    vmo.refcount(),
+                    handle_count
+                ),
+            });
+        }
+    }
+
+    for (idx, ep) in kernel.endpoints.iter_allocated() {
+        let handle_count = endpoint_handle_counts.get(&idx).copied().unwrap_or(0);
+
+        if ep.refcount() < handle_count {
+            violations.push(Violation {
+                category: "refcount-endpoint",
+                detail: format!(
+                    "endpoint #{} refcount {} < {} handles (dangling handles)",
+                    idx,
+                    ep.refcount(),
+                    handle_count
+                ),
+            });
+        }
+    }
+
+    for (idx, evt) in kernel.events.iter_allocated() {
+        let handle_count = event_handle_counts.get(&idx).copied().unwrap_or(0);
+
+        if evt.refcount() < handle_count {
+            violations.push(Violation {
+                category: "refcount-event",
+                detail: format!(
+                    "event #{} refcount {} < {} handles (dangling handles)",
+                    idx,
+                    evt.refcount(),
+                    handle_count
+                ),
+            });
+        }
+    }
+}
+
+fn check_endpoint_event_binding_bidirectionality(kernel: &Kernel, violations: &mut Vec<Violation>) {
+    for (ep_idx, ep) in kernel.endpoints.iter_allocated() {
+        if let Some(event_id) = ep.bound_event() {
+            match kernel.events.get(event_id.0) {
+                None => {
+                    violations.push(Violation {
+                        category: "binding-ep→evt",
+                        detail: format!(
+                            "endpoint #{} bound to deallocated event #{}",
+                            ep_idx, event_id.0
+                        ),
+                    });
+                }
+                Some(evt) => {
+                    if evt.bound_endpoint() != Some(crate::types::EndpointId(ep_idx)) {
+                        violations.push(Violation {
+                            category: "binding-ep→evt",
+                            detail: format!(
+                                "endpoint #{} bound to event #{} but event points to {:?}",
+                                ep_idx,
+                                event_id.0,
+                                evt.bound_endpoint()
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    for (evt_idx, evt) in kernel.events.iter_allocated() {
+        if let Some(endpoint_id) = evt.bound_endpoint() {
+            match kernel.endpoints.get(endpoint_id.0) {
+                None => {
+                    violations.push(Violation {
+                        category: "binding-evt→ep",
+                        detail: format!(
+                            "event #{} bound to deallocated endpoint #{}",
+                            evt_idx, endpoint_id.0
+                        ),
+                    });
+                }
+                Some(ep) => {
+                    if ep.bound_event() != Some(crate::types::EventId(evt_idx)) {
+                        violations.push(Violation {
+                            category: "binding-evt→ep",
+                            detail: format!(
+                                "event #{} bound to endpoint #{} but endpoint points to {:?}",
+                                evt_idx,
+                                endpoint_id.0,
+                                ep.bound_event()
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn check_priority_inheritance_consistency(kernel: &Kernel, violations: &mut Vec<Violation>) {
+    for (ep_idx, ep) in kernel.endpoints.iter_allocated() {
+        if let Some(server_tid) = ep.active_server()
+            && let Some(highest_caller) = ep.highest_caller_priority()
+            && let Some(thread) = kernel.threads.get(server_tid.0)
+        {
+            let effective = thread.effective_priority();
+
+            if effective < highest_caller {
+                violations.push(Violation {
+                    category: "priority-inheritance",
+                    detail: format!(
+                        "endpoint #{} active server thread #{} has effective priority {:?} \
+                         but highest pending caller is {:?} (base: {:?})",
+                        ep_idx,
+                        server_tid.0,
+                        effective,
+                        highest_caller,
+                        thread.priority()
+                    ),
+                });
             }
         }
     }
