@@ -229,4 +229,48 @@ mod tests {
 
         assert_eq!(k.threads.get(t1.0).unwrap().state(), ThreadRunState::Ready);
     }
+
+    #[test]
+    fn block_with_no_other_thread_clears_current() {
+        let mut k = setup();
+        let tid = add_thread(&mut k, Priority::Medium);
+
+        k.scheduler.core_mut(0).set_current(Some(tid));
+
+        block_current(&mut k, tid, 0);
+
+        assert_eq!(k.scheduler.core(0).current(), None);
+        assert_eq!(
+            k.threads.get(tid.0).unwrap().state(),
+            ThreadRunState::Blocked
+        );
+    }
+
+    #[test]
+    fn exit_with_no_other_thread_clears_current() {
+        let mut k = setup();
+        let tid = add_thread(&mut k, Priority::Medium);
+
+        k.scheduler.core_mut(0).set_current(Some(tid));
+
+        exit_current(&mut k, tid, 0, 0);
+
+        assert_eq!(k.scheduler.core(0).current(), None);
+    }
+
+    #[test]
+    fn yield_then_pick_returns_same_thread() {
+        let mut k = setup();
+        let tid = add_thread(&mut k, Priority::Medium);
+
+        k.scheduler.core_mut(0).set_current(Some(tid));
+
+        yield_current(&mut k, tid, 0);
+
+        assert_eq!(k.scheduler.core(0).current(), Some(tid));
+        assert_eq!(
+            k.threads.get(tid.0).unwrap().state(),
+            ThreadRunState::Running,
+        );
+    }
 }
