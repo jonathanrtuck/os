@@ -24,6 +24,8 @@ mod tests {
     };
 
     fn setup_kernel() -> Box<Kernel> {
+        crate::frame::arch::page_table::reset_asid_pool();
+
         let mut k = Box::new(Kernel::new(1));
         let space = AddressSpace::new(AddressSpaceId(0), 1, 0);
 

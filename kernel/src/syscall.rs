@@ -1943,16 +1943,26 @@ impl Kernel {
         }
 
         // 3. Free page table and ASID.
-        #[cfg(target_os = "none")]
         if let Some(space) = self.spaces.get(target_id.0) {
-            let root = space.page_table_root();
             let asid = space.asid();
 
-            if root != 0 {
-                crate::frame::arch::page_table::destroy_page_table(
-                    crate::frame::arch::page_alloc::PhysAddr(root),
-                    crate::frame::arch::page_table::Asid(asid),
-                );
+            #[cfg(target_os = "none")]
+            {
+                let root = space.page_table_root();
+
+                if root != 0 {
+                    crate::frame::arch::page_table::destroy_page_table(
+                        crate::frame::arch::page_alloc::PhysAddr(root),
+                        crate::frame::arch::page_table::Asid(asid),
+                    );
+                }
+            }
+
+            #[cfg(all(not(target_os = "none"), test))]
+            if asid != 0 {
+                crate::frame::arch::page_table::free_asid(crate::frame::arch::page_table::Asid(
+                    asid,
+                ));
             }
         }
 
@@ -2077,6 +2087,8 @@ mod tests {
     use crate::types::Priority;
 
     fn setup_kernel() -> Box<Kernel> {
+        crate::frame::arch::page_table::reset_asid_pool();
+
         let mut k = Box::new(Kernel::new(1));
         let space = AddressSpace::new(AddressSpaceId(0), 1, 0);
 

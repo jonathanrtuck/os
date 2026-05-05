@@ -18,6 +18,8 @@ mod tests {
     };
 
     fn setup_kernel() -> Box<Kernel> {
+        crate::frame::arch::page_table::reset_asid_pool();
+
         let mut k = Box::new(Kernel::new(1));
         let space = AddressSpace::new(AddressSpaceId(0), 1, 0);
 
@@ -542,6 +544,230 @@ mod tests {
                 }
 
                 prev_hid = Some(hid);
+            }
+
+            inv(&k);
+        }
+    }
+
+    // =========================================================================
+    // MULTI-OBJECT INTERACTION PROPERTIES
+    // =========================================================================
+
+    proptest! {
+        #[test]
+        fn thread_create_destroy_cycle(iterations in 1usize..=20) {
+            let mut k = setup_kernel();
+            let (_, space_hid) = call(&mut k, num::SPACE_CREATE, &[0; 6]);
+
+            for _ in 0..iterations {
+                let (err, tid_hid) = call(
+                    &mut k,
+                    num::THREAD_CREATE_IN,
+                    &[space_hid, 0x1000, 0x2000, 0, 0, 0],
+                );
+
+                if err != 0 { break; }
+
+                let (err, _) = call(&mut k, num::HANDLE_CLOSE, &[tid_hid, 0, 0, 0, 0, 0]);
+
+                prop_assert_eq!(err, 0);
+            }
+
+            inv(&k);
+        }
+
+        #[test]
+        fn space_create_destroy_cycle(iterations in 1usize..=10) {
+            let mut k = setup_kernel();
+
+            for _ in 0..iterations {
+                let (err, space_hid) = call(&mut k, num::SPACE_CREATE, &[0; 6]);
+
+                if err != 0 { break; }
+
+                let (err, _) = call(&mut k, num::SPACE_DESTROY, &[space_hid, 0, 0, 0, 0, 0]);
+
+                prop_assert_eq!(err, 0);
+            }
+
+            inv(&k);
+        }
+
+        #[test]
+        fn mixed_object_create_close_never_corrupts(
+            ops in proptest::collection::vec(0u8..=4, 1..=30),
+        ) {
+            let mut k = setup_kernel();
+            let page = config::PAGE_SIZE as u64;
+            let mut handles: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+
+            for op in &ops {
+                match op % 5 {
+                    0 => {
+                        let (err, hid) = call(&mut k, num::VMO_CREATE, &[page, 0, 0, 0, 0, 0]);
+
+                        if err == 0 { handles.push(hid); }
+                    }
+                    1 => {
+                        let (err, hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
+
+                        if err == 0 { handles.push(hid); }
+                    }
+                    2 => {
+                        let (err, hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+
+                        if err == 0 { handles.push(hid); }
+                    }
+                    3 => {
+                        if !handles.is_empty() {
+                            let idx = (*op as usize) % handles.len();
+                            let hid = handles.swap_remove(idx);
+
+                            call(&mut k, num::HANDLE_CLOSE, &[hid, 0, 0, 0, 0, 0]);
+                        }
+                    }
+                    _ => {
+                        if !handles.is_empty() {
+                            let idx = (*op as usize) % handles.len();
+                            let hid = handles[idx];
+                            let (err, dup) = call(
+                                &mut k,
+                                num::HANDLE_DUP,
+                                &[hid, Rights::ALL.0 as u64, 0, 0, 0, 0],
+                            );
+
+                            if err == 0 { handles.push(dup); }
+                        }
+                    }
+                }
+            }
+
+            for hid in handles {
+                call(&mut k, num::HANDLE_CLOSE, &[hid, 0, 0, 0, 0, 0]);
+            }
+
+            inv(&k);
+        }
+
+        #[test]
+        fn event_signal_wait_clear_roundtrip(
+            signal_bits in 1u64..=u64::MAX,
+            wait_mask in 1u64..=u64::MAX,
+        ) {
+            let mut k = setup_kernel();
+            let (_, evt) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+
+            call(&mut k, num::EVENT_SIGNAL, &[evt, signal_bits, 0, 0, 0, 0]);
+
+            let (err, fired_handle) = call(
+                &mut k,
+                num::EVENT_WAIT,
+                &[evt, wait_mask, 0, 0, 0, 0],
+            );
+
+            if signal_bits & wait_mask != 0 {
+                prop_assert_eq!(err, 0, "wait should succeed when bits match mask");
+                prop_assert_eq!(fired_handle, evt, "fired handle should be the event");
+            }
+
+            call(&mut k, num::EVENT_CLEAR, &[evt, u64::MAX, 0, 0, 0, 0]);
+
+            let obj_id = k
+                .spaces
+                .get(0)
+                .unwrap()
+                .handles()
+                .lookup(HandleId(evt as u32))
+                .unwrap()
+                .object_id;
+
+            prop_assert_eq!(k.events.get(obj_id).unwrap().bits(), 0);
+            inv(&k);
+        }
+
+        #[test]
+        fn ipc_with_handle_transfer_preserves_refcount(
+            transfer_count in 0usize..=4,
+        ) {
+            let mut k = setup_kernel();
+            let (_, ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
+            let page = config::PAGE_SIZE as u64;
+            let mut vmo_handles = alloc::vec::Vec::new();
+            let mut vmo_obj_ids = alloc::vec::Vec::new();
+
+            for _ in 0..transfer_count {
+                let (err, hid) = call(&mut k, num::VMO_CREATE, &[page, 0, 0, 0, 0, 0]);
+
+                if err != 0 { break; }
+
+                let obj_id = k
+                    .spaces
+                    .get(0)
+                    .unwrap()
+                    .handles()
+                    .lookup(HandleId(hid as u32))
+                    .unwrap()
+                    .object_id;
+
+                vmo_handles.push(hid as u32);
+                vmo_obj_ids.push(obj_id);
+            }
+
+            let actual_count = vmo_handles.len();
+
+            if actual_count > 0 {
+                let mut call_buf = [0u8; 128];
+                let (err, _) = call(
+                    &mut k,
+                    num::CALL,
+                    &[
+                        ep_hid,
+                        call_buf.as_mut_ptr() as u64,
+                        0,
+                        vmo_handles.as_ptr() as u64,
+                        actual_count as u64,
+                        0,
+                    ],
+                );
+
+                prop_assert_eq!(err, 0);
+
+                for &obj_id in &vmo_obj_ids {
+                    prop_assert!(
+                        k.vmos.get(obj_id).is_some(),
+                        "VMO must still exist after transfer (refcount > 0)"
+                    );
+                }
+
+                let mut recv_buf = [0u8; 128];
+                let mut recv_handles = [0u32; 8];
+                let (err, packed) = call(
+                    &mut k,
+                    num::RECV,
+                    &[
+                        ep_hid,
+                        recv_buf.as_mut_ptr() as u64,
+                        128,
+                        recv_handles.as_mut_ptr() as u64,
+                        8,
+                        0,
+                    ],
+                );
+
+                prop_assert_eq!(err, 0);
+
+                let h_count = ((packed >> 16) & 0xFFFF) as usize;
+
+                prop_assert_eq!(h_count, actual_count);
+
+                for &obj_id in &vmo_obj_ids {
+                    prop_assert_eq!(
+                        k.vmos.get(obj_id).unwrap().refcount(),
+                        1,
+                        "VMO refcount must be 1 after transfer (removed from sender, installed in receiver)"
+                    );
+                }
             }
 
             inv(&k);

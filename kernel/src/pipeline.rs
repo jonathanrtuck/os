@@ -36,6 +36,8 @@ mod tests {
     }
 
     fn setup_two_services() -> TwoServiceSetup {
+        crate::frame::arch::page_table::reset_asid_pool();
+
         let mut k = Box::new(Kernel::new(2));
         let svc_space = AddressSpace::new(AddressSpaceId(0), 1, 0);
         let (svc_idx, _) = k.spaces.alloc(svc_space).unwrap();
