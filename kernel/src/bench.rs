@@ -403,9 +403,195 @@ pub fn run(kern: &mut Kernel) {
         );
     }
 
+    // ── Workload benchmarks ─────────────────────────────────────────
+    crate::println!("--- workloads ---");
+
+    results.push(bench_document_editing(kern, current));
+    results.push(bench_ipc_storm(kern, current));
+    results.push(bench_object_lifecycle_churn(kern, current));
+
+    for r in results.iter().skip(results.len() - 3) {
+        crate::println!(
+            "  {:30} median {:>6}  P99 {:>6}  [{}]",
+            r.name,
+            r.median,
+            r.p99,
+            if r.passed() {
+                "PASS"
+            } else {
+                all_pass = false;
+                "FAIL"
+            },
+        );
+    }
+
     if all_pass {
         crate::println!("benchmarks: all passed");
     } else {
         crate::println!("benchmarks: STRUCTURAL REGRESSION DETECTED");
+    }
+}
+
+fn bench_document_editing(kern: &mut Kernel, current: ThreadId) -> BenchResult {
+    let page = config::PAGE_SIZE as u64;
+
+    for _ in 0..WARMUP {
+        document_editing_iteration(kern, current, page);
+    }
+
+    let mut samples = [0u64; ITERATIONS];
+
+    for s in &mut samples {
+        arch::isb();
+        let start = arch::read_cycle_counter();
+
+        document_editing_iteration(kern, current, page);
+
+        arch::isb();
+        *s = arch::read_cycle_counter().wrapping_sub(start);
+    }
+
+    let (median, p99) = stats(&mut samples);
+
+    BenchResult {
+        name: "workload: doc editing",
+        median,
+        p99,
+        threshold_mult: 50000,
+    }
+}
+
+fn document_editing_iteration(kern: &mut Kernel, current: ThreadId, page: u64) {
+    // Simulate: create VMO (document content), map it, snapshot (undo point),
+    // create event (compositor notify), signal it, close everything.
+    let (_, vmo) = kern.dispatch(current, 0, num::VMO_CREATE, &[page, 0, 0, 0, 0, 0]);
+    let (_, snap) = kern.dispatch(current, 0, num::VMO_SNAPSHOT, &[vmo, 0, 0, 0, 0, 0]);
+    let (_, evt) = kern.dispatch(current, 0, num::EVENT_CREATE, &[0; 6]);
+
+    kern.dispatch(current, 0, num::EVENT_SIGNAL, &[evt, 0x1, 0, 0, 0, 0]);
+    kern.dispatch(current, 0, num::EVENT_CLEAR, &[evt, 0x1, 0, 0, 0, 0]);
+
+    kern.dispatch(current, 0, num::HANDLE_CLOSE, &[evt, 0, 0, 0, 0, 0]);
+    kern.dispatch(current, 0, num::HANDLE_CLOSE, &[snap, 0, 0, 0, 0, 0]);
+    kern.dispatch(current, 0, num::HANDLE_CLOSE, &[vmo, 0, 0, 0, 0, 0]);
+}
+
+fn bench_ipc_storm(kern: &mut Kernel, current: ThreadId) -> BenchResult {
+    let (_, ep) = kern.dispatch(current, 0, num::ENDPOINT_CREATE, &[0; 6]);
+
+    for _ in 0..WARMUP {
+        ipc_storm_iteration(kern, current, ep);
+    }
+
+    let mut samples = [0u64; ITERATIONS];
+
+    for s in &mut samples {
+        arch::isb();
+        let start = arch::read_cycle_counter();
+
+        ipc_storm_iteration(kern, current, ep);
+
+        arch::isb();
+        *s = arch::read_cycle_counter().wrapping_sub(start);
+    }
+
+    kern.dispatch(current, 0, num::HANDLE_CLOSE, &[ep, 0, 0, 0, 0, 0]);
+
+    let (median, p99) = stats(&mut samples);
+
+    BenchResult {
+        name: "workload: IPC storm (10 calls)",
+        median,
+        p99,
+        threshold_mult: 100000,
+    }
+}
+
+fn ipc_storm_iteration(kern: &mut Kernel, current: ThreadId, ep: u64) {
+    let mut buf = [0u8; 128];
+
+    // 10 rapid call attempts — each will enqueue a pending call (thread blocks
+    // then we restore). We measure the enqueue path, which is the hot path.
+    for _ in 0..10 {
+        kern.dispatch(
+            current,
+            0,
+            num::CALL,
+            &[ep, buf.as_mut_ptr() as u64, 8, 0, 0, 0],
+        );
+
+        // Restore thread for next iteration (thread blocked on call).
+        if let Some(t) = kern.threads.get_mut(current.0)
+            && t.state() == crate::thread::ThreadRunState::Blocked
+        {
+            t.set_state(crate::thread::ThreadRunState::Ready);
+            t.set_state(crate::thread::ThreadRunState::Running);
+        }
+    }
+
+    // Drain the endpoint so it doesn't fill up across iterations.
+    if let Ok(handle) = kern
+        .spaces
+        .get(0)
+        .unwrap()
+        .handles()
+        .lookup(crate::types::HandleId(ep as u32))
+    {
+        let ep_id = handle.object_id;
+
+        if let Some(endpoint) = kern.endpoints.get_mut(ep_id) {
+            while endpoint.dequeue_call().is_some() {}
+        }
+    }
+}
+
+fn bench_object_lifecycle_churn(kern: &mut Kernel, current: ThreadId) -> BenchResult {
+    for _ in 0..WARMUP {
+        object_churn_iteration(kern, current);
+    }
+
+    let mut samples = [0u64; ITERATIONS];
+
+    for s in &mut samples {
+        arch::isb();
+        let start = arch::read_cycle_counter();
+
+        object_churn_iteration(kern, current);
+
+        arch::isb();
+        *s = arch::read_cycle_counter().wrapping_sub(start);
+    }
+
+    let (median, p99) = stats(&mut samples);
+
+    BenchResult {
+        name: "workload: object churn",
+        median,
+        p99,
+        threshold_mult: 100000,
+    }
+}
+
+fn object_churn_iteration(kern: &mut Kernel, current: ThreadId) {
+    let page = config::PAGE_SIZE as u64;
+    let mut handles = [0u64; 8];
+
+    // Create 4 VMOs + 2 events + 2 endpoints
+    for h in &mut handles[..4] {
+        let (_, hid) = kern.dispatch(current, 0, num::VMO_CREATE, &[page, 0, 0, 0, 0, 0]);
+        *h = hid;
+    }
+    for h in &mut handles[4..6] {
+        let (_, hid) = kern.dispatch(current, 0, num::EVENT_CREATE, &[0; 6]);
+        *h = hid;
+    }
+    for h in &mut handles[6..8] {
+        let (_, hid) = kern.dispatch(current, 0, num::ENDPOINT_CREATE, &[0; 6]);
+        *h = hid;
+    }
+
+    // Close all in reverse order — exercises different table paths
+    for h in handles.iter().rev() {
+        kern.dispatch(current, 0, num::HANDLE_CLOSE, &[*h, 0, 0, 0, 0, 0]);
     }
 }
