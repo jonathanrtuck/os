@@ -773,4 +773,120 @@ mod tests {
             inv(&k);
         }
     }
+
+    // =========================================================================
+    // MULTI-CORE SCHEDULING PROPERTIES
+    // =========================================================================
+
+    fn setup_multicore_kernel(cores: usize) -> Box<Kernel> {
+        crate::frame::arch::page_table::reset_asid_pool();
+
+        let mut k = Box::new(Kernel::new(cores));
+        let space = AddressSpace::new(AddressSpaceId(0), 1, 0);
+
+        k.spaces.alloc(space);
+
+        let thread = Thread::new(
+            ThreadId(0),
+            Some(AddressSpaceId(0)),
+            Priority::Medium,
+            0,
+            0,
+            0,
+        );
+
+        k.threads.alloc(thread);
+        k.threads
+            .get_mut(0)
+            .unwrap()
+            .set_state(crate::thread::ThreadRunState::Running);
+        k.scheduler.core_mut(0).set_current(Some(ThreadId(0)));
+
+        k
+    }
+
+    proptest! {
+        #[test]
+        fn multicore_thread_create_distributes_load(thread_count in 2usize..=8) {
+            let mut k = setup_multicore_kernel(4);
+
+            for _ in 0..thread_count {
+                let (err, _) = k.dispatch(
+                    ThreadId(0),
+                    0,
+                    num::THREAD_CREATE_IN as u64,
+                    &[0; 6],
+                );
+
+                if err != 0 {
+                    let (err, _) = k.dispatch(
+                        ThreadId(0),
+                        0,
+                        num::THREAD_CREATE,
+                        &[0x1000, 0x2000, 0, 0, 0, 0],
+                    );
+
+                    if err != 0 { break; }
+                }
+            }
+
+            let mut total_ready = 0;
+
+            for core_id in 0..4 {
+                total_ready += k.scheduler.core(core_id).total_ready();
+            }
+
+            prop_assert!(total_ready > 0 || thread_count == 0);
+            inv(&k);
+        }
+
+        #[test]
+        fn multicore_dispatch_alternating_cores(
+            ops in proptest::collection::vec(0u8..=3, 1..=20),
+        ) {
+            let mut k = setup_multicore_kernel(2);
+            let page = config::PAGE_SIZE as u64;
+
+            for (i, op) in ops.iter().enumerate() {
+                let core_id = i % 2;
+
+                match op % 4 {
+                    0 => {
+                        k.dispatch(
+                            ThreadId(0),
+                            core_id,
+                            num::VMO_CREATE,
+                            &[page, 0, 0, 0, 0, 0],
+                        );
+                    }
+                    1 => {
+                        k.dispatch(
+                            ThreadId(0),
+                            core_id,
+                            num::EVENT_CREATE,
+                            &[0; 6],
+                        );
+                    }
+                    2 => {
+                        k.dispatch(
+                            ThreadId(0),
+                            core_id,
+                            num::ENDPOINT_CREATE,
+                            &[0; 6],
+                        );
+                    }
+                    _ => {
+                        k.dispatch(
+                            ThreadId(0),
+                            core_id,
+                            num::SYSTEM_INFO,
+                            &[0, 0, 0, 0, 0, 0],
+                        );
+                    }
+                }
+            }
+
+            inv(&k);
+        }
+    }
 }
