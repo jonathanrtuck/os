@@ -259,4 +259,66 @@ mod tests {
 
         crate::invariants::assert_valid(&*k);
     }
+
+    #[test]
+    fn bootstrap_increments_alive_threads() {
+        let mut k = setup_kernel();
+
+        assert_eq!(k.alive_threads, 0);
+
+        create_init(&mut k, fake_init_binary()).unwrap();
+
+        assert_eq!(k.alive_threads, 1);
+    }
+
+    #[test]
+    fn bootstrap_handle_rights() {
+        let mut k = setup_kernel();
+        let tid = create_init(&mut k, fake_init_binary()).unwrap();
+        let space_id = k.threads.get(tid.0).unwrap().address_space().unwrap();
+        let space = k.spaces.get(space_id.0).unwrap();
+        let h0 = space.handles().lookup(crate::types::HandleId(0)).unwrap();
+
+        assert_eq!(h0.object_type, ObjectType::AddressSpace);
+        assert_eq!(h0.rights, Rights::ALL);
+
+        let h1 = space.handles().lookup(crate::types::HandleId(1)).unwrap();
+
+        assert_eq!(h1.object_type, ObjectType::Vmo);
+        assert_eq!(h1.rights, Rights::ALL);
+    }
+
+    #[test]
+    fn bootstrap_mapping_rights() {
+        let mut k = setup_kernel();
+        let tid = create_init(&mut k, fake_init_binary()).unwrap();
+        let space_id = k.threads.get(tid.0).unwrap().address_space().unwrap();
+        let space = k.spaces.get(space_id.0).unwrap();
+        let mappings = space.mappings();
+
+        assert_eq!(mappings.len(), 2);
+
+        let code_mapping = mappings
+            .iter()
+            .find(|m| m.va_start == INIT_CODE_VA)
+            .unwrap();
+
+        assert!(code_mapping.rights.contains(Rights::READ));
+        assert!(code_mapping.rights.contains(Rights::EXECUTE));
+        assert!(!code_mapping.rights.contains(Rights::WRITE));
+
+        let stack_mapping = mappings
+            .iter()
+            .find(|m| m.va_start == INIT_STACK_VA)
+            .unwrap();
+
+        assert!(stack_mapping.rights.contains(Rights::READ));
+        assert!(stack_mapping.rights.contains(Rights::WRITE));
+        assert!(!stack_mapping.rights.contains(Rights::EXECUTE));
+    }
+
+    #[test]
+    fn bootstrap_stack_size_is_four_pages() {
+        assert_eq!(INIT_STACK_SIZE, 4 * config::PAGE_SIZE);
+    }
 }

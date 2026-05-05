@@ -273,4 +273,22 @@ mod tests {
             ThreadRunState::Running,
         );
     }
+
+    #[test]
+    fn yield_with_two_threads_switches() {
+        let mut k = setup();
+        let t1 = add_thread(&mut k, Priority::Medium);
+        let t2 = add_thread(&mut k, Priority::Medium);
+
+        k.scheduler.enqueue(0, t2, Priority::Medium);
+        k.scheduler.core_mut(0).set_current(Some(t1));
+
+        yield_current(&mut k, t1, 0);
+
+        assert_eq!(k.scheduler.core(0).current(), Some(t2));
+        assert_eq!(
+            k.threads.get(t2.0).unwrap().state(),
+            ThreadRunState::Running
+        );
+    }
 }

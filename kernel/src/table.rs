@@ -394,4 +394,21 @@ mod tests {
         assert_eq!(*m7, 70);
         assert_eq!(*r0, 0);
     }
+
+    #[test]
+    fn is_allocated_false_for_empty_and_dealloced() {
+        let mut t: ObjectTable<u64, 4> = ObjectTable::new();
+
+        assert!(!t.is_allocated(0));
+        assert!(!t.is_allocated(3));
+
+        let (a, _) = t.alloc(42).unwrap();
+
+        assert!(t.is_allocated(a));
+        assert!(!t.is_allocated(1));
+
+        t.dealloc(a);
+
+        assert!(!t.is_allocated(a));
+    }
 }

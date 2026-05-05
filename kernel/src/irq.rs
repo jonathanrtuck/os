@@ -352,4 +352,116 @@ mod tests {
 
         assert_eq!(t.ack(65), Ok(()));
     }
+
+    // -- Unbind/ack boundary validation --
+
+    #[test]
+    fn unbind_rejects_sgi_range() {
+        let mut t = make_table();
+
+        assert_eq!(t.unbind(0), Err(SyscallError::InvalidArgument));
+        assert_eq!(t.unbind(31), Err(SyscallError::InvalidArgument));
+    }
+
+    #[test]
+    fn unbind_rejects_out_of_range() {
+        let mut t = make_table();
+
+        assert_eq!(
+            t.unbind(config::MAX_IRQS as u32),
+            Err(SyscallError::InvalidArgument)
+        );
+    }
+
+    #[test]
+    fn ack_rejects_sgi_range() {
+        let mut t = make_table();
+
+        assert_eq!(t.ack(0), Err(SyscallError::InvalidArgument));
+        assert_eq!(t.ack(31), Err(SyscallError::InvalidArgument));
+    }
+
+    #[test]
+    fn ack_rejects_out_of_range() {
+        let mut t = make_table();
+
+        assert_eq!(
+            t.ack(config::MAX_IRQS as u32),
+            Err(SyscallError::InvalidArgument)
+        );
+    }
+
+    // -- intids_for_event_bits --
+
+    #[test]
+    fn intids_for_event_bits_empty_table() {
+        let t = make_table();
+        let (_, count) = t.intids_for_event_bits(EventId(0), u64::MAX);
+
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn intids_for_event_bits_single_match() {
+        let mut t = make_table();
+
+        t.bind(64, EventId(5), 0b1010).unwrap();
+        t.bind(65, EventId(6), 0b0101).unwrap();
+
+        let (ids, count) = t.intids_for_event_bits(EventId(5), 0b1111);
+
+        assert_eq!(count, 1);
+        assert_eq!(ids[0], 64);
+    }
+
+    #[test]
+    fn intids_for_event_bits_multiple_matches() {
+        let mut t = make_table();
+
+        t.bind(64, EventId(5), 0b0001).unwrap();
+        t.bind(65, EventId(5), 0b0010).unwrap();
+        t.bind(66, EventId(5), 0b0100).unwrap();
+
+        let (ids, count) = t.intids_for_event_bits(EventId(5), 0b0111);
+
+        assert_eq!(count, 3);
+        assert_eq!(ids[0], 64);
+        assert_eq!(ids[1], 65);
+        assert_eq!(ids[2], 66);
+    }
+
+    #[test]
+    fn intids_for_event_bits_no_overlap() {
+        let mut t = make_table();
+
+        t.bind(64, EventId(5), 0b1100).unwrap();
+
+        let (_, count) = t.intids_for_event_bits(EventId(5), 0b0011);
+
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn intids_for_event_bits_wrong_event() {
+        let mut t = make_table();
+
+        t.bind(64, EventId(5), 0b1111).unwrap();
+
+        let (_, count) = t.intids_for_event_bits(EventId(6), 0b1111);
+
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn intids_for_event_bits_caps_at_four() {
+        let mut t = make_table();
+
+        for i in 0..6 {
+            t.bind(64 + i, EventId(0), 1 << i).unwrap();
+        }
+
+        let (_, count) = t.intids_for_event_bits(EventId(0), u64::MAX);
+
+        assert_eq!(count, 4);
+    }
 }

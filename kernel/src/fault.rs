@@ -301,4 +301,39 @@ mod tests {
 
         assert_eq!(action, FaultAction::Kill);
     }
+
+    #[test]
+    fn lazy_alloc_at_nonzero_page_index() {
+        let mut k = setup();
+        let vmo = Vmo::new(VmoId(0), 4 * config::PAGE_SIZE, VmoFlags::NONE);
+        let (idx, _) = k.vmos.alloc(vmo).unwrap();
+        let rw = Rights(Rights::READ.0 | Rights::WRITE.0);
+        let space = k.spaces.get_mut(0).unwrap();
+        let va = space
+            .map_vmo(VmoId(idx), 4 * config::PAGE_SIZE, rw, 0)
+            .unwrap();
+
+        let action = handle_data_abort(&mut k, ThreadId(0), va + 2 * config::PAGE_SIZE, true);
+
+        assert_eq!(action, FaultAction::Resolved);
+        assert!(k.vmos.get(idx).unwrap().page_at(0).is_none());
+        assert!(k.vmos.get(idx).unwrap().page_at(2).is_some());
+    }
+
+    #[test]
+    fn pager_backed_vmo_returns_kill() {
+        let mut k = setup();
+        let mut vmo = Vmo::new(VmoId(0), config::PAGE_SIZE, VmoFlags::NONE);
+
+        vmo.set_pager(crate::types::EndpointId(0)).unwrap();
+
+        let (idx, _) = k.vmos.alloc(vmo).unwrap();
+        let space = k.spaces.get_mut(0).unwrap();
+        let va = space
+            .map_vmo(VmoId(idx), config::PAGE_SIZE, Rights::READ, 0)
+            .unwrap();
+        let action = handle_data_abort(&mut k, ThreadId(0), va, false);
+
+        assert_eq!(action, FaultAction::Kill);
+    }
 }
