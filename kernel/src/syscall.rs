@@ -726,13 +726,38 @@ impl Kernel {
             return Err(SyscallError::InsufficientRights);
         }
 
+        let obj_type = handle.object_type;
+        let obj_id = handle.object_id;
         let space = self
             .spaces
             .get_mut(space_id.0)
             .ok_or(SyscallError::InvalidArgument)?;
         let new_id = space.handles_mut().duplicate(handle_id, new_rights)?;
 
+        self.add_object_ref(obj_type, obj_id);
+
         Ok(new_id.0 as u64)
+    }
+
+    fn add_object_ref(&mut self, object_type: ObjectType, object_id: u32) {
+        match object_type {
+            ObjectType::Vmo => {
+                if let Some(vmo) = self.vmos.get_mut(object_id) {
+                    vmo.add_ref();
+                }
+            }
+            ObjectType::Endpoint => {
+                if let Some(ep) = self.endpoints.get_mut(object_id) {
+                    ep.add_ref();
+                }
+            }
+            ObjectType::Event => {
+                if let Some(evt) = self.events.get_mut(object_id) {
+                    evt.add_ref();
+                }
+            }
+            ObjectType::Thread | ObjectType::AddressSpace => {}
+        }
     }
 
     fn sys_handle_close(
@@ -746,10 +771,129 @@ impl Kernel {
             .spaces
             .get_mut(space_id.0)
             .ok_or(SyscallError::InvalidArgument)?;
+        let handle = space.handles_mut().close(handle_id)?;
 
-        space.handles_mut().close(handle_id)?;
+        self.release_object_ref(handle.object_type, handle.object_id);
 
         Ok(0)
+    }
+
+    fn release_object_ref(&mut self, object_type: ObjectType, object_id: u32) {
+        match object_type {
+            ObjectType::Vmo => {
+                if let Some(vmo) = self.vmos.get_mut(object_id)
+                    && vmo.release_ref()
+                {
+                    self.vmos.dealloc(object_id);
+                }
+            }
+            ObjectType::Endpoint => {
+                if let Some(ep) = self.endpoints.get_mut(object_id)
+                    && ep.release_ref()
+                {
+                    self.close_endpoint_peer(object_id);
+
+                    if let Some(ep) = self.endpoints.get_mut(object_id)
+                        && let Some(evt_id) = ep.bound_event()
+                        && let Some(evt) = self.events.get_mut(evt_id.0)
+                    {
+                        evt.unbind_endpoint();
+                    }
+
+                    self.endpoints.dealloc(object_id);
+                }
+            }
+            ObjectType::Event => {
+                if let Some(evt) = self.events.get_mut(object_id)
+                    && evt.release_ref()
+                {
+                    self.destroy_event(object_id);
+                }
+            }
+            ObjectType::Thread | ObjectType::AddressSpace => {}
+        }
+    }
+
+    fn close_endpoint_peer(&mut self, ep_id: u32) {
+        let Some(ep) = self.endpoints.get_mut(ep_id) else {
+            return;
+        };
+
+        let mut close_result = ep.close_peer();
+
+        for canceled in close_result.canceled_callers_mut() {
+            if let Some(caller) = canceled.take() {
+                if caller.handle_count > 0 {
+                    let caller_space = self
+                        .threads
+                        .get(caller.thread_id.0)
+                        .and_then(|t| t.address_space());
+
+                    if let Some(sid) = caller_space {
+                        self.reinstall_handles(
+                            sid,
+                            StagedHandles {
+                                handles: caller.handles,
+                                count: caller.handle_count,
+                            },
+                        );
+                    }
+                }
+
+                if let Some(t) = self.threads.get_mut(caller.thread_id.0) {
+                    t.set_wakeup_error(SyscallError::PeerClosed);
+
+                    #[cfg(any(target_os = "none", test))]
+                    if let Some(rs) = t.register_state_mut() {
+                        rs.gprs[0] = SyscallError::PeerClosed as u64;
+                    }
+                }
+
+                crate::sched::wake(self, caller.thread_id, self.core_id);
+            }
+        }
+
+        for &tid in close_result.reply_callers() {
+            if let Some(t) = self.threads.get_mut(tid.0) {
+                t.set_wakeup_error(SyscallError::PeerClosed);
+
+                #[cfg(any(target_os = "none", test))]
+                if let Some(rs) = t.register_state_mut() {
+                    rs.gprs[0] = SyscallError::PeerClosed as u64;
+                }
+            }
+
+            crate::sched::wake(self, tid, self.core_id);
+        }
+
+        for &tid in close_result.recv_waiters() {
+            if let Some(t) = self.threads.get_mut(tid.0) {
+                t.set_wakeup_error(SyscallError::PeerClosed);
+            }
+
+            crate::sched::wake(self, tid, self.core_id);
+        }
+    }
+
+    fn destroy_event(&mut self, event_id: u32) {
+        if let Some(evt) = self.events.get(event_id)
+            && let Some(ep_id) = evt.bound_endpoint()
+            && let Some(ep) = self.endpoints.get_mut(ep_id.0)
+        {
+            ep.unbind_event();
+        }
+
+        for intid in 0..config::MAX_IRQS {
+            if self
+                .irqs
+                .binding_at(intid)
+                .is_some_and(|b| b.event_id.0 == event_id)
+            {
+                let _ = self.irqs.unbind(intid as u32);
+            }
+        }
+
+        self.events.dealloc(event_id);
     }
 
     fn sys_handle_info(&mut self, current: ThreadId, args: &[u64; 6]) -> Result<u64, SyscallError> {
@@ -1544,26 +1688,49 @@ impl Kernel {
                 return Err(e);
             }
 
-            let target = self
-                .spaces
-                .get_mut(target_space.0)
-                .ok_or(SyscallError::InvalidHandle)?;
+            let mut installed_refs = [(ObjectType::Vmo, 0u32); config::MAX_IPC_HANDLES];
+            let mut installed_count = 0;
 
-            for (i, slot) in cloned[..handles_count].iter_mut().enumerate() {
-                let h = slot.take().unwrap();
+            let install_result: Result<(), SyscallError> = (|| {
+                let target = self
+                    .spaces
+                    .get_mut(target_space.0)
+                    .ok_or(SyscallError::InvalidHandle)?;
 
-                if let Err(e) = target.handles_mut().allocate_at(i, h) {
-                    for j in 0..i {
-                        target.handles_mut().close(HandleId(j as u32)).ok();
+                for (i, slot) in cloned[..handles_count].iter_mut().enumerate() {
+                    let h = slot.take().unwrap();
+
+                    installed_refs[i] = (h.object_type, h.object_id);
+
+                    if let Err(e) = target.handles_mut().allocate_at(i, h) {
+                        for j in 0..i {
+                            target.handles_mut().close(HandleId(j as u32)).ok();
+                        }
+
+                        return Err(e);
                     }
 
-                    self.unlink_thread_from_space(idx, target_space);
-                    #[cfg(target_os = "none")]
-                    self.free_kernel_stack(idx);
-                    self.threads.dealloc(idx);
-
-                    return Err(e);
+                    installed_count += 1;
                 }
+
+                Ok(())
+            })();
+
+            if let Err(e) = install_result {
+                for &(obj_type, obj_id) in &installed_refs[..installed_count] {
+                    self.release_object_ref(obj_type, obj_id);
+                }
+
+                self.unlink_thread_from_space(idx, target_space);
+                #[cfg(target_os = "none")]
+                self.free_kernel_stack(idx);
+                self.threads.dealloc(idx);
+
+                return Err(e);
+            }
+
+            for &(obj_type, obj_id) in &installed_refs[..installed_count] {
+                self.add_object_ref(obj_type, obj_id);
             }
         }
 
@@ -1746,98 +1913,14 @@ impl Kernel {
         }
 
         for &(obj_type, obj_id) in &handle_buf[..handle_count] {
-            match obj_type {
-                ObjectType::Vmo => {
-                    if let Some(vmo) = self.vmos.get_mut(obj_id)
-                        && vmo.release_ref()
-                    {
-                        self.vmos.dealloc(obj_id);
-                    }
-                }
-                ObjectType::Endpoint => {
-                    if let Some(ep) = self.endpoints.get_mut(obj_id) {
-                        if let Some(evt_id) = ep.bound_event()
-                            && let Some(evt) = self.events.get_mut(evt_id.0)
-                        {
-                            evt.unbind_endpoint();
-                        }
-
-                        let mut close_result = ep.close_peer();
-
-                        for canceled in close_result.canceled_callers_mut() {
-                            if let Some(caller) = canceled.take() {
-                                if caller.handle_count > 0 {
-                                    let caller_space = self
-                                        .threads
-                                        .get(caller.thread_id.0)
-                                        .and_then(|t| t.address_space());
-
-                                    if let Some(sid) = caller_space {
-                                        self.reinstall_handles(
-                                            sid,
-                                            StagedHandles {
-                                                handles: caller.handles,
-                                                count: caller.handle_count,
-                                            },
-                                        );
-                                    }
-                                }
-
-                                if let Some(t) = self.threads.get_mut(caller.thread_id.0) {
-                                    t.set_wakeup_error(SyscallError::PeerClosed);
-
-                                    #[cfg(any(target_os = "none", test))]
-                                    if let Some(rs) = t.register_state_mut() {
-                                        rs.gprs[0] = SyscallError::PeerClosed as u64;
-                                    }
-                                }
-
-                                crate::sched::wake(self, caller.thread_id, self.core_id);
-                            }
-                        }
-
-                        for &tid in close_result.reply_callers() {
-                            if let Some(t) = self.threads.get_mut(tid.0) {
-                                t.set_wakeup_error(SyscallError::PeerClosed);
-
-                                #[cfg(any(target_os = "none", test))]
-                                if let Some(rs) = t.register_state_mut() {
-                                    rs.gprs[0] = SyscallError::PeerClosed as u64;
-                                }
-                            }
-
-                            crate::sched::wake(self, tid, self.core_id);
-                        }
-
-                        for &tid in close_result.recv_waiters() {
-                            if let Some(t) = self.threads.get_mut(tid.0) {
-                                t.set_wakeup_error(SyscallError::PeerClosed);
-                            }
-
-                            crate::sched::wake(self, tid, self.core_id);
-                        }
-                    }
-                }
-                ObjectType::Event => {
-                    if let Some(evt) = self.events.get(obj_id)
-                        && let Some(ep_id) = evt.bound_endpoint()
-                        && let Some(ep) = self.endpoints.get_mut(ep_id.0)
-                    {
-                        ep.unbind_event();
-                    }
-
-                    for intid in 0..config::MAX_IRQS {
-                        if self
-                            .irqs
-                            .binding_at(intid)
-                            .is_some_and(|b| b.event_id.0 == obj_id)
-                        {
-                            let _ = self.irqs.unbind(intid as u32);
-                        }
-                    }
-                }
-                ObjectType::Thread | ObjectType::AddressSpace => {}
+            if obj_type == ObjectType::Endpoint
+                && let Some(ep) = self.endpoints.get_mut(obj_id)
+                && !ep.is_peer_closed()
+            {
+                self.close_endpoint_peer(obj_id);
             }
+
+            self.release_object_ref(obj_type, obj_id);
         }
 
         // 3. Free page table and ASID.
@@ -6106,6 +6189,122 @@ mod tests {
             thread.take_wakeup_error(),
             Some(SyscallError::PeerClosed),
             "recv waiter must get PeerClosed when endpoint is destroyed"
+        );
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn handle_close_frees_endpoint() {
+        let mut k = setup_kernel();
+        let (_, ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
+        let ep_obj_id = k
+            .spaces
+            .get(0)
+            .unwrap()
+            .handles()
+            .lookup(HandleId(ep_hid as u32))
+            .unwrap()
+            .object_id;
+
+        assert!(k.endpoints.get(ep_obj_id).is_some());
+
+        let (err, _) = call(&mut k, num::HANDLE_CLOSE, &[ep_hid, 0, 0, 0, 0, 0]);
+
+        assert_eq!(err, 0);
+        assert!(
+            k.endpoints.get(ep_obj_id).is_none(),
+            "endpoint must be freed when last handle is closed"
+        );
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn handle_close_frees_event() {
+        let mut k = setup_kernel();
+        let (_, evt_hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+        let evt_obj_id = k
+            .spaces
+            .get(0)
+            .unwrap()
+            .handles()
+            .lookup(HandleId(evt_hid as u32))
+            .unwrap()
+            .object_id;
+
+        assert!(k.events.get(evt_obj_id).is_some());
+
+        let (err, _) = call(&mut k, num::HANDLE_CLOSE, &[evt_hid, 0, 0, 0, 0, 0]);
+
+        assert_eq!(err, 0);
+        assert!(
+            k.events.get(evt_obj_id).is_none(),
+            "event must be freed when last handle is closed"
+        );
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn handle_close_frees_vmo() {
+        let mut k = setup_kernel();
+        let (_, vmo_hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
+        let vmo_obj_id = k
+            .spaces
+            .get(0)
+            .unwrap()
+            .handles()
+            .lookup(HandleId(vmo_hid as u32))
+            .unwrap()
+            .object_id;
+
+        assert!(k.vmos.get(vmo_obj_id).is_some());
+
+        let (err, _) = call(&mut k, num::HANDLE_CLOSE, &[vmo_hid, 0, 0, 0, 0, 0]);
+
+        assert_eq!(err, 0);
+        assert!(
+            k.vmos.get(vmo_obj_id).is_none(),
+            "VMO must be freed when last handle is closed"
+        );
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn handle_dup_prevents_premature_free() {
+        let mut k = setup_kernel();
+        let (_, ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
+        let ep_obj_id = k
+            .spaces
+            .get(0)
+            .unwrap()
+            .handles()
+            .lookup(HandleId(ep_hid as u32))
+            .unwrap()
+            .object_id;
+        let (_, dup_hid) = call(
+            &mut k,
+            num::HANDLE_DUP,
+            &[ep_hid, Rights::ALL.0 as u64, 0, 0, 0, 0],
+        );
+
+        assert_eq!(k.endpoints.get(ep_obj_id).unwrap().refcount(), 2);
+
+        call(&mut k, num::HANDLE_CLOSE, &[ep_hid, 0, 0, 0, 0, 0]);
+
+        assert!(
+            k.endpoints.get(ep_obj_id).is_some(),
+            "endpoint must survive when other handles still reference it"
+        );
+        assert_eq!(k.endpoints.get(ep_obj_id).unwrap().refcount(), 1);
+
+        call(&mut k, num::HANDLE_CLOSE, &[dup_hid, 0, 0, 0, 0, 0]);
+
+        assert!(
+            k.endpoints.get(ep_obj_id).is_none(),
+            "endpoint must be freed when last handle is closed"
         );
 
         crate::invariants::assert_valid(&*k);

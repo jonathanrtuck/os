@@ -888,6 +888,8 @@ mod tests {
             .allocate(ObjectType::Endpoint, ep_obj_id, Rights::ALL, ep_gen)
             .unwrap();
 
+        k.endpoints.get_mut(ep_obj_id).unwrap().add_ref();
+
         assert!(!k.endpoints.get(ep_obj_id).unwrap().is_peer_closed());
 
         // Destroy the child space — should signal PeerClosed.

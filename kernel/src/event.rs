@@ -68,6 +68,7 @@ pub struct Event {
     waiters: [Option<Waiter>; config::MAX_WAITERS_PER_EVENT],
     waiter_count: usize,
     bound_endpoint: Option<EndpointId>,
+    refcount: usize,
 }
 
 #[allow(clippy::new_without_default)]
@@ -79,7 +80,23 @@ impl Event {
             waiters: [None; config::MAX_WAITERS_PER_EVENT],
             waiter_count: 0,
             bound_endpoint: None,
+            refcount: 1,
         }
+    }
+
+    pub fn refcount(&self) -> usize {
+        self.refcount
+    }
+
+    pub fn add_ref(&mut self) {
+        self.refcount += 1;
+    }
+
+    pub fn release_ref(&mut self) -> bool {
+        assert!(self.refcount > 0, "Event refcount underflow");
+
+        self.refcount -= 1;
+        self.refcount == 0
     }
 
     pub fn bits(&self) -> u64 {

@@ -299,6 +299,7 @@ pub struct Endpoint {
     bound_event: Option<EventId>,
     active_server: Option<ThreadId>,
     peer_closed: bool,
+    refcount: usize,
 }
 
 #[allow(clippy::new_without_default)]
@@ -316,7 +317,23 @@ impl Endpoint {
             bound_event: None,
             active_server: None,
             peer_closed: false,
+            refcount: 1,
         }
+    }
+
+    pub fn refcount(&self) -> usize {
+        self.refcount
+    }
+
+    pub fn add_ref(&mut self) {
+        self.refcount += 1;
+    }
+
+    pub fn release_ref(&mut self) -> bool {
+        assert!(self.refcount > 0, "Endpoint refcount underflow");
+
+        self.refcount -= 1;
+        self.refcount == 0
     }
 
     pub fn is_peer_closed(&self) -> bool {
