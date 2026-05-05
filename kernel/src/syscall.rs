@@ -7304,4 +7304,86 @@ mod tests {
 
         crate::invariants::assert_valid(&*k);
     }
+
+    // -- Mutation-killing: clock_read arithmetic --
+
+    #[test]
+    fn clock_read_returns_nonzero_nanoseconds() {
+        let mut k = setup_kernel();
+        let (err, ns) = call(&mut k, num::CLOCK_READ, &[0; 6]);
+
+        assert_eq!(err, 0);
+        assert!(ns > 0, "clock should return a positive nanosecond value");
+    }
+
+    #[test]
+    fn clock_read_advances_between_calls() {
+        let mut k = setup_kernel();
+        let (_, ns1) = call(&mut k, num::CLOCK_READ, &[0; 6]);
+        let (_, ns2) = call(&mut k, num::CLOCK_READ, &[0; 6]);
+
+        assert!(ns2 >= ns1, "time must not go backwards");
+    }
+
+    #[test]
+    fn clock_read_value_is_nanoseconds_not_ticks() {
+        let mut k = setup_kernel();
+        let (_, ns) = call(&mut k, num::CLOCK_READ, &[0; 6]);
+        let freq = crate::frame::arch::timer::frequency();
+
+        assert!(
+            ns > freq,
+            "ns ({ns}) should be much larger than freq ({freq}) — \
+             indicates conversion to nanoseconds, not raw ticks"
+        );
+    }
+
+    // -- Mutation-killing: event multi-wait buffer encoding --
+
+    #[test]
+    fn event_wait_multi_returns_correct_handle() {
+        let mut k = setup_kernel();
+        let e1 = create_event(&mut k);
+        let e2 = create_event(&mut k);
+
+        call(&mut k, num::EVENT_SIGNAL, &[e2, 0b10, 0, 0, 0, 0]);
+
+        let wait_buf = [e1 as u32, 0b01u32, 0u32, e2 as u32, 0b10u32, 0u32];
+        let (err, fired_hid) = call(
+            &mut k,
+            num::EVENT_WAIT,
+            &[wait_buf.as_ptr() as u64, 2, 0, 0, 0, 0],
+        );
+
+        assert_eq!(err, 0);
+        assert_eq!(
+            fired_hid, e2,
+            "should return the handle of the signaled event"
+        );
+
+        inv(&k);
+    }
+
+    #[test]
+    fn event_wait_multi_with_64bit_mask() {
+        let mut k = setup_kernel();
+        let e1 = create_event(&mut k);
+        let high_bit: u64 = 1 << 33;
+
+        call(&mut k, num::EVENT_SIGNAL, &[e1, high_bit, 0, 0, 0, 0]);
+
+        let mask_lo = high_bit as u32;
+        let mask_hi = (high_bit >> 32) as u32;
+        let wait_buf = [e1 as u32, mask_lo, mask_hi];
+        let (err, fired_hid) = call(
+            &mut k,
+            num::EVENT_WAIT,
+            &[wait_buf.as_ptr() as u64, 1, 0, 0, 0, 0],
+        );
+
+        assert_eq!(err, 0);
+        assert_eq!(fired_hid, e1);
+
+        inv(&k);
+    }
 }

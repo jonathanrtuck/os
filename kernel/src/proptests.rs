@@ -14,7 +14,7 @@ mod tests {
         config,
         syscall::{Kernel, num},
         thread::Thread,
-        types::{AddressSpaceId, HandleId, ObjectType, Priority, Rights, SyscallError, ThreadId},
+        types::{AddressSpaceId, HandleId, Priority, Rights, SyscallError, ThreadId},
     };
 
     fn setup_kernel() -> Box<Kernel> {
