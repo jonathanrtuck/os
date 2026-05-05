@@ -289,4 +289,66 @@ mod tests {
         assert_eq!(b, ids[200]);
         assert_eq!(c, ids[100]);
     }
+
+    #[test]
+    fn get_pair_mut_both_directions() {
+        let mut t: ObjectTable<u64, 4> = ObjectTable::new();
+        let (a, _) = t.alloc(10).unwrap();
+        let (b, _) = t.alloc(20).unwrap();
+
+        let (ma, rb) = t.get_pair_mut(a, b).unwrap();
+
+        assert_eq!(*ma, 10);
+        assert_eq!(*rb, 20);
+
+        *ma = 11;
+
+        assert_eq!(*t.get(a).unwrap(), 11);
+
+        let (mb, ra) = t.get_pair_mut(b, a).unwrap();
+
+        assert_eq!(*mb, 20);
+        assert_eq!(*ra, 11);
+    }
+
+    #[test]
+    fn get_pair_mut_out_of_bounds() {
+        let mut t: ObjectTable<u64, 4> = ObjectTable::new();
+        let (a, _) = t.alloc(1).unwrap();
+
+        assert!(t.get_pair_mut(a, 99).is_none());
+        assert!(t.get_pair_mut(99, a).is_none());
+    }
+
+    #[test]
+    fn get_pair_mut_one_empty() {
+        let mut t: ObjectTable<u64, 4> = ObjectTable::new();
+        let (a, _) = t.alloc(1).unwrap();
+
+        assert!(t.get_pair_mut(a, 1).is_none());
+    }
+
+    #[test]
+    fn iter_allocated_skips_empty() {
+        let mut t: ObjectTable<u64, 4> = ObjectTable::new();
+        let (a, _) = t.alloc(10).unwrap();
+        let (b, _) = t.alloc(20).unwrap();
+        let (c, _) = t.alloc(30).unwrap();
+
+        t.dealloc(b);
+
+        let items: alloc::vec::Vec<_> = t.iter_allocated().collect();
+
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().any(|&(id, v)| id == a && *v == 10));
+        assert!(items.iter().any(|&(id, v)| id == c && *v == 30));
+    }
+
+    #[test]
+    fn dealloc_nonexistent_returns_none() {
+        let mut t: ObjectTable<u64, 4> = ObjectTable::new();
+
+        assert!(t.dealloc(0).is_none());
+        assert!(t.dealloc(99).is_none());
+    }
 }
