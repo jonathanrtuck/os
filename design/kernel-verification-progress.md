@@ -21,9 +21,9 @@
 
 **Phase 11.13 (WFE/SEV Spin Wait) — complete:**
 
-- Replaced `core::hint::spin_loop()` (ISB) with WFE in the ticket lock spin
-  loop on bare-metal. WFE puts the core into low-power standby until SEV on
-  unlock wakes it.
+- Replaced `core::hint::spin_loop()` (ISB) with WFE in the ticket lock spin loop
+  on bare-metal. WFE puts the core into low-power standby until SEV on unlock
+  wakes it.
 - SEVL primes the event register so the first WFE falls through without
   stalling. LDAPR (RCPC) provides the weaker load-acquire for the spin check.
 - Verified in assembly: `sevl → wfe → ldapr → cmp → b.ne` (lock),
@@ -51,8 +51,8 @@
 
 - Object table exhaustion + recovery: VMO, event, endpoint tables filled then
   recovered (3 tests)
-- thread_create_in rollback: invalid handle → thread cleaned up; valid handle
-  → refcount incremented (2 tests)
+- thread_create_in rollback: invalid handle → thread cleaned up; valid handle →
+  refcount incremented (2 tests)
 - Input boundary injection: null pointer rejected, zero-length accepted,
   MAX_IPC_HANDLES+1 rejected (3 tests)
 
@@ -74,21 +74,21 @@
 
 ### Phase Status
 
-| Phase                 | Status | Notes                                                                      |
-| --------------------- | ------ | -------------------------------------------------------------------------- |
-| 0. Spec Review        | 100%   | 0.1 done, 0.2 done, 0.3 done (16 invariants), 0.4 done                    |
-| 1. Unsafe Audit       | 100%   | 85 blocks in 15 files — ALL CLEAN                                          |
-| 2. Property Testing   | 100%   | 33 proptests. All plan items covered.                                      |
-| 3. Fuzzing            | 95%    | 44M runs, zero crashes                                                     |
-| 4. Miri               | 100%   | 673 tests (pending Miri re-verification this session)                      |
-| 5. Coverage           | 90%    | 96-100% on all critical files, remaining gaps are bare-metal-only          |
-| 6. Mutation Testing   | 80%    | 7 critical files, most survivors bare-metal-only                           |
-| 7. Sanitizers         | 95%    | ASan: 673 tests clean                                                      |
-| 8. Concurrency        | 75%    | Host-side comprehensive. SMP bare-metal pending.                           |
-| 9. Error Injection    | 90%    | All object types exhaustion+recovery, rollback, boundary injection         |
-| 10. Static Analysis   | 95%    | Clippy clean (lib+bare-metal), cargo audit clean                           |
-| 11. Bare-Metal + Perf | 100%   | WFE spin, dispatch stack opt, LSE, assembly, differential tests complete   |
-| 12. Regression Infra  | 90%    | All Makefile targets, nightly gate. Baselines need bare-metal run.         |
+| Phase                 | Status | Notes                                                                    |
+| --------------------- | ------ | ------------------------------------------------------------------------ |
+| 0. Spec Review        | 100%   | 0.1 done, 0.2 done, 0.3 done (16 invariants), 0.4 done                   |
+| 1. Unsafe Audit       | 100%   | 85 blocks in 15 files — ALL CLEAN                                        |
+| 2. Property Testing   | 100%   | 33 proptests. All plan items covered.                                    |
+| 3. Fuzzing            | 95%    | 44M runs, zero crashes                                                   |
+| 4. Miri               | 100%   | 673 tests (pending Miri re-verification this session)                    |
+| 5. Coverage           | 90%    | 96-100% on all critical files, remaining gaps are bare-metal-only        |
+| 6. Mutation Testing   | 80%    | 7 critical files, most survivors bare-metal-only                         |
+| 7. Sanitizers         | 95%    | ASan: 673 tests clean                                                    |
+| 8. Concurrency        | 75%    | Host-side comprehensive. SMP bare-metal pending.                         |
+| 9. Error Injection    | 90%    | All object types exhaustion+recovery, rollback, boundary injection       |
+| 10. Static Analysis   | 95%    | Clippy clean (lib+bare-metal), cargo audit clean                         |
+| 11. Bare-Metal + Perf | 100%   | WFE spin, dispatch stack opt, LSE, assembly, differential tests complete |
+| 12. Regression Infra  | 90%    | All Makefile targets, nightly gate. Baselines need bare-metal run.       |
 
 ### Remaining Work
 
