@@ -51,7 +51,7 @@
 | Phase | Status | Notes |
 |-------|--------|-------|
 | 0. Spec Review | 90% | 0.1 done (7 bugs), 0.4 done (9 error paths). 0.2 partial |
-| 1. Unsafe Audit | 0% | 81 blocks in frame/ |
+| 1. Unsafe Audit | 100% | 81 blocks in 15 files — ALL CLEAN |
 | 2. Property Testing | 90% | 20 proptests inc. multi-object, scheduler, IPC transfer |
 | 3. Fuzzing | 70% | Invariant checking added. 1-hour run still pending |
 | 4. Miri | 80% | UB fix confirmed. 5 previously-failing tests pass clean |
