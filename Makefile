@@ -3,7 +3,7 @@ HOST_TARGET := aarch64-apple-darwin
 
 .PHONY: test build check clippy fmt bench clean integration-test \
         miri asan fuzz mutants coverage gate nightly \
-        stress bench-check audit integration-release
+        stress bench-check bench-baseline audit integration-release
 
 # -- Core targets --
 
@@ -58,7 +58,10 @@ stress:
 	@scripts/integration-test --stress 100
 
 bench-check:
-	@echo "TODO: bench + baseline comparison (Phase 11.16)"
+	@scripts/bench-test
+
+bench-baseline:
+	@scripts/bench-test --update-baseline
 
 audit:
 	cargo audit
