@@ -6645,4 +6645,328 @@ mod tests {
 
         crate::invariants::assert_valid(&*k);
     }
+
+    // -- Error code audit: untested error paths --
+
+    #[test]
+    fn call_on_full_endpoint_returns_buffer_full() {
+        use crate::{
+            endpoint::{Message, PendingCall},
+            thread::Thread,
+        };
+
+        let mut k = setup_kernel();
+        let (_, ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
+        let ep_obj_id = k
+            .spaces
+            .get(0)
+            .unwrap()
+            .handles()
+            .lookup(HandleId(ep_hid as u32))
+            .unwrap()
+            .object_id;
+
+        let priorities = [
+            Priority::Idle,
+            Priority::Low,
+            Priority::Medium,
+            Priority::High,
+        ];
+
+        for i in 0..config::MAX_PENDING_PER_ENDPOINT {
+            let t = Thread::new(
+                ThreadId(0),
+                Some(AddressSpaceId(0)),
+                priorities[i % 4],
+                0,
+                0,
+                0,
+            );
+            let (tid, _) = k.threads.alloc(t).unwrap();
+
+            k.threads.get_mut(tid).unwrap().id = ThreadId(tid);
+            k.threads
+                .get_mut(tid)
+                .unwrap()
+                .set_state(crate::thread::ThreadRunState::Blocked);
+
+            let ep = k.endpoints.get_mut(ep_obj_id).unwrap();
+            let pending = PendingCall {
+                caller: ThreadId(tid),
+                priority: priorities[i % 4],
+                message: Message::empty(),
+                handles: [const { None }; config::MAX_IPC_HANDLES],
+                handle_count: 0,
+                badge: 0,
+                reply_buf: 0,
+            };
+
+            ep.enqueue_call(pending).unwrap();
+        }
+
+        assert!(k.endpoints.get(ep_obj_id).unwrap().is_full());
+
+        let mut buf = [0u8; 128];
+        let (err, _) = call(
+            &mut k,
+            num::CALL,
+            &[ep_hid, buf.as_mut_ptr() as u64, 0, 0, 0, 0],
+        );
+
+        assert_eq!(
+            err,
+            SyscallError::BufferFull as u64,
+            "call on full endpoint must return BufferFull"
+        );
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn call_on_peer_closed_endpoint() {
+        let mut k = setup_kernel();
+        let (_, ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
+        let ep_obj_id = k
+            .spaces
+            .get(0)
+            .unwrap()
+            .handles()
+            .lookup(HandleId(ep_hid as u32))
+            .unwrap()
+            .object_id;
+
+        k.endpoints.get_mut(ep_obj_id).unwrap().close_peer();
+
+        let mut buf = [0u8; 128];
+        let (err, _) = call(
+            &mut k,
+            num::CALL,
+            &[ep_hid, buf.as_mut_ptr() as u64, 0, 0, 0, 0],
+        );
+
+        assert_eq!(err, SyscallError::PeerClosed as u64);
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn event_wait_buffer_wrong_handle_type() {
+        let mut k = setup_kernel();
+        let (_, vmo_hid) = call(
+            &mut k,
+            num::VMO_CREATE,
+            &[config::PAGE_SIZE as u64, 0, 0, 0, 0, 0],
+        );
+        let wait_buf: [u32; 3] = [vmo_hid as u32, 0b1, 0];
+        let result = call(
+            &mut k,
+            num::EVENT_WAIT,
+            &[wait_buf.as_ptr() as u64, 1, 0, 0, 0, 0],
+        );
+
+        assert_eq!(result.0, SyscallError::WrongHandleType as u64);
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn event_wait_buffer_zero_count() {
+        let mut k = setup_kernel();
+        let buf: [u32; 3] = [0, 0, 0];
+        let result = call(
+            &mut k,
+            num::EVENT_WAIT,
+            &[buf.as_ptr() as u64, 0, 0, 0, 0, 0],
+        );
+
+        assert_eq!(result.0, SyscallError::InvalidArgument as u64);
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn event_wait_buffer_all_zero_masks() {
+        let mut k = setup_kernel();
+        let (_, evt_hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+        let wait_buf: [u32; 3] = [evt_hid as u32, 0, 0];
+        let result = call(
+            &mut k,
+            num::EVENT_WAIT,
+            &[wait_buf.as_ptr() as u64, 1, 0, 0, 0, 0],
+        );
+
+        assert_eq!(
+            result.0,
+            SyscallError::InvalidArgument as u64,
+            "all-zero masks means no events to wait on"
+        );
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn reply_to_non_blocked_caller() {
+        let mut k = setup_kernel();
+        let (_, ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
+        let mut call_buf = [0u8; 128];
+
+        call(
+            &mut k,
+            num::CALL,
+            &[ep_hid, call_buf.as_mut_ptr() as u64, 4, 0, 0, 0],
+        );
+
+        let mut recv_buf = [0u8; 128];
+        let (_, packed) = call(
+            &mut k,
+            num::RECV,
+            &[ep_hid, recv_buf.as_mut_ptr() as u64, 128, 0, 0, 0],
+        );
+
+        let reply_cap = packed >> 32;
+
+        crate::sched::wake(&mut k, ThreadId(0), 0);
+
+        assert_eq!(
+            k.threads.get(0).unwrap().state(),
+            crate::thread::ThreadRunState::Ready,
+        );
+
+        let (err, _) = call(&mut k, num::REPLY, &[ep_hid, reply_cap, 0, 0, 0, 0]);
+
+        assert_eq!(
+            err,
+            SyscallError::InvalidArgument as u64,
+            "reply to non-blocked caller must fail"
+        );
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn reply_with_handles_exceeds_caller_capacity() {
+        let mut k = setup_kernel();
+        let (_, ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
+        let mut call_buf = [0u8; 128];
+
+        call(
+            &mut k,
+            num::CALL,
+            &[ep_hid, call_buf.as_mut_ptr() as u64, 0, 0, 0, 0],
+        );
+
+        let mut recv_buf = [0u8; 128];
+        let (_, packed) = call(
+            &mut k,
+            num::RECV,
+            &[ep_hid, recv_buf.as_mut_ptr() as u64, 128, 0, 0, 0],
+        );
+
+        let reply_cap = packed >> 32;
+
+        for _ in 0..config::MAX_HANDLES - 2 {
+            let (err, _) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+
+            if err != 0 {
+                break;
+            }
+        }
+
+        let (_, extra) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+
+        if extra > 0 {
+            let handle_ids = [extra as u32];
+            let (err, _) = call(
+                &mut k,
+                num::REPLY,
+                &[ep_hid, reply_cap, 0, 0, handle_ids.as_ptr() as u64, 1],
+            );
+
+            assert_eq!(
+                err,
+                SyscallError::BufferFull as u64,
+                "reply with handles when caller's handle table is full"
+            );
+        }
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn recv_on_peer_closed_endpoint_returns_error() {
+        let mut k = setup_kernel();
+        let (_, ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
+        let ep_obj_id = k
+            .spaces
+            .get(0)
+            .unwrap()
+            .handles()
+            .lookup(HandleId(ep_hid as u32))
+            .unwrap()
+            .object_id;
+
+        k.endpoints.get_mut(ep_obj_id).unwrap().close_peer();
+
+        let mut buf = [0u8; 128];
+        let (err, _) = call(
+            &mut k,
+            num::RECV,
+            &[ep_hid, buf.as_mut_ptr() as u64, 128, 0, 0, 0],
+        );
+
+        assert_eq!(err, SyscallError::PeerClosed as u64);
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn install_handles_buffer_full() {
+        let mut k = setup_kernel();
+        let (_, ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
+        let (_, vmo_hid) = call(
+            &mut k,
+            num::VMO_CREATE,
+            &[config::PAGE_SIZE as u64, 0, 0, 0, 0, 0],
+        );
+
+        let handle_ids = [vmo_hid as u32];
+        let mut call_buf = [0u8; 128];
+        let (err, _) = call(
+            &mut k,
+            num::CALL,
+            &[
+                ep_hid,
+                call_buf.as_mut_ptr() as u64,
+                0,
+                handle_ids.as_ptr() as u64,
+                1,
+                0,
+            ],
+        );
+
+        assert_eq!(err, 0);
+
+        let mut recv_buf = [0u8; 128];
+        let mut recv_handles = [0u32; 1];
+        let (err, _) = call(
+            &mut k,
+            num::RECV,
+            &[
+                ep_hid,
+                recv_buf.as_mut_ptr() as u64,
+                128,
+                recv_handles.as_mut_ptr() as u64,
+                0,
+                0,
+            ],
+        );
+
+        assert_eq!(
+            err,
+            SyscallError::BufferFull as u64,
+            "recv with handle_cap=0 when call transferred handles must fail"
+        );
+
+        crate::invariants::assert_valid(&*k);
+    }
 }
