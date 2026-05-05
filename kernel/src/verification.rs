@@ -1758,4 +1758,90 @@ mod tests {
             SyscallError::GenerationMismatch,
         );
     }
+
+    // ── Struct layout audit ──────────────────────────────────────────
+
+    #[test]
+    fn struct_layout_audit() {
+        use crate::{
+            address_space::AddressSpace,
+            handle::{Handle, HandleTable},
+            thread::RunQueue,
+        };
+
+        // Handle: must fit in one cache line for fast lookup.
+        assert!(
+            core::mem::size_of::<Handle>() <= 128,
+            "Handle ({} bytes) exceeds one M4 Pro cache line",
+            core::mem::size_of::<Handle>(),
+        );
+
+        // Thread: track size for regression detection.
+        let thread_size = core::mem::size_of::<Thread>();
+
+        assert!(
+            thread_size <= 512,
+            "Thread grew to {thread_size} bytes — audit for field bloat",
+        );
+
+        // Event: track size.
+        let event_size = core::mem::size_of::<Event>();
+
+        assert!(
+            event_size <= 512,
+            "Event grew to {event_size} bytes — audit for field bloat",
+        );
+
+        // Endpoint: inherently large (inline PendingCalls), just track upper bound.
+        let ep_size = core::mem::size_of::<Endpoint>();
+
+        assert!(
+            ep_size <= 16384,
+            "Endpoint grew to {ep_size} bytes — unexpected growth",
+        );
+
+        // Kernel: the central struct, heap-allocated via Box.
+        let kernel_size = core::mem::size_of::<Kernel>();
+
+        assert!(
+            kernel_size <= 131072,
+            "Kernel grew to {kernel_size} bytes — unexpected growth",
+        );
+
+        // Print actual sizes for documentation (visible with --nocapture).
+        println!("--- struct layout audit ---");
+        println!(
+            "  Handle:      {:>6} bytes  (cache lines: {})",
+            core::mem::size_of::<Handle>(),
+            (core::mem::size_of::<Handle>() + 127) / 128,
+        );
+        println!(
+            "  HandleTable: {:>6} bytes",
+            core::mem::size_of::<HandleTable>(),
+        );
+        println!(
+            "  Thread:      {:>6} bytes  (cache lines: {})",
+            thread_size,
+            (thread_size + 127) / 128,
+        );
+        println!(
+            "  Event:       {:>6} bytes  (cache lines: {})",
+            event_size,
+            (event_size + 127) / 128,
+        );
+        println!(
+            "  Endpoint:    {:>6} bytes  (cache lines: {})",
+            ep_size,
+            (ep_size + 127) / 128,
+        );
+        println!(
+            "  AddrSpace:   {:>6} bytes",
+            core::mem::size_of::<AddressSpace>(),
+        );
+        println!(
+            "  RunQueue:    {:>6} bytes",
+            core::mem::size_of::<RunQueue>(),
+        );
+        println!("  Kernel:      {:>6} bytes", kernel_size);
+    }
 }

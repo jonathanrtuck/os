@@ -71,6 +71,13 @@ pub struct Event {
     refcount: usize,
 }
 
+// Verify the compiler's chosen layout for Event. Rust's default repr
+// reorders fields — these assertions track the actual layout to catch
+// regressions if field additions push hot data to a new cache line.
+const _: () = {
+    assert!(core::mem::size_of::<Event>() <= 512);
+};
+
 #[allow(clippy::new_without_default)]
 impl Event {
     pub fn new(id: EventId) -> Self {

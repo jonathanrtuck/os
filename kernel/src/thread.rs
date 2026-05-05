@@ -54,6 +54,14 @@ pub struct Thread {
     register_state: Option<Box<RegisterState>>,
 }
 
+// Verify Thread doesn't grow unexpectedly. The struct is heap-allocated
+// (Box in ObjectTable), so absolute offset < 128 isn't achievable with
+// Rust's default repr (the compiler places the wait_events array first).
+// Instead, track total size to catch field bloat.
+const _: () = {
+    assert!(core::mem::size_of::<Thread>() <= 512);
+};
+
 #[allow(clippy::new_without_default)]
 impl Thread {
     pub fn new(
@@ -353,6 +361,12 @@ pub struct RunQueue {
     queues: [FixedRing; NUM_PRIORITY_LEVELS],
     current: Option<ThreadId>,
 }
+
+// RunQueue.current is checked on every dispatch to identify the calling
+// thread. Verify it's within reach of the same cache line as the queues.
+const _: () = {
+    assert!(core::mem::offset_of!(RunQueue, current) < 128);
+};
 
 #[allow(clippy::new_without_default)]
 impl RunQueue {

@@ -21,6 +21,12 @@ pub struct Handle {
     pub badge: u32,
 }
 
+// Handle must fit in one M4 Pro cache line (128 bytes) — every syscall
+// begins with a handle lookup, so this is always the first data touched.
+const _: () = {
+    assert!(core::mem::size_of::<Handle>() <= 128);
+};
+
 /// Per-address-space handle table. Fixed-size array, O(1) lookup and alloc.
 pub struct HandleTable {
     entries: [Option<Handle>; config::MAX_HANDLES],
