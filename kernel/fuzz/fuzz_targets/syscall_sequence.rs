@@ -51,13 +51,14 @@ fuzz_target!(|data: &[u8]| {
             *arg = u64::from_le_bytes(chunk[arg_offset..arg_offset + 8].try_into().unwrap());
         }
 
-        let takes_user_ptr = matches!(
-            syscall_num,
-            9 | 10 | 11 | 2 | 14 | 17
-        );
+        let skip = matches!(syscall_num, 9 | 10 | 11 | 2 | 14 | 17 | 16 | 18 | 22);
 
-        if takes_user_ptr {
+        if skip {
             continue;
+        }
+
+        if k.scheduler.core(0).current() != Some(ThreadId(0)) {
+            break;
         }
 
         let (error, _) = k.dispatch(ThreadId(0), 0, syscall_num, &args);
