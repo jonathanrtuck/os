@@ -1844,4 +1844,227 @@ mod tests {
         );
         println!("  Kernel:      {:>6} bytes", kernel_size);
     }
+
+    // =========================================================================
+    // ERROR INJECTION: OBJECT TABLE EXHAUSTION
+    // =========================================================================
+
+    #[test]
+    fn vmo_table_exhaustion_and_recovery() {
+        let mut k = setup_kernel();
+        let mut handles = alloc::vec::Vec::new();
+
+        for _ in 0..config::MAX_VMOS {
+            let (err, hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
+            if err != 0 {
+                break;
+            }
+            handles.push(hid);
+        }
+
+        let count = handles.len();
+        assert!(count > 0);
+
+        let (err, _) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
+        assert_ne!(err, 0, "should fail when VMO table is full");
+
+        let last = handles.pop().unwrap();
+        let (err, _) = call(&mut k, num::HANDLE_CLOSE, &[last, 0, 0, 0, 0, 0]);
+        assert_eq!(err, 0);
+
+        let (err, _) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
+        assert_eq!(err, 0, "should recover after closing one VMO");
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn event_table_exhaustion_and_recovery() {
+        let mut k = setup_kernel();
+        let mut handles = alloc::vec::Vec::new();
+
+        for _ in 0..config::MAX_EVENTS {
+            let (err, hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+            if err != 0 {
+                break;
+            }
+            handles.push(hid);
+        }
+
+        let count = handles.len();
+        assert!(count > 0);
+
+        let (err, _) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+        assert_ne!(err, 0, "should fail when event table is full");
+
+        let last = handles.pop().unwrap();
+        let (err, _) = call(&mut k, num::HANDLE_CLOSE, &[last, 0, 0, 0, 0, 0]);
+        assert_eq!(err, 0);
+
+        let (err, _) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+        assert_eq!(err, 0, "should recover after closing one event");
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn endpoint_table_exhaustion_and_recovery() {
+        let mut k = setup_kernel();
+        let mut handles = alloc::vec::Vec::new();
+
+        for _ in 0..config::MAX_ENDPOINTS {
+            let (err, hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
+            if err != 0 {
+                break;
+            }
+            handles.push(hid);
+        }
+
+        let count = handles.len();
+        assert!(count > 0);
+
+        let (err, _) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
+        assert_ne!(err, 0, "should fail when endpoint table is full");
+
+        let last = handles.pop().unwrap();
+        let (err, _) = call(&mut k, num::HANDLE_CLOSE, &[last, 0, 0, 0, 0, 0]);
+        assert_eq!(err, 0);
+
+        let (err, _) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
+        assert_eq!(err, 0, "should recover after closing one endpoint");
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    // =========================================================================
+    // ERROR INJECTION: THREAD_CREATE_IN ROLLBACK
+    // =========================================================================
+
+    #[test]
+    fn thread_create_in_rollback_on_invalid_handle() {
+        let mut k = setup_kernel();
+
+        let (err, space_hid) = call(&mut k, num::SPACE_CREATE, &[0; 6]);
+        assert_eq!(err, 0);
+
+        let invalid_handle_id = 999u32;
+        let handle_ids = [invalid_handle_id];
+
+        let thread_count_before = k.threads.count();
+        let (err, _) = call(
+            &mut k,
+            num::THREAD_CREATE_IN,
+            &[space_hid, 0x1000, 0x2000, 0, handle_ids.as_ptr() as u64, 1],
+        );
+
+        assert_ne!(err, 0, "should fail with invalid handle");
+        assert_eq!(
+            k.threads.count(),
+            thread_count_before,
+            "thread must be cleaned up on handle clone failure"
+        );
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn thread_create_in_success_increments_refcount() {
+        let mut k = setup_kernel();
+
+        let (err, space_hid) = call(&mut k, num::SPACE_CREATE, &[0; 6]);
+        assert_eq!(err, 0);
+
+        let (err, vmo_hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
+        assert_eq!(err, 0);
+
+        let vmo_obj_id = k
+            .spaces
+            .get(0)
+            .unwrap()
+            .handles()
+            .lookup(HandleId(vmo_hid as u32))
+            .unwrap()
+            .object_id;
+        let rc_before = k.vmos.get(vmo_obj_id).unwrap().refcount();
+
+        let handle_ids = [vmo_hid as u32];
+        let (err, _) = call(
+            &mut k,
+            num::THREAD_CREATE_IN,
+            &[space_hid, 0x1000, 0x2000, 0, handle_ids.as_ptr() as u64, 1],
+        );
+        assert_eq!(err, 0);
+
+        let rc_after = k.vmos.get(vmo_obj_id).unwrap().refcount();
+        assert_eq!(
+            rc_after,
+            rc_before + 1,
+            "refcount must increase by 1 for cloned handle"
+        );
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    // =========================================================================
+    // ERROR INJECTION: INPUT BOUNDARY VALUES
+    // =========================================================================
+
+    #[test]
+    fn null_pointer_rejected_for_ipc_calls() {
+        let mut k = setup_kernel();
+        let (err, ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
+        assert_eq!(err, 0);
+
+        let (err, _) = call(&mut k, num::CALL, &[ep_hid, 0, 8, 0, 0, 0]);
+        assert_ne!(err, 0, "CALL with null msg_ptr and nonzero len must fail");
+
+        let (err, _) = call(&mut k, num::RECV, &[ep_hid, 0, 128, 0, 0, 0]);
+        assert_ne!(err, 0, "RECV with null out_buf and nonzero cap must fail");
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn zero_length_message_accepted() {
+        let mut k = setup_kernel();
+        let (err, ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
+        assert_eq!(err, 0);
+
+        let mut buf = [0u8; 128];
+        let (err, _) = call(
+            &mut k,
+            num::CALL,
+            &[ep_hid, buf.as_mut_ptr() as u64, 0, 0, 0, 0],
+        );
+        assert_eq!(err, 0, "zero-length CALL must succeed");
+
+        let (err, packed) = call(
+            &mut k,
+            num::RECV,
+            &[ep_hid, buf.as_mut_ptr() as u64, 128, 0, 0, 0],
+        );
+        assert_eq!(err, 0, "RECV must succeed");
+
+        let msg_len = (packed & 0xFFFF_FFFF) as usize;
+        assert_eq!(msg_len, 0, "received message must be zero-length");
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn max_ipc_handles_boundary() {
+        let mut k = setup_kernel();
+        let (err, ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
+        assert_eq!(err, 0);
+
+        let too_many = config::MAX_IPC_HANDLES + 1;
+        let (err, _) = call(&mut k, num::CALL, &[ep_hid, 0, 0, 0, too_many as u64, 0]);
+        assert_eq!(
+            err,
+            SyscallError::InvalidArgument as u64,
+            "CALL with too many handles must fail"
+        );
+
+        crate::invariants::assert_valid(&*k);
+    }
 }
