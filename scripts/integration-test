@@ -67,6 +67,8 @@ map_exit_code() {
         33[0-9]) echo "diff_error_codes" ;;
         34[0-9]) echo "diff_vmo_snapshot_seal_resize" ;;
         35[0-9]) echo "diff_handle_slot_reuse" ;;
+        40[0-7]) echo "smp_stress_setup" ;;
+        41[0-7]) echo "smp_stress_worker" ;;
         57005) echo "panic (0xDEAD)" ;;
         *) echo "unknown (code $code)" ;;
     esac

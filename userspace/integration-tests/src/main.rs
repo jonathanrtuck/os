@@ -531,6 +531,89 @@ fn diff_handle_slot_reuse() {
     assert_ok(abi::handle::close(h3), 358);
 }
 
+// ── SMP stress test ──────────────────────────────────────────────
+
+const SMP_ITERATIONS: usize = 200;
+
+fn test_smp_stress() {
+    let num_cores = assert_ok(abi::system::info(abi::system::INFO_NUM_CORES), 400) as usize;
+
+    if num_cores < 2 {
+        return;
+    }
+
+    let worker_count = if num_cores > 4 { 4 } else { num_cores };
+
+    let sync_event = assert_ok(abi::event::create(), 401);
+
+    for i in 0..worker_count {
+        let stack_vmo = assert_ok(abi::vmo::create(PAGE_SIZE * 4, 0), 402);
+        let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
+        let stack_va = assert_ok(abi::vmo::map(stack_vmo, 0, rw), 403);
+        let stack_top = stack_va + PAGE_SIZE * 4;
+
+        let arg = (sync_event.0 as usize) | (i << 16) | (SMP_ITERATIONS << 32);
+
+        let thread = assert_ok(
+            abi::thread::create(smp_worker_entry as *const () as usize, stack_top, arg),
+            404,
+        );
+
+        let _ = abi::thread::set_affinity(thread, i as u64);
+    }
+
+    let done_mask: u64 = (1u64 << worker_count) - 1;
+
+    let fired = assert_ok(abi::event::wait(&[(sync_event, done_mask)]), 405);
+    assert_true(fired.0 == sync_event.0, 406);
+
+    assert_ok(abi::handle::close(sync_event), 407);
+}
+
+extern "C" fn smp_worker_entry(arg: usize) -> ! {
+    let event_handle = Handle((arg & 0xFFFF) as u32);
+    let worker_id = (arg >> 16) & 0xFFFF;
+    let iterations = arg >> 32;
+
+    for _ in 0..iterations {
+        let vmo = match abi::vmo::create(PAGE_SIZE, 0) {
+            Ok(h) => h,
+            Err(_) => abi::thread::exit(410),
+        };
+        let ev = match abi::event::create() {
+            Ok(h) => h,
+            Err(_) => abi::thread::exit(411),
+        };
+
+        if abi::event::signal(ev, 0xFF).is_err() {
+            abi::thread::exit(412);
+        }
+        if abi::event::clear(ev, 0x0F).is_err() {
+            abi::thread::exit(413);
+        }
+
+        let snap = match abi::vmo::snapshot(vmo) {
+            Ok(h) => h,
+            Err(_) => abi::thread::exit(414),
+        };
+
+        if abi::handle::close(snap).is_err() {
+            abi::thread::exit(415);
+        }
+        if abi::handle::close(ev).is_err() {
+            abi::thread::exit(416);
+        }
+        if abi::handle::close(vmo).is_err() {
+            abi::thread::exit(417);
+        }
+    }
+
+    let done_bit = 1u64 << worker_id;
+    let _ = abi::event::signal(event_handle, done_bit);
+
+    abi::thread::exit(0);
+}
+
 // ── Entry point ───────────────────────────────────────────────────
 
 #[unsafe(no_mangle)]
@@ -588,6 +671,9 @@ extern "C" fn _start() -> ! {
     diff_error_codes();
     diff_vmo_snapshot_seal_resize();
     diff_handle_slot_reuse();
+
+    // SMP stress (multiple cores, concurrent object ops)
+    test_smp_stress();
 
     // All tests passed.
     abi::thread::exit(0);

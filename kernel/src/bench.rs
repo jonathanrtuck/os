@@ -430,6 +430,26 @@ pub fn run(kern: &mut Kernel) {
     } else {
         crate::println!("benchmarks: STRUCTURAL REGRESSION DETECTED");
     }
+
+    teardown_bench_env(kern, current);
+}
+
+fn teardown_bench_env(kern: &mut Kernel, thread_id: ThreadId) {
+    let space_id = kern
+        .threads
+        .get(thread_id.0)
+        .unwrap()
+        .address_space()
+        .unwrap();
+
+    kern.scheduler.remove(thread_id);
+    kern.threads.dealloc(thread_id.0);
+    kern.alive_threads = kern.alive_threads.saturating_sub(1);
+
+    let space = kern.spaces.get_mut(space_id.0).unwrap();
+
+    space.set_thread_head(None);
+    kern.spaces.dealloc(space_id.0);
 }
 
 fn bench_document_editing(kern: &mut Kernel, current: ThreadId) -> BenchResult {
