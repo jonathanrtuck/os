@@ -2084,7 +2084,7 @@ mod tests {
     use alloc::boxed::Box;
 
     use super::*;
-    use crate::types::Priority;
+    use crate::{thread::ThreadRunState, types::Priority};
 
     fn setup_kernel() -> Box<Kernel> {
         crate::frame::arch::page_table::reset_asid_pool();
@@ -7179,6 +7179,128 @@ mod tests {
         let (err, _) = call(&mut k, num::SPACE_CREATE, &[0; 6]);
 
         assert_eq!(err, 0, "should recover after destroying one space");
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    // -- Phase 8: Multi-core scheduling stress --
+
+    #[test]
+    fn multi_core_thread_creation_and_scheduling() {
+        crate::frame::arch::page_table::reset_asid_pool();
+
+        let mut k = Box::new(Kernel::new(2));
+        let space = AddressSpace::new(AddressSpaceId(0), 1, 0);
+
+        k.spaces.alloc(space);
+
+        let t0 = Thread::new(
+            ThreadId(0),
+            Some(AddressSpaceId(0)),
+            Priority::Medium,
+            0,
+            0,
+            0,
+        );
+
+        k.threads.alloc(t0);
+        k.threads
+            .get_mut(0)
+            .unwrap()
+            .set_state(ThreadRunState::Running);
+        k.scheduler.core_mut(0).set_current(Some(ThreadId(0)));
+
+        let (err, _) = k.dispatch(
+            ThreadId(0),
+            0,
+            num::THREAD_CREATE,
+            &[0x1000, 0x2000, 0, 0, 0, 0],
+        );
+
+        assert_eq!(err, 0);
+
+        let (err, _) = k.dispatch(
+            ThreadId(0),
+            0,
+            num::THREAD_CREATE,
+            &[0x3000, 0x4000, 0, 0, 0, 0],
+        );
+
+        assert_eq!(err, 0);
+
+        let total_ready = k.scheduler.core(0).total_ready() + k.scheduler.core(1).total_ready();
+
+        assert!(total_ready >= 2, "both new threads should be ready");
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn multi_core_event_signal_cross_core_wake() {
+        let mut k = setup_kernel();
+        let evt = create_event(&mut k);
+
+        k.dispatch(ThreadId(0), 0, num::EVENT_WAIT, &[evt, 0b1, 0, 0, 0, 0]);
+
+        assert_eq!(
+            k.threads.get(0).unwrap().state(),
+            ThreadRunState::Blocked,
+            "thread 0 should be blocked waiting for event"
+        );
+
+        k.events.get_mut(0).unwrap().signal(0b1);
+
+        crate::sched::wake(&mut k, ThreadId(0), 0);
+
+        assert_eq!(
+            k.threads.get(0).unwrap().state(),
+            ThreadRunState::Ready,
+            "thread 0 should be woken after signal"
+        );
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn rapid_create_destroy_cycle_stress() {
+        let mut k = setup_kernel();
+
+        for _ in 0..100 {
+            let vmo = create_vmo(&mut k);
+            let evt = create_event(&mut k);
+            let ep = create_endpoint(&mut k);
+
+            call(&mut k, num::HANDLE_CLOSE, &[vmo, 0, 0, 0, 0, 0]);
+            call(&mut k, num::HANDLE_CLOSE, &[evt, 0, 0, 0, 0, 0]);
+            call(&mut k, num::HANDLE_CLOSE, &[ep, 0, 0, 0, 0, 0]);
+        }
+
+        crate::invariants::assert_valid(&*k);
+
+        assert_eq!(k.vmos.count(), 0, "all VMOs should be freed");
+        assert_eq!(k.events.count(), 0, "all events should be freed");
+        assert_eq!(k.endpoints.count(), 0, "all endpoints should be freed");
+    }
+
+    #[test]
+    fn ipc_call_recv_reply_50_rapid_rounds() {
+        let mut k = setup_kernel();
+        let ep = create_endpoint(&mut k);
+
+        for round in 0..50u8 {
+            let msg = [round];
+            let mut reply_buf = [0u8; 128];
+
+            do_call(&mut k, ep, &msg, &mut reply_buf);
+
+            let mut recv_buf = [0u8; 128];
+            let (len, reply_cap) = do_recv(&mut k, ep, &mut recv_buf);
+
+            assert_eq!(&recv_buf[..len], &[round]);
+
+            do_reply(&mut k, ep, reply_cap, &[round + 100]);
+            resume_caller(&mut k);
+        }
 
         crate::invariants::assert_valid(&*k);
     }
