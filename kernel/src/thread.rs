@@ -494,8 +494,7 @@ impl Scheduler {
             .iter()
             .enumerate()
             .min_by_key(|(_, rq)| rq.total_ready())
-            .map(|(i, _)| i)
-            .unwrap_or(0)
+            .map_or(0, |(i, _)| i)
     }
 }
 

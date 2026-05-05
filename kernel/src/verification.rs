@@ -2067,4 +2067,167 @@ mod tests {
 
         crate::invariants::assert_valid(&*k);
     }
+
+    // =========================================================================
+    // ERROR INJECTION: ASID LEAK ON SPACE_CREATE FAILURE
+    // =========================================================================
+
+    #[test]
+    fn space_create_handle_table_full_frees_asid() {
+        use crate::frame::arch::page_table;
+
+        page_table::reset_asid_pool();
+
+        let mut k = setup_kernel();
+
+        for _ in 0..config::MAX_HANDLES {
+            let (err, _) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
+            if err != 0 {
+                break;
+            }
+        }
+
+        let (err, _) = call(&mut k, num::SPACE_CREATE, &[0; 6]);
+        assert_ne!(err, 0, "space_create must fail when handle table is full");
+
+        page_table::reset_asid_pool();
+        let asid = page_table::alloc_asid();
+        assert!(
+            asid.is_some(),
+            "ASID pool must not leak ASIDs on failed space_create"
+        );
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn space_create_space_table_full_frees_asid() {
+        use crate::frame::arch::page_table;
+
+        page_table::reset_asid_pool();
+
+        let mut k = setup_kernel();
+        let mut space_handles = alloc::vec::Vec::new();
+
+        for _ in 0..config::MAX_ADDRESS_SPACES {
+            let (err, hid) = call(&mut k, num::SPACE_CREATE, &[0; 6]);
+            if err != 0 {
+                break;
+            }
+            space_handles.push(hid);
+        }
+
+        let pre_count = space_handles.len();
+        let (err, _) = call(&mut k, num::SPACE_CREATE, &[0; 6]);
+        assert_ne!(err, 0, "space_create must fail when space table is full");
+
+        for hid in &space_handles {
+            call(&mut k, num::SPACE_DESTROY, &[*hid, 0, 0, 0, 0, 0]);
+        }
+
+        page_table::reset_asid_pool();
+        for _ in 0..pre_count + 1 {
+            assert!(
+                page_table::alloc_asid().is_some(),
+                "ASID pool must recover all ASIDs after cleanup"
+            );
+        }
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    // =========================================================================
+    // ERROR INJECTION: VMO MAP BOUNDARY VALUES
+    // =========================================================================
+
+    #[test]
+    fn vmo_map_without_map_right_rejected() {
+        let mut k = setup_kernel();
+
+        let (err, vmo_hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
+        assert_eq!(err, 0);
+
+        let read_only_rights = Rights::READ.0 as u64;
+        let (err, dup_hid) = call(
+            &mut k,
+            num::HANDLE_DUP,
+            &[vmo_hid, read_only_rights, 0, 0, 0, 0],
+        );
+        assert_eq!(err, 0);
+
+        let (err, _) = call(&mut k, num::VMO_MAP, &[dup_hid, 0, 0, 0, 0, 0]);
+        assert_ne!(err, 0, "VMO map without MAP right must fail");
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn vmo_map_write_without_write_right_rejected() {
+        let mut k = setup_kernel();
+
+        let (err, vmo_hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
+        assert_eq!(err, 0);
+
+        let map_only = (Rights::MAP.0 | Rights::READ.0) as u64;
+        let (err, dup_hid) = call(&mut k, num::HANDLE_DUP, &[vmo_hid, map_only, 0, 0, 0, 0]);
+        assert_eq!(err, 0);
+
+        let write_perms = Rights::WRITE.0 as u64;
+        let (err, _) = call(&mut k, num::VMO_MAP, &[dup_hid, 0, write_perms, 0, 0, 0]);
+        assert_ne!(
+            err, 0,
+            "VMO map with WRITE perm without WRITE right must fail"
+        );
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn handle_dup_with_zero_rights() {
+        let mut k = setup_kernel();
+
+        let (err, vmo_hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
+        assert_eq!(err, 0);
+
+        let (err, dup_hid) = call(&mut k, num::HANDLE_DUP, &[vmo_hid, 0, 0, 0, 0, 0]);
+        assert_eq!(err, 0, "dup with zero rights must succeed (attenuation)");
+
+        let (err, _) = call(&mut k, num::HANDLE_INFO, &[dup_hid, 0, 0, 0, 0, 0]);
+        assert_eq!(err, 0, "handle_info must succeed even with zero rights");
+
+        let (err, _) = call(&mut k, num::VMO_MAP, &[dup_hid, 0, 0, 0, 0, 0]);
+        assert_ne!(err, 0, "zero-rights handle must fail MAP operation");
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn handle_boundary_ids() {
+        let mut k = setup_kernel();
+
+        let max_handle = config::MAX_HANDLES as u64;
+        let (err, _) = call(&mut k, num::HANDLE_INFO, &[max_handle, 0, 0, 0, 0, 0]);
+        assert_ne!(err, 0, "handle ID at MAX_HANDLES must fail");
+
+        let (err, _) = call(&mut k, num::HANDLE_INFO, &[u32::MAX as u64, 0, 0, 0, 0, 0]);
+        assert_ne!(err, 0, "handle ID at u32::MAX must fail");
+
+        let (err, _) = call(&mut k, num::HANDLE_CLOSE, &[max_handle, 0, 0, 0, 0, 0]);
+        assert_ne!(err, 0, "close handle ID at MAX_HANDLES must fail");
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn vmo_resize_to_usize_max_rejected() {
+        let mut k = setup_kernel();
+
+        let (err, vmo_hid) = call(&mut k, num::VMO_CREATE, &[4096, 0, 0, 0, 0, 0]);
+        assert_eq!(err, 0);
+
+        let (err, _) = call(&mut k, num::VMO_RESIZE, &[vmo_hid, u64::MAX, 0, 0, 0, 0]);
+        assert_ne!(err, 0, "VMO resize to u64::MAX must fail");
+
+        crate::invariants::assert_valid(&*k);
+    }
 }

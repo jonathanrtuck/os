@@ -117,6 +117,16 @@ impl Kernel {
     }
 
     #[cfg(any(target_os = "none", test))]
+    fn free_asid(&self, asid: u8) {
+        if asid != 0 {
+            crate::frame::arch::page_table::free_asid(crate::frame::arch::page_table::Asid(asid));
+        }
+    }
+
+    #[cfg(not(any(target_os = "none", test)))]
+    fn free_asid(&self, _asid: u8) {}
+
+    #[cfg(any(target_os = "none", test))]
     fn init_thread_registers(thread: &mut Thread, entry: usize, stack_top: usize, arg: usize) {
         let rs = thread.init_register_state();
 
@@ -715,10 +725,10 @@ impl Kernel {
         let caller_space_id = self.thread_space_id(current)?;
         let asid = self.alloc_asid()?;
         let space = Box::new(AddressSpace::new(AddressSpaceId(0), asid, 0));
-        let (idx, generation) = self
-            .spaces
-            .alloc_boxed(space)
-            .ok_or(SyscallError::OutOfMemory)?;
+        let Some((idx, generation)) = self.spaces.alloc_boxed(space) else {
+            self.free_asid(asid);
+            return Err(SyscallError::OutOfMemory);
+        };
 
         self.spaces.get_mut(idx).unwrap().id = AddressSpaceId(idx);
 
@@ -735,7 +745,9 @@ impl Kernel {
         ) {
             Ok(hid) => Ok(hid.0 as u64),
             Err(e) => {
+                let asid = self.spaces.get(idx).map_or(0, |s| s.asid());
                 self.spaces.dealloc(idx);
+                self.free_asid(asid);
 
                 Err(e)
             }
@@ -1223,8 +1235,7 @@ impl Kernel {
             let caller_pri = self
                 .threads
                 .get(current.0)
-                .map(|t| t.effective_priority())
-                .unwrap_or(Priority::Idle);
+                .map_or(Priority::Idle, |t| t.effective_priority());
 
             if let Some(server) = self.threads.get_mut(server_tid.0) {
                 server.boost_priority(caller_pri);
@@ -1935,8 +1946,7 @@ impl Kernel {
             let (wait_evts, wait_n) = self
                 .threads
                 .get_mut(tid)
-                .map(|t| t.take_wait_events())
-                .unwrap_or(([0; config::MAX_MULTI_WAIT], 0));
+                .map_or(([0; config::MAX_MULTI_WAIT], 0), |t| t.take_wait_events());
 
             for &evt_id in &wait_evts[..wait_n as usize] {
                 if let Some(e) = self.events.get_mut(evt_id) {

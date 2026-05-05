@@ -22,9 +22,8 @@ pub fn block_current(kernel: &mut Kernel, current: ThreadId, core_id: usize) {
 
 /// Wake a blocked thread by marking it Ready and enqueuing it.
 pub fn wake(kernel: &mut Kernel, thread_id: ThreadId, core_id: usize) {
-    let thread = match kernel.threads.get_mut(thread_id.0) {
-        Some(t) => t,
-        None => return,
+    let Some(thread) = kernel.threads.get_mut(thread_id.0) else {
+        return;
     };
 
     if thread.state() != ThreadRunState::Blocked {
@@ -65,13 +64,10 @@ pub fn exit_current(kernel: &mut Kernel, current: ThreadId, core_id: usize, code
 /// state-machine-only operation — no actual register switching.
 #[inline(never)]
 fn switch_away(kernel: &mut Kernel, _current: ThreadId, core_id: usize) {
-    let next_id = match kernel.scheduler.pick_next(core_id) {
-        Some(id) => id,
-        None => {
-            kernel.scheduler.core_mut(core_id).set_current(None);
+    let Some(next_id) = kernel.scheduler.pick_next(core_id) else {
+        kernel.scheduler.core_mut(core_id).set_current(None);
 
-            return;
-        }
+        return;
     };
     let next = kernel.threads.get_mut(next_id.0).unwrap();
 

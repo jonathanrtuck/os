@@ -9,6 +9,7 @@
 //! Available in test, fuzzing, and debug builds. Zero cost in release kernel binary.
 
 use alloc::{collections::BTreeSet, format, string::String, vec::Vec};
+use core::fmt::Write;
 
 use crate::{
     syscall::Kernel,
@@ -115,7 +116,7 @@ fn check_endpoint_internal_counts(kernel: &Kernel, violations: &mut Vec<Violatio
         if let Err(msg) = ep.verify_internal_counts() {
             violations.push(Violation {
                 category: "endpoint",
-                detail: format!("endpoint #{}: {}", idx, msg),
+                detail: format!("endpoint #{idx}: {msg}"),
             });
         }
     }
@@ -126,7 +127,7 @@ fn check_event_internal_counts(kernel: &Kernel, violations: &mut Vec<Violation>)
         if let Err(msg) = evt.verify_internal_counts() {
             violations.push(Violation {
                 category: "event",
-                detail: format!("event #{}: {}", idx, msg),
+                detail: format!("event #{idx}: {msg}"),
             });
         }
     }
@@ -141,28 +142,21 @@ fn check_thread_space_linked_lists(kernel: &Kernel, violations: &mut Vec<Violati
             if !visited.insert(tid) {
                 violations.push(Violation {
                     category: "thread-list",
-                    detail: format!(
-                        "space {} thread list has cycle at thread #{}",
-                        space_idx, tid
-                    ),
+                    detail: format!("space {space_idx} thread list has cycle at thread #{tid}"),
                 });
 
                 break;
             }
 
-            let thread = match kernel.threads.get(tid) {
-                Some(t) => t,
-                None => {
-                    violations.push(Violation {
-                        category: "thread-list",
-                        detail: format!(
-                            "space {} thread list references deallocated thread #{}",
-                            space_idx, tid
-                        ),
-                    });
+            let Some(thread) = kernel.threads.get(tid) else {
+                violations.push(Violation {
+                    category: "thread-list",
+                    detail: format!(
+                        "space {space_idx} thread list references deallocated thread #{tid}",
+                    ),
+                });
 
-                    break;
-                }
+                break;
             };
 
             if thread.address_space() != Some(AddressSpaceId(space_idx)) {
@@ -238,7 +232,7 @@ fn check_thread_state_consistency(kernel: &Kernel, violations: &mut Vec<Violatio
                 if !in_scheduler {
                     violations.push(Violation {
                         category: "thread-state",
-                        detail: format!("thread {} is Ready but not in any run queue", idx),
+                        detail: format!("thread {idx} is Ready but not in any run queue"),
                     });
                 }
             }
@@ -246,7 +240,7 @@ fn check_thread_state_consistency(kernel: &Kernel, violations: &mut Vec<Violatio
                 if !in_scheduler {
                     violations.push(Violation {
                         category: "thread-state",
-                        detail: format!("thread {} is Running but not current on any core", idx),
+                        detail: format!("thread {idx} is Running but not current on any core"),
                     });
                 }
             }
@@ -254,7 +248,7 @@ fn check_thread_state_consistency(kernel: &Kernel, violations: &mut Vec<Violatio
                 if in_scheduler {
                     violations.push(Violation {
                         category: "thread-state",
-                        detail: format!("thread {} is Blocked but still in a run queue", idx),
+                        detail: format!("thread {idx} is Blocked but still in a run queue"),
                     });
                 }
             }
@@ -262,7 +256,7 @@ fn check_thread_state_consistency(kernel: &Kernel, violations: &mut Vec<Violatio
                 if in_scheduler {
                     violations.push(Violation {
                         category: "thread-state",
-                        detail: format!("thread {} is Exited but still in a run queue", idx),
+                        detail: format!("thread {idx} is Exited but still in a run queue"),
                     });
                 }
             }
@@ -280,7 +274,7 @@ fn check_mapping_consistency(kernel: &Kernel, violations: &mut Vec<Violation>) {
             if m.size == 0 {
                 violations.push(Violation {
                     category: "mapping",
-                    detail: format!("space {} mapping {} has zero size", space_idx, i),
+                    detail: format!("space {space_idx} mapping {i} has zero size"),
                 });
             }
 
@@ -638,7 +632,7 @@ fn check_object_reachability(kernel: &Kernel, violations: &mut Vec<Violation>) {
             if !is_mapped {
                 violations.push(Violation {
                     category: "orphan-vmo",
-                    detail: format!("VMO #{} has no handles and no mappings (orphaned)", idx),
+                    detail: format!("VMO #{idx} has no handles and no mappings (orphaned)"),
                 });
             }
         }
@@ -648,7 +642,7 @@ fn check_object_reachability(kernel: &Kernel, violations: &mut Vec<Violation>) {
         if !endpoint_refs.contains(&idx) {
             violations.push(Violation {
                 category: "orphan-endpoint",
-                detail: format!("endpoint #{} has no handles (orphaned)", idx),
+                detail: format!("endpoint #{idx} has no handles (orphaned)"),
             });
         }
     }
@@ -657,7 +651,7 @@ fn check_object_reachability(kernel: &Kernel, violations: &mut Vec<Violation>) {
         if !event_refs.contains(&idx) {
             violations.push(Violation {
                 category: "orphan-event",
-                detail: format!("event #{} has no handles (orphaned)", idx),
+                detail: format!("event #{idx} has no handles (orphaned)"),
             });
         }
     }
@@ -670,7 +664,7 @@ pub fn assert_valid(kernel: &Kernel) {
         let mut msg = String::from("KERNEL INVARIANT VIOLATIONS:\n");
 
         for v in &violations {
-            msg.push_str(&format!("  {}\n", v));
+            let _ = writeln!(msg, "  {v}");
         }
 
         panic!("{}", msg);

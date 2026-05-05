@@ -38,26 +38,23 @@ pub fn handle_data_abort(
     fault_addr: usize,
     is_write: bool,
 ) -> FaultAction {
-    let space_id = match kernel.thread_space_id(current) {
-        Ok(id) => id,
-        Err(_) => return FaultAction::Kill,
+    let Ok(space_id) = kernel.thread_space_id(current) else {
+        return FaultAction::Kill;
     };
-    let mapping = match kernel.spaces.get(space_id.0) {
-        Some(space) => space.find_mapping(fault_addr).cloned(),
-        None => return FaultAction::Kill,
-    };
-    let mapping = match mapping {
-        Some(m) => m,
-        None => return FaultAction::Kill,
+    let Some(mapping) = kernel
+        .spaces
+        .get(space_id.0)
+        .and_then(|space| space.find_mapping(fault_addr).copied())
+    else {
+        return FaultAction::Kill;
     };
 
     if is_write && !mapping.rights.contains(crate::types::Rights::WRITE) {
         return FaultAction::Kill;
     }
 
-    let vmo = match kernel.vmos.get(mapping.vmo_id.0) {
-        Some(v) => v,
-        None => return FaultAction::Kill,
+    let Some(vmo) = kernel.vmos.get(mapping.vmo_id.0) else {
+        return FaultAction::Kill;
     };
     let page_idx = (fault_addr - mapping.va_start) / crate::config::PAGE_SIZE;
 

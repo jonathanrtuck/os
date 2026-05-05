@@ -97,8 +97,7 @@ pub fn run(kern: &mut Kernel) {
 
         assert!(
             violations.is_empty(),
-            "POST: invariant violations: {:?}",
-            violations,
+            "POST: invariant violations: {violations:?}",
         );
     }
 

@@ -43,9 +43,7 @@ fn build_init(kernel_dir: &std::path::Path) {
         .status()
         .expect("failed to build init crate");
 
-    if !status.success() {
-        panic!("init crate build failed");
-    }
+    assert!(status.success(), "init crate build failed");
 
     let init_elf = init_dir.join(format!("target/aarch64-unknown-none/release/{crate_name}"));
     let status = Command::new("rust-objcopy")
@@ -58,9 +56,7 @@ fn build_init(kernel_dir: &std::path::Path) {
         .status()
         .expect("failed to run rust-objcopy on init binary");
 
-    if !status.success() {
-        panic!("rust-objcopy failed on init binary");
-    }
+    assert!(status.success(), "rust-objcopy failed on init binary");
 
     println!("cargo:rerun-if-changed=../userspace/init/src/main.rs");
     println!("cargo:rerun-if-changed=../userspace/init/link.ld");
