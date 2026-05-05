@@ -527,8 +527,19 @@ impl Kernel {
             return Err(SyscallError::InsufficientRights);
         }
 
+        let vmo_id = handle.object_id;
+        let aligned_new = new_size.next_multiple_of(config::PAGE_SIZE);
+
+        for (_, space) in self.spaces.iter_allocated_mut() {
+            for m in space.mappings() {
+                if m.vmo_id.0 == vmo_id && m.size > aligned_new {
+                    return Err(SyscallError::InvalidArgument);
+                }
+            }
+        }
+
         self.vmos
-            .get_mut(handle.object_id)
+            .get_mut(vmo_id)
             .ok_or(SyscallError::InvalidHandle)?
             .resize(new_size, |_pa| {
                 #[cfg(target_os = "none")]
