@@ -13,6 +13,8 @@
 
 #![no_std]
 #![deny(unsafe_code)]
+#![deny(unused_must_use)]
+#![deny(unreachable_patterns)]
 
 extern crate alloc;
 
@@ -31,7 +33,7 @@ pub mod fault;
 #[allow(unsafe_code)]
 pub mod frame;
 pub mod handle;
-#[cfg(test)]
+#[cfg(any(test, fuzzing))]
 pub mod invariants;
 pub mod irq;
 #[cfg(test)]
