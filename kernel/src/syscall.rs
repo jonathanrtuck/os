@@ -6986,7 +6986,11 @@ mod tests {
     fn thread_create_in_with_handles_increments_refcounts() {
         let mut k = setup_kernel();
         let (_, space_hid) = call(&mut k, num::SPACE_CREATE, &[0; 6]);
-        let (_, vmo_hid) = call(&mut k, num::VMO_CREATE, &[config::PAGE_SIZE as u64, 0, 0, 0, 0, 0]);
+        let (_, vmo_hid) = call(
+            &mut k,
+            num::VMO_CREATE,
+            &[config::PAGE_SIZE as u64, 0, 0, 0, 0, 0],
+        );
         let (_, ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
 
         let vmo_obj = k
@@ -7013,14 +7017,7 @@ mod tests {
         let (err, _) = call(
             &mut k,
             num::THREAD_CREATE_IN,
-            &[
-                space_hid,
-                0x1000,
-                0x2000,
-                0,
-                handle_ids.as_ptr() as u64,
-                2,
-            ],
+            &[space_hid, 0x1000, 0x2000, 0, handle_ids.as_ptr() as u64, 2],
         );
 
         assert_eq!(err, 0);
@@ -7048,6 +7045,140 @@ mod tests {
             1,
             "endpoint refcount should return to 1 after space destroy"
         );
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    // -- Error injection: object table exhaustion --
+
+    #[test]
+    fn vmo_table_exhaustion_and_recovery() {
+        let mut k = setup_kernel();
+        let mut created = 0;
+        let mut last_hid = 0u64;
+
+        loop {
+            let (err, hid) = call(
+                &mut k,
+                num::VMO_CREATE,
+                &[config::PAGE_SIZE as u64, 0, 0, 0, 0, 0],
+            );
+
+            if err != 0 {
+                assert!(
+                    err == SyscallError::OutOfMemory as u64,
+                    "expected OutOfMemory, got {err}"
+                );
+
+                break;
+            }
+
+            last_hid = hid;
+            created += 1;
+        }
+
+        assert!(created > 0);
+
+        call(&mut k, num::HANDLE_CLOSE, &[last_hid, 0, 0, 0, 0, 0]);
+
+        let (err, _) = call(
+            &mut k,
+            num::VMO_CREATE,
+            &[config::PAGE_SIZE as u64, 0, 0, 0, 0, 0],
+        );
+
+        assert_eq!(err, 0, "should recover after freeing one VMO");
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn event_table_exhaustion_and_recovery() {
+        let mut k = setup_kernel();
+        let mut created = 0;
+        let mut last_hid = 0u64;
+
+        loop {
+            let (err, hid) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+
+            if err != 0 {
+                assert!(
+                    err == SyscallError::OutOfMemory as u64,
+                    "expected OutOfMemory, got {err}"
+                );
+
+                break;
+            }
+
+            last_hid = hid;
+            created += 1;
+        }
+
+        assert!(created > 0);
+
+        call(&mut k, num::HANDLE_CLOSE, &[last_hid, 0, 0, 0, 0, 0]);
+
+        let (err, _) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
+
+        assert_eq!(err, 0, "should recover after freeing one event");
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn thread_create_in_invalid_handle_rollback() {
+        let mut k = setup_kernel();
+        let (_, space_hid) = call(&mut k, num::SPACE_CREATE, &[0; 6]);
+        let initial_thread_count = k.threads.count();
+
+        let bad_handle_ids = [9999u32];
+        let (err, _) = call(
+            &mut k,
+            num::THREAD_CREATE_IN,
+            &[
+                space_hid,
+                0x1000,
+                0x2000,
+                0,
+                bad_handle_ids.as_ptr() as u64,
+                1,
+            ],
+        );
+
+        assert_ne!(err, 0, "should fail with invalid handle");
+        assert_eq!(
+            k.threads.count(),
+            initial_thread_count,
+            "thread should be rolled back"
+        );
+
+        crate::invariants::assert_valid(&*k);
+    }
+
+    #[test]
+    fn space_table_exhaustion_and_recovery() {
+        let mut k = setup_kernel();
+        let mut created = 0;
+        let mut last_hid = 0u64;
+
+        loop {
+            let (err, hid) = call(&mut k, num::SPACE_CREATE, &[0; 6]);
+
+            if err != 0 {
+                break;
+            }
+
+            last_hid = hid;
+            created += 1;
+        }
+
+        assert!(created > 0);
+
+        call(&mut k, num::SPACE_DESTROY, &[last_hid, 0, 0, 0, 0, 0]);
+
+        let (err, _) = call(&mut k, num::SPACE_CREATE, &[0; 6]);
+
+        assert_eq!(err, 0, "should recover after destroying one space");
 
         crate::invariants::assert_valid(&*k);
     }
