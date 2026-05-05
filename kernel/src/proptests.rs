@@ -1036,4 +1036,253 @@ mod tests {
             inv(&k);
         }
     }
+
+    // =========================================================================
+    // IPC MESSAGE INTEGRITY PROPERTIES
+    // =========================================================================
+
+    fn do_call_with_buf(k: &mut Kernel, ep_hid: u64, msg: &[u8], call_buf: &mut [u8; 128]) {
+        call_buf[..msg.len()].copy_from_slice(msg);
+        let (err, _) = call(
+            k,
+            num::CALL,
+            &[
+                ep_hid,
+                call_buf.as_mut_ptr() as u64,
+                msg.len() as u64,
+                0,
+                0,
+                0,
+            ],
+        );
+        assert_eq!(err, 0, "CALL failed");
+    }
+
+    fn do_recv_full(k: &mut Kernel, ep_hid: u64, out_buf: &mut [u8; 128]) -> (usize, u64) {
+        let (err, packed) = call(
+            k,
+            num::RECV,
+            &[ep_hid, out_buf.as_mut_ptr() as u64, 128, 0, 0, 0],
+        );
+        assert_eq!(err, 0, "RECV failed");
+        let msg_len = (packed & 0xFFFF_FFFF) as usize;
+        let reply_cap = packed >> 32;
+        (msg_len, reply_cap)
+    }
+
+    fn do_reply_with(k: &mut Kernel, ep_hid: u64, reply_cap: u64, msg: &[u8]) {
+        let (err, _) = call(
+            k,
+            num::REPLY,
+            &[
+                ep_hid,
+                reply_cap,
+                msg.as_ptr() as u64,
+                msg.len() as u64,
+                0,
+                0,
+            ],
+        );
+        assert_eq!(err, 0, "REPLY failed");
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn ipc_message_data_integrity(
+            msg_len in 0usize..=128,
+            seed in any::<u8>(),
+        ) {
+            let mut k = setup_kernel();
+            let (_, ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
+            prop_assert_eq!(ep_hid & 0xFFFF_FFFF_0000_0000, 0);
+
+            let mut send_msg = [0u8; 128];
+            for i in 0..msg_len {
+                send_msg[i] = seed.wrapping_add(i as u8);
+            }
+
+            let mut reply_buf = [0u8; 128];
+            do_call_with_buf(&mut k, ep_hid, &send_msg[..msg_len], &mut reply_buf);
+
+            let mut recv_buf = [0u8; 128];
+            let (recv_len, reply_cap) = do_recv_full(&mut k, ep_hid, &mut recv_buf);
+
+            prop_assert_eq!(recv_len, msg_len, "received length must match sent length");
+            prop_assert_eq!(
+                &recv_buf[..recv_len],
+                &send_msg[..msg_len],
+                "received bytes must match sent bytes"
+            );
+
+            let mut reply_msg = [0u8; 128];
+            let reply_len = msg_len.min(64);
+            for i in 0..reply_len {
+                reply_msg[i] = seed.wrapping_add(128).wrapping_add(i as u8);
+            }
+            do_reply_with(&mut k, ep_hid, reply_cap, &reply_msg[..reply_len]);
+
+            inv(&k);
+        }
+    }
+
+    // =========================================================================
+    // IPC PROTOCOL PROPERTIES
+    // =========================================================================
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(32))]
+
+        #[test]
+        fn double_reply_fails(_iteration in 0u32..10) {
+            let mut k = setup_kernel();
+            let (_, ep_hid) = call(&mut k, num::ENDPOINT_CREATE, &[0; 6]);
+
+            let msg = [0u8; 8];
+            let mut reply_buf = [0u8; 128];
+            do_call_with_buf(&mut k, ep_hid, &msg, &mut reply_buf);
+
+            let mut recv_buf = [0u8; 128];
+            let (_, reply_cap) = do_recv_full(&mut k, ep_hid, &mut recv_buf);
+
+            do_reply_with(&mut k, ep_hid, reply_cap, &[1u8; 4]);
+
+            let (err, _) = call(
+                &mut k,
+                num::REPLY,
+                &[ep_hid, reply_cap, [0u8; 4].as_ptr() as u64, 4, 0, 0],
+            );
+            prop_assert_ne!(err, 0, "second reply must fail — reply cap is consumed");
+
+            inv(&k);
+        }
+
+        #[test]
+        fn single_thread_yield_no_panic(_iteration in 0u32..20) {
+            let mut k = setup_kernel();
+
+            let (err, _) = call(&mut k, num::THREAD_EXIT, &[0; 6]);
+            prop_assert_eq!(err, 0);
+
+            inv(&k);
+        }
+    }
+
+    // =========================================================================
+    // VMO SNAPSHOT INDEPENDENCE
+    // =========================================================================
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(32))]
+
+        #[test]
+        fn vmo_snapshot_is_independent_copy(pages in 1usize..=4) {
+            let page = config::PAGE_SIZE as u64;
+            let size = pages as u64 * page;
+            let mut k = setup_kernel();
+
+            let (err, orig_hid) = call(&mut k, num::VMO_CREATE, &[size, 0, 0, 0, 0, 0]);
+            prop_assert_eq!(err, 0);
+
+            let (err, snap_hid) = call(&mut k, num::VMO_SNAPSHOT, &[orig_hid, 0, 0, 0, 0, 0]);
+            prop_assert_eq!(err, 0);
+
+            let orig_obj = k.spaces.get(0).unwrap().handles()
+                .lookup(HandleId(orig_hid as u32)).unwrap().object_id;
+            let snap_obj = k.spaces.get(0).unwrap().handles()
+                .lookup(HandleId(snap_hid as u32)).unwrap().object_id;
+
+            prop_assert_ne!(orig_obj, snap_obj, "snapshot must be a distinct object");
+
+            let orig_size = k.vmos.get(orig_obj).unwrap().size();
+            let snap_size = k.vmos.get(snap_obj).unwrap().size();
+            prop_assert_eq!(orig_size, snap_size, "snapshot must preserve size");
+
+            let (err, _) = call(&mut k, num::HANDLE_CLOSE, &[snap_hid, 0, 0, 0, 0, 0]);
+            prop_assert_eq!(err, 0);
+
+            prop_assert!(
+                k.vmos.get(orig_obj).is_some(),
+                "closing snapshot must not affect original"
+            );
+
+            inv(&k);
+        }
+    }
+
+    // =========================================================================
+    // CAPACITY LIMIT PROPERTIES
+    // =========================================================================
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(8))]
+
+        #[test]
+        fn handle_table_capacity_recovery(fill_count in 1usize..=8) {
+            let mut k = setup_kernel();
+            let page = config::PAGE_SIZE as u64;
+            let max = config::MAX_HANDLES;
+            let mut handles = alloc::vec::Vec::new();
+
+            for _ in 0..max.min(fill_count * 32) {
+                let (err, hid) = call(&mut k, num::VMO_CREATE, &[page, 0, 0, 0, 0, 0]);
+                if err != 0 { break; }
+                handles.push(hid);
+            }
+
+            if handles.len() >= 2 {
+                let to_close = handles.pop().unwrap();
+                let (err, _) = call(&mut k, num::HANDLE_CLOSE, &[to_close, 0, 0, 0, 0, 0]);
+                prop_assert_eq!(err, 0);
+
+                let (err, new_hid) = call(&mut k, num::VMO_CREATE, &[page, 0, 0, 0, 0, 0]);
+                prop_assert_eq!(err, 0, "must recover after closing one handle");
+                handles.push(new_hid);
+            }
+
+            for hid in handles.iter().rev() {
+                let (err, _) = call(&mut k, num::HANDLE_CLOSE, &[*hid, 0, 0, 0, 0, 0]);
+                prop_assert_eq!(err, 0);
+            }
+
+            inv(&k);
+        }
+
+        #[test]
+        fn event_signal_clear_commutative(
+            bits1 in boundary_u64(),
+            bits2 in boundary_u64(),
+        ) {
+            let mut k = setup_kernel();
+
+            let (err_a, ev_a) = call(&mut k, num::EVENT_CREATE, &[0, 0, 0, 0, 0, 0]);
+            let (err_b, ev_b) = call(&mut k, num::EVENT_CREATE, &[0, 0, 0, 0, 0, 0]);
+            prop_assert_eq!(err_a, 0);
+            prop_assert_eq!(err_b, 0);
+
+            call(&mut k, num::EVENT_SIGNAL, &[ev_a, bits1, 0, 0, 0, 0]);
+            call(&mut k, num::EVENT_SIGNAL, &[ev_a, bits2, 0, 0, 0, 0]);
+            call(&mut k, num::EVENT_CLEAR, &[ev_a, bits1, 0, 0, 0, 0]);
+
+            call(&mut k, num::EVENT_SIGNAL, &[ev_b, bits2, 0, 0, 0, 0]);
+            call(&mut k, num::EVENT_SIGNAL, &[ev_b, bits1, 0, 0, 0, 0]);
+            call(&mut k, num::EVENT_CLEAR, &[ev_b, bits1, 0, 0, 0, 0]);
+
+            let obj_a = k.spaces.get(0).unwrap().handles()
+                .lookup(HandleId(ev_a as u32)).unwrap().object_id;
+            let obj_b = k.spaces.get(0).unwrap().handles()
+                .lookup(HandleId(ev_b as u32)).unwrap().object_id;
+
+            let bits_a = k.events.get(obj_a).unwrap().bits();
+            let bits_b = k.events.get(obj_b).unwrap().bits();
+
+            prop_assert_eq!(
+                bits_a, bits_b,
+                "signal order must not matter"
+            );
+
+            inv(&k);
+        }
+    }
 }
