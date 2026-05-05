@@ -71,5 +71,5 @@ audit:
 gate: clippy test build
 	@echo "Gate passed: clippy + tests + build"
 
-nightly: gate miri asan fuzz coverage integration-test integration-release stress
+nightly: gate miri asan fuzz coverage mutants integration-test integration-release stress bench-check audit
 	@echo "Nightly gate passed: all verification targets"
