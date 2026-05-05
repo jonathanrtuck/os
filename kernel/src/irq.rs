@@ -115,8 +115,7 @@ impl IrqTable {
         Ok(())
     }
 
-    /// Inspect a binding at a given INTID (for invariant checking).
-    #[cfg(any(test, fuzzing))]
+    /// Inspect a binding at a given INTID.
     pub fn binding_at(&self, intid: usize) -> Option<IrqSignal> {
         self.bindings.get(intid)?.as_ref().map(|b| IrqSignal {
             event_id: b.event_id,

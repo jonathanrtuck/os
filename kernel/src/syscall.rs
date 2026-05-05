@@ -1740,6 +1740,12 @@ impl Kernel {
                 }
                 ObjectType::Endpoint => {
                     if let Some(ep) = self.endpoints.get_mut(obj_id) {
+                        if let Some(evt_id) = ep.bound_event()
+                            && let Some(evt) = self.events.get_mut(evt_id.0)
+                        {
+                            evt.unbind_endpoint();
+                        }
+
                         let blocked = ep.close_peer();
 
                         for tid in blocked.as_slice() {
@@ -1747,7 +1753,24 @@ impl Kernel {
                         }
                     }
                 }
-                ObjectType::Event => {}
+                ObjectType::Event => {
+                    if let Some(evt) = self.events.get(obj_id)
+                        && let Some(ep_id) = evt.bound_endpoint()
+                        && let Some(ep) = self.endpoints.get_mut(ep_id.0)
+                    {
+                        ep.unbind_event();
+                    }
+
+                    for intid in 0..config::MAX_IRQS {
+                        if self
+                            .irqs
+                            .binding_at(intid)
+                            .is_some_and(|b| b.event_id.0 == obj_id)
+                        {
+                            let _ = self.irqs.unbind(intid as u32);
+                        }
+                    }
+                }
                 ObjectType::Thread | ObjectType::AddressSpace => {}
             }
         }
