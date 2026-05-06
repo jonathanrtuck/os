@@ -357,6 +357,7 @@ impl RawRwSpinLock {
     pub fn write_unlock(&self, daif: u64) {
         self.state.store(0, Ordering::Release);
         Self::wake_waiters();
+
         daif_restore(daif);
     }
 
@@ -562,7 +563,6 @@ mod tests {
     #[test]
     fn rw_multiple_readers() {
         let lock = RwSpinLock::new(42u64);
-
         // Multiple read guards coexist.
         let r1 = lock.read();
         let r2 = lock.read();

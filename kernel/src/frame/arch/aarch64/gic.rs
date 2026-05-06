@@ -281,7 +281,6 @@ pub fn send_sgi(target_core: u32, sgi_id: u32) {
     // are zero, the target list is simply (1 << core_id).
     let target_list: u64 = 1 << (target_core & 0xF);
     let intid: u64 = (sgi_id as u64 & 0xF) << 24;
-
     // Aff1/2/3 are all zero for cores 0–255.
     let val = intid | target_list;
 

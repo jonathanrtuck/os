@@ -169,7 +169,6 @@ impl<T, const MAX: usize, S: Storage<T>> ConcurrentTable<T, MAX, S> {
         }
 
         let _slot_guard = self.lock_slot(idx);
-
         // SAFETY: we hold the slot lock, ensuring exclusive access.
         let removed = unsafe { (*self.storage.get()).remove(i) };
 
@@ -316,7 +315,6 @@ mod tests {
         let mut table: ObjectTable<u64, 4> = ObjectTable::new();
         let (a, gen_a) = table.alloc(100).unwrap();
         let (b, gen_b) = table.alloc(200).unwrap();
-
         let ct = ConcurrentTable::from_table(table);
 
         assert_eq!(unsafe { *ct.get(a).unwrap() }, 100);
