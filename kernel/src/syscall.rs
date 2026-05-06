@@ -11,7 +11,7 @@ use crate::{
     config,
     endpoint::{Endpoint, PendingCall, ReplyCapId},
     event::Event,
-    frame::user_mem,
+    frame::{slab::InlineSlab, user_mem},
     handle::Handle,
     irq::IrqTable,
     table::ObjectTable,
@@ -73,7 +73,7 @@ impl StagedHandles {
 
 /// Central kernel state — all object tables and the scheduler.
 pub struct Kernel {
-    pub vmos: ObjectTable<Vmo, { config::MAX_VMOS }>,
+    pub vmos: ObjectTable<Vmo, { config::MAX_VMOS }, InlineSlab<Vmo>>,
     pub events: ObjectTable<Event, { config::MAX_EVENTS }>,
     pub endpoints: ObjectTable<Endpoint, { config::MAX_ENDPOINTS }>,
     pub threads: ObjectTable<Thread, { config::MAX_THREADS }>,
@@ -724,8 +724,8 @@ impl Kernel {
     ) -> Result<u64, SyscallError> {
         let caller_space_id = self.thread_space_id(current)?;
         let asid = self.alloc_asid()?;
-        let space = Box::new(AddressSpace::new(AddressSpaceId(0), asid, 0));
-        let Some((idx, generation)) = self.spaces.alloc_boxed(space) else {
+        let space = AddressSpace::new(AddressSpaceId(0), asid, 0);
+        let Some((idx, generation)) = self.spaces.alloc(space) else {
             self.free_asid(asid);
             return Err(SyscallError::OutOfMemory);
         };

@@ -10,4 +10,5 @@ pub mod fault_resolve;
 pub mod firmware;
 #[cfg(target_os = "none")]
 pub mod heap;
+pub mod slab;
 pub mod user_mem;
