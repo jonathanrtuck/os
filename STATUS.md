@@ -15,8 +15,13 @@ The kernel is complete and verified. The userspace has not yet been built.
 Thread (5), Address Space (2), plus handle_dup/close/info, clock_read,
 system_info.
 
-**Scheduler:** Multi-core fixed-priority preemptive, 4 levels (Idle/Low/
-Medium/High), per-core run queues, SMP up to 8 cores.
+**Scheduler:** Multi-core fixed-priority preemptive, 256 levels, per-CPU
+`SpinLock<PerCoreState>` (no global lock). SMP up to 8 cores.
+
+**SMP concurrency:** Per-object locking via ConcurrentTable (per-slot
+TicketLock + atomic generations). Per-CPU scheduler locks. IPI infrastructure
+(GICv3 SGI for cross-core wake). Syscall dispatch as free functions accessing
+global ConcurrentTable state — no global kernel lock.
 
 **IPC:** Synchronous call/recv/reply via endpoints. Priority inheritance. Up to
 128 bytes data + 4 handle transfers per message. One-shot reply caps.
@@ -46,12 +51,24 @@ fault handling, cross-space mapping. 16 KiB pages (Apple Silicon native).
 
 **Bugs found and fixed:** 20. Discovery curve flattened to zero.
 
-**Test suite:** 704 tests, 4 fuzz targets, 33 property tests, 16 invariant
+**Test suite:** 543 tests, 4 fuzz targets, 33 property tests, 16 invariant
 checks, 34 bare-metal integration tests, 14 per-syscall benchmarks + 3 workload
 benchmarks.
 
 **Performance gates:** Per-benchmark statistical thresholds (P99 + 3σ) in
 `kernel/bench_baselines.toml`. Regression = bug.
+
+## SMP Remaining (Optional)
+
+Per-object locking is structurally complete. Optional refinements:
+
+- **Lockdep** — debug-mode lock ordering validator. Catches ordering violations
+  in test code before they become deadlocks under SMP.
+- **Multi-core benchmarks** — `ipc_call_reply_2core` (two cores, independent
+  endpoints, should show ~2x throughput) to validate the per-CPU scheduler.
+- **HandleTable RwSpinLock** — concurrent handle lookups within the same address
+  space. Currently serialized via AddressSpace slot lock; matters only for
+  multi-threaded services.
 
 ## What's Next
 
