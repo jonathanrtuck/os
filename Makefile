@@ -29,7 +29,8 @@ bench-el0:
 	cargo run -p kernel --release --features bench-el0
 
 bench-smp:
-	cargo run -p kernel --release --features bench-smp
+	cargo build -p kernel --release --features bench-smp
+	hypervisor --no-gpu --timeout 60 target/aarch64-unknown-none/release/kernel
 
 integration-test:
 	@scripts/integration-test

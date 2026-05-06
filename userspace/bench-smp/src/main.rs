@@ -279,17 +279,15 @@ extern "C" fn wake_pong_entry(arg: usize) -> ! {
 #[unsafe(link_section = ".text.boot")]
 extern "C" fn _start() -> ! {
     let num_cores = abi::system::info(abi::system::INFO_NUM_CORES).unwrap_or(1) as usize;
-
-    let ipc_ticks = if num_cores >= 2 { bench_ipc_2core() } else { 0 };
-
+    // Single-core benchmark first — proves the binary runs.
     let churn_1core = bench_churn_1core();
-
+    // Multi-core benchmarks (any of these may hang if scheduling is broken).
+    let ipc_ticks = if num_cores >= 2 { bench_ipc_2core() } else { 0 };
     let (churn_multi, worker_count) = if num_cores >= 2 {
         bench_churn_multicore(num_cores)
     } else {
         (0, 0)
     };
-
     let wake_ticks = if num_cores >= 2 {
         bench_wake_latency()
     } else {

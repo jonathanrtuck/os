@@ -2265,6 +2265,11 @@ fn sys_thread_exit(
             crate::println!("INTEGRATION TEST: EXIT {code}");
             crate::frame::arch::psci::system_off();
         }
+        #[cfg(feature = "bench-smp")]
+        {
+            crate::println!("SMP BENCH: all threads exited without results (no 0xBEEF)");
+            crate::frame::arch::psci::system_off();
+        }
 
         #[cfg(not(any(
             feature = "integration-tests",
