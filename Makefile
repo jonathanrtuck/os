@@ -1,7 +1,7 @@
 # Host target for running tests (the workspace default is aarch64-unknown-none).
 HOST_TARGET := aarch64-apple-darwin
 
-.PHONY: test build check clippy fmt bench bench-el0 clean integration-test \
+.PHONY: test build check clippy fmt bench bench-el0 bench-smp clean integration-test \
         miri asan fuzz mutants coverage gate nightly \
         stress bench-check bench-baseline audit integration-release
 
@@ -27,6 +27,9 @@ bench:
 
 bench-el0:
 	cargo run -p kernel --release --features bench-el0
+
+bench-smp:
+	cargo run -p kernel --release --features bench-smp
 
 integration-test:
 	@scripts/integration-test

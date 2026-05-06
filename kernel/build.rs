@@ -18,7 +18,10 @@ fn main() {
 fn build_init(kernel_dir: &std::path::Path) {
     let integration = env::var("CARGO_FEATURE_INTEGRATION_TESTS").is_ok();
     let bench_el0 = env::var("CARGO_FEATURE_BENCH_EL0").is_ok();
-    let (init_dir, crate_name) = if bench_el0 {
+    let bench_smp = env::var("CARGO_FEATURE_BENCH_SMP").is_ok();
+    let (init_dir, crate_name) = if bench_smp {
+        (kernel_dir.join("../userspace/bench-smp"), "bench-smp")
+    } else if bench_el0 {
         (kernel_dir.join("../userspace/bench"), "bench")
     } else if integration {
         (
@@ -68,4 +71,7 @@ fn build_init(kernel_dir: &std::path::Path) {
     println!("cargo:rerun-if-changed=../userspace/bench/src/main.rs");
     println!("cargo:rerun-if-changed=../userspace/bench/link.ld");
     println!("cargo:rerun-if-changed=../userspace/bench/Cargo.toml");
+    println!("cargo:rerun-if-changed=../userspace/bench-smp/src/main.rs");
+    println!("cargo:rerun-if-changed=../userspace/bench-smp/link.ld");
+    println!("cargo:rerun-if-changed=../userspace/bench-smp/Cargo.toml");
 }

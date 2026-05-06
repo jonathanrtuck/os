@@ -2246,6 +2246,13 @@ fn sys_thread_exit(
 
     #[cfg(target_os = "none")]
     if remaining == 0 {
+        #[cfg(feature = "bench-smp")]
+        {
+            print_smp_bench_results(args);
+
+            crate::frame::arch::psci::system_off();
+        }
+
         #[cfg(feature = "bench-el0")]
         {
             print_el0_bench_results(args);
@@ -2259,7 +2266,11 @@ fn sys_thread_exit(
             crate::frame::arch::psci::system_off();
         }
 
-        #[cfg(not(any(feature = "integration-tests", feature = "bench-el0")))]
+        #[cfg(not(any(
+            feature = "integration-tests",
+            feature = "bench-el0",
+            feature = "bench-smp"
+        )))]
         loop {
             crate::frame::arch::halt();
         }
@@ -2301,6 +2312,86 @@ fn print_el0_bench_results(args: &[u64; 6]) {
             ratio_x10 % 10,
         );
     }
+}
+
+#[cfg(feature = "bench-smp")]
+fn print_smp_bench_results(args: &[u64; 6]) {
+    let batch_n = (args[5] & 0xFFFF) as usize;
+    let workers = ((args[5] >> 16) & 0xFFFF) as usize;
+
+    if batch_n == 0 {
+        crate::println!("SMP BENCH: no results (batch_n=0)");
+
+        return;
+    }
+
+    crate::println!(
+        "--- SMP benchmarks ({}x, {} cores, 24MHz->4.5GHz) ---",
+        batch_n,
+        workers,
+    );
+
+    let ipc_ticks = args[1];
+    let churn_1 = args[2];
+    let churn_n = args[3];
+    let wake_ticks = args[4];
+
+    if ipc_ticks > 0 {
+        let cyc = ipc_ticks * 1875 / batch_n as u64;
+
+        crate::println!(
+            "  {:36} {:>5}.{} cyc/rtt",
+            "IPC null round-trip (2-core)",
+            cyc / 10,
+            cyc % 10,
+        );
+    }
+
+    if churn_1 > 0 {
+        let cyc1 = churn_1 * 1875 / batch_n as u64;
+
+        crate::println!(
+            "  {:36} {:>5}.{} cyc/iter",
+            "object churn (1-core)",
+            cyc1 / 10,
+            cyc1 % 10,
+        );
+
+        if churn_n > 0 && workers > 0 {
+            let cyc_n = churn_n * 1875 / batch_n as u64;
+            let scaling_x10 = if churn_n > 0 {
+                churn_1 * workers as u64 * 10 / churn_n
+            } else {
+                0
+            };
+
+            crate::println!(
+                "  {:36} {:>5}.{} cyc/iter  scaling {}.{}x / {}",
+                "object churn (multi-core wall)",
+                cyc_n / 10,
+                cyc_n % 10,
+                scaling_x10 / 10,
+                scaling_x10 % 10,
+                workers,
+            );
+        }
+    }
+
+    if wake_ticks > 0 {
+        let cyc = wake_ticks * 1875 / batch_n as u64;
+        let one_way = cyc / 2;
+
+        crate::println!(
+            "  {:36} {:>5}.{} cyc/rtt  (~{}.{} one-way)",
+            "cross-core wake (event ping-pong)",
+            cyc / 10,
+            cyc % 10,
+            one_way / 10,
+            one_way % 10,
+        );
+    }
+
+    crate::println!("--- end SMP benchmarks ---");
 }
 
 #[inline(never)]
