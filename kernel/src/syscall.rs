@@ -2039,11 +2039,21 @@ fn sys_thread_create(
 
     match hid {
         Ok(hid) => {
+            let target = state::schedulers().least_loaded_core();
+
             state::schedulers()
-                .core(core_id)
+                .core(target)
                 .lock()
                 .enqueue(ThreadId(idx), Priority::Medium);
             state::inc_alive_threads();
+
+            #[cfg(target_os = "none")]
+            if target != core_id {
+                crate::frame::arch::gic::send_sgi(
+                    target as u32,
+                    crate::frame::arch::gic::SGI_RESCHEDULE,
+                );
+            }
 
             Ok(hid.0 as u64)
         }
@@ -2215,6 +2225,14 @@ fn sys_thread_create_in(
                 .lock()
                 .enqueue(ThreadId(idx), Priority::Medium);
             state::inc_alive_threads();
+
+            #[cfg(target_os = "none")]
+            if core != _core_id {
+                crate::frame::arch::gic::send_sgi(
+                    core as u32,
+                    crate::frame::arch::gic::SGI_RESCHEDULE,
+                );
+            }
 
             Ok(hid.0 as u64)
         }
