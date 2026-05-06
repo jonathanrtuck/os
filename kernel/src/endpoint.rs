@@ -11,6 +11,7 @@
 
 use crate::{
     config,
+    frame::ring::FixedRing,
     handle::Handle,
     types::{EndpointId, EventId, Priority, SyscallError, ThreadId},
 };
@@ -18,61 +19,15 @@ use crate::{
 const NUM_PRIORITY_LEVELS: usize = 4;
 const SLOTS_PER_PRIORITY: usize = config::MAX_PENDING_PER_ENDPOINT / NUM_PRIORITY_LEVELS;
 
-struct PriorityRing {
-    slots: [Option<PendingCall>; SLOTS_PER_PRIORITY],
-    head: u8,
-    len: u8,
-}
-
-impl PriorityRing {
-    const fn new() -> Self {
-        PriorityRing {
-            slots: [const { None }; SLOTS_PER_PRIORITY],
-            head: 0,
-            len: 0,
-        }
-    }
-
-    fn push(&mut self, item: PendingCall) -> Result<(), SyscallError> {
-        if self.len as usize >= SLOTS_PER_PRIORITY {
-            return Err(SyscallError::BufferFull);
-        }
-
-        let tail = (self.head as usize + self.len as usize) % SLOTS_PER_PRIORITY;
-
-        self.slots[tail] = Some(item);
-        self.len += 1;
-
-        Ok(())
-    }
-
-    fn pop(&mut self) -> Option<PendingCall> {
-        if self.len == 0 {
-            return None;
-        }
-
-        let item = self.slots[self.head as usize].take();
-
-        self.head = ((self.head as usize + 1) % SLOTS_PER_PRIORITY) as u8;
-        self.len -= 1;
-
-        item
-    }
-
-    fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-}
-
 struct PrioritySendQueue {
-    rings: [PriorityRing; NUM_PRIORITY_LEVELS],
+    rings: [FixedRing<PendingCall, SLOTS_PER_PRIORITY>; NUM_PRIORITY_LEVELS],
     total: u16,
 }
 
 impl PrioritySendQueue {
     const fn new() -> Self {
         PrioritySendQueue {
-            rings: [const { PriorityRing::new() }; NUM_PRIORITY_LEVELS],
+            rings: [const { FixedRing::new() }; NUM_PRIORITY_LEVELS],
             total: 0,
         }
     }
@@ -80,7 +35,10 @@ impl PrioritySendQueue {
     fn enqueue(&mut self, call: PendingCall) -> Result<(), SyscallError> {
         let level = call.priority as usize;
 
-        self.rings[level].push(call)?;
+        if !self.rings[level].push(call) {
+            return Err(SyscallError::BufferFull);
+        }
+
         self.total += 1;
 
         Ok(())
@@ -593,7 +551,7 @@ impl Endpoint {
             return Err("recv_waiter_count mismatch");
         }
 
-        let ring_sum: usize = self.send_queue.rings.iter().map(|r| r.len as usize).sum();
+        let ring_sum: usize = self.send_queue.rings.iter().map(|r| r.len()).sum();
 
         if ring_sum != self.send_queue.total as usize {
             return Err("send_queue total mismatch");
@@ -607,12 +565,8 @@ impl Endpoint {
         let mut ids = alloc::vec::Vec::new();
 
         for ring in &self.send_queue.rings {
-            for i in 0..ring.len as usize {
-                let idx = (ring.head as usize + i) % SLOTS_PER_PRIORITY;
-
-                if let Some(call) = &ring.slots[idx] {
-                    ids.push(call.caller);
-                }
+            for call in ring.iter() {
+                ids.push(call.caller);
             }
         }
 

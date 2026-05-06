@@ -6,7 +6,8 @@
 # Each benchmark has: median, p95, p99, stddev, threshold (p99 + 3*stddev).
 # A measured median exceeding `threshold` is a regression.
 #
-# Timer frequency is 24 MHz (1 tick ≈ 42 ns).
+# Timer frequency is 24 MHz (1 tick = 42 ns).
+# Updated: 2026-05-05 (endpoint InlineSlab + MaybeUninit ring slots)
 
 [svc_null]
 median = 1
@@ -24,24 +25,24 @@ threshold = 4
 
 [vmo_create_close]
 median = 1
-p95 = 2
+p95 = 1
 p99 = 2
 stddev = 1
 threshold = 5
 
 [event_create_close]
 median = 1
-p95 = 2
+p95 = 1
 p99 = 2
 stddev = 1
 threshold = 5
 
 [endpoint_create_close]
-median = 15
-p95 = 16
-p99 = 16
+median = 4
+p95 = 4
+p99 = 5
 stddev = 1
-threshold = 19
+threshold = 8
 
 [event_signal]
 median = 0
@@ -51,11 +52,11 @@ stddev = 1
 threshold = 4
 
 [event_clear]
-median = 7
-p95 = 8
-p99 = 9
+median = 0
+p95 = 1
+p99 = 1
 stddev = 1
-threshold = 12
+threshold = 4
 
 [event_wait_signaled]
 median = 0
@@ -79,14 +80,14 @@ stddev = 1
 threshold = 4
 
 [vmo_snapshot_close]
-median = 2
-p95 = 20
-p99 = 38
-stddev = 12
-threshold = 74
+median = 1
+p95 = 1
+p99 = 2
+stddev = 1
+threshold = 5
 
 [clock_read]
-median = 1
+median = 0
 p95 = 1
 p99 = 1
 stddev = 1
@@ -100,11 +101,11 @@ stddev = 1
 threshold = 4
 
 [workload_doc_editing]
-median = 20
-p95 = 21
-p99 = 22
-stddev = 1
-threshold = 25
+median = 8
+p95 = 20
+p99 = 45
+stddev = 12
+threshold = 81
 
 [workload_ipc_storm]
 median = 1
@@ -114,8 +115,8 @@ stddev = 1
 threshold = 5
 
 [workload_object_churn]
-median = 82
-p95 = 96
-p99 = 104
-stddev = 8
-threshold = 128
+median = 20
+p95 = 22
+p99 = 25
+stddev = 3
+threshold = 34

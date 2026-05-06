@@ -75,7 +75,7 @@ impl StagedHandles {
 pub struct Kernel {
     pub vmos: ObjectTable<Vmo, { config::MAX_VMOS }, InlineSlab<Vmo>>,
     pub events: ObjectTable<Event, { config::MAX_EVENTS }>,
-    pub endpoints: ObjectTable<Endpoint, { config::MAX_ENDPOINTS }>,
+    pub endpoints: ObjectTable<Endpoint, { config::MAX_ENDPOINTS }, InlineSlab<Endpoint>>,
     pub threads: ObjectTable<Thread, { config::MAX_THREADS }>,
     pub spaces: ObjectTable<AddressSpace, { config::MAX_ADDRESS_SPACES }>,
     pub irqs: Box<IrqTable>,
