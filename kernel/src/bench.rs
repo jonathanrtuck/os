@@ -13,8 +13,8 @@ use crate::{
     config,
     frame::arch,
     syscall::{Kernel, num},
-    thread::Thread,
-    types::{AddressSpaceId, ObjectType, Priority, Rights, ThreadId},
+    thread::{Thread, ThreadRunState},
+    types::{AddressSpaceId, HandleId, ObjectType, Priority, Rights, ThreadId},
 };
 
 const WARMUP: usize = 10;
@@ -710,6 +710,201 @@ fn object_churn_iteration(kern: &mut Kernel, current: ThreadId) {
     }
 }
 
+struct IpcBenchEnv {
+    server: ThreadId,
+    client_ep_h: u64,
+    server_ep_h: u64,
+    ep_obj_id: u32,
+    server_space_idx: u32,
+}
+
+fn setup_ipc_bench(kern: &mut Kernel, client: ThreadId) -> IpcBenchEnv {
+    let asid = kern.alloc_asid().expect("ipc bench: server asid");
+    let space = AddressSpace::new(AddressSpaceId(0), asid, 0);
+    let (space_idx, space_gen) = kern.spaces.alloc(space).expect("ipc bench: server space");
+
+    kern.spaces.get_mut(space_idx).unwrap().id = AddressSpaceId(space_idx);
+
+    let server_space = kern.spaces.get_mut(space_idx).unwrap();
+
+    server_space
+        .handles_mut()
+        .allocate(ObjectType::AddressSpace, space_idx, Rights::ALL, space_gen)
+        .expect("ipc bench: space handle");
+
+    let thread = Thread::new(
+        ThreadId(0),
+        Some(AddressSpaceId(space_idx)),
+        Priority::Medium,
+        0x3000,
+        0x4000,
+        0,
+    );
+    let (server_idx, _) = kern
+        .threads
+        .alloc(thread)
+        .expect("ipc bench: server thread");
+
+    kern.threads.get_mut(server_idx).unwrap().id = ThreadId(server_idx);
+    kern.alive_threads += 1;
+
+    let (err, client_ep_h) = kern.dispatch(client, 0, num::ENDPOINT_CREATE, &[0; 6]);
+
+    assert_eq!(err, 0);
+
+    let client_space_id = kern.thread_space_id(client).unwrap();
+    let handle = kern
+        .spaces
+        .get(client_space_id.0)
+        .unwrap()
+        .handles()
+        .lookup(HandleId(client_ep_h as u32))
+        .unwrap();
+    let ep_obj_id = handle.object_id;
+    let ep_gen = handle.generation;
+    let server_space = kern.spaces.get_mut(space_idx).unwrap();
+    let server_ep_h = server_space
+        .handles_mut()
+        .allocate(ObjectType::Endpoint, ep_obj_id, Rights::ALL, ep_gen)
+        .expect("ipc bench: server ep handle");
+
+    kern.endpoints.get_mut(ep_obj_id).unwrap().add_ref();
+
+    IpcBenchEnv {
+        server: ThreadId(server_idx),
+        client_ep_h,
+        server_ep_h: server_ep_h.0 as u64,
+        ep_obj_id,
+        server_space_idx: space_idx,
+    }
+}
+
+fn force_running(kern: &mut Kernel, tid: ThreadId) {
+    kern.scheduler.remove(tid);
+
+    if let Some(t) = kern.threads.get_mut(tid.0) {
+        match t.state() {
+            ThreadRunState::Blocked => {
+                t.set_state(ThreadRunState::Ready);
+                t.set_state(ThreadRunState::Running);
+            }
+            ThreadRunState::Ready => {
+                t.set_state(ThreadRunState::Running);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn bench_ipc_null_round_trip(kern: &mut Kernel, env: &IpcBenchEnv, client: ThreadId) -> u64 {
+    for _ in 0..BATCH_N {
+        ipc_null_iteration(kern, env, client);
+    }
+
+    let mut samples = [0u64; BATCH_SAMPLES];
+
+    for s in &mut samples {
+        arch::isb();
+
+        let start = arch::read_cycle_counter();
+
+        for _ in 0..BATCH_N {
+            ipc_null_iteration(kern, env, client);
+        }
+
+        arch::isb();
+
+        *s = arch::read_cycle_counter().wrapping_sub(start);
+    }
+
+    samples.sort_unstable();
+    samples[BATCH_SAMPLES / 2]
+}
+
+fn ipc_null_iteration(kern: &mut Kernel, env: &IpcBenchEnv, client: ThreadId) {
+    kern.endpoints
+        .get_mut(env.ep_obj_id)
+        .unwrap()
+        .add_recv_waiter(env.server)
+        .ok();
+    kern.dispatch(client, 0, num::CALL, &[env.client_ep_h, 0, 0, 0, 0, 0]);
+
+    force_running(kern, env.server);
+
+    let (_, packed) = kern.dispatch(env.server, 0, num::RECV, &[env.server_ep_h, 0, 0, 0, 0, 0]);
+    let reply_cap = packed >> 32;
+
+    kern.dispatch(
+        env.server,
+        0,
+        num::REPLY,
+        &[env.server_ep_h, reply_cap, 0, 0, 0, 0],
+    );
+
+    force_running(kern, client);
+    force_running(kern, env.server);
+}
+
+fn teardown_ipc_bench(kern: &mut Kernel, env: &IpcBenchEnv, client: ThreadId) {
+    kern.dispatch(
+        client,
+        0,
+        num::HANDLE_CLOSE,
+        &[env.client_ep_h, 0, 0, 0, 0, 0],
+    );
+    kern.scheduler.remove(env.server);
+    kern.threads.dealloc(env.server.0);
+    kern.alive_threads = kern.alive_threads.saturating_sub(1);
+
+    let space = kern.spaces.get_mut(env.server_space_idx).unwrap();
+
+    space.set_thread_head(None);
+    kern.spaces.dealloc(env.server_space_idx);
+}
+
+fn bench_fault_lookup(kern: &mut Kernel, current: ThreadId) -> u64 {
+    let page = config::PAGE_SIZE as u64;
+    let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
+    let space_id = kern.thread_space_id(current).unwrap();
+    let (_, vmo_h) = kern.dispatch(current, 0, num::VMO_CREATE, &[page * 4, 0, 0, 0, 0, 0]);
+    let (_, va) = kern.dispatch(current, 0, num::VMO_MAP, &[vmo_h, 0, rw.0 as u64, 0, 0, 0]);
+    let fault_addr = va as usize + config::PAGE_SIZE;
+
+    for _ in 0..BATCH_N {
+        let space = kern.spaces.get(space_id.0).unwrap();
+        let _ = space.find_mapping(fault_addr);
+    }
+
+    let mut samples = [0u64; BATCH_SAMPLES];
+
+    for s in &mut samples {
+        arch::isb();
+
+        let start = arch::read_cycle_counter();
+
+        for _ in 0..BATCH_N {
+            let space = kern.spaces.get(space_id.0).unwrap();
+            let mapping = space.find_mapping(fault_addr);
+
+            if let Some(m) = mapping {
+                let vmo_id = m.vmo_id;
+                let page_idx = (fault_addr - m.va_start) / config::PAGE_SIZE;
+                let _ = kern.vmos.get(vmo_id.0).map(|v| v.page_at(page_idx));
+            }
+        }
+
+        arch::isb();
+
+        *s = arch::read_cycle_counter().wrapping_sub(start);
+    }
+
+    kern.dispatch(current, 0, num::VMO_UNMAP, &[va, 0, 0, 0, 0, 0]);
+    kern.dispatch(current, 0, num::HANDLE_CLOSE, &[vmo_h, 0, 0, 0, 0, 0]);
+
+    samples.sort_unstable();
+    samples[BATCH_SAMPLES / 2]
+}
+
 fn run_cycle_estimates(kern: &mut Kernel, current: ThreadId) {
     crate::println!(
         "--- cycle estimates ({}x{} samples, 24MHz->4.5GHz) ---",
@@ -939,6 +1134,27 @@ fn run_cycle_estimates(kern: &mut Kernel, current: ThreadId) {
             BATCH_N,
         ),
         theoretical: 50,
+    });
+
+    // ── IPC round-trip ──────────────────────────────────────────
+    let ipc_env = setup_ipc_bench(kern, current);
+
+    estimates.push(CycleEstimate {
+        name: "IPC null round-trip",
+        cycles_x10: ticks_to_cycles_x10(
+            bench_ipc_null_round_trip(kern, &ipc_env, current),
+            BATCH_N,
+        ),
+        theoretical: 150,
+    });
+
+    teardown_ipc_bench(kern, &ipc_env, current);
+
+    // ── Page fault kernel path ──────────────────────────────────
+    estimates.push(CycleEstimate {
+        name: "fault lookup+page_at",
+        cycles_x10: ticks_to_cycles_x10(bench_fault_lookup(kern, current), BATCH_N),
+        theoretical: 15,
     });
 
     // ── Print results ────────────────────────────────────────────
