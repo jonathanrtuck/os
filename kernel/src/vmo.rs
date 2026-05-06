@@ -117,7 +117,7 @@ pub struct Vmo {
     cow_parent: Option<VmoId>,
     has_pages: bool,
     mapping_count: usize,
-    refcount: usize,
+    refcount: core::sync::atomic::AtomicUsize,
 }
 
 impl Vmo {
@@ -135,7 +135,7 @@ impl Vmo {
             cow_parent: None,
             has_pages: false,
             mapping_count: 0,
-            refcount: 1,
+            refcount: core::sync::atomic::AtomicUsize::new(1),
         }
     }
 
@@ -164,20 +164,28 @@ impl Vmo {
     }
 
     pub fn refcount(&self) -> usize {
+        self.refcount.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn add_ref(&self) {
         self.refcount
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     }
 
-    pub fn add_ref(&mut self) {
-        assert!(self.refcount < usize::MAX, "VMO refcount overflow");
+    pub fn release_ref(&self) -> bool {
+        let prev = self
+            .refcount
+            .fetch_sub(1, core::sync::atomic::Ordering::Release);
 
-        self.refcount += 1;
-    }
+        assert!(prev > 0, "VMO refcount underflow");
 
-    pub fn release_ref(&mut self) -> bool {
-        assert!(self.refcount > 0, "VMO refcount underflow");
+        if prev == 1 {
+            core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
 
-        self.refcount -= 1;
-        self.refcount == 0
+            return true;
+        }
+
+        false
     }
 
     pub fn mapping_count(&self) -> usize {
@@ -234,7 +242,7 @@ impl Vmo {
             cow_parent: Some(self.id),
             has_pages: self.has_pages,
             mapping_count: 0,
-            refcount: 1,
+            refcount: core::sync::atomic::AtomicUsize::new(1),
         }
     }
 
@@ -455,7 +463,7 @@ mod tests {
 
     #[test]
     fn refcount_lifecycle() {
-        let mut vmo = make_vmo(1);
+        let vmo = make_vmo(1);
 
         assert_eq!(vmo.refcount(), 1);
 

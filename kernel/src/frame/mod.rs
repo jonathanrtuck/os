@@ -12,6 +12,8 @@ pub mod fault_resolve;
 pub mod firmware;
 #[cfg(target_os = "none")]
 pub mod heap;
+#[cfg(any(target_os = "none", test))]
+pub mod lockdep;
 pub mod ring;
 pub mod slab;
 #[cfg(any(target_os = "none", test))]

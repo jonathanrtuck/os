@@ -269,7 +269,7 @@ pub struct Endpoint {
     bound_event: Option<EventId>,
     active_server: Option<ThreadId>,
     peer_closed: bool,
-    refcount: usize,
+    refcount: core::sync::atomic::AtomicUsize,
 }
 
 #[allow(clippy::new_without_default)]
@@ -287,23 +287,33 @@ impl Endpoint {
             bound_event: None,
             active_server: None,
             peer_closed: false,
-            refcount: 1,
+            refcount: core::sync::atomic::AtomicUsize::new(1),
         }
     }
 
     pub fn refcount(&self) -> usize {
+        self.refcount.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn add_ref(&self) {
         self.refcount
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     }
 
-    pub fn add_ref(&mut self) {
-        self.refcount += 1;
-    }
+    pub fn release_ref(&self) -> bool {
+        let prev = self
+            .refcount
+            .fetch_sub(1, core::sync::atomic::Ordering::Release);
 
-    pub fn release_ref(&mut self) -> bool {
-        assert!(self.refcount > 0, "Endpoint refcount underflow");
+        assert!(prev > 0, "Endpoint refcount underflow");
 
-        self.refcount -= 1;
-        self.refcount == 0
+        if prev == 1 {
+            core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+
+            return true;
+        }
+
+        false
     }
 
     pub fn is_peer_closed(&self) -> bool {

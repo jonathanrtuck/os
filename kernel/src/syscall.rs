@@ -325,17 +325,17 @@ fn install_handles(
 fn add_object_ref(object_type: ObjectType, object_id: u32) {
     match object_type {
         ObjectType::Vmo => {
-            if let Some(mut vmo) = state::vmos().write(object_id) {
+            if let Some(vmo) = state::vmos().read(object_id) {
                 vmo.add_ref();
             }
         }
         ObjectType::Endpoint => {
-            if let Some(mut ep) = state::endpoints().write(object_id) {
+            if let Some(ep) = state::endpoints().read(object_id) {
                 ep.add_ref();
             }
         }
         ObjectType::Event => {
-            if let Some(mut evt) = state::events().write(object_id) {
+            if let Some(evt) = state::events().read(object_id) {
                 evt.add_ref();
             }
         }
@@ -347,8 +347,8 @@ fn release_object_ref(object_type: ObjectType, object_id: u32, core_id: usize) {
     match object_type {
         ObjectType::Vmo => {
             let should_destroy = state::vmos()
-                .write(object_id)
-                .is_some_and(|mut vmo| vmo.release_ref());
+                .read(object_id)
+                .is_some_and(|vmo| vmo.release_ref());
 
             if should_destroy {
                 let has_mappings = state::vmos()
@@ -368,8 +368,8 @@ fn release_object_ref(object_type: ObjectType, object_id: u32, core_id: usize) {
         }
         ObjectType::Endpoint => {
             let should_destroy = state::endpoints()
-                .write(object_id)
-                .is_some_and(|mut ep| ep.release_ref());
+                .read(object_id)
+                .is_some_and(|ep| ep.release_ref());
 
             if should_destroy {
                 close_endpoint_peer(object_id, core_id);
@@ -389,8 +389,8 @@ fn release_object_ref(object_type: ObjectType, object_id: u32, core_id: usize) {
         }
         ObjectType::Event => {
             let should_destroy = state::events()
-                .write(object_id)
-                .is_some_and(|mut evt| evt.release_ref());
+                .read(object_id)
+                .is_some_and(|evt| evt.release_ref());
 
             if should_destroy {
                 destroy_event(object_id);
