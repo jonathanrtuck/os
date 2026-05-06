@@ -69,8 +69,8 @@ Per-object locking is structurally complete. Two items deferred:
   harness.
 - **HandleTable RwSpinLock** — concurrent handle lookups within the same address
   space. Currently serialized via AddressSpace slot lock; benefits only
-  multi-threaded services. Requires extracting HandleTable from AddressSpace
-  or adding RW mode to ConcurrentTable slot locks.
+  multi-threaded services. Requires extracting HandleTable from AddressSpace or
+  adding RW mode to ConcurrentTable slot locks.
 
 ## What's Next
 

@@ -45,7 +45,6 @@ static mut HELD_STACK: [u8; MAX_HELD] = [0; MAX_HELD];
 #[cfg(debug_assertions)]
 pub fn check_acquire(class: LockClass) {
     let count = HELD_COUNT.load(Ordering::Relaxed) as usize;
-
     // SAFETY: single-threaded access (tests: --test-threads=1, bare metal:
     // IRQs disabled). addr_of_mut avoids creating a reference to the static mut.
     let stack = unsafe { &mut *core::ptr::addr_of_mut!(HELD_STACK) };
@@ -65,6 +64,7 @@ pub fn check_acquire(class: LockClass) {
     assert!(count < MAX_HELD, "lockdep: nesting depth exceeded");
 
     stack[count] = class as u8;
+
     HELD_COUNT.store((count + 1) as u8, Ordering::Relaxed);
 }
 
@@ -86,6 +86,7 @@ pub fn check_release(class: LockClass) {
     );
 
     stack[count - 1] = 0;
+
     HELD_COUNT.store((count - 1) as u8, Ordering::Relaxed);
 }
 
@@ -206,7 +207,6 @@ mod tests {
 
         check_acquire(LockClass::SpaceSlot);
         check_release(LockClass::SpaceSlot);
-
         check_acquire(LockClass::EndpointSlot);
         check_acquire(LockClass::ThreadSlot);
         check_acquire(LockClass::Scheduler);
