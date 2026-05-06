@@ -21,13 +21,13 @@ by the red/blue/black color model. See
 [architecture.md § The Adaptation Layer](architecture.md#the-adaptation-layer).
 
 **Document pipeline** — three cooperating processes that form the center of the
-system, replacing the former monolithic "core" service (decomposed v0.5):
-`document` (sole writer to document state — applies edits, manages piece table
-or flat buffer), `layout` (text layout with styled runs, word/character
-breaking, font metrics), and `presenter` (scene graph builder, input router,
-style shortcuts). Together they understand content at the mimetype level (text
-has lines, images have dimensions, compound documents have parts) but are
-semantically ignorant of codec internals, user intent, and hardware. See
+system (decomposed from a former monolithic "core" service): `document` (sole
+writer to document state — applies edits, manages piece table or flat buffer),
+`layout` (text layout with styled runs, word/character breaking, font metrics),
+and `presenter` (scene graph builder, input router, style shortcuts). Together
+they understand content at the mimetype level (text has lines, images have
+dimensions, compound documents have parts) but are semantically ignorant of
+codec internals, user intent, and hardware. See
 [architecture.md § The OS Service](architecture.md#the-os-service) and
 [design/userspace.md](userspace.md).
 
@@ -63,10 +63,12 @@ foundational. See [design/userspace.md § 2.1](userspace.md).
 
 **Kernel** — manages hardware resources (memory, CPU time, interrupts, process
 isolation). Semantically ignorant — does not know what a document, mimetype, or
-pixel is. Provides handles to typed objects (channels, VMOs, threads, events,
-scheduling contexts) with rights attenuation. Does not look inside the data that
-flows through them. 46 syscalls, 4 SMP cores, per-core EEVDF scheduler with work
-stealing, GICv3. See `kernel/DESIGN.md`.
+pixel is. Five object types (VMO, Endpoint, Event, Thread, Address Space), each
+accessed via capability handles with rights attenuation. 30 syscalls, SMP with
+per-core fixed-priority preemptive scheduler (4 priority levels), sync IPC
+(call/recv/reply), GICv3, 16 KiB pages, ~28K LOC Rust. Framekernel discipline:
+`unsafe` confined to `frame/` module, enforced at compile time. See
+`kernel/src/`.
 
 **Leaf node** — a component at the outermost edge of a pipeline, connecting to
 nothing downstream. Leaf nodes are where essential complexity lives: a PNG
@@ -111,10 +113,9 @@ memory and produces pixels. "Thick" means the entire rendering pipeline (tree
 walk, rasterization, compositing, GPU presentation) runs in a single process —
 no cross-process IPC for frame submission. Sole implementation: `metal-render`
 (native Metal GPU via hypervisor passthrough with 4x MSAA). Previous
-implementations (`cpu-render`, `virgil-render`) were removed after render
-consolidation (v0.5). Render services are leaf nodes: they consume a
-content-agnostic scene graph and emit pixels. See
-[design/userspace.md](userspace.md).
+implementations (`cpu-render`, `virgil-render`) were removed after render render
+consolidation. Render services are leaf nodes: they consume a content-agnostic
+scene graph and emit pixels. See [design/userspace.md](userspace.md).
 
 **Service** — a long-running userspace process with a specific role in the
 system. Services communicate via IPC (event rings, state registers, or shared
@@ -142,68 +143,75 @@ translator; the OS doesn't change. Translation is inherently lossy. See
 ## Kernel
 
 **ASLR (Address Space Layout Randomization)** — per-process randomization of
-heap, DMA, device, and stack region base addresses (~14 bits of entropy each).
-Defense-in-depth alongside the capability model. **KASLR** randomizes the kernel
-image load address at boot (8-bit entropy, 32 MiB slide) via PIE + PIC +
-post-link relocation fixup. See `kernel/aslr.rs`, `kernel/relocate.rs`.
+region base addresses. Defense-in-depth alongside the capability model. Planned
+for userspace bring-up.
 
 **Badge** — a u64 value attached to a handle, preserved through transfer and
 attenuation. Enables userspace servers to identify callers without a global PID
 namespace — each client gets a unique badge when the server mints their handle.
-See `kernel/handle.rs`.
+See `kernel/src/handle.rs`.
 
 **Capability (handle)** — the kernel's access control primitive. A process can
 only interact with a resource (channel, VMO, thread, event, scheduling context)
 by holding a handle to it. Handles carry rights and a badge. No ambient
-authority — nothing is accessible without a handle. See `kernel/handle.rs`.
+authority — nothing is accessible without a handle. See `kernel/src/handle.rs`.
 
 **CWC (Concurrent Work Conservation)** — a property of the SMP scheduler: no
-idle core coexists with an overloaded core after a scheduling round.
-Property-tested via model tests. Linux CFS was shown to violate CWC (Ipanema,
-EuroSys 2020). See `kernel/scheduler.rs`.
+idle core coexists with an overloaded core after a scheduling round. Linux CFS
+was shown to violate CWC (Ipanema, EuroSys 2020). Not currently implemented; the
+kernel uses a fixed-priority preemptive scheduler. May be added if workload
+analysis justifies it. See `kernel/src/thread.rs`.
 
-**EEVDF (Earliest Eligible Virtual Deadline First)** — the scheduling algorithm,
-independently chosen by both this kernel and Linux (6.6+). Per-core ready queues
-with virtual lag (vlag) tracking for fairness. Threads are placed via
-cache-affine wake (prefer `last_core`). See `kernel/scheduler.rs`.
+**EEVDF (Earliest Eligible Virtual Deadline First)** — a fair scheduling
+algorithm, also used by Linux (6.6+). Per-core ready queues with virtual lag
+(vlag) tracking. Not currently implemented; the kernel uses a simpler
+fixed-priority preemptive scheduler with 4 levels (Idle, Low, Medium, High). May
+be added if workload analysis justifies the complexity.
+
+**Endpoint** — the kernel's IPC rendezvous point. Provides synchronous
+call/recv/reply IPC with priority inheritance. The caller blocks until the
+server receives, processes, and replies. Messages carry up to 128 bytes of data
+and up to 4 handle transfers. A one-shot reply capability prevents double-reply.
+Can be bound to an event for async notification of pending calls. See
+`kernel/src/endpoint.rs`.
 
 **Event** — a kernel object with a 64-bit signal bitmask. Threads can wait on
-events and set/clear bits atomically. Used for lightweight synchronization
-between processes. See `kernel/event.rs`.
+events (single or multi-wait on up to 32 events) and set/clear bits atomically.
+Used for lightweight synchronization between processes. Can be bound to IRQs for
+hardware interrupt delivery to userspace. See `kernel/src/event.rs`.
 
 **PAC (Pointer Authentication Code)** / **BTI (Branch Target Identification)** —
 ARM64 hardware control-flow integrity features. PAC signs return addresses with
 per-process keys (5 × 128-bit, loaded on context switch). BTI enforces that
 indirect branches land on valid targets. Strictly superior to stack canaries.
-See `kernel/arch/aarch64/context.rs`.
+See `kernel/src/frame/arch/aarch64/context.rs`.
 
 **Pager** — a userspace process that supplies pages to a VMO on demand, via a
 channel. When a thread faults on an uncommitted VMO page, the kernel sends a
 fault message to the pager channel; the pager responds with physical memory.
-Fault deduplication ensures only one request per page. See `kernel/vmo.rs`.
+Fault deduplication ensures only one request per page. See `kernel/src/vmo.rs`.
 
-**Rights** — a bitmask of 8 named permissions on a handle: READ, WRITE, SIGNAL,
-WAIT, MAP, TRANSFER, CREATE, KILL. Rights are monotonically attenuated — you can
-only remove rights on transfer, never add them. Per-syscall enforcement ensures
-a handle without WRITE cannot be used to write. See `kernel/handle.rs`.
+**Rights** — a bitmask of 9 named permissions on a handle: READ, WRITE, EXECUTE,
+MAP, DUP, TRANSFER, SIGNAL, WAIT, SPAWN. Rights are monotonically attenuated —
+you can only remove rights on duplication or transfer, never add them.
+Per-syscall enforcement ensures a handle without WRITE cannot be used to write.
+See `kernel/src/types.rs` and `kernel/src/handle.rs`.
 
 **Scheduling context** — a handle-based object that groups threads into a
 budget. Threads sharing a scheduling context share CPU time allocation. Used by
-userspace to express workload structure. Work stealing prefers to migrate entire
-scheduling context groups (workload-granularity migration). See
-`kernel/scheduler.rs`.
+userspace to express workload structure. Not currently implemented. May be added
+as part of the userspace scheduler interface.
 
-**VMO (Virtual Memory Object)** — the kernel's memory primitive. A named
-collection of pages with five novel features: versioned (COW snapshots with
-bounded ring), sealed (immutable freeze with PTE invalidation), content-typed
-(u64 tag for IPC type safety), lazy-backed (demand-paged), and pager-backed
-(userspace fault handling). Cross-process `vmo_map` replaces the older
-`memory_share` syscall. 10 syscalls (30–39). See `kernel/vmo.rs`.
+**VMO (Virtual Memory Object)** — the kernel's memory primitive. A collection of
+pages with five features: COW snapshots, sealing (immutable freeze), lazy
+allocation (demand-paged with zero-fill), pager-backed (userspace fault handling
+via channel), and cross-space mapping (`vmo_map_into`). 8 syscalls: create, map,
+map_into, unmap, snapshot, seal, resize, set_pager. See `kernel/src/vmo.rs`.
 
 **Work stealing** — idle SMP cores steal runnable threads from the busiest
-remote core's ready queue. EEVDF virtual lag is preserved across migration so
-fairness position is maintained. Budget-aware: only steals threads with
-scheduling context budget remaining. See `kernel/scheduler.rs`.
+remote core's ready queue. Not currently implemented; the multi-core scheduler
+uses thread affinity placement at creation time. May be added if workload
+benchmarks show idle-core waste.
 
 ---
 
@@ -320,7 +328,7 @@ type). A sequence of pieces referencing either the original text or an
 append-only add buffer, with style IDs per piece. Enables operation-aware
 editing (selective undo, future collaboration) via the same rebase machinery the
 architecture calls for. Leaf node library at `libraries/piecetable/`. See
-[journal.md](journal.md) "v0.5 Rich Text Design."
+[journal.md](journal.md) "Rich Text Design."
 
 **Shell** — the navigation interface (GUI, CLI, or TUI). A blue-layer tool: an
 untrusted userspace process that translates navigational intent (find documents,

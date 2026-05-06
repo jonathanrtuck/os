@@ -15,17 +15,17 @@ the alternatives.
 
 The questions a systems programmer would ask on first encounter:
 
-| Question                            | Answer                                                                                                                                               |
-| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| What kind of kernel?                | Microkernel. Rust, `no_std`, arm64. 46 syscalls, ~11K LOC.                                                                                           |
-| POSIX?                              | No. Custom syscall ABI designed around documents, handles, and channels.                                                                             |
-| More like Linux, macOS, or Fuchsia? | Microkernel + capabilities like Fuchsia. MIME-aware content model like BeOS. Document-centric data model like none of them.                          |
-| Filesystem?                         | Custom COW with per-document snapshots, metadata queries, and a document store layer.                                                                |
-| GPU?                                | Metal via hypervisor passthrough. The OS compiles a scene graph; the GPU renders it. Apps don't touch pixels.                                        |
-| Can it run existing software?       | No. No POSIX, no libc, no compatibility layer. Everything is `no_std` Rust.                                                                          |
-| Performance?                        | Designed for it (zero-copy IPC, EEVDF scheduler, Metal GPU). Not yet benchmarked against other systems.                                              |
-| How much code?                      | ~64K LOC Rust across kernel (11K), 14 libraries, 12 services, 6 user programs. 2,300+ tests, 15 visual regression tests.                             |
-| Is this serious?                    | It's a design exploration with working code. Pre-alpha (v0.6). Not a product, not a weekend project. Closer to a research OS with an implementation. |
+| Question                            | Answer                                                                                                                      |
+| ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| What kind of kernel?                | Microkernel. Rust, `no_std`, arm64. 30 syscalls, ~28K LOC.                                                                  |
+| POSIX?                              | No. Custom syscall ABI designed around handles and sync IPC.                                                                |
+| More like Linux, macOS, or Fuchsia? | Microkernel + capabilities like Fuchsia. MIME-aware content model like BeOS. Document-centric data model like none of them. |
+| Filesystem?                         | Planned: custom COW with per-document snapshots, metadata queries, and a document store layer.                              |
+| GPU?                                | Planned: Metal via hypervisor passthrough, scene graph rendering.                                                           |
+| Can it run existing software?       | No. No POSIX, no libc, no compatibility layer. Everything is `no_std` Rust.                                                 |
+| Performance?                        | Kernel hot paths cycle-benchmarked on M4 Pro. IPC round-trip, page fault, object lifecycle all baselined.                   |
+| How much code?                      | ~28K LOC Rust (kernel). 704 tests, 4 fuzz targets, 33 property tests, 16 invariant checks. Userspace next.                  |
+| Is this serious?                    | Design exploration with a verified kernel. Not a product, not a weekend project. Closer to a research OS.                   |
 
 ---
 
@@ -52,63 +52,62 @@ to compare against technically.
 ## Kernel & Process Model
 
 **Our approach:** Preemptive microkernel in Rust (`no_std`,
-`aarch64-unknown-none`). 4 SMP cores, per-core EEVDF scheduler with work
-stealing, handle-based scheduling contexts, and per-context budgets. 46
-syscalls. Kernel spawns only init; init reads service ELFs from a memory-mapped
-flat archive and spawns everything else. Hardware isolation via ARM EL0/EL1.
-Full context save/restore including NEON/FP state.
+`aarch64-unknown-none`). SMP (up to 8 cores), per-core fixed-priority preemptive
+scheduler with 4 levels (Idle/Low/Medium/High). 30 syscalls across 5 object
+types (VMO, Endpoint, Event, Thread, Address Space). Kernel spawns only init;
+init spawns everything else. Hardware isolation via ARM EL0/EL1. Full context
+save/restore including NEON/FP state. Framekernel discipline: all `unsafe` code
+confined to `frame/` module, enforced by `#![deny(unsafe_code)]` at crate root.
 
-|                     | This OS                | Linux                | macOS (XNU)         | Fuchsia (Zircon)  | Redox                    | seL4                         |
-| ------------------- | ---------------------- | -------------------- | ------------------- | ----------------- | ------------------------ | ---------------------------- |
-| Architecture        | Microkernel            | Monolithic           | Hybrid (Mach + BSD) | Microkernel       | Microkernel              | Microkernel                  |
-| Language            | Rust (`no_std`)        | C                    | C/C++               | C++               | Rust                     | C (verified)                 |
-| Syscalls            | 46                     | ~450                 | ~540 (Mach + BSD)   | ~170              | POSIX-like set           | ~12                          |
-| Scheduler           | Per-core EEVDF + steal | EEVDF (since 6.6)    | Mach decay-usage    | Fair scheduler    | Cooperative + preemptive | Round-robin (minimal)        |
-| SMP                 | 4 cores                | Thousands            | Dozens              | Many              | Single core (WIP)        | Configurable                 |
-| Boot init model     | Init from service pack | PID 1 (systemd/init) | launchd             | component_manager | initfs                   | Root task                    |
-| Formal verification | No                     | No                   | No                  | No                | No                       | Yes (functional correctness) |
+|                     | This OS                 | Linux                | macOS (XNU)         | Fuchsia (Zircon)  | Redox                    | seL4                         |
+| ------------------- | ----------------------- | -------------------- | ------------------- | ----------------- | ------------------------ | ---------------------------- |
+| Architecture        | Microkernel             | Monolithic           | Hybrid (Mach + BSD) | Microkernel       | Microkernel              | Microkernel                  |
+| Language            | Rust (`no_std`)         | C                    | C/C++               | C++               | Rust                     | C (verified)                 |
+| Syscalls            | 30                      | ~450                 | ~540 (Mach + BSD)   | ~170              | POSIX-like set           | ~12                          |
+| Scheduler           | Per-core fixed-priority | EEVDF (since 6.6)    | Mach decay-usage    | Fair scheduler    | Cooperative + preemptive | Round-robin (minimal)        |
+| SMP                 | Up to 8 cores           | Thousands            | Dozens              | Many              | Single core (WIP)        | Configurable                 |
+| Boot init model     | Init from service pack  | PID 1 (systemd/init) | launchd             | component_manager | initfs                   | Root task                    |
+| Formal verification | No                      | No                   | No                  | No                | No                       | Yes (functional correctness) |
 
-**Convergences:** Linux adopted EEVDF in kernel 6.6 (2023) — the same scheduling
-algorithm, independently chosen. The microkernel + root-task-spawns-everything
-pattern is shared with Fuchsia and seL4.
+**Convergences:** The microkernel + root-task-spawns-everything pattern is
+shared with Fuchsia and seL4. The kernel uses a fixed-priority scheduler; EEVDF
+(as used by Linux 6.6+) is a future option if workload data justifies the
+complexity.
 
-**Tradeoffs:** 46 syscalls vs Linux's ~450 reflects scope, not minimalism for
+**Tradeoffs:** 30 syscalls vs Linux's ~450 reflects scope, not minimalism for
 its own sake — networking, multi-user, and pipes don't exist yet. The count will
 grow. Rust prevents memory safety bugs in the kernel (shared with Redox), but
 the kernel is not formally verified (seL4's advantage). The design bets that
-Rust's type system, ~2,260 tests, and small codebase provide adequate confidence
-for a single-user system — a weaker guarantee than seL4's formal proofs, but at
-a fraction of the engineering cost. The per-core EEVDF scheduler with work
-stealing is novel in two ways: workload-granularity migration (steal by
-scheduling context group) and a property-tested Concurrent Work Conservation
-guarantee (CWC) — Linux CFS was shown to violate CWC by Ipanema (EuroSys 2020).
+Rust's type system + framekernel discipline + 12-phase verification (704 tests,
+4 fuzz targets, 33 property tests, Miri, mutation testing, sanitizers, SMP
+stress) provides adequate confidence for a single-user system — a weaker
+guarantee than seL4's formal proofs, but at a fraction of the engineering cost.
 
 ---
 
 ## Memory & Security
 
 **Our approach:** Capability-based handle table with rights attenuation —
-processes hold handles to channels, VMOs (virtual memory objects), scheduling
-contexts, events, and threads. 8 named rights (READ, WRITE, SIGNAL, WAIT, MAP,
-TRANSFER, CREATE, KILL) monotonically attenuated on transfer. Per-handle u64
-badges for endpoint discrimination. No ambient authority (no global PID
-namespace, no `/proc`, no ambient file access). Split TTBR (kernel TTBR1 / user
-TTBR0). VMO-backed demand-paged memory with COW snapshots and pager interface.
-W^X enforcement on all pages. Three-tier kernel allocator (slab + linked-list +
-buddy). ASLR (per-process user-space + kernel KASLR with 8-bit entropy). PAC
-(pointer authentication) and BTI (branch target identification) on ARM64.
-Execute-only code pages. No dynamic linking, no shared libraries.
+processes hold handles to VMOs (virtual memory objects), endpoints, events,
+threads, and address spaces. 9 named rights (READ, WRITE, EXECUTE, MAP, DUP,
+TRANSFER, SIGNAL, WAIT, SPAWN) monotonically attenuated on duplication or
+transfer. No ambient authority (no global PID namespace, no `/proc`, no ambient
+file access). Split TTBR (kernel TTBR1 / user TTBR0). VMO-backed demand-paged
+memory with COW snapshots and pager interface. W^X enforcement on all pages.
+ASLR (per-process user-space + kernel KASLR). PAC (pointer authentication) and
+BTI (branch target identification) on ARM64. No dynamic linking, no shared
+libraries.
 
-|                 | This OS                    | Linux                        | macOS                       | Fuchsia                 | seL4                             |
-| --------------- | -------------------------- | ---------------------------- | --------------------------- | ----------------------- | -------------------------------- |
-| Isolation       | EL0/EL1 hardware           | Ring 0/3 hardware            | Hardware + SIP + sandbox    | Hardware + capabilities | Hardware + verified capabilities |
-| Capabilities    | Handle + 8 rights + badges | DAC + MAC (SELinux/AppArmor) | Sandbox entitlements        | Handle table (runtime)  | Capabilities (verified)          |
-| Memory objects  | VMOs (COW, sealed, pager)  | Anonymous/file mmap          | Mach VM objects             | VMOs                    | Frames + untyped                 |
-| Page size       | 16 KiB                     | 4 KiB default                | 16 KiB (Apple Silicon)      | 4 KiB                   | Configurable                     |
-| W^X             | Enforced on all pages      | Optional (mprotect)          | Enforced (hardened runtime) | Enforced                | Enforced                         |
-| ASLR            | User + kernel (KASLR)      | Yes                          | Yes                         | Yes                     | N/A                              |
-| PAC / BTI       | Yes (per-process keys)     | Yes (since 5.8/5.10)         | Yes (Apple Silicon)         | No                      | N/A                              |
-| Dynamic linking | None                       | ld.so                        | dyld                        | ELF + vDSO              | None                             |
+|                 | This OS                   | Linux                        | macOS                       | Fuchsia                 | seL4                             |
+| --------------- | ------------------------- | ---------------------------- | --------------------------- | ----------------------- | -------------------------------- |
+| Isolation       | EL0/EL1 hardware          | Ring 0/3 hardware            | Hardware + SIP + sandbox    | Hardware + capabilities | Hardware + verified capabilities |
+| Capabilities    | Handle + 9 rights         | DAC + MAC (SELinux/AppArmor) | Sandbox entitlements        | Handle table (runtime)  | Capabilities (verified)          |
+| Memory objects  | VMOs (COW, sealed, pager) | Anonymous/file mmap          | Mach VM objects             | VMOs                    | Frames + untyped                 |
+| Page size       | 16 KiB                    | 4 KiB default                | 16 KiB (Apple Silicon)      | 4 KiB                   | Configurable                     |
+| W^X             | Enforced on all pages     | Optional (mprotect)          | Enforced (hardened runtime) | Enforced                | Enforced                         |
+| ASLR            | Planned                   | Yes                          | Yes                         | Yes                     | N/A                              |
+| PAC / BTI       | Planned                   | Yes (since 5.8/5.10)         | Yes (Apple Silicon)         | No                      | N/A                              |
+| Dynamic linking | None                      | ld.so                        | dyld                        | ELF + vDSO              | None                             |
 
 **Tradeoffs:** The handle-based model is structurally similar to Fuchsia's: you
 cannot access a resource you don't hold a handle to. Rights attenuation and
@@ -117,28 +116,26 @@ servers to identify callers without a global PID namespace. VMOs with versioning
 (COW snapshot ring), sealing (immutable freeze), content typing (u64 tag), and
 userspace pagers are architecturally comparable to Fuchsia's VMOs but add
 several novel features (bounded snapshot ring, compile-time seal enforcement via
-rights). ASLR covers both userspace (~14 bits per region) and kernel (KASLR,
-8-bit entropy, 32 MiB slide). PAC + BTI provide hardware control-flow integrity
-— strictly superior to stack canaries on ARM64. No dynamic linking eliminates
-GOT/PLT hijacking and LD_PRELOAD-class attacks, at the cost of higher memory
-usage when multiple processes share library code (each gets its own copy in
-physical memory).
+rights). ASLR and PAC/BTI are planned for userspace bring-up. No dynamic linking
+eliminates GOT/PLT hijacking and LD_PRELOAD-class attacks, at the cost of higher
+memory usage when multiple processes share library code (each gets its own copy
+in physical memory).
 
 ---
 
 ## Inter-Process Communication
 
-**Our approach:** Two mechanisms matched to data semantics: event rings (64-byte
-lock-free SPSC ring buffers in shared memory pages) for discrete events where
-order matters, and state registers (atomic shared memory with store-release /
-load-acquire) for continuous state where only the latest value matters. A third
-region — the Content Region (4 MiB shared memory with a registry) — holds
-persistent decoded content (font data, image pixels). All signaled via a single
-`channel_signal` syscall that wakes consumers from `sys::wait()`.
+**Our approach:** The kernel provides synchronous IPC via endpoints
+(call/recv/reply with priority inheritance) and asynchronous notification via
+events (64-bit signal bitmask with multi-wait). The userspace design layers two
+mechanisms on top: event rings (64-byte lock-free SPSC ring buffers in shared
+memory) for discrete events where order matters, and state registers (atomic
+shared memory with store-release / load-acquire) for continuous state where only
+the latest value matters.
 
 |                    | This OS                            | Linux                         | macOS (XNU)                  | Fuchsia               | Plan 9            |
 | ------------------ | ---------------------------------- | ----------------------------- | ---------------------------- | --------------------- | ----------------- |
-| Primary mechanism  | Ring buffers + state registers     | Pipes, sockets, shared memory | Mach ports (queued messages) | Channels (FIDL-typed) | 9P file protocol  |
+| Primary mechanism  | Sync IPC (call/recv/reply)         | Pipes, sockets, shared memory | Mach ports (queued messages) | Channels (FIDL-typed) | 9P file protocol  |
 | Message size       | Fixed 64 bytes                     | Arbitrary                     | Arbitrary (Mach messages)    | Arbitrary (FIDL)      | Arbitrary (9P)    |
 | Bulk data          | Shared memory (zero-copy)          | sendfile, splice, mmap        | Mach OOL memory              | VMOs (zero-copy)      | Read/write on fd  |
 | Typed messages     | Yes (protocol library, 10 modules) | No (byte streams)             | Partial (MIG)                | Yes (FIDL, versioned) | No (byte streams) |
@@ -379,8 +376,7 @@ semantic relationship that assistive technology needs.
 **Our approach:** arm64 exclusively (Apple Silicon). Runs in a custom hypervisor
 on macOS that provides Metal GPU passthrough, virtio-blk/input/console/9p
 devices, DTB-based device discovery, and built-in screenshot capture for
-deterministic visual testing. Bare-metal hardware is a planned future target
-(v0.13).
+deterministic visual testing. Bare-metal hardware is a future target.
 
 |                  | This OS                        | Linux                       | macOS                     | Fuchsia                  | Redox                  |
 | ---------------- | ------------------------------ | --------------------------- | ------------------------- | ------------------------ | ---------------------- |
@@ -404,9 +400,9 @@ tables) would need porting for other ISAs.
 
 ## Networking & Ecosystem
 
-No networking (planned for v0.11). No package manager. No application ecosystem.
-All code is first-party Rust. The OS communicates with the host only via
-virtio-9p (shared filesystem) and virtio-console (serial).
+No networking yet. No package manager. No application ecosystem. All code is
+first-party Rust. The OS communicates with the host only via virtio-9p (shared
+filesystem) and virtio-console (serial).
 
 This is the most obvious gap relative to any system that ships to users. It is a
 deliberate sequencing choice: the document model, rendering pipeline, and
@@ -418,72 +414,73 @@ not reshape the architecture. But until then, the OS is an island.
 
 ## Build System & Developer Experience
 
-**Our approach:** Single command (`cargo build --release`) compiles the entire
-system: 14 shared libraries, 12 services, 6 user programs, a service pack
-archive, and the kernel — all cross-compiled to `aarch64-unknown-none`.
-`cargo run --release` builds and boots. The build script (`build.rs`)
-orchestrates parallel compilation of userspace ELFs, packs them into a flat
-archive linked as a `.services` section in the kernel binary, and runs a
-build-time SVG→path icon converter. No Makefile, no CMake, no external build
-system. A single `system_config.rs` file is the SSOT for 9 root constants (page
-size, VA layout, memory regions) shared between kernel, libraries, and build
-script.
+**Our approach:** Cargo workspace with kernel and userspace crates.
+`cargo build -p kernel` cross-compiles the kernel to `aarch64-unknown-none`;
+`cargo test -p kernel --lib` runs 704 host-side tests on the build machine. A
+separate `userspace/integration-tests` crate builds bare-metal init binaries for
+hypervisor boot. Makefile provides verification targets: `make test`,
+`make miri`, `make fuzz`, `make bench-check`, `make nightly`. Configuration via
+`kernel/src/config.rs` (capacity limits, page size) and `.cargo/config.toml`
+(target features: LSE atomics, RCPC).
 
-|                     | This OS                             | Linux                          | Fuchsia                           | Redox                   | Haiku                    |
-| ------------------- | ----------------------------------- | ------------------------------ | --------------------------------- | ----------------------- | ------------------------ |
-| Build system        | `cargo build` (single command)      | Kbuild + Make + Kconfig        | GN + Ninja + fx                   | Make + Cargo            | Jam (custom)             |
-| Config management   | One Rust file (SSOT)                | .config (thousands of options) | GN args + product config          | Config.toml + Makefiles | Various                  |
-| Cross-compilation   | Native (Rust target triple)         | Cross-compiler toolchain       | Built-in (fx set)                 | Built-in                | Cross-compiler toolchain |
-| Build time (clean)  | ~30s (single binary)                | Minutes to hours               | Minutes to hours                  | Minutes                 | Minutes to hours         |
-| Service packaging   | Flat archive (service pack)         | Filesystem hierarchy           | Package system (Fuchsia packages) | initfs                  | Package system (.hpkg)   |
-| Incremental rebuild | Cargo-managed + service pack relink | Incremental by design          | Ninja incremental                 | Make incremental        | Jam incremental          |
+|                     | This OS                                  | Linux                          | Fuchsia                  | Redox                   | Haiku                    |
+| ------------------- | ---------------------------------------- | ------------------------------ | ------------------------ | ----------------------- | ------------------------ |
+| Build system        | Cargo workspace + Makefile               | Kbuild + Make + Kconfig        | GN + Ninja + fx          | Make + Cargo            | Jam (custom)             |
+| Config management   | Rust const files                         | .config (thousands of options) | GN args + product config | Config.toml + Makefiles | Various                  |
+| Cross-compilation   | Native (Rust target triple)              | Cross-compiler toolchain       | Built-in (fx set)        | Built-in                | Cross-compiler toolchain |
+| Build time (clean)  | ~5s (kernel only)                        | Minutes to hours               | Minutes to hours         | Minutes                 | Minutes to hours         |
+| Verification gates  | Pre-commit (clippy+test+build) + nightly | Scattered CI configs           | CQ integration           | GitHub Actions          | BuildBot                 |
+| Incremental rebuild | Cargo-managed                            | Incremental by design          | Ninja incremental        | Make incremental        | Jam incremental          |
 
-**Tradeoffs:** A single Cargo workspace means one command builds everything and
-Rust's dependency tracking handles incrementality. The service pack avoids the
-`include_bytes!` cascade that previously caused 19 MB of relinking when any
-service changed. The cost: no configuration system. There is no kernel .config,
-no feature flags, no conditional compilation beyond Rust's standard `cfg`. For a
-single-target, single-user system this is simplicity; for a multi-platform OS it
-would be insufficient. The build also depends on Rust nightly (for `no_std`
-features and the target triple), tying it to a specific toolchain.
+**Tradeoffs:** Rust nightly required for `no_std` features and the
+`aarch64-unknown-none` target triple. No configuration system beyond Rust's
+`cfg` — no kernel .config, no feature flags. For a single-target, single-user
+system this is simplicity; for a multi-platform OS it would be insufficient.
 
 ---
 
 ## Testing & Verification
 
-**Our approach:** Three layers of testing. Host-side unit tests (~2,300+)
-exercise kernel and library logic in isolation via `#[path]` includes with stub
-dependencies. Integration scripts (smoke, stress, crash, display-pipeline) boot
-the full system under QEMU with various device configurations. Visual regression
-tests boot the hypervisor, run event scripts (type text, click, drag), capture
-screenshots via GPU blit, and assert correctness with `verify.py` — a tool that
-returns PASS/FAIL verdicts on assertions like `frame_not_blank`,
-`page_centered`, `cursor_visible_at`, `pixel_is`, and SSIM comparisons.
+**Our approach:** The kernel underwent a 12-phase verification campaign
+(`design/kernel-verification-plan.md`) applying every technique short of formal
+verification. Host-side tests (704) cover unit, syscall-level, property-based,
+pipeline, and verification scenarios. 4 structured fuzz targets with
+invariant-checking harnesses. 33 property tests (proptest) for state machine
+properties. Miri for undefined behavior detection. Mutation testing to verify
+tests detect real bugs. AddressSanitizer for memory errors. SMP bare-metal
+stress tests on 4 vCPUs. Per-syscall cycle-accurate benchmarks with statistical
+regression thresholds. Debug-build runtime invariant checking (16 structural
+invariants verified after every syscall on bare-metal). 20 bugs found and fixed
+during the campaign.
 
-|                   | This OS                                    | Linux                       | Fuchsia                   | Redox          | seL4          |
-| ----------------- | ------------------------------------------ | --------------------------- | ------------------------- | -------------- | ------------- |
-| Unit tests        | ~2,750 (host-side)                         | kselftest, kunit            | Extensive (host + device) | Moderate       | Formal proofs |
-| Integration tests | QEMU boot scripts                          | kselftest, LTP              | CQ bots, emulator         | QEMU boot      | Proof-based   |
-| Visual regression | 15 spec files, verify.py (assertion-based) | None (no OS-level renderer) | Screenshot tests (Scenic) | None           | N/A           |
-| Stress testing    | Fuzz + IPC/scheduler/timer stress, 4 SMP   | Syzkaller, LTP stress       | CQ stress, fuzzing        | Limited        | N/A           |
-| Fault injection   | OOM injection (set_fail_after)             | Fault injection framework   | Various                   | No             | N/A           |
-| CI                | Local (no CI server)                       | Extensive (0-day, kernelci) | Extensive (CQ, CI/CD)     | GitHub Actions | Various       |
+|                       | This OS                                          | Linux                       | Fuchsia                   | Redox          | seL4           |
+| --------------------- | ------------------------------------------------ | --------------------------- | ------------------------- | -------------- | -------------- |
+| Unit tests            | 704 (kernel, host-side)                          | kselftest, kunit            | Extensive (host + device) | Moderate       | Formal proofs  |
+| Property tests        | 33 proptests (state machine + boundary values)   | Limited                     | Some                      | No             | N/A            |
+| Fuzzing               | 4 targets, invariant-checking, 200K+ runs        | Syzkaller (extensive)       | CQ fuzzing                | Limited        | N/A            |
+| UB detection          | Miri (host tests) + ASan                         | KASAN, KMSAN, KCSAN         | ASan, MSan                | No             | N/A            |
+| Mutation testing      | cargo-mutants on all critical files              | Limited                     | No                        | No             | N/A            |
+| Integration tests     | 34 bare-metal tests (hypervisor boot)            | kselftest, LTP              | CQ bots, emulator         | QEMU boot      | Proof-based    |
+| SMP stress            | 4-vCPU bare-metal: IPC, lifecycle, event stress  | Extensive                   | CQ stress                 | Limited        | N/A            |
+| Performance baselines | Per-syscall cycle-accurate, P99 + 3σ thresholds  | perf, eBPF                  | Tracing                   | No             | N/A            |
+| Runtime invariants    | 16 checks after every syscall (debug bare-metal) | CONFIG*DEBUG*\* options     | Debug checks              | No             | Proved correct |
+| Fault injection       | OOM at every allocation point + capacity exhaust | Fault injection framework   | Various                   | No             | N/A            |
+| CI                    | Local (pre-commit + nightly gates)               | Extensive (0-day, kernelci) | Extensive (CQ, CI/CD)     | GitHub Actions | Various        |
 
-**Where this is unusual:** Visual regression testing at the OS level. Because
-the OS controls all rendering, the visual output is deterministic — the same
-inputs produce the same pixels. This enables assertion-based visual testing:
-"the cursor is at (x, y) with size 32" is a verifiable statement, not a visual
-judgment. Mainstream OSes cannot do this because application rendering is
-non-deterministic. The hypervisor's screenshot capture (GPU blit from Metal
-drawable) provides pixel-perfect captures without window focus or macOS
-accessibility permissions.
+**Where this is unusual:** The 12-phase verification campaign is more thorough
+than most non-formally-verified kernels. The combination of property testing,
+structured fuzzing with invariant checking, mutation testing, Miri, and
+debug-build runtime invariant checking on bare-metal creates overlapping
+detection layers — each technique catches bugs the others miss. The bug
+discovery curve (17 bugs in sessions 1-2, 3 trickle bugs in sessions 8-10, zero
+in session 11) suggests diminishing returns on isolated verification.
 
-**Tradeoffs:** No CI. All testing is local. For a single-developer project this
-works; for collaboration it would be a blocker. The host-side unit tests run
-with `--test-threads=1` due to shared global state in stubs — a testing
-limitation, not an architectural one. The stress tests are time-bounded (not
-fuzz-until-crash), so they provide confidence proportional to runtime, not
-coverage guarantees.
+**Tradeoffs:** No CI server. All testing is local. For a single-developer
+project this works; for collaboration it would be a blocker. Not formally
+verified — every technique is probabilistic, not a proof. The host-side tests
+run with `--test-threads=1` due to shared kernel state. Visual regression
+testing (planned: 15 specs, `verify.py`) will be added when the userspace
+rendering pipeline is in place.
 
 ---
 
@@ -525,27 +522,25 @@ the codebase is `no_std` with no public crate interface.
 
 ## Maturity & Scope
 
-| Dimension             | This OS                            | Fuchsia                 | Redox                   | Haiku                   | seL4                     |
-| --------------------- | ---------------------------------- | ----------------------- | ----------------------- | ----------------------- | ------------------------ |
-| Active development    | ~2 months                          | ~10 years               | ~11 years               | ~23 years               | ~17 years                |
-| Codebase              | ~64K LOC Rust                      | Millions LOC (C++/Rust) | ~400K LOC Rust          | Millions LOC (C++)      | ~10K LOC C (kernel)      |
-| Tests                 | 2,300+ unit + 15 visual regression | Extensive               | Moderate                | Extensive               | Formal proofs + tests    |
-| Content types handled | 3 (plain text, rich text, PNG)     | N/A (delegated to apps) | N/A (delegated to apps) | N/A (delegated to apps) | N/A                      |
-| Self-hosting          | Not a goal                         | Partial                 | In progress             | Yes                     | Not a goal               |
-| Contributors          | 1                                  | ~500+                   | ~80+                    | ~100+                   | ~30+                     |
-| Ships to users        | No                                 | Yes (Nest Hub, Pixel)   | Alpha ISOs              | Beta releases           | Deployed (defense, auto) |
+| Dimension             | This OS                    | Fuchsia                 | Redox                   | Haiku                   | seL4                     |
+| --------------------- | -------------------------- | ----------------------- | ----------------------- | ----------------------- | ------------------------ |
+| Active development    | ~2 months                  | ~10 years               | ~11 years               | ~23 years               | ~17 years                |
+| Codebase              | ~28K LOC Rust (kernel)     | Millions LOC (C++/Rust) | ~400K LOC Rust          | Millions LOC (C++)      | ~10K LOC C (kernel)      |
+| Tests                 | 704 + 4 fuzz + 33 proptest | Extensive               | Moderate                | Extensive               | Formal proofs + tests    |
+| Content types handled | 0 (kernel only)            | N/A (delegated to apps) | N/A (delegated to apps) | N/A (delegated to apps) | N/A                      |
+| Self-hosting          | Not a goal                 | Partial                 | In progress             | Yes                     | Not a goal               |
+| Contributors          | 1                          | ~500+                   | ~80+                    | ~100+                   | ~30+                     |
+| Ships to users        | No                         | Yes (Nest Hub, Pixel)   | Alpha ISOs              | Beta releases           | Deployed (defense, auto) |
 
-**Honest assessment:** This OS is pre-alpha. It has a working microkernel, a GPU
-rendering pipeline, a COW document store with undo, and rich text editing with
-piece table, multi-style runs, and decorations. These components are tested and
-integrated. But it lacks networking, multi-user support, most content type
-decoders, a CLI, compound document layout, audio, video, and the years of
-edge-case handling that mature systems embody.
+**Honest assessment:** The kernel has been rewritten from first principles and
+verified through a 12-phase campaign (20 bugs found and fixed, zero remaining
+after convergence). The userspace has not yet been built. The kernel is the
+foundation; everything above it is next.
 
 The comparison here is not "this OS vs production systems" — it's "the design
 choices this OS makes vs the design choices production systems make, and what
-the tradeoffs imply." The implementation validates that the architecture works
-at small scale. Whether it works at production scale is unknown.
+the tradeoffs imply." The kernel is production-grade in verification depth; the
+system as a whole is pre-alpha.
 
 ---
 
@@ -576,11 +571,10 @@ at small scale. Whether it works at production scale is unknown.
   planned. Every tool must be written from scratch in `no_std` Rust.
 - **Hardware support** — One architecture, one GPU vendor, mediated by a
   hypervisor. No native hardware drivers.
-- **Maturity** — ~2 months old, single developer, unproven at scale. Young
-  filesystem, young scheduler, young everything.
+- **Maturity** — ~2 months old, single developer. The kernel is well-verified
+  (12-phase campaign, 704 tests); the userspace has not yet been built.
 - **Networking** — None.
-- **Content breadth** — Three content types vs the thousands that mainstream
-  OSes handle via their application ecosystems.
+- **Content breadth** — Zero content types currently (kernel only).
 - **Rendering constraints** — Applications that need custom visual output
   (games, CAD, video editing, data visualization) have no path today.
 - **No multi-user, no multi-display** — Single-user, single-screen by design
