@@ -958,17 +958,13 @@ impl Kernel {
     fn sys_clock_read(&self, _args: &[u64; 6]) -> Result<u64, SyscallError> {
         #[cfg(any(target_os = "none", test))]
         {
+            const FREQ: u64 = crate::frame::arch::timer::TIMER_FREQ_HZ;
+
             let ticks = crate::frame::arch::timer::now();
-            let freq = crate::frame::arch::timer::frequency();
+            let secs = ticks / FREQ;
+            let remainder = ticks % FREQ;
 
-            if freq == 0 {
-                return Ok(0);
-            }
-
-            let secs = ticks / freq;
-            let remainder = ticks % freq;
-
-            Ok(secs * 1_000_000_000 + remainder * 1_000_000_000 / freq)
+            Ok(secs * 1_000_000_000 + remainder * 1_000_000_000 / FREQ)
         }
 
         #[cfg(not(any(target_os = "none", test)))]

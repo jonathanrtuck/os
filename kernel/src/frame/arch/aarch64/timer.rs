@@ -19,6 +19,11 @@ use core::sync::atomic::{AtomicBool, Ordering};
 #[cfg(not(miri))]
 use super::sysreg;
 
+/// Timer frequency in Hz. ARM generic timer on Apple HVF and QEMU virt
+/// runs at 24 MHz. Using a const lets the compiler replace udiv with
+/// multiply-shift (saves ~24 cycles per clock_read).
+pub const TIMER_FREQ_HZ: u64 = 24_000_000;
+
 /// Per-core deadline-expired flags. The virtual timer (INTID 27) is a PPI —
 /// each core has its own instance. The expired flag must be per-core to
 /// prevent one core from stealing another's timer expiry.
@@ -38,6 +43,13 @@ static MIRI_COUNTER: AtomicU64 = AtomicU64::new(1000);
 #[cfg(not(miri))]
 pub fn init() {
     sysreg::set_cntv_ctl_el0(0);
+
+    let hw_freq = sysreg::cntfrq_el0();
+
+    assert!(
+        hw_freq == TIMER_FREQ_HZ,
+        "CNTFRQ_EL0 mismatch: expected {TIMER_FREQ_HZ}, got {hw_freq}",
+    );
 
     // Enable EL0 access to the virtual counter (CNTVCT_EL0). Bit 1
     // (EL0VCTEN) allows userspace to read the timer without trapping.
@@ -68,15 +80,8 @@ pub fn now() -> u64 {
 
 /// Return the timer frequency in Hz.
 #[inline]
-pub fn frequency() -> u64 {
-    #[cfg(not(miri))]
-    {
-        sysreg::cntfrq_el0()
-    }
-    #[cfg(miri)]
-    {
-        24_000_000
-    }
+pub const fn frequency() -> u64 {
+    TIMER_FREQ_HZ
 }
 
 /// Arm a one-shot deadline `ticks_from_now` timer ticks in the future.
