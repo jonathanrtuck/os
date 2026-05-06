@@ -36,6 +36,7 @@ pub fn call(
 
 pub struct RecvResult {
     pub reply_cap: u32,
+    pub badge: u32,
     pub msg_len: usize,
     pub handle_count: usize,
 }
@@ -45,6 +46,8 @@ pub fn recv(
     msg_buf: &mut [u8],
     handles_buf: &mut [u32],
 ) -> Result<RecvResult, SyscallError> {
+    let mut reply_cap_val: u64 = 0;
+
     let packed = check(raw::syscall(
         num::RECV,
         endpoint.0 as u64,
@@ -52,11 +55,12 @@ pub fn recv(
         msg_buf.len() as u64,
         handles_buf.as_mut_ptr() as u64,
         handles_buf.len() as u64,
-        0,
+        &mut reply_cap_val as *mut u64 as u64,
     ))?;
 
     Ok(RecvResult {
-        reply_cap: (packed >> 32) as u32,
+        reply_cap: reply_cap_val as u32,
+        badge: (packed >> 32) as u32,
         handle_count: ((packed >> 16) & 0xFFFF) as usize,
         msg_len: (packed & 0xFFFF) as usize,
     })

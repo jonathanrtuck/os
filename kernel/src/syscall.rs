@@ -2238,48 +2238,44 @@ fn sys_thread_exit(
     args: &[u64; 6],
 ) -> Result<u64, SyscallError> {
     let code = args[0] as u32;
-
-    crate::sched::exit_current(current, core_id, code);
-
+    // Decrement alive count and handle system shutdown BEFORE the context
+    // switch. exit_current() calls switch_away() which may never return
+    // (the old thread's kernel stack is frozen at the context switch point).
+    // Any code after exit_current is unreachable when other threads exist.
     #[allow(unused_variables)]
     let remaining = state::dec_alive_threads();
 
-    #[cfg(all(target_os = "none", feature = "bench-smp"))]
-    if code == 0xBEEF {
-        print_smp_bench_results(args);
-
-        crate::frame::arch::psci::system_off();
-    }
-
     #[cfg(target_os = "none")]
-    if remaining == 0 {
-        #[cfg(feature = "bench-el0")]
-        {
-            print_el0_bench_results(args);
-
-            crate::frame::arch::psci::system_off();
-        }
-
-        #[cfg(feature = "integration-tests")]
-        {
-            crate::println!("INTEGRATION TEST: EXIT {code}");
-            crate::frame::arch::psci::system_off();
-        }
+    {
         #[cfg(feature = "bench-smp")]
-        {
-            crate::println!("SMP BENCH: all threads exited without results (no 0xBEEF)");
+        if code == 0xBEEF {
+            print_smp_bench_results(args);
+
             crate::frame::arch::psci::system_off();
         }
 
-        #[cfg(not(any(
-            feature = "integration-tests",
-            feature = "bench-el0",
-            feature = "bench-smp"
-        )))]
-        loop {
-            crate::frame::arch::halt();
+        if remaining == 0 {
+            #[cfg(feature = "bench-el0")]
+            {
+                print_el0_bench_results(args);
+
+                crate::frame::arch::psci::system_off();
+            }
+            #[cfg(feature = "integration-tests")]
+            {
+                crate::println!("INTEGRATION TEST: EXIT {code}");
+
+                crate::frame::arch::psci::system_off();
+            }
+
+            #[cfg(not(any(feature = "integration-tests", feature = "bench-el0",)))]
+            loop {
+                crate::frame::arch::halt();
+            }
         }
     }
+
+    crate::sched::exit_current(current, core_id, code);
 
     Ok(0)
 }
