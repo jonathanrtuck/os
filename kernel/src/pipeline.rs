@@ -279,11 +279,10 @@ mod tests {
         let tid = bootstrap::create_init(&mut k, &[0u8; 100]).unwrap();
         let thread = k.threads.get(tid.0).unwrap();
 
-        assert_eq!(thread.entry_point(), bootstrap::INIT_CODE_VA);
-        assert_eq!(
-            thread.stack_top(),
-            bootstrap::INIT_STACK_VA + bootstrap::INIT_STACK_SIZE
-        );
+        assert!(thread.entry_point() >= config::PAGE_SIZE);
+        assert!(thread.entry_point().is_multiple_of(config::PAGE_SIZE));
+        assert!(thread.stack_top() > config::PAGE_SIZE);
+        assert!(thread.stack_top().is_multiple_of(config::PAGE_SIZE));
         assert_eq!(
             thread.state(),
             crate::thread::ThreadRunState::Running,

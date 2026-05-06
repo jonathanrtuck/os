@@ -28,10 +28,15 @@ pub struct MappingRecord {
     pub rights: Rights,
 }
 
-/// First-fit VA allocator over a sorted free list (fixed-size, no heap).
+/// VA allocator over a sorted free list with ASLR (fixed-size, no heap).
+///
+/// When `rng_state` is non-zero, allocations without a hint land at a
+/// random page-aligned offset within the first qualifying free region.
+/// When zero, the allocator is deterministic (first-fit from region start).
 pub struct VaAllocator {
     regions: [(usize, usize); config::MAX_VA_REGIONS],
     len: usize,
+    rng_state: u64,
 }
 
 impl VaAllocator {
@@ -39,6 +44,7 @@ impl VaAllocator {
         let mut va = VaAllocator {
             regions: [(0, 0); config::MAX_VA_REGIONS],
             len: 0,
+            rng_state: 0,
         };
 
         if size > 0 {
@@ -47,6 +53,27 @@ impl VaAllocator {
         }
 
         va
+    }
+
+    pub fn set_aslr_seed(&mut self, seed: u64) {
+        self.rng_state = seed;
+    }
+
+    fn next_random(&mut self) -> u64 {
+        if self.rng_state == 0 {
+            return 0;
+        }
+
+        // Marsaglia xorshift64 — period 2^64-1, never produces 0 from non-zero state.
+        let mut x = self.rng_state;
+
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+
+        self.rng_state = x;
+
+        x
     }
 
     pub fn allocate(&mut self, size: usize, hint: usize) -> Result<usize, SyscallError> {
@@ -66,7 +93,18 @@ impl VaAllocator {
         for i in 0..self.len {
             let (start, len) = self.regions[i];
 
-            if len >= size {
+            if len < size {
+                continue;
+            }
+
+            let slack_pages = (len - size) / config::PAGE_SIZE;
+            let offset = if slack_pages > 0 {
+                (self.next_random() as usize % (slack_pages + 1)) * config::PAGE_SIZE
+            } else {
+                0
+            };
+
+            if offset == 0 {
                 if len == size {
                     self.remove_at(i);
                 } else {
@@ -75,6 +113,31 @@ impl VaAllocator {
 
                 return Ok(start);
             }
+
+            let addr = start + offset;
+            let after = len - offset - size;
+
+            // Splitting into 2 fragments is net +1 region. If only 'before'
+            // exists (after == 0), it's net 0 — always fits.
+            if after > 0 && self.len >= config::MAX_VA_REGIONS {
+                if len == size {
+                    self.remove_at(i);
+                } else {
+                    self.regions[i] = (start + size, len - size);
+                }
+
+                return Ok(start);
+            }
+
+            self.remove_at(i);
+
+            if after > 0 {
+                self.insert_sorted(addr + size, after);
+            }
+
+            self.insert_sorted(start, offset);
+
+            return Ok(addr);
         }
 
         Err(SyscallError::OutOfMemory)
@@ -267,6 +330,10 @@ impl AddressSpace {
             va_allocator: VaAllocator::new(USER_VA_BASE, USER_VA_SIZE),
             thread_head: None,
         }
+    }
+
+    pub fn set_aslr_seed(&mut self, seed: u64) {
+        self.va_allocator.set_aslr_seed(seed);
     }
 
     pub fn asid(&self) -> u8 {
@@ -1008,5 +1075,144 @@ mod tests {
         assert_eq!(regions.len(), 1);
         assert_eq!(regions[0].0, USER_VA_BASE);
         assert_eq!(regions[0].0 + regions[0].1, USER_VA_END);
+    }
+
+    // -- ASLR tests --
+
+    #[test]
+    fn aslr_seed_zero_is_deterministic() {
+        let mut va = VaAllocator::new(0x1_0000, 0x10_0000);
+        let a = va.allocate(0x4000, 0).unwrap();
+        let b = va.allocate(0x4000, 0).unwrap();
+
+        assert_eq!(a, 0x1_0000);
+        assert_eq!(b, 0x1_4000);
+    }
+
+    #[test]
+    fn aslr_seeded_allocations_are_page_aligned() {
+        let mut va = VaAllocator::new(0x1_0000, 0x10_0000);
+
+        va.set_aslr_seed(0xDEAD_BEEF);
+
+        for _ in 0..8 {
+            let addr = va.allocate(config::PAGE_SIZE, 0).unwrap();
+
+            assert!(addr.is_multiple_of(config::PAGE_SIZE));
+            assert!(addr >= 0x1_0000);
+            assert!(addr + config::PAGE_SIZE <= 0x11_0000);
+        }
+    }
+
+    #[test]
+    fn aslr_seeded_allocations_differ_from_first_fit() {
+        let mut va = VaAllocator::new(USER_VA_BASE, USER_VA_SIZE);
+
+        va.set_aslr_seed(0x1234_5678_9ABC_DEF0);
+
+        let addr = va.allocate(config::PAGE_SIZE, 0).unwrap();
+
+        assert_ne!(
+            addr, USER_VA_BASE,
+            "seeded allocator should not pick first-fit address"
+        );
+    }
+
+    #[test]
+    fn aslr_different_seeds_different_addresses() {
+        let mut va1 = VaAllocator::new(USER_VA_BASE, USER_VA_SIZE);
+
+        va1.set_aslr_seed(0xAAAA_BBBB_CCCC_DDDD);
+
+        let addr1 = va1.allocate(config::PAGE_SIZE, 0).unwrap();
+        let mut va2 = VaAllocator::new(USER_VA_BASE, USER_VA_SIZE);
+
+        va2.set_aslr_seed(0x1111_2222_3333_4444);
+
+        let addr2 = va2.allocate(config::PAGE_SIZE, 0).unwrap();
+
+        assert_ne!(
+            addr1, addr2,
+            "different seeds should produce different addresses"
+        );
+    }
+
+    #[test]
+    fn aslr_free_list_integrity_after_split() {
+        let mut va = VaAllocator::new(0x1_0000, 0x10_0000);
+
+        va.set_aslr_seed(0xCAFE_BABE);
+
+        let a = va.allocate(config::PAGE_SIZE, 0).unwrap();
+
+        assert!(a >= 0x1_0000 && a + config::PAGE_SIZE <= 0x11_0000);
+
+        let regions = va.free_regions();
+        let total_free: usize = regions.iter().map(|(_, len)| len).sum();
+
+        assert_eq!(total_free, 0x10_0000 - config::PAGE_SIZE);
+
+        for w in regions.windows(2) {
+            assert!(w[0].0 + w[0].1 <= w[1].0, "free regions must not overlap");
+        }
+    }
+
+    #[test]
+    fn aslr_allocate_then_free_restores_space() {
+        let mut va = VaAllocator::new(0x1_0000, 0x10_0000);
+
+        va.set_aslr_seed(0xBEEF_FACE);
+
+        let a = va.allocate(0x4_0000, 0).unwrap();
+        let b = va.allocate(0x4_0000, 0).unwrap();
+
+        va.free(a, 0x4_0000);
+        va.free(b, 0x4_0000);
+
+        let regions = va.free_regions();
+        let total_free: usize = regions.iter().map(|(_, len)| len).sum();
+
+        assert_eq!(total_free, 0x10_0000);
+    }
+
+    #[test]
+    fn aslr_exact_fit_region_no_split() {
+        let mut va = VaAllocator::new(0x1_0000, config::PAGE_SIZE);
+
+        va.set_aslr_seed(0xFFFF);
+
+        let addr = va.allocate(config::PAGE_SIZE, 0).unwrap();
+
+        assert_eq!(addr, 0x1_0000);
+        assert!(va.free_regions().is_empty());
+    }
+
+    #[test]
+    fn aslr_hint_bypasses_randomization() {
+        let mut va = VaAllocator::new(0x1_0000, 0x10_0000);
+
+        va.set_aslr_seed(0xDEAD_BEEF);
+
+        let addr = va.allocate(config::PAGE_SIZE, 0x5_0000).unwrap();
+
+        assert_eq!(addr, 0x5_0000);
+    }
+
+    #[test]
+    fn aslr_entropy_bits() {
+        let mut seen = alloc::collections::BTreeSet::new();
+
+        for seed in 1..=256u64 {
+            let mut va = VaAllocator::new(USER_VA_BASE, USER_VA_SIZE);
+
+            va.set_aslr_seed(seed);
+            seen.insert(va.allocate(config::PAGE_SIZE, 0).unwrap());
+        }
+
+        assert!(
+            seen.len() > 200,
+            "256 seeds should produce >200 distinct addresses, got {}",
+            seen.len()
+        );
     }
 }

@@ -112,6 +112,11 @@ fn setup_post_env(kern: &mut Kernel) -> ThreadId {
     let (space_idx, space_gen) = kern.spaces.alloc(space).expect("POST: space alloc");
 
     kern.spaces.get_mut(space_idx).unwrap().id = AddressSpaceId(space_idx);
+    #[cfg(target_os = "none")]
+    kern.spaces
+        .get_mut(space_idx)
+        .unwrap()
+        .set_aslr_seed(crate::frame::arch::entropy::random_u64());
 
     let space = kern.spaces.get_mut(space_idx).unwrap();
 

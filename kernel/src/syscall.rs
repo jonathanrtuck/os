@@ -769,6 +769,11 @@ impl Kernel {
         };
 
         self.spaces.get_mut(idx).unwrap().id = AddressSpaceId(idx);
+        #[cfg(target_os = "none")]
+        self.spaces
+            .get_mut(idx)
+            .unwrap()
+            .set_aslr_seed(crate::frame::arch::entropy::random_u64());
 
         let caller_space = self
             .spaces

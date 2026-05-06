@@ -208,6 +208,11 @@ fn setup_bench_env(kern: &mut Kernel) -> ThreadId {
     let (space_idx, space_gen) = kern.spaces.alloc(space).expect("bench: space alloc");
 
     kern.spaces.get_mut(space_idx).unwrap().id = AddressSpaceId(space_idx);
+    #[cfg(target_os = "none")]
+    kern.spaces
+        .get_mut(space_idx)
+        .unwrap()
+        .set_aslr_seed(crate::frame::arch::entropy::random_u64());
 
     let space = kern.spaces.get_mut(space_idx).unwrap();
 
@@ -724,6 +729,11 @@ fn setup_ipc_bench(kern: &mut Kernel, client: ThreadId) -> IpcBenchEnv {
     let (space_idx, space_gen) = kern.spaces.alloc(space).expect("ipc bench: server space");
 
     kern.spaces.get_mut(space_idx).unwrap().id = AddressSpaceId(space_idx);
+    #[cfg(target_os = "none")]
+    kern.spaces
+        .get_mut(space_idx)
+        .unwrap()
+        .set_aslr_seed(crate::frame::arch::entropy::random_u64());
 
     let server_space = kern.spaces.get_mut(space_idx).unwrap();
 

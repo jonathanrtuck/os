@@ -15,9 +15,7 @@ use crate::{
     vmo::{Vmo, VmoFlags},
 };
 
-pub const INIT_CODE_VA: usize = 0x0020_0000;
 pub const INIT_STACK_SIZE: usize = config::PAGE_SIZE * 4;
-pub const INIT_STACK_VA: usize = 0x4000_0000;
 
 pub fn create_init(kernel: &mut Kernel, init_binary: &[u8]) -> Result<ThreadId, SyscallError> {
     if init_binary.is_empty() {
@@ -32,6 +30,12 @@ pub fn create_init(kernel: &mut Kernel, init_binary: &[u8]) -> Result<ThreadId, 
         .ok_or(SyscallError::OutOfMemory)?;
 
     kernel.spaces.get_mut(space_idx).unwrap().id = AddressSpaceId(space_idx);
+    #[cfg(target_os = "none")]
+    kernel
+        .spaces
+        .get_mut(space_idx)
+        .unwrap()
+        .set_aslr_seed(crate::frame::arch::entropy::random_u64());
 
     let code_size = init_binary.len().next_multiple_of(config::PAGE_SIZE);
     let code_vmo = Vmo::new(VmoId(0), code_size, VmoFlags::NONE);
@@ -56,8 +60,8 @@ pub fn create_init(kernel: &mut Kernel, init_binary: &[u8]) -> Result<ThreadId, 
         .spaces
         .get_mut(space_idx)
         .ok_or(SyscallError::InvalidArgument)?;
-    let code_va = space.map_vmo(VmoId(code_idx), code_size, rx, INIT_CODE_VA)?;
-    let stack_va = space.map_vmo(VmoId(stack_idx), INIT_STACK_SIZE, rw, INIT_STACK_VA)?;
+    let code_va = space.map_vmo(VmoId(code_idx), code_size, rx, 0)?;
+    let stack_va = space.map_vmo(VmoId(stack_idx), INIT_STACK_SIZE, rw, 0)?;
 
     kernel.vmos.get_mut(code_idx).unwrap().inc_mapping_count();
     kernel.vmos.get_mut(stack_idx).unwrap().inc_mapping_count();
@@ -108,7 +112,7 @@ pub fn create_init(kernel: &mut Kernel, init_binary: &[u8]) -> Result<ThreadId, 
 
             page_table::map_page(
                 root,
-                page_table::VirtAddr(INIT_CODE_VA + offset),
+                page_table::VirtAddr(code_va + offset),
                 pa,
                 page_table::Perms::RX,
             );
@@ -120,7 +124,7 @@ pub fn create_init(kernel: &mut Kernel, init_binary: &[u8]) -> Result<ThreadId, 
             user_mem::zero_phys(pa.0, config::PAGE_SIZE);
             page_table::map_page(
                 root,
-                page_table::VirtAddr(INIT_STACK_VA + offset),
+                page_table::VirtAddr(stack_va + offset),
                 pa,
                 page_table::Perms::RW,
             );
@@ -198,12 +202,13 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_maps_code_at_expected_address() {
+    fn bootstrap_maps_code_page_aligned() {
         let mut k = setup_kernel();
         let tid = create_init(&mut k, fake_init_binary()).unwrap();
         let thread = k.threads.get(tid.0).unwrap();
 
-        assert_eq!(thread.entry_point(), INIT_CODE_VA);
+        assert!(thread.entry_point() >= config::PAGE_SIZE);
+        assert!(thread.entry_point().is_multiple_of(config::PAGE_SIZE));
 
         crate::invariants::assert_valid(&*k);
     }
@@ -214,7 +219,8 @@ mod tests {
         let tid = create_init(&mut k, fake_init_binary()).unwrap();
         let thread = k.threads.get(tid.0).unwrap();
 
-        assert_eq!(thread.stack_top(), INIT_STACK_VA + INIT_STACK_SIZE);
+        assert!(thread.stack_top() > config::PAGE_SIZE);
+        assert!(thread.stack_top().is_multiple_of(config::PAGE_SIZE));
 
         crate::invariants::assert_valid(&*k);
     }
@@ -304,20 +310,18 @@ mod tests {
 
         let code_mapping = mappings
             .iter()
-            .find(|m| m.va_start == INIT_CODE_VA)
+            .find(|m| m.rights.contains(Rights::EXECUTE))
             .unwrap();
 
         assert!(code_mapping.rights.contains(Rights::READ));
-        assert!(code_mapping.rights.contains(Rights::EXECUTE));
         assert!(!code_mapping.rights.contains(Rights::WRITE));
 
         let stack_mapping = mappings
             .iter()
-            .find(|m| m.va_start == INIT_STACK_VA)
+            .find(|m| m.rights.contains(Rights::WRITE))
             .unwrap();
 
         assert!(stack_mapping.rights.contains(Rights::READ));
-        assert!(stack_mapping.rights.contains(Rights::WRITE));
         assert!(!stack_mapping.rights.contains(Rights::EXECUTE));
     }
 
