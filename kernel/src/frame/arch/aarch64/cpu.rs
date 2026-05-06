@@ -59,7 +59,9 @@ pub struct PerCpu {
     pub current_thread: u32,
     pub kernel_ptr: usize,
     pub reschedule_pending: u32,
-    _pad: [u8; 104],
+    _pad0: u32,
+    pub last_syscall_entry: u64,
+    _pad: [u8; 96],
 }
 
 impl PerCpu {
@@ -71,8 +73,18 @@ impl PerCpu {
             current_thread: Self::IDLE,
             kernel_ptr: 0,
             reschedule_pending: 0,
-            _pad: [0; 104],
+            _pad0: 0,
+            last_syscall_entry: 0,
+            _pad: [0; 96],
         }
+    }
+
+    pub fn mark_syscall_entry(&mut self) {
+        self.last_syscall_entry = super::sysreg::cntvct_el0();
+    }
+
+    pub fn clear_syscall_entry(&mut self) {
+        self.last_syscall_entry = 0;
     }
 }
 
@@ -270,9 +282,18 @@ pub fn activate_secondaries() {
         }
     }
 
-    let online = CORES_ONLINE.load(Ordering::Acquire) + 1;
+    let raw = CORES_ONLINE.load(Ordering::Acquire);
+    let expected = count - 1;
 
-    crate::println!("{}/{} cores online", online, count);
+    if raw != expected {
+        crate::println!(
+            "cpu: CORES_ONLINE anomaly: got {:#x}, expected {} (bug #21)",
+            raw,
+            expected,
+        );
+    }
+
+    crate::println!("{}/{} cores online", raw + 1, count);
 }
 
 /// Phase 1: secondary core boot at physical address. Sets up exception

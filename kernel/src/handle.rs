@@ -21,6 +21,12 @@ pub struct Handle {
     pub badge: u32,
 }
 
+// Handle must fit in one M4 Pro cache line (128 bytes) — every syscall
+// begins with a handle lookup, so this is always the first data touched.
+const _: () = {
+    assert!(core::mem::size_of::<Handle>() <= 128);
+};
+
 /// Per-address-space handle table. Fixed-size array, O(1) lookup and alloc.
 pub struct HandleTable {
     entries: [Option<Handle>; config::MAX_HANDLES],
@@ -338,5 +344,80 @@ mod tests {
         let id2 = t.allocate(ObjectType::Event, 20, Rights::ALL, 0).unwrap();
 
         assert_ne!(id2, HandleId(3));
+    }
+
+    #[test]
+    fn allocate_at_middle_of_free_list() {
+        let mut t = make_table();
+
+        t.allocate(ObjectType::Vmo, 0, Rights::ALL, 0).unwrap();
+        t.allocate(ObjectType::Vmo, 1, Rights::ALL, 0).unwrap();
+        t.allocate(ObjectType::Vmo, 2, Rights::ALL, 0).unwrap();
+
+        let h = Handle {
+            object_type: ObjectType::Event,
+            object_id: 99,
+            rights: Rights::ALL,
+            generation: 0,
+            badge: 0,
+        };
+
+        t.allocate_at(5, h).unwrap();
+
+        assert_eq!(t.count(), 4);
+        assert_eq!(t.lookup(HandleId(5)).unwrap().object_id, 99);
+
+        let next = t.allocate(ObjectType::Vmo, 3, Rights::ALL, 0).unwrap();
+
+        assert_ne!(next, HandleId(5));
+        assert_eq!(t.count(), 5);
+
+        t.close(HandleId(5)).unwrap();
+
+        assert_eq!(t.count(), 4);
+        assert_eq!(t.free_slot_count(), config::MAX_HANDLES - 4);
+    }
+
+    #[test]
+    fn free_slot_count_tracks_allocations() {
+        let mut t = make_table();
+
+        assert_eq!(t.free_slot_count(), config::MAX_HANDLES);
+
+        t.allocate(ObjectType::Vmo, 0, Rights::ALL, 0).unwrap();
+
+        assert_eq!(t.free_slot_count(), config::MAX_HANDLES - 1);
+
+        t.allocate(ObjectType::Vmo, 1, Rights::ALL, 0).unwrap();
+
+        assert_eq!(t.free_slot_count(), config::MAX_HANDLES - 2);
+
+        t.close(HandleId(0)).unwrap();
+
+        assert_eq!(t.free_slot_count(), config::MAX_HANDLES - 1);
+    }
+
+    #[test]
+    fn allocate_at_preserves_other_free_slots() {
+        let mut t = make_table();
+        let h = Handle {
+            object_type: ObjectType::Vmo,
+            object_id: 0,
+            rights: Rights::ALL,
+            generation: 0,
+            badge: 0,
+        };
+
+        t.allocate_at(0, h.clone()).unwrap();
+        t.allocate_at(2, h.clone()).unwrap();
+        t.allocate_at(4, h).unwrap();
+
+        assert_eq!(t.count(), 3);
+        assert_eq!(t.free_slot_count(), config::MAX_HANDLES - 3);
+
+        let next = t.allocate(ObjectType::Event, 1, Rights::ALL, 0).unwrap();
+
+        assert!(next == HandleId(1) || next == HandleId(3));
+        assert_eq!(t.count(), 4);
     }
 }

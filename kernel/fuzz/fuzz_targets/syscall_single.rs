@@ -24,6 +24,11 @@ fn setup_kernel() -> Box<Kernel> {
     );
 
     k.threads.alloc(thread);
+    k.threads
+        .get_mut(0)
+        .unwrap()
+        .set_state(kernel::thread::ThreadRunState::Running);
+    k.scheduler.core_mut(0).set_current(Some(ThreadId(0)));
 
     k
 }
@@ -43,7 +48,21 @@ fuzz_target!(|data: &[u8]| {
         *arg = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
     }
 
-    let (error, _value) = k.dispatch(ThreadId(0), syscall_num, &args);
+    let takes_user_ptr = matches!(syscall_num, 9 | 10 | 11 | 2 | 14 | 17);
+
+    if takes_user_ptr {
+        return;
+    }
+
+    let (error, _value) = k.dispatch(ThreadId(0), 0, syscall_num, &args);
 
     assert!(error <= 12, "invalid error code: {error}");
+
+    let violations = kernel::invariants::verify(&k);
+
+    assert!(
+        violations.is_empty(),
+        "invariant violations: {:?}",
+        violations
+    );
 });

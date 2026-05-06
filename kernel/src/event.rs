@@ -68,7 +68,15 @@ pub struct Event {
     waiters: [Option<Waiter>; config::MAX_WAITERS_PER_EVENT],
     waiter_count: usize,
     bound_endpoint: Option<EndpointId>,
+    refcount: usize,
 }
+
+// Verify the compiler's chosen layout for Event. Rust's default repr
+// reorders fields — these assertions track the actual layout to catch
+// regressions if field additions push hot data to a new cache line.
+const _: () = {
+    assert!(core::mem::size_of::<Event>() <= 512);
+};
 
 #[allow(clippy::new_without_default)]
 impl Event {
@@ -79,7 +87,23 @@ impl Event {
             waiters: [None; config::MAX_WAITERS_PER_EVENT],
             waiter_count: 0,
             bound_endpoint: None,
+            refcount: 1,
         }
+    }
+
+    pub fn refcount(&self) -> usize {
+        self.refcount
+    }
+
+    pub fn add_ref(&mut self) {
+        self.refcount += 1;
+    }
+
+    pub fn release_ref(&mut self) -> bool {
+        assert!(self.refcount > 0, "Event refcount underflow");
+
+        self.refcount -= 1;
+        self.refcount == 0
     }
 
     pub fn bits(&self) -> u64 {
@@ -105,6 +129,10 @@ impl Event {
     /// Signal (OR) bits and wake all matching waiters.
     pub fn signal(&mut self, bits: u64) -> WakeList {
         self.bits |= bits;
+
+        if self.waiter_count == 0 {
+            return WakeList::new();
+        }
 
         let current_bits = self.bits;
         let mut woken = WakeList::new();
@@ -179,7 +207,7 @@ impl Event {
         self.bound_endpoint = None;
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, fuzzing, debug_assertions))]
     pub fn verify_internal_counts(&self) -> Result<(), &'static str> {
         let actual = self.waiters.iter().filter(|s| s.is_some()).count();
 
@@ -190,7 +218,7 @@ impl Event {
         Ok(())
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, fuzzing, debug_assertions))]
     pub fn all_waiter_thread_ids(&self) -> alloc::vec::Vec<crate::types::ThreadId> {
         self.waiters
             .iter()

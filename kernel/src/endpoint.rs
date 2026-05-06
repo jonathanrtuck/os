@@ -11,6 +11,7 @@
 
 use crate::{
     config,
+    frame::ring::FixedRing,
     handle::Handle,
     types::{EndpointId, EventId, Priority, SyscallError, ThreadId},
 };
@@ -18,61 +19,15 @@ use crate::{
 const NUM_PRIORITY_LEVELS: usize = 4;
 const SLOTS_PER_PRIORITY: usize = config::MAX_PENDING_PER_ENDPOINT / NUM_PRIORITY_LEVELS;
 
-struct PriorityRing {
-    slots: [Option<PendingCall>; SLOTS_PER_PRIORITY],
-    head: u8,
-    len: u8,
-}
-
-impl PriorityRing {
-    const fn new() -> Self {
-        PriorityRing {
-            slots: [const { None }; SLOTS_PER_PRIORITY],
-            head: 0,
-            len: 0,
-        }
-    }
-
-    fn push(&mut self, item: PendingCall) -> Result<(), SyscallError> {
-        if self.len as usize >= SLOTS_PER_PRIORITY {
-            return Err(SyscallError::BufferFull);
-        }
-
-        let tail = (self.head as usize + self.len as usize) % SLOTS_PER_PRIORITY;
-
-        self.slots[tail] = Some(item);
-        self.len += 1;
-
-        Ok(())
-    }
-
-    fn pop(&mut self) -> Option<PendingCall> {
-        if self.len == 0 {
-            return None;
-        }
-
-        let item = self.slots[self.head as usize].take();
-
-        self.head = ((self.head as usize + 1) % SLOTS_PER_PRIORITY) as u8;
-        self.len -= 1;
-
-        item
-    }
-
-    fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-}
-
 struct PrioritySendQueue {
-    rings: [PriorityRing; NUM_PRIORITY_LEVELS],
+    rings: [FixedRing<PendingCall, SLOTS_PER_PRIORITY>; NUM_PRIORITY_LEVELS],
     total: u16,
 }
 
 impl PrioritySendQueue {
     const fn new() -> Self {
         PrioritySendQueue {
-            rings: [const { PriorityRing::new() }; NUM_PRIORITY_LEVELS],
+            rings: [const { FixedRing::new() }; NUM_PRIORITY_LEVELS],
             total: 0,
         }
     }
@@ -80,7 +35,10 @@ impl PrioritySendQueue {
     fn enqueue(&mut self, call: PendingCall) -> Result<(), SyscallError> {
         let level = call.priority as usize;
 
-        self.rings[level].push(call)?;
+        if !self.rings[level].push(call) {
+            return Err(SyscallError::BufferFull);
+        }
+
         self.total += 1;
 
         Ok(())
@@ -120,16 +78,6 @@ impl PrioritySendQueue {
         }
 
         None
-    }
-
-    fn drain_callers(&mut self, out: &mut impl FnMut(ThreadId)) {
-        for level in 0..NUM_PRIORITY_LEVELS {
-            while let Some(call) = self.rings[level].pop() {
-                out(call.caller);
-            }
-        }
-
-        self.total = 0;
     }
 }
 
@@ -213,8 +161,19 @@ impl core::fmt::Debug for Message {
 }
 
 /// A one-shot reply capability identifier.
+///
+/// Encodes `(nonce << SLOT_BITS) | slot_index` so that consume_reply can
+/// extract the slot in O(1) instead of scanning all active replies. The
+/// nonce portion prevents stale cap IDs from matching after slot reuse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReplyCapId(pub u32);
+
+const SLOT_BITS: u32 = 4;
+const SLOT_MASK: u32 = (1 << SLOT_BITS) - 1;
+
+const _: () = {
+    assert!(config::MAX_PENDING_PER_ENDPOINT <= (1 << SLOT_BITS));
+};
 
 /// A pending call waiting in the send queue.
 #[derive(Debug)]
@@ -236,44 +195,59 @@ struct ActiveReply {
     reply_buf: usize,
 }
 
-const MAX_CLOSE_LIST: usize =
-    config::MAX_PENDING_PER_ENDPOINT + config::MAX_PENDING_PER_ENDPOINT + config::MAX_RECV_WAITERS;
-
-/// Stack-allocated list of thread IDs returned by close_peer.
-pub struct CloseList {
-    items: [ThreadId; MAX_CLOSE_LIST],
-    len: usize,
+/// A caller whose call was canceled — includes handles to recover.
+pub struct CanceledCaller {
+    pub thread_id: ThreadId,
+    pub handles: [Option<Handle>; config::MAX_IPC_HANDLES],
+    pub handle_count: u8,
 }
 
-impl CloseList {
+/// Result of closing an endpoint's peer end. Separates callers with recoverable
+/// handles (from the send queue) from callers awaiting reply and recv waiters
+/// (which don't have handles to recover).
+pub struct CloseResult {
+    canceled: [Option<CanceledCaller>; config::MAX_PENDING_PER_ENDPOINT],
+    canceled_len: usize,
+    reply_callers: [ThreadId; config::MAX_PENDING_PER_ENDPOINT],
+    reply_caller_len: usize,
+    recv_waiters: [ThreadId; config::MAX_RECV_WAITERS],
+    recv_waiter_len: usize,
+}
+
+impl CloseResult {
     fn new() -> Self {
-        CloseList {
-            items: [ThreadId(0); MAX_CLOSE_LIST],
-            len: 0,
+        CloseResult {
+            canceled: [const { None }; config::MAX_PENDING_PER_ENDPOINT],
+            canceled_len: 0,
+            reply_callers: [ThreadId(0); config::MAX_PENDING_PER_ENDPOINT],
+            reply_caller_len: 0,
+            recv_waiters: [ThreadId(0); config::MAX_RECV_WAITERS],
+            recv_waiter_len: 0,
         }
     }
 
-    fn push(&mut self, tid: ThreadId) {
-        if self.len < MAX_CLOSE_LIST {
-            self.items[self.len] = tid;
-            self.len += 1;
-        }
+    pub fn canceled_callers(&self) -> &[Option<CanceledCaller>] {
+        &self.canceled[..self.canceled_len]
     }
 
-    pub fn as_slice(&self) -> &[ThreadId] {
-        &self.items[..self.len]
+    pub fn canceled_callers_mut(&mut self) -> &mut [Option<CanceledCaller>] {
+        &mut self.canceled[..self.canceled_len]
     }
 
-    pub fn len(&self) -> usize {
-        self.len
+    pub fn reply_callers(&self) -> &[ThreadId] {
+        &self.reply_callers[..self.reply_caller_len]
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
+    pub fn recv_waiters(&self) -> &[ThreadId] {
+        &self.recv_waiters[..self.recv_waiter_len]
     }
 
-    pub fn contains(&self, tid: &ThreadId) -> bool {
-        self.as_slice().contains(tid)
+    pub fn all_thread_ids(&self) -> impl Iterator<Item = ThreadId> + '_ {
+        self.canceled[..self.canceled_len]
+            .iter()
+            .filter_map(|c| c.as_ref().map(|c| c.thread_id))
+            .chain(self.reply_callers[..self.reply_caller_len].iter().copied())
+            .chain(self.recv_waiters[..self.recv_waiter_len].iter().copied())
     }
 }
 
@@ -294,6 +268,7 @@ pub struct Endpoint {
     bound_event: Option<EventId>,
     active_server: Option<ThreadId>,
     peer_closed: bool,
+    refcount: usize,
 }
 
 #[allow(clippy::new_without_default)]
@@ -311,7 +286,23 @@ impl Endpoint {
             bound_event: None,
             active_server: None,
             peer_closed: false,
+            refcount: 1,
         }
+    }
+
+    pub fn refcount(&self) -> usize {
+        self.refcount
+    }
+
+    pub fn add_ref(&mut self) {
+        self.refcount += 1;
+    }
+
+    pub fn release_ref(&mut self) -> bool {
+        assert!(self.refcount > 0, "Endpoint refcount underflow");
+
+        self.refcount -= 1;
+        self.refcount == 0
     }
 
     pub fn is_peer_closed(&self) -> bool {
@@ -383,26 +374,9 @@ impl Endpoint {
     /// Returns `None` if the send queue is empty OR all reply slots are
     /// occupied (backpressure — the server must reply before receiving more).
     pub fn dequeue_call(&mut self) -> Option<(PendingCall, ReplyCapId)> {
-        // Check for a free reply slot BEFORE dequeuing. If we dequeue first
-        // and then find no slot, the call is lost and the caller deadlocks.
         let free_slot = self.active_replies.iter().position(|s| s.is_none())?;
         let call = self.send_queue.dequeue_highest()?;
-
-        // Advance past any ID that collides with a currently-active reply cap.
-        loop {
-            let collides = self
-                .active_replies
-                .iter()
-                .any(|s| s.as_ref().is_some_and(|r| r.cap_id.0 == self.next_reply_id));
-
-            if !collides {
-                break;
-            }
-
-            self.next_reply_id = self.next_reply_id.wrapping_add(1);
-        }
-
-        let cap_id = ReplyCapId(self.next_reply_id);
+        let cap_id = ReplyCapId((self.next_reply_id << SLOT_BITS) | (free_slot as u32));
 
         self.next_reply_id = self.next_reply_id.wrapping_add(1);
         self.active_replies[free_slot] = Some(ActiveReply {
@@ -416,21 +390,29 @@ impl Endpoint {
     }
 
     /// Consume a reply cap, returning (caller_thread_id, caller_reply_buf).
+    /// O(1) via the slot index encoded in the cap ID.
     pub fn consume_reply(&mut self, cap_id: ReplyCapId) -> Result<(ThreadId, usize), SyscallError> {
-        for slot in &mut self.active_replies {
-            if let Some(r) = slot
-                && r.cap_id == cap_id
-            {
-                let reply = *r;
+        let slot_idx = (cap_id.0 & SLOT_MASK) as usize;
 
-                *slot = None;
-                self.active_reply_count -= 1;
-
-                return Ok((reply.caller, reply.reply_buf));
-            }
+        if slot_idx >= config::MAX_PENDING_PER_ENDPOINT {
+            return Err(SyscallError::InvalidHandle);
         }
 
-        Err(SyscallError::InvalidHandle)
+        let slot = &mut self.active_replies[slot_idx];
+
+        if let Some(r) = slot
+            && r.cap_id == cap_id
+        {
+            let reply = *r;
+
+            *slot = None;
+
+            self.active_reply_count -= 1;
+
+            Ok((reply.caller, reply.reply_buf))
+        } else {
+            Err(SyscallError::InvalidHandle)
+        }
     }
 
     /// Highest priority among pending callers (for priority inheritance).
@@ -454,6 +436,36 @@ impl Endpoint {
         }
 
         Err(SyscallError::BufferFull)
+    }
+
+    /// Pop the first recv waiter for IPC direct transfer.
+    pub fn pop_recv_waiter(&mut self) -> Option<ThreadId> {
+        for slot in &mut self.recv_waiters {
+            if let Some(tid) = slot.take() {
+                self.recv_waiter_count -= 1;
+
+                return Some(tid);
+            }
+        }
+
+        None
+    }
+
+    /// Allocate a reply cap without dequeuing from the send queue.
+    /// Used by CALL's direct-transfer fast path.
+    pub fn allocate_reply_cap(&mut self, caller: ThreadId, reply_buf: usize) -> Option<ReplyCapId> {
+        let free_slot = self.active_replies.iter().position(|s| s.is_none())?;
+        let cap_id = ReplyCapId((self.next_reply_id << SLOT_BITS) | (free_slot as u32));
+
+        self.next_reply_id = self.next_reply_id.wrapping_add(1);
+        self.active_replies[free_slot] = Some(ActiveReply {
+            cap_id,
+            caller,
+            reply_buf,
+        });
+        self.active_reply_count += 1;
+
+        Some(cap_id)
     }
 
     /// Remove a recv waiter (on timeout or cancel).
@@ -489,32 +501,56 @@ impl Endpoint {
         list
     }
 
-    /// Close the peer end. Returns all blocked thread IDs:
-    /// callers in send queue + callers awaiting reply + recv waiters.
-    pub fn close_peer(&mut self) -> CloseList {
+    /// Close the peer end. Returns structured close result preserving handles
+    /// from pending calls so they can be recovered by the caller.
+    pub fn close_peer(&mut self) -> Option<CloseResult> {
         self.peer_closed = true;
 
-        let mut blocked = CloseList::new();
+        if self.send_queue.is_empty() && self.active_reply_count == 0 && self.recv_waiter_count == 0
+        {
+            return None;
+        }
 
-        self.send_queue.drain_callers(&mut |tid| blocked.push(tid));
+        let mut result = CloseResult::new();
+
+        for level in 0..NUM_PRIORITY_LEVELS {
+            while let Some(call) = self.send_queue.rings[level].pop() {
+                if result.canceled_len < config::MAX_PENDING_PER_ENDPOINT {
+                    result.canceled[result.canceled_len] = Some(CanceledCaller {
+                        thread_id: call.caller,
+                        handles: call.handles,
+                        handle_count: call.handle_count,
+                    });
+                    result.canceled_len += 1;
+                }
+            }
+        }
+
+        self.send_queue.total = 0;
 
         for slot in &mut self.active_replies {
-            if let Some(reply) = slot.take() {
-                blocked.push(reply.caller);
+            if let Some(reply) = slot.take()
+                && result.reply_caller_len < config::MAX_PENDING_PER_ENDPOINT
+            {
+                result.reply_callers[result.reply_caller_len] = reply.caller;
+                result.reply_caller_len += 1;
             }
         }
 
         self.active_reply_count = 0;
 
         for slot in &mut self.recv_waiters {
-            if let Some(tid) = slot.take() {
-                blocked.push(tid);
+            if let Some(tid) = slot.take()
+                && result.recv_waiter_len < config::MAX_RECV_WAITERS
+            {
+                result.recv_waiters[result.recv_waiter_len] = tid;
+                result.recv_waiter_len += 1;
             }
         }
 
         self.recv_waiter_count = 0;
 
-        blocked
+        Some(result)
     }
 
     /// Bind an event to this endpoint (for channel-event integration).
@@ -533,7 +569,7 @@ impl Endpoint {
         self.bound_event = None;
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, fuzzing, debug_assertions))]
     pub fn verify_internal_counts(&self) -> Result<(), &'static str> {
         let actual_active = self.active_replies.iter().filter(|s| s.is_some()).count();
 
@@ -547,7 +583,7 @@ impl Endpoint {
             return Err("recv_waiter_count mismatch");
         }
 
-        let ring_sum: usize = self.send_queue.rings.iter().map(|r| r.len as usize).sum();
+        let ring_sum: usize = self.send_queue.rings.iter().map(|r| r.len()).sum();
 
         if ring_sum != self.send_queue.total as usize {
             return Err("send_queue total mismatch");
@@ -556,28 +592,24 @@ impl Endpoint {
         Ok(())
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, fuzzing, debug_assertions))]
     pub fn all_caller_thread_ids(&self) -> alloc::vec::Vec<crate::types::ThreadId> {
         let mut ids = alloc::vec::Vec::new();
 
         for ring in &self.send_queue.rings {
-            for slot in &ring.slots[..ring.len as usize] {
-                if let Some(call) = slot {
-                    ids.push(call.caller);
-                }
+            for call in ring.iter() {
+                ids.push(call.caller);
             }
         }
 
-        for slot in &self.active_replies {
-            if let Some(r) = slot {
-                ids.push(r.caller);
-            }
+        for r in self.active_replies.iter().flatten() {
+            ids.push(r.caller);
         }
 
         ids
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, fuzzing, debug_assertions))]
     pub fn all_recv_waiter_ids(&self) -> alloc::vec::Vec<crate::types::ThreadId> {
         self.recv_waiters.iter().filter_map(|s| *s).collect()
     }
@@ -729,17 +761,18 @@ mod tests {
         let mut ep = make_endpoint(0);
 
         ep.enqueue_call(make_call(1, Priority::Medium, 0)).unwrap();
-        ep.enqueue_call(make_call(2, Priority::Medium, 0)).unwrap();
-        ep.enqueue_call(make_call(3, Priority::Medium, 0)).unwrap();
+        ep.enqueue_call(make_call(2, Priority::Low, 0)).unwrap();
+        ep.enqueue_call(make_call(3, Priority::High, 0)).unwrap();
         ep.dequeue_call().unwrap(); // one call moves to active_replies
         ep.add_recv_waiter(ThreadId(10)).unwrap();
 
-        let blocked = ep.close_peer();
+        let result = ep.close_peer().unwrap();
+        let all_ids: alloc::vec::Vec<_> = result.all_thread_ids().collect();
 
-        assert_eq!(blocked.len(), 4);
-        assert!(blocked.contains(&ThreadId(1)));
-        assert!(blocked.contains(&ThreadId(2)));
-        assert!(blocked.contains(&ThreadId(10)));
+        assert_eq!(all_ids.len(), 4);
+        assert!(all_ids.contains(&ThreadId(1)));
+        assert!(all_ids.contains(&ThreadId(2)));
+        assert!(all_ids.contains(&ThreadId(10)));
     }
 
     #[test]
@@ -982,27 +1015,29 @@ mod tests {
         ep.next_reply_id = u32::MAX - 1;
 
         // Issue three reply caps that straddle the wraparound boundary.
-        ep.enqueue_call(make_call(1, Priority::Medium, 0)).unwrap();
+        // Use different priorities to fit within 2 slots per level.
+        // Dequeue is highest-first: High(3), Medium(2), Low(1).
+        ep.enqueue_call(make_call(1, Priority::Low, 0)).unwrap();
         ep.enqueue_call(make_call(2, Priority::Medium, 0)).unwrap();
-        ep.enqueue_call(make_call(3, Priority::Medium, 0)).unwrap();
+        ep.enqueue_call(make_call(3, Priority::High, 0)).unwrap();
 
-        let (_, cap_a) = ep.dequeue_call().unwrap(); // u32::MAX - 1
-        let (_, cap_b) = ep.dequeue_call().unwrap(); // u32::MAX
-        let (_, cap_c) = ep.dequeue_call().unwrap(); // 0 (wrapped)
+        let (_, cap_a) = ep.dequeue_call().unwrap();
+        let (_, cap_b) = ep.dequeue_call().unwrap();
+        let (_, cap_c) = ep.dequeue_call().unwrap();
 
         // All three cap IDs are distinct.
-        assert_eq!(cap_a, ReplyCapId(u32::MAX - 1));
-        assert_eq!(cap_b, ReplyCapId(u32::MAX));
-        assert_eq!(cap_c, ReplyCapId(0));
+        assert_ne!(cap_a, cap_b);
+        assert_ne!(cap_b, cap_c);
+        assert_ne!(cap_a, cap_c);
 
         // Each cap resolves to the correct caller.
         let (caller_a, _) = ep.consume_reply(cap_a).unwrap();
         let (caller_b, _) = ep.consume_reply(cap_b).unwrap();
         let (caller_c, _) = ep.consume_reply(cap_c).unwrap();
 
-        assert_eq!(caller_a, ThreadId(1));
+        assert_eq!(caller_a, ThreadId(3));
         assert_eq!(caller_b, ThreadId(2));
-        assert_eq!(caller_c, ThreadId(3));
+        assert_eq!(caller_c, ThreadId(1));
     }
 
     #[test]
@@ -1077,18 +1112,25 @@ mod tests {
         ep.add_recv_waiter(ThreadId(10)).unwrap();
         ep.add_recv_waiter(ThreadId(11)).unwrap();
 
-        let blocked = ep.close_peer();
+        let result = ep.close_peer().unwrap();
+        let all_ids: alloc::vec::Vec<_> = result.all_thread_ids().collect();
 
         // Expected blocked threads:
         //   send queue: 1, 3
         //   active replies: 2 (dequeued but not replied)
         //   recv waiters: 10, 11
-        assert_eq!(blocked.len(), 5);
-        assert!(blocked.contains(&ThreadId(1)));
-        assert!(blocked.contains(&ThreadId(2)));
-        assert!(blocked.contains(&ThreadId(3)));
-        assert!(blocked.contains(&ThreadId(10)));
-        assert!(blocked.contains(&ThreadId(11)));
+        assert_eq!(all_ids.len(), 5);
+        assert!(all_ids.contains(&ThreadId(1)));
+        assert!(all_ids.contains(&ThreadId(2)));
+        assert!(all_ids.contains(&ThreadId(3)));
+        assert!(all_ids.contains(&ThreadId(10)));
+        assert!(all_ids.contains(&ThreadId(11)));
+        // Canceled callers (from send queue) must have their handles preserved.
+        assert_eq!(result.canceled_callers().len(), 2);
+        // Reply callers (already in-flight) have no handles to recover.
+        assert_eq!(result.reply_callers().len(), 1);
+        assert_eq!(result.reply_callers()[0], ThreadId(2));
+        assert_eq!(result.recv_waiters().len(), 2);
     }
 
     #[test]
@@ -1097,10 +1139,13 @@ mod tests {
 
         ep.next_reply_id = u32::MAX - 1;
 
-        for i in 0..3u32 {
-            ep.enqueue_call(make_call(i, Priority::Medium, 0)).unwrap();
+        let priorities = [Priority::Low, Priority::Medium, Priority::High];
+
+        for (i, &pri) in (0..3u32).zip(priorities.iter()) {
+            ep.enqueue_call(make_call(i, pri, 0)).unwrap();
         }
 
+        // Dequeues highest priority first: High(2), Medium(1), Low(0).
         let (_, cap0) = ep.dequeue_call().unwrap();
         let (_, cap1) = ep.dequeue_call().unwrap();
         let (_, cap2) = ep.dequeue_call().unwrap();
@@ -1108,9 +1153,59 @@ mod tests {
         assert_ne!(cap0, cap1);
         assert_ne!(cap1, cap2);
         assert_ne!(cap0, cap2);
-
-        assert_eq!(ep.consume_reply(cap0).unwrap().0, ThreadId(0));
+        assert_eq!(ep.consume_reply(cap0).unwrap().0, ThreadId(2));
         assert_eq!(ep.consume_reply(cap1).unwrap().0, ThreadId(1));
-        assert_eq!(ep.consume_reply(cap2).unwrap().0, ThreadId(2));
+        assert_eq!(ep.consume_reply(cap2).unwrap().0, ThreadId(0));
+    }
+
+    #[test]
+    fn all_caller_thread_ids_after_wraparound() {
+        let mut ep = make_endpoint(0);
+
+        ep.enqueue_call(make_call(1, Priority::Medium, 0)).unwrap();
+        ep.enqueue_call(make_call(2, Priority::Medium, 0)).unwrap();
+        ep.dequeue_call().unwrap();
+        ep.dequeue_call().unwrap();
+
+        ep.enqueue_call(make_call(3, Priority::Medium, 0)).unwrap();
+        ep.enqueue_call(make_call(4, Priority::Medium, 0)).unwrap();
+
+        let ids = ep.all_caller_thread_ids();
+
+        assert_eq!(ids.len(), 4);
+        assert!(ids.contains(&ThreadId(3)));
+        assert!(ids.contains(&ThreadId(4)));
+    }
+
+    #[test]
+    fn close_peer_preserves_handles_for_recovery() {
+        let mut ep = make_endpoint(0);
+        let mut handles = [const { None }; config::MAX_IPC_HANDLES];
+
+        handles[0] = Some(make_handle(42));
+        handles[1] = Some(make_handle(43));
+
+        let call = PendingCall {
+            caller: ThreadId(1),
+            priority: Priority::Medium,
+            message: Message::empty(),
+            handles,
+            handle_count: 2,
+            badge: 0,
+            reply_buf: 0,
+        };
+
+        ep.enqueue_call(call).unwrap();
+
+        let mut result = ep.close_peer().unwrap();
+
+        assert_eq!(result.canceled_callers().len(), 1);
+
+        let canceled = result.canceled_callers_mut()[0].take().unwrap();
+
+        assert_eq!(canceled.thread_id, ThreadId(1));
+        assert_eq!(canceled.handle_count, 2);
+        assert_eq!(canceled.handles[0].as_ref().unwrap().object_id, 42);
+        assert_eq!(canceled.handles[1].as_ref().unwrap().object_id, 43);
     }
 }

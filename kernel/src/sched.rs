@@ -22,9 +22,8 @@ pub fn block_current(kernel: &mut Kernel, current: ThreadId, core_id: usize) {
 
 /// Wake a blocked thread by marking it Ready and enqueuing it.
 pub fn wake(kernel: &mut Kernel, thread_id: ThreadId, core_id: usize) {
-    let thread = match kernel.threads.get_mut(thread_id.0) {
-        Some(t) => t,
-        None => return,
+    let Some(thread) = kernel.threads.get_mut(thread_id.0) else {
+        return;
     };
 
     if thread.state() != ThreadRunState::Blocked {
@@ -65,13 +64,10 @@ pub fn exit_current(kernel: &mut Kernel, current: ThreadId, core_id: usize, code
 /// state-machine-only operation — no actual register switching.
 #[inline(never)]
 fn switch_away(kernel: &mut Kernel, _current: ThreadId, core_id: usize) {
-    let next_id = match kernel.scheduler.pick_next(core_id) {
-        Some(id) => id,
-        None => {
-            kernel.scheduler.core_mut(core_id).set_current(None);
+    let Some(next_id) = kernel.scheduler.pick_next(core_id) else {
+        kernel.scheduler.core_mut(core_id).set_current(None);
 
-            return;
-        }
+        return;
     };
     let next = kernel.threads.get_mut(next_id.0).unwrap();
 
@@ -228,5 +224,67 @@ mod tests {
         wake(&mut k, t1, 0);
 
         assert_eq!(k.threads.get(t1.0).unwrap().state(), ThreadRunState::Ready);
+    }
+
+    #[test]
+    fn block_with_no_other_thread_clears_current() {
+        let mut k = setup();
+        let tid = add_thread(&mut k, Priority::Medium);
+
+        k.scheduler.core_mut(0).set_current(Some(tid));
+
+        block_current(&mut k, tid, 0);
+
+        assert_eq!(k.scheduler.core(0).current(), None);
+        assert_eq!(
+            k.threads.get(tid.0).unwrap().state(),
+            ThreadRunState::Blocked
+        );
+    }
+
+    #[test]
+    fn exit_with_no_other_thread_clears_current() {
+        let mut k = setup();
+        let tid = add_thread(&mut k, Priority::Medium);
+
+        k.scheduler.core_mut(0).set_current(Some(tid));
+
+        exit_current(&mut k, tid, 0, 0);
+
+        assert_eq!(k.scheduler.core(0).current(), None);
+    }
+
+    #[test]
+    fn yield_then_pick_returns_same_thread() {
+        let mut k = setup();
+        let tid = add_thread(&mut k, Priority::Medium);
+
+        k.scheduler.core_mut(0).set_current(Some(tid));
+
+        yield_current(&mut k, tid, 0);
+
+        assert_eq!(k.scheduler.core(0).current(), Some(tid));
+        assert_eq!(
+            k.threads.get(tid.0).unwrap().state(),
+            ThreadRunState::Running,
+        );
+    }
+
+    #[test]
+    fn yield_with_two_threads_switches() {
+        let mut k = setup();
+        let t1 = add_thread(&mut k, Priority::Medium);
+        let t2 = add_thread(&mut k, Priority::Medium);
+
+        k.scheduler.enqueue(0, t2, Priority::Medium);
+        k.scheduler.core_mut(0).set_current(Some(t1));
+
+        yield_current(&mut k, t1, 0);
+
+        assert_eq!(k.scheduler.core(0).current(), Some(t2));
+        assert_eq!(
+            k.threads.get(t2.0).unwrap().state(),
+            ThreadRunState::Running
+        );
     }
 }

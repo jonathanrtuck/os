@@ -114,6 +114,14 @@ pub fn free_asid(asid: Asid) {
     ASID_MAP[idx].store(0, Ordering::Release);
 }
 
+/// Reset the entire ASID pool. Test-only — not safe for concurrent use.
+#[cfg(test)]
+pub fn reset_asid_pool() {
+    for slot in &ASID_MAP {
+        slot.store(0, Ordering::Release);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Page table operations
 // ---------------------------------------------------------------------------

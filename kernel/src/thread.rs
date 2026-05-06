@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 
 #[cfg(any(target_os = "none", test))]
 use crate::frame::arch::register_state::RegisterState;
-use crate::types::{AddressSpaceId, EventId, Priority, ThreadId, TopologyHint};
+use crate::types::{AddressSpaceId, EventId, Priority, SyscallError, ThreadId, TopologyHint};
 
 /// Number of priority levels: Idle, Low, Medium, High.
 const NUM_PRIORITY_LEVELS: usize = 4;
@@ -27,6 +27,22 @@ pub enum ThreadRunState {
     Running,
     Blocked,
     Exited,
+}
+
+/// Saved RECV buffer state for IPC direct transfer.
+///
+/// When a server blocks in RECV, it saves its buffer addresses here.
+/// If a client calls CALL while this server is waiting, CALL reads
+/// these addresses to deliver the message directly — skipping the
+/// endpoint's priority send queue entirely.
+#[derive(Debug, Clone, Copy)]
+pub struct RecvState {
+    pub endpoint_id: u32,
+    pub space_id: AddressSpaceId,
+    pub out_buf: usize,
+    pub out_cap: usize,
+    pub handles_out: usize,
+    pub handles_cap: usize,
 }
 
 /// A thread — schedulable execution context.
@@ -47,11 +63,22 @@ pub struct Thread {
     fp_dirty: bool,
     wait_events: [u32; crate::config::MAX_MULTI_WAIT],
     wait_count: u8,
+    wakeup_error: Option<SyscallError>,
+    wakeup_value: Option<u64>,
+    recv_state: Option<RecvState>,
     space_next: Option<u32>,
     space_prev: Option<u32>,
     #[cfg(any(target_os = "none", test))]
     register_state: Option<Box<RegisterState>>,
 }
+
+// Verify Thread doesn't grow unexpectedly. The struct is heap-allocated
+// (Box in ObjectTable), so absolute offset < 128 isn't achievable with
+// Rust's default repr (the compiler places the wait_events array first).
+// Instead, track total size to catch field bloat.
+const _: () = {
+    assert!(core::mem::size_of::<Thread>() <= 576);
+};
 
 #[allow(clippy::new_without_default)]
 impl Thread {
@@ -80,6 +107,9 @@ impl Thread {
             fp_dirty: false,
             wait_events: [0; crate::config::MAX_MULTI_WAIT],
             wait_count: 0,
+            wakeup_error: None,
+            wakeup_value: None,
+            recv_state: None,
             space_next: None,
             space_prev: None,
             #[cfg(any(target_os = "none", test))]
@@ -239,6 +269,30 @@ impl Thread {
         result
     }
 
+    pub fn set_wakeup_error(&mut self, error: SyscallError) {
+        self.wakeup_error = Some(error);
+    }
+
+    pub fn take_wakeup_error(&mut self) -> Option<SyscallError> {
+        self.wakeup_error.take()
+    }
+
+    pub fn set_wakeup_value(&mut self, val: u64) {
+        self.wakeup_value = Some(val);
+    }
+
+    pub fn take_wakeup_value(&mut self) -> Option<u64> {
+        self.wakeup_value.take()
+    }
+
+    pub fn set_recv_state(&mut self, state: RecvState) {
+        self.recv_state = Some(state);
+    }
+
+    pub fn take_recv_state(&mut self) -> Option<RecvState> {
+        self.recv_state.take()
+    }
+
     /// Terminate the thread with an exit code.
     pub fn exit(&mut self, code: u32) {
         self.state = ThreadRunState::Exited;
@@ -332,7 +386,7 @@ impl FixedRing {
         self.len as usize
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, fuzzing, debug_assertions))]
     fn iter(&self) -> impl Iterator<Item = ThreadId> + '_ {
         (0..self.len as usize).map(|i| self.buf[(self.head as usize + i) % QUEUE_CAP])
     }
@@ -343,6 +397,12 @@ pub struct RunQueue {
     queues: [FixedRing; NUM_PRIORITY_LEVELS],
     current: Option<ThreadId>,
 }
+
+// RunQueue.current is checked on every dispatch to identify the calling
+// thread. Verify it's within reach of the same cache line as the queues.
+const _: () = {
+    assert!(core::mem::offset_of!(RunQueue, current) < 128);
+};
 
 #[allow(clippy::new_without_default)]
 impl RunQueue {
@@ -399,7 +459,7 @@ impl RunQueue {
         self.queues.iter().map(|q| q.len()).sum()
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, fuzzing, debug_assertions))]
     pub fn all_queued_thread_ids(&self) -> alloc::vec::Vec<ThreadId> {
         let mut ids = alloc::vec::Vec::new();
 
@@ -470,8 +530,7 @@ impl Scheduler {
             .iter()
             .enumerate()
             .min_by_key(|(_, rq)| rq.total_ready())
-            .map(|(i, _)| i)
-            .unwrap_or(0)
+            .map_or(0, |(i, _)| i)
     }
 }
 

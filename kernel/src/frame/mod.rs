@@ -10,4 +10,6 @@ pub mod fault_resolve;
 pub mod firmware;
 #[cfg(target_os = "none")]
 pub mod heap;
+pub mod ring;
+pub mod slab;
 pub mod user_mem;

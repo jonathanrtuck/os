@@ -168,6 +168,12 @@ fn irq_handler(_frame: &mut TrapFrame) {
             let core = 0;
 
             super::timer::handle_deadline(core);
+
+            #[cfg(all(debug_assertions, target_os = "none"))]
+            // SAFETY: percpu() valid — IRQ handlers fire after boot.
+            unsafe {
+                watchdog_check(super::cpu::percpu());
+            }
         }
         32.. => {
             let handler_addr = DEVICE_IRQ_HANDLER.load(Ordering::Acquire);
@@ -189,6 +195,38 @@ fn irq_handler(_frame: &mut TrapFrame) {
     }
 
     super::gic::end_of_interrupt(intid);
+}
+
+// ---------------------------------------------------------------------------
+// Watchdog — detects syscalls that take longer than the threshold
+// ---------------------------------------------------------------------------
+
+#[cfg(all(debug_assertions, target_os = "none"))]
+fn watchdog_check(pc: &super::cpu::PerCpu) {
+    const WATCHDOG_THRESHOLD_TICKS: u64 = 10_000_000;
+    let entry = pc.last_syscall_entry;
+
+    if entry == 0 {
+        return;
+    }
+
+    let now = super::sysreg::cntvct_el0();
+    let elapsed = now.wrapping_sub(entry);
+
+    if elapsed > WATCHDOG_THRESHOLD_TICKS {
+        let freq = super::sysreg::cntfrq_el0();
+        let elapsed_us = (elapsed * 1_000_000).checked_div(freq).unwrap_or(elapsed);
+
+        crate::println!(
+            "WATCHDOG: core {} syscall stalled for {}us ({} ticks, thread {})",
+            pc.core_id,
+            elapsed_us,
+            elapsed,
+            pc.current_thread,
+        );
+
+        panic!("kernel watchdog: syscall exceeded time threshold");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -280,17 +318,26 @@ extern "C" fn svc_fast_handler(
     syscall_num: u64,
 ) -> (u64, u64) {
     let args = [a0, a1, a2, a3, a4, a5];
-    // SAFETY: percpu() requires init_percpu_bsp to have been called.
+    // SAFETY: percpu_mut() requires init_percpu_bsp to have been called.
     // kernel_ptr was set during boot via set_kernel_ptr.
     let (kernel, current_thread, core_id) = unsafe {
-        let pc = super::cpu::percpu();
+        let pc = super::cpu::percpu_mut();
+
+        pc.mark_syscall_entry();
+
         let kernel = &mut *(pc.kernel_ptr as *mut crate::syscall::Kernel);
         let current = crate::types::ThreadId(pc.current_thread);
 
         (kernel, current, pc.core_id as usize)
     };
+    let result = kernel.dispatch(current_thread, core_id, syscall_num, &args);
 
-    kernel.dispatch(current_thread, core_id, syscall_num, &args)
+    // SAFETY: same as above — percpu is valid for this core's lifetime.
+    unsafe {
+        super::cpu::percpu_mut().clear_syscall_entry();
+    }
+
+    result
 }
 
 // ---------------------------------------------------------------------------

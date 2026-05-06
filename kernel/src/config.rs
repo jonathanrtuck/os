@@ -48,8 +48,10 @@ pub const BITMAP_WORDS: usize = MAX_PHYS_PAGES / 64;
 //   worst case (50 docs + undo snapshots + scene graph + stacks).
 // MAX_WAITERS_PER_EVENT (16): concurrent waiters on one event.
 //   Typical: 1 (compositor on scene-ready). 16 = generous headroom.
-// MAX_PENDING_PER_ENDPOINT (16): concurrent callers blocked on one
-//   endpoint. Typical: 1-3 editors calling OS service. 16 = headroom.
+// MAX_PENDING_PER_ENDPOINT (8): concurrent callers blocked on one
+//   endpoint. Typical: 1-3 editors calling OS service. 8 = headroom.
+// MAX_IPC_HANDLES (4): handles transferred per IPC call. Typical
+//   calls transfer 0-2 handles (VMO + maybe event). 4 = headroom.
 
 pub const MAX_VMOS: usize = 4096;
 pub const MAX_HANDLES: usize = 512;
@@ -61,10 +63,10 @@ pub const MAX_PAGES_INLINE: usize = 32;
 pub const MAX_MAPPINGS: usize = 128;
 pub const MAX_VA_REGIONS: usize = MAX_MAPPINGS + 1;
 pub const MAX_WAITERS_PER_EVENT: usize = 16;
-pub const MAX_PENDING_PER_ENDPOINT: usize = 16;
+pub const MAX_PENDING_PER_ENDPOINT: usize = 8;
 pub const MAX_RECV_WAITERS: usize = 4;
 pub const MAX_MULTI_WAIT: usize = 32;
-pub const MAX_IPC_HANDLES: usize = 8;
+pub const MAX_IPC_HANDLES: usize = 4;
 pub const KERNEL_STACK_PAGES: usize = 2;
 
 /// Kernel stack size per thread (2 pages = 32 KiB).

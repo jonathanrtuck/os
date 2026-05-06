@@ -51,10 +51,24 @@ fn copy_from_user(dst: &mut [u8], src_va: usize) -> Result<(), SyscallError> {
     // instruction computes the recovery label address without accessing
     // memory — safe with nomem omitted. `str` to COPY_FAULT_RECOVERY is a
     // kernel VA write (identity-mapped), not a user VA access.
+    //
+    // The 16-byte fast loop uses two LDTRs per iteration (LDTR supports
+    // [Xn, #simm9] offsets). This halves loop overhead for IPC messages
+    // (128 bytes = 8 iterations instead of 16).
     unsafe {
         core::arch::asm!(
             "adr {recovery}, 22f",
             "str {recovery}, [{flag}]",
+            "10:",
+            "cmp {len}, #16",
+            "b.lt 11f",
+            "ldtr {tmp}, [{src}]",
+            "ldtr {tmp2}, [{src}, #8]",
+            "stp {tmp}, {tmp2}, [{dst}]",
+            "add {src}, {src}, #16",
+            "add {dst}, {dst}, #16",
+            "sub {len}, {len}, #16",
+            "b 10b",
             "11:",
             "cmp {len}, #8",
             "b.lt 13f",
@@ -63,7 +77,6 @@ fn copy_from_user(dst: &mut [u8], src_va: usize) -> Result<(), SyscallError> {
             "add {src}, {src}, #8",
             "add {dst}, {dst}, #8",
             "sub {len}, {len}, #8",
-            "b 11b",
             "13:",
             "cbz {len}, 14f",
             "15:",
@@ -85,6 +98,7 @@ fn copy_from_user(dst: &mut [u8], src_va: usize) -> Result<(), SyscallError> {
             dst = inout(reg) dst.as_mut_ptr() => _,
             len = inout(reg) len => _,
             tmp = out(reg) _,
+            tmp2 = out(reg) _,
             fault = lateout(reg) fault,
             recovery = out(reg) _,
             flag = in(reg) COPY_FAULT_RECOVERY[core_id].as_ptr(),
@@ -110,11 +124,22 @@ fn copy_to_user(dst_va: usize, src: &[u8]) -> Result<(), SyscallError> {
     let fault: u64;
 
     // SAFETY: STTR performs the store using EL0's translation regime. Same
-    // fault recovery mechanism as copy_from_user.
+    // fault recovery mechanism as copy_from_user. 16-byte fast loop mirrors
+    // copy_from_user: LDP from kernel buffer, two STTRs to user VA.
     unsafe {
         core::arch::asm!(
             "adr {recovery}, 22f",
             "str {recovery}, [{flag}]",
+            "10:",
+            "cmp {len}, #16",
+            "b.lt 11f",
+            "ldp {tmp}, {tmp2}, [{src}]",
+            "sttr {tmp}, [{dst}]",
+            "sttr {tmp2}, [{dst}, #8]",
+            "add {src}, {src}, #16",
+            "add {dst}, {dst}, #16",
+            "sub {len}, {len}, #16",
+            "b 10b",
             "11:",
             "cmp {len}, #8",
             "b.lt 13f",
@@ -123,7 +148,6 @@ fn copy_to_user(dst_va: usize, src: &[u8]) -> Result<(), SyscallError> {
             "add {src}, {src}, #8",
             "add {dst}, {dst}, #8",
             "sub {len}, {len}, #8",
-            "b 11b",
             "13:",
             "cbz {len}, 14f",
             "15:",
@@ -145,6 +169,7 @@ fn copy_to_user(dst_va: usize, src: &[u8]) -> Result<(), SyscallError> {
             src = inout(reg) src.as_ptr() => _,
             len = inout(reg) len => _,
             tmp = out(reg) _,
+            tmp2 = out(reg) _,
             fault = lateout(reg) fault,
             recovery = out(reg) _,
             flag = in(reg) COPY_FAULT_RECOVERY[core_id].as_ptr(),

@@ -337,6 +337,20 @@ impl AddressSpace {
         Ok(va)
     }
 
+    pub fn remove_mappings_for_vmo(&mut self, vmo_id: VmoId) {
+        let mut i = 0;
+
+        while i < self.mappings.len() {
+            if self.mappings.as_slice()[i].vmo_id == vmo_id {
+                let record = self.mappings.remove(i);
+
+                self.va_allocator.free(record.va_start, record.size);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
     pub fn unmap(&mut self, addr: usize) -> Result<MappingRecord, SyscallError> {
         let pos = self.mappings.partition_point(|m| m.va_start < addr);
         let slice = self.mappings.as_slice();
@@ -714,5 +728,285 @@ mod tests {
             va.allocate(0x4_0000, 0x1_0000),
             Err(SyscallError::InvalidArgument)
         );
+    }
+
+    // -- Mutation-killing tests: VaAllocator boundary precision --
+
+    #[test]
+    fn va_allocate_fixed_exact_region_start() {
+        let mut va = VaAllocator::new(0x1_0000, 0x8_0000);
+        let a = va.allocate(0x4_0000, 0x1_0000).unwrap();
+
+        assert_eq!(a, 0x1_0000);
+
+        let regions = va.free_regions();
+
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0], (0x5_0000, 0x4_0000));
+    }
+
+    #[test]
+    fn va_allocate_fixed_exact_region_end() {
+        let mut va = VaAllocator::new(0x1_0000, 0x8_0000);
+        let a = va.allocate(0x4_0000, 0x5_0000).unwrap();
+
+        assert_eq!(a, 0x5_0000);
+
+        let regions = va.free_regions();
+
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0], (0x1_0000, 0x4_0000));
+    }
+
+    #[test]
+    fn va_allocate_fixed_consumes_entire_region() {
+        let mut va = VaAllocator::new(0x1_0000, 0x4_0000);
+        let a = va.allocate(0x4_0000, 0x1_0000).unwrap();
+
+        assert_eq!(a, 0x1_0000);
+        assert!(va.free_regions().is_empty());
+    }
+
+    #[test]
+    fn va_allocate_fixed_splits_region_correctly() {
+        let mut va = VaAllocator::new(0x1_0000, 0xC_0000);
+        let a = va.allocate(0x4_0000, 0x5_0000).unwrap();
+
+        assert_eq!(a, 0x5_0000);
+
+        let regions = va.free_regions();
+
+        assert_eq!(regions.len(), 2);
+        assert_eq!(regions[0], (0x1_0000, 0x4_0000));
+        assert_eq!(regions[1], (0x9_0000, 0x4_0000));
+    }
+
+    #[test]
+    fn va_free_merge_prev_exact_size() {
+        let mut va = VaAllocator::new(0x1_0000, 0x8_0000);
+        let a = va.allocate(0x4_0000, 0).unwrap();
+        let b = va.allocate(0x4_0000, 0).unwrap();
+
+        va.free(a, 0x4_0000);
+        va.free(b, 0x4_0000);
+
+        let regions = va.free_regions();
+
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0], (0x1_0000, 0x8_0000));
+    }
+
+    #[test]
+    fn va_free_merge_next_exact_size() {
+        let mut va = VaAllocator::new(0x1_0000, 0x8_0000);
+        let a = va.allocate(0x4_0000, 0).unwrap();
+        let b = va.allocate(0x4_0000, 0).unwrap();
+
+        va.free(b, 0x4_0000);
+        va.free(a, 0x4_0000);
+
+        let regions = va.free_regions();
+
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0], (0x1_0000, 0x8_0000));
+    }
+
+    #[test]
+    fn va_free_no_merge_gap_in_between() {
+        let mut va = VaAllocator::new(0x1_0000, 0xC_0000);
+        let a = va.allocate(0x4_0000, 0).unwrap();
+        let _b = va.allocate(0x4_0000, 0).unwrap();
+        let c = va.allocate(0x4_0000, 0).unwrap();
+
+        va.free(a, 0x4_0000);
+        va.free(c, 0x4_0000);
+
+        let regions = va.free_regions();
+
+        assert_eq!(regions.len(), 2);
+        assert_eq!(regions[0], (0x1_0000, 0x4_0000));
+        assert_eq!(regions[1], (0x9_0000, 0x4_0000));
+    }
+
+    #[test]
+    fn va_insert_sorted_preserves_order() {
+        let mut va = VaAllocator::new(0x1_0000, 0x14_0000);
+
+        va.allocate(0x4_0000, 0x5_0000).unwrap();
+        va.allocate(0x4_0000, 0xD_0000).unwrap();
+
+        let regions = va.free_regions();
+
+        assert_eq!(regions.len(), 3);
+        assert_eq!(regions[0], (0x1_0000, 0x4_0000));
+        assert_eq!(regions[1], (0x9_0000, 0x4_0000));
+        assert_eq!(regions[2], (0x11_0000, 0x4_0000));
+        assert!(regions[0].0 < regions[1].0);
+        assert!(regions[1].0 < regions[2].0);
+    }
+
+    #[test]
+    fn va_remove_at_shifts_correctly() {
+        let mut va = VaAllocator::new(0x1_0000, 0x14_0000);
+
+        va.allocate(0x4_0000, 0x5_0000).unwrap();
+        va.allocate(0x4_0000, 0xD_0000).unwrap();
+
+        assert_eq!(va.free_regions().len(), 3);
+
+        va.allocate(0x4_0000, 0x1_0000).unwrap();
+
+        let regions = va.free_regions();
+
+        assert_eq!(regions.len(), 2);
+        assert_eq!(regions[0], (0x9_0000, 0x4_0000));
+        assert_eq!(regions[1], (0x11_0000, 0x4_0000));
+    }
+
+    // -- Mutation-killing tests: AddressSpace fields --
+
+    #[test]
+    fn set_page_table_updates_both_fields() {
+        let mut space = make_space(0);
+
+        space.set_page_table(0xBEEF_0000, 42);
+
+        assert_eq!(space.page_table_root(), 0xBEEF_0000);
+        assert_eq!(space.asid(), 42);
+    }
+
+    #[test]
+    fn asid_matches_constructor() {
+        let space = AddressSpace::new(AddressSpaceId(0), 99, 0);
+
+        assert_eq!(space.asid(), 99);
+    }
+
+    // -- Mutation-killing tests: find_mapping precision --
+
+    #[test]
+    fn find_mapping_exact_start_and_end() {
+        let mut space = make_space(0);
+        let va = space
+            .map_vmo(VmoId(1), 2 * config::PAGE_SIZE, Rights::READ, 0)
+            .unwrap();
+
+        assert!(space.find_mapping(va).is_some());
+        assert!(space.find_mapping(va + 2 * config::PAGE_SIZE - 1).is_some());
+        assert!(space.find_mapping(va + 2 * config::PAGE_SIZE).is_none());
+        assert!(space.find_mapping(va.wrapping_sub(1)).is_none());
+    }
+
+    #[test]
+    fn find_mapping_with_multiple_mappings() {
+        let mut space = make_space(0);
+        let va1 = space
+            .map_vmo(VmoId(1), config::PAGE_SIZE, Rights::READ, 0)
+            .unwrap();
+        let va2 = space
+            .map_vmo(VmoId(2), config::PAGE_SIZE, Rights::READ, 0)
+            .unwrap();
+
+        assert_eq!(space.find_mapping(va1).unwrap().vmo_id, VmoId(1));
+        assert_eq!(space.find_mapping(va2).unwrap().vmo_id, VmoId(2));
+        assert!(space.find_mapping(va2 + config::PAGE_SIZE).is_none());
+    }
+
+    #[test]
+    fn find_mapping_gap_between_mappings() {
+        let mut space = make_space(0);
+        let va1 = space
+            .map_vmo(VmoId(1), config::PAGE_SIZE, Rights::READ, 0)
+            .unwrap();
+        let gap_hint = va1 + 2 * config::PAGE_SIZE;
+        let va2 = space
+            .map_vmo(VmoId(2), config::PAGE_SIZE, Rights::READ, gap_hint)
+            .unwrap();
+
+        assert_eq!(space.find_mapping(va1).unwrap().vmo_id, VmoId(1));
+        assert!(space.find_mapping(va1 + config::PAGE_SIZE).is_none());
+        assert_eq!(space.find_mapping(va2).unwrap().vmo_id, VmoId(2));
+    }
+
+    // -- Mutation-killing tests: DestroyMappings --
+
+    #[test]
+    fn destroy_mappings_is_empty() {
+        let space = make_space(0);
+        let mut cb = NoopCallback;
+        let (mappings, _) = space.destroy(&mut cb);
+
+        assert!(mappings.is_empty());
+        assert_eq!(mappings.len(), 0);
+    }
+
+    #[test]
+    fn destroy_mappings_not_empty() {
+        let mut space = make_space(0);
+
+        space
+            .map_vmo(VmoId(0), config::PAGE_SIZE, Rights::READ, 0)
+            .unwrap();
+
+        let mut cb = NoopCallback;
+        let (mappings, _) = space.destroy(&mut cb);
+
+        assert!(!mappings.is_empty());
+        assert_eq!(mappings.len(), 1);
+    }
+
+    // -- Mutation-killing tests: MappingArray shift operations --
+
+    #[test]
+    fn mapping_insert_remove_preserves_order() {
+        let mut space = make_space(0);
+        let va1 = space
+            .map_vmo(VmoId(1), config::PAGE_SIZE, Rights::READ, 0)
+            .unwrap();
+        let va2 = space
+            .map_vmo(VmoId(2), config::PAGE_SIZE, Rights::READ, 0)
+            .unwrap();
+        let va3 = space
+            .map_vmo(VmoId(3), config::PAGE_SIZE, Rights::READ, 0)
+            .unwrap();
+
+        space.unmap(va2).unwrap();
+
+        assert_eq!(space.mapping_count(), 2);
+        assert_eq!(space.mappings()[0].va_start, va1);
+        assert_eq!(space.mappings()[0].vmo_id, VmoId(1));
+        assert_eq!(space.mappings()[1].va_start, va3);
+        assert_eq!(space.mappings()[1].vmo_id, VmoId(3));
+    }
+
+    #[test]
+    fn mapping_insert_in_middle_shifts_existing() {
+        let mut space = make_space(0);
+        let high_hint = USER_VA_BASE + 10 * config::PAGE_SIZE;
+        let va_high = space
+            .map_vmo(VmoId(1), config::PAGE_SIZE, Rights::READ, high_hint)
+            .unwrap();
+        let va_low = space
+            .map_vmo(VmoId(2), config::PAGE_SIZE, Rights::READ, 0)
+            .unwrap();
+
+        assert_eq!(space.mapping_count(), 2);
+        assert!(va_low < va_high);
+        assert_eq!(space.mappings()[0].vmo_id, VmoId(2));
+        assert_eq!(space.mappings()[0].va_start, va_low);
+        assert_eq!(space.mappings()[1].vmo_id, VmoId(1));
+        assert_eq!(space.mappings()[1].va_start, va_high);
+    }
+
+    // -- Mutation-killing test: USER_VA_SIZE arithmetic --
+
+    #[test]
+    fn va_space_size_is_correct() {
+        let va = VaAllocator::new(USER_VA_BASE, USER_VA_SIZE);
+        let regions = va.free_regions();
+
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].0, USER_VA_BASE);
+        assert_eq!(regions[0].0 + regions[0].1, USER_VA_END);
     }
 }

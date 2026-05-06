@@ -3,6 +3,10 @@
 //! Ticket lock: LDADDAL for acquire (~5 cycles), STLR for release (~5 cycles).
 //! Each lock is 128-byte aligned to own its M4 Pro cache line.
 //! IRQs are disabled while any lock is held (prevents IRQ handler deadlock).
+//!
+//! Spin wait uses WFE (bare-metal) instead of ISB: puts the core into
+//! low-power standby until SEV wakes it on unlock. SEVL primes the event
+//! register so the first WFE falls through without stalling.
 
 use core::{
     cell::UnsafeCell,
@@ -58,8 +62,8 @@ fn daif_restore(_daif: u64) {}
 /// LSE ticket lock. 128-byte aligned (one M4 Pro cache line).
 ///
 /// Acquire: LDADDAL on next_ticket (single LSE instruction, ~5 cycles).
-/// Spin: load now_serving until it matches our ticket (WFE-based).
-/// Release: store-release to now_serving + SEV.
+/// Spin: SEVL + WFE loop (bare-metal) or spin_loop hint (host tests).
+/// Release: store-release to now_serving + SEV to wake waiting cores.
 #[repr(C, align(128))]
 pub struct TicketLock {
     now_serving: AtomicU32,
@@ -81,15 +85,56 @@ impl TicketLock {
         let daif = daif_save_and_disable();
         let ticket = self.next_ticket.fetch_add(1, Ordering::AcqRel);
 
-        while self.now_serving.load(Ordering::Acquire) != ticket {
-            core::hint::spin_loop();
-        }
+        self.spin_until_serving(ticket);
 
         daif
     }
 
+    #[cfg(target_os = "none")]
+    #[inline(always)]
+    fn spin_until_serving(&self, ticket: u32) {
+        // SAFETY: SEVL primes the event register so the first WFE falls
+        // through. WFE then sleeps until SEV (from unlock) or a store to
+        // a monitored cache line wakes the core. LDAPR (RCPC) is a weaker
+        // load-acquire sufficient for ticket lock ordering.
+        // Not nomem: WFE/SEVL interact with the event register (architectural
+        // state), and the load reads memory.
+        unsafe {
+            core::arch::asm!(
+                "sevl",
+                "2:",
+                "wfe",
+                "ldapr {serving:w}, [{addr}]",
+                "cmp {serving:w}, {ticket:w}",
+                "b.ne 2b",
+                addr = in(reg) self.now_serving.as_ptr(),
+                ticket = in(reg) ticket,
+                serving = out(reg) _,
+                options(nostack),
+            );
+        }
+    }
+
+    #[cfg(not(target_os = "none"))]
+    #[inline(always)]
+    fn spin_until_serving(&self, ticket: u32) {
+        while self.now_serving.load(Ordering::Acquire) != ticket {
+            core::hint::spin_loop();
+        }
+    }
+
     pub fn unlock(&self, daif: u64) {
         self.now_serving.fetch_add(1, Ordering::Release);
+
+        // Wake cores waiting in WFE spin loops.
+        #[cfg(target_os = "none")]
+        {
+            // SAFETY: SEV is a hint with no side effects other than setting
+            // the event register on all cores. No memory access.
+            unsafe {
+                core::arch::asm!("sev", options(nostack, nomem));
+            }
+        }
 
         daif_restore(daif);
     }

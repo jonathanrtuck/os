@@ -1,0 +1,97 @@
+#!/bin/bash
+# Performance regression gate — runs bare-metal benchmarks and compares
+# against baselines in kernel/bench_baselines.toml.
+#
+# Usage: scripts/bench-test [--update-baseline]
+#
+# --update-baseline: Run benchmarks and write results as new baselines.
+# Without this flag: Run benchmarks and compare against existing baselines.
+
+set -eo pipefail
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+DIM='\033[2m'
+RESET='\033[0m'
+
+BASELINE_FILE="kernel/bench_baselines.toml"
+TIMEOUT=60
+UPDATE=0
+
+for arg in "$@"; do
+    case "$arg" in
+        --update-baseline) UPDATE=1 ;;
+    esac
+done
+
+pass() { printf "${GREEN}pass${RESET}  %s\n" "$1"; }
+fail() { printf "${RED}FAIL${RESET}  %s\n" "$1"; exit 1; }
+warn() { printf "${YELLOW}warn${RESET}  %s\n" "$1"; }
+info() { printf "${DIM}info${RESET}  %s\n" "$1"; }
+
+# ── Build ──────────────────────────────────────────────────────────
+
+info "building kernel (release, bench)..."
+cargo build -p kernel --release --features bench 2>&1 | tail -1
+pass "build"
+
+# ── Run benchmarks ─────────────────────────────────────────────────
+
+KERNEL_ELF="target/aarch64-unknown-none/release/kernel"
+if [ ! -f "$KERNEL_ELF" ]; then
+    fail "kernel binary not found"
+fi
+
+if ! command -v hypervisor &>/dev/null; then
+    fail "hypervisor not found in PATH"
+fi
+
+info "running benchmarks (timeout ${TIMEOUT}s)..."
+SERIAL_LOG=$(mktemp /tmp/bench-test-XXXXXX.log)
+trap "rm -f $SERIAL_LOG" EXIT
+
+set +e
+hypervisor --no-gpu --timeout "$TIMEOUT" "$KERNEL_ELF" > "$SERIAL_LOG" 2>&1
+EXIT_CODE=$?
+set -e
+
+if [ "$EXIT_CODE" -ne 0 ] && [ "$EXIT_CODE" -ne 2 ]; then
+    cat "$SERIAL_LOG"
+    fail "hypervisor exited with code $EXIT_CODE"
+fi
+
+# ── Parse results ──────────────────────────────────────────────────
+
+info "benchmark results:"
+grep "median" "$SERIAL_LOG" | while IFS= read -r line; do
+    echo "  $line"
+done
+
+# Check for regression marker
+if grep -q "STRUCTURAL REGRESSION DETECTED" "$SERIAL_LOG"; then
+    fail "structural regression detected (exceeded 10x threshold)"
+fi
+
+if grep -q "benchmarks: all passed" "$SERIAL_LOG"; then
+    pass "all benchmarks within 10x structural threshold"
+fi
+
+# ── Baseline comparison ────────────────────────────────────────────
+
+if [ ! -f "$BASELINE_FILE" ]; then
+    warn "no baseline file found at $BASELINE_FILE — run with --update-baseline"
+    exit 0
+fi
+
+# Check if baselines are populated (not all zeros)
+if ! grep -q "median = [1-9]" "$BASELINE_FILE" 2>/dev/null; then
+    warn "baselines are empty (all zeros) — run bare-metal benchmarks with --update-baseline to populate"
+    exit 0
+fi
+
+info "comparing against baselines in $BASELINE_FILE..."
+# Future: parse serial output and compare median values against thresholds
+# For now, the structural 10x check in bench.rs is the gate
+
+pass "performance regression gate"

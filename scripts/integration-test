@@ -2,7 +2,7 @@
 # Bare-metal integration tests — builds the kernel with the test init binary,
 # boots it under the hypervisor, and verifies exit code + serial output.
 #
-# Usage: scripts/integration-test [--verbose]
+# Usage: scripts/integration-test [--verbose] [--release] [--stress N]
 
 set -eo pipefail
 
@@ -14,10 +14,15 @@ RESET='\033[0m'
 
 TIMEOUT=30
 VERBOSE=0
+RELEASE=0
+STRESS=1
 
 for arg in "$@"; do
     case "$arg" in
         --verbose|-v) VERBOSE=1 ;;
+        --release) RELEASE=1 ;;
+        --stress) shift; STRESS="${1:-100}" ;;
+        --stress=*) STRESS="${arg#*=}" ;;
     esac
 done
 
@@ -25,73 +30,147 @@ pass() { printf "${GREEN}pass${RESET}  %s\n" "$1"; }
 fail() { printf "${RED}FAIL${RESET}  %s\n" "$1"; exit 1; }
 info() { printf "${DIM}info${RESET}  %s\n" "$1"; }
 
-# ── Build ───────────────────────────────────────────────────────────────
+# ── Test name mapping (exit code → test name) ─────────────────────
 
-info "building kernel with integration-tests init..."
-BUILD_OUTPUT=$(cargo build -p kernel --features integration-tests --release 2>&1)
+map_exit_code() {
+    local code="$1"
+    case "$code" in
+        10|11) echo "system_info_page_size" ;;
+        12|13) echo "system_info_msg_size" ;;
+        14|15) echo "system_info_num_cores" ;;
+        20|21|22) echo "clock_read" ;;
+        23|24|25) echo "clock_monotonic" ;;
+        30|31) echo "vmo_create" ;;
+        40|41|42|43) echo "vmo_create_and_info" ;;
+        120|121|122|123) echo "vmo_snapshot" ;;
+        130|131|132) echo "vmo_seal" ;;
+        133|134|135) echo "vmo_resize" ;;
+        50|51|52) echo "event_create" ;;
+        60|61|62|63) echo "event_signal_and_wait" ;;
+        70|71|72|73|74) echo "event_clear" ;;
+        75|76|77|78|79) echo "event_multi_signal" ;;
+        80|81|82) echo "endpoint_create" ;;
+        140|141|142) echo "endpoint_bind_event" ;;
+        90|91|92|93|94) echo "handle_dup" ;;
+        103|104|105) echo "handle_dup_rights_attenuation" ;;
+        100|101|102) echo "handle_close" ;;
+        110|111|112) echo "space_create" ;;
+        150|151|152|153) echo "vmo_map_and_access" ;;
+        154|155|156) echo "vmo_map_write_pattern" ;;
+        170|171|172|173|174|175) echo "event_cross_thread" ;;
+        160|161|162|163|164|165|166|167|168) echo "ipc_call_recv_reply" ;;
+        200|201) echo "ipc_caller_thread" ;;
+        180|181|182|183|184) echo "capacity_recovery" ;;
+        30[0-9]) echo "diff_object_lifecycle" ;;
+        31[0-9]) echo "diff_event_signal_clear" ;;
+        32[0-9]) echo "diff_endpoint_bind_close" ;;
+        33[0-9]) echo "diff_error_codes" ;;
+        34[0-9]) echo "diff_vmo_snapshot_seal_resize" ;;
+        35[0-9]) echo "diff_handle_slot_reuse" ;;
+        42[0-7]) echo "smp_ipc_stress" ;;
+        43[01]) echo "smp_ipc_server" ;;
+        40[0-7]) echo "smp_stress_setup" ;;
+        41[0-7]) echo "smp_stress_worker" ;;
+        57005) echo "panic (0xDEAD)" ;;
+        *) echo "unknown (code $code)" ;;
+    esac
+}
+
+# ── Build ──────────────────────────────────────────────────────────
+
+PROFILE="release"
+PROFILE_FLAG="--release"
+if [ "$RELEASE" -eq 0 ]; then
+    PROFILE="release"
+    PROFILE_FLAG="--release"
+fi
+
+info "building kernel with integration-tests init ($PROFILE)..."
+BUILD_OUTPUT=$(cargo build -p kernel --features integration-tests $PROFILE_FLAG 2>&1)
 if [ $? -ne 0 ]; then
     echo "$BUILD_OUTPUT"
     fail "kernel build failed"
 fi
-pass "build"
+pass "build ($PROFILE)"
 
-# ── Locate binary ──────────────────────────────────────────────────────
+# ── Locate binary ─────────────────────────────────────────────────
 
-KERNEL_ELF="target/aarch64-unknown-none/release/kernel"
+KERNEL_ELF="target/aarch64-unknown-none/$PROFILE/kernel"
 if [ ! -f "$KERNEL_ELF" ]; then
     fail "kernel binary not found at $KERNEL_ELF"
 fi
 
-# ── Boot under hypervisor ──────────────────────────────────────────────
+# ── Boot under hypervisor ─────────────────────────────────────────
 
 if ! command -v hypervisor &>/dev/null; then
     fail "hypervisor not found in PATH (install from ~/Sites/hypervisor)"
 fi
 
-info "booting under hypervisor (timeout ${TIMEOUT}s)..."
+run_one() {
+    local iteration="$1"
+    local SERIAL_LOG
+    SERIAL_LOG=$(mktemp /tmp/integration-test-XXXXXX.log)
 
-SERIAL_LOG=$(mktemp /tmp/integration-test-XXXXXX.log)
-trap "rm -f $SERIAL_LOG" EXIT
+    set +e
+    hypervisor --no-gpu --timeout "$TIMEOUT" "$KERNEL_ELF" > "$SERIAL_LOG" 2>&1
+    local EXIT_CODE=$?
+    set -e
 
-set +e
-hypervisor --no-gpu --timeout "$TIMEOUT" "$KERNEL_ELF" > "$SERIAL_LOG" 2>&1
-EXIT_CODE=$?
-set -e
+    if [ "$VERBOSE" -eq 1 ]; then
+        printf "${DIM}"
+        cat "$SERIAL_LOG"
+        printf "${RESET}"
+    fi
 
-if [ "$VERBOSE" -eq 1 ]; then
-    printf "${DIM}"
-    cat "$SERIAL_LOG"
-    printf "${RESET}"
-fi
+    if [ "$EXIT_CODE" -eq 2 ]; then
+        echo ""
+        info "serial output:"
+        cat "$SERIAL_LOG"
+        rm -f "$SERIAL_LOG"
+        fail "[$iteration] hypervisor timeout (${TIMEOUT}s) — kernel hung or deadlocked"
+    fi
 
-# ── Check results ──────────────────────────────────────────────────────
+    if [ "$EXIT_CODE" -ne 0 ]; then
+        echo ""
+        info "serial output:"
+        cat "$SERIAL_LOG"
+        rm -f "$SERIAL_LOG"
+        fail "[$iteration] hypervisor exited with code $EXIT_CODE"
+    fi
 
-if [ "$EXIT_CODE" -eq 2 ]; then
-    echo ""
-    info "serial output:"
-    cat "$SERIAL_LOG"
-    fail "hypervisor timeout (${TIMEOUT}s) — kernel hung or deadlocked"
-fi
+    if grep -q "INTEGRATION TEST: EXIT 0" "$SERIAL_LOG"; then
+        rm -f "$SERIAL_LOG"
+        return 0
+    elif grep -q "INTEGRATION TEST: EXIT" "$SERIAL_LOG"; then
+        local CODE
+        CODE=$(grep "INTEGRATION TEST: EXIT" "$SERIAL_LOG" | head -1 | awk '{print $NF}')
+        local TEST_NAME
+        TEST_NAME=$(map_exit_code "$CODE")
+        echo ""
+        info "serial output:"
+        cat "$SERIAL_LOG"
+        rm -f "$SERIAL_LOG"
+        fail "[$iteration] test '$TEST_NAME' failed (exit code $CODE)"
+    else
+        echo ""
+        info "serial output:"
+        cat "$SERIAL_LOG"
+        rm -f "$SERIAL_LOG"
+        fail "[$iteration] no test exit marker found in serial output"
+    fi
+}
 
-if [ "$EXIT_CODE" -ne 0 ]; then
-    echo ""
-    info "serial output:"
-    cat "$SERIAL_LOG"
-    fail "hypervisor exited with code $EXIT_CODE"
-fi
-
-# Check for the integration test exit marker in serial output.
-if grep -q "INTEGRATION TEST: EXIT 0" "$SERIAL_LOG"; then
+if [ "$STRESS" -eq 1 ]; then
+    info "booting under hypervisor (timeout ${TIMEOUT}s)..."
+    run_one 1
     pass "all bare-metal integration tests passed"
-elif grep -q "INTEGRATION TEST: EXIT" "$SERIAL_LOG"; then
-    CODE=$(grep "INTEGRATION TEST: EXIT" "$SERIAL_LOG" | head -1 | awk '{print $NF}')
-    echo ""
-    info "serial output:"
-    cat "$SERIAL_LOG"
-    fail "integration tests failed with exit code $CODE"
 else
-    echo ""
-    info "serial output:"
-    cat "$SERIAL_LOG"
-    fail "no test exit marker found in serial output"
+    info "stress test: $STRESS iterations (timeout ${TIMEOUT}s each)..."
+    for i in $(seq 1 "$STRESS"); do
+        run_one "$i"
+        if [ $((i % 10)) -eq 0 ]; then
+            info "iteration $i/$STRESS passed"
+        fi
+    done
+    pass "stress test: all $STRESS iterations passed"
 fi

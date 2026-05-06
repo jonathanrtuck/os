@@ -16,3 +16,21 @@ pub fn info(key: u64) -> Result<u64, SyscallError> {
 pub const INFO_PAGE_SIZE: u64 = 0;
 pub const INFO_MSG_SIZE: u64 = 1;
 pub const INFO_NUM_CORES: u64 = 2;
+
+#[inline(always)]
+pub fn raw_counter() -> u64 {
+    let val: u64;
+
+    unsafe {
+        core::arch::asm!("mrs {}, cntvct_el0", out(reg) val, options(nomem, nostack));
+    }
+
+    val
+}
+
+#[inline(always)]
+pub fn isb() {
+    unsafe {
+        core::arch::asm!("isb", options(nostack));
+    }
+}

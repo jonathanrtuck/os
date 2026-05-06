@@ -11,7 +11,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-kernel = { path = ".." }
+kernel = { path = "..", features = ["fuzzing"] }
 
 [[bin]]
 name = "syscall_single"
@@ -21,4 +21,14 @@ doc = false
 [[bin]]
 name = "syscall_sequence"
 path = "fuzz_targets/syscall_sequence.rs"
+doc = false
+
+[[bin]]
+name = "syscall_structured"
+path = "fuzz_targets/syscall_structured.rs"
+doc = false
+
+[[bin]]
+name = "syscall_multi_thread"
+path = "fuzz_targets/syscall_multi_thread.rs"
 doc = false
