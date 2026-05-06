@@ -5,9 +5,11 @@
 //! reply cap. Handle transfer is staged in the PendingCall and installed by
 //! the syscall layer.
 //!
-//! The send queue uses per-priority inline ring buffers — 4 levels × 4 slots
-//! = 16 total. O(1) enqueue, O(4) dequeue (check each level). No heap
-//! allocation on the IPC path.
+//! The send queue uses per-priority ring buffers — 4 levels × 2 slots = 8
+//! total. O(1) enqueue, O(4) dequeue (check each level). The send queue is
+//! heap-allocated (Box) to keep the Endpoint struct small for slab placement.
+
+use alloc::boxed::Box;
 
 use crate::{
     config,
@@ -259,7 +261,7 @@ impl CloseResult {
 /// for calls). Thread blocking/waking is the syscall layer's concern.
 pub struct Endpoint {
     pub id: EndpointId,
-    send_queue: PrioritySendQueue,
+    send_queue: Box<PrioritySendQueue>,
     active_replies: [Option<ActiveReply>; config::MAX_PENDING_PER_ENDPOINT],
     active_reply_count: u8,
     recv_waiters: [Option<ThreadId>; config::MAX_RECV_WAITERS],
@@ -272,12 +274,16 @@ pub struct Endpoint {
     refcount: core::sync::atomic::AtomicUsize,
 }
 
+const _: () = {
+    assert!(core::mem::size_of::<Endpoint>() <= 512);
+};
+
 #[allow(clippy::new_without_default)]
 impl Endpoint {
     pub fn new(id: EndpointId) -> Self {
         Endpoint {
             id,
-            send_queue: PrioritySendQueue::new(),
+            send_queue: Box::new(PrioritySendQueue::new()),
             active_replies: [None; config::MAX_PENDING_PER_ENDPOINT],
             active_reply_count: 0,
             recv_waiters: [None; config::MAX_RECV_WAITERS],

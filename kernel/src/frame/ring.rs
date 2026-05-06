@@ -3,8 +3,7 @@
 //! Uses `MaybeUninit` for slot storage — only occupied slots contain
 //! initialized values. Validity is tracked by `head` and `len`, not
 //! by `Option` discriminants. This avoids touching N × size_of::<T>()
-//! bytes on construction, which matters for large T (e.g. PendingCall
-//! at 256 bytes × 2 slots per ring × 4 rings = 2 KB saved per Endpoint).
+//! bytes on construction.
 
 use core::mem::MaybeUninit;
 
