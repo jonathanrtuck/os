@@ -73,14 +73,15 @@ built (`make bench-smp`), awaiting first bare-metal run. One item deferred:
 ### Performance optimization completed
 
 - **Endpoint struct: 2432 -> 352 bytes** — PrioritySendQueue boxed to reduce
-  slab placement memcpy from 19 to 3 cache lines. Expected: endpoint_create_close
-  drops from 4 ticks to ~2 ticks.
+  slab placement memcpy from 19 to 3 cache lines. Expected:
+  endpoint_create_close drops from 4 ticks to ~2 ticks.
 
 ### Benchmarks awaiting bare-metal run
 
 - `make bench-smp`: IPC 2-core round-trip, object churn scaling (1 vs N cores),
   cross-core wake latency (event ping-pong). Run with hypervisor (2+ cores).
-- `make bench-check`: verify single-core baselines reflect Endpoint optimization.
+- `make bench-check`: verify single-core baselines reflect Endpoint
+  optimization.
 
 ## What's Next
 

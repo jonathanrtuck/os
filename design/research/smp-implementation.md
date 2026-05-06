@@ -745,17 +745,17 @@ After all layers are complete and all 704 tests pass:
 All structural layers are implemented. SMP benchmark harness built, awaiting
 first bare-metal run.
 
-| Layer                      | Status   | Notes                                                                                                                                                                                                        |
-| -------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 0. RwSpinLock              | Done     | `frame/arch/aarch64/sync.rs`                                                                                                                                                                                 |
-| 1. IPI                     | Done     | SGI send/receive, reschedule handler                                                                                                                                                                         |
-| 2. Per-CPU Scheduler       | Done     | `Schedulers` struct, per-CPU `SpinLock<PerCoreState>`                                                                                                                                                        |
-| 3. ConcurrentTable         | Done     | Per-slot TicketLock + AtomicU64 generations                                                                                                                                                                  |
-| 3d. HandleTable RwSpinLock | Deferred | Decision pending `bench-smp` data. If handle lookup shows < 1.5x scaling, implement. Otherwise close as not needed.                                                                                         |
-| 3e. Atomic refcounts       | Done     | `AtomicUsize` on Vmo, Endpoint, Event; `add_ref`/`release_ref` take `&self`                                                                                                                                  |
-| 4. Global State + Dispatch | Done     | Free functions, `frame::state` globals                                                                                                                                                                       |
-| 5. Lockdep                 | Done     | `frame/lockdep.rs`, 8 lock classes, debug_assertions only                                                                                                                                                    |
-| 6. Benchmark Comparison    | Ready    | Single-core baselines set. SMP harness: `make bench-smp` (IPC 2-core, churn scaling, wake latency). Endpoint optimized 2432→352 bytes.                                                                      |
+| Layer                      | Status   | Notes                                                                                                                                  |
+| -------------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| 0. RwSpinLock              | Done     | `frame/arch/aarch64/sync.rs`                                                                                                           |
+| 1. IPI                     | Done     | SGI send/receive, reschedule handler                                                                                                   |
+| 2. Per-CPU Scheduler       | Done     | `Schedulers` struct, per-CPU `SpinLock<PerCoreState>`                                                                                  |
+| 3. ConcurrentTable         | Done     | Per-slot TicketLock + AtomicU64 generations                                                                                            |
+| 3d. HandleTable RwSpinLock | Deferred | Decision pending `bench-smp` data. If handle lookup shows < 1.5x scaling, implement. Otherwise close as not needed.                    |
+| 3e. Atomic refcounts       | Done     | `AtomicUsize` on Vmo, Endpoint, Event; `add_ref`/`release_ref` take `&self`                                                            |
+| 4. Global State + Dispatch | Done     | Free functions, `frame::state` globals                                                                                                 |
+| 5. Lockdep                 | Done     | `frame/lockdep.rs`, 8 lock classes, debug_assertions only                                                                              |
+| 6. Benchmark Comparison    | Ready    | Single-core baselines set. SMP harness: `make bench-smp` (IPC 2-core, churn scaling, wake latency). Endpoint optimized 2432→352 bytes. |
 
 ## Implementation Order and Dependencies
 
