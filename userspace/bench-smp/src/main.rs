@@ -299,7 +299,7 @@ extern "C" fn _start() -> ! {
     loop {
         raw::syscall(
             raw::num::THREAD_EXIT,
-            0,
+            0xBEEF,
             ipc_ticks,
             churn_1core,
             churn_multi,

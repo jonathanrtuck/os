@@ -2244,15 +2244,15 @@ fn sys_thread_exit(
     #[allow(unused_variables)]
     let remaining = state::dec_alive_threads();
 
+    #[cfg(all(target_os = "none", feature = "bench-smp"))]
+    if code == 0xBEEF {
+        print_smp_bench_results(args);
+
+        crate::frame::arch::psci::system_off();
+    }
+
     #[cfg(target_os = "none")]
     if remaining == 0 {
-        #[cfg(feature = "bench-smp")]
-        {
-            print_smp_bench_results(args);
-
-            crate::frame::arch::psci::system_off();
-        }
-
         #[cfg(feature = "bench-el0")]
         {
             print_el0_bench_results(args);
