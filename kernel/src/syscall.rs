@@ -1848,19 +1848,63 @@ impl Kernel {
 
         #[cfg(target_os = "none")]
         if self.alive_threads == 0 {
+            #[cfg(feature = "bench-el0")]
+            {
+                Self::print_el0_bench_results(args);
+                crate::frame::arch::psci::system_off();
+            }
+
             #[cfg(feature = "integration-tests")]
             {
                 crate::println!("INTEGRATION TEST: EXIT {code}");
                 crate::frame::arch::psci::system_off();
             }
 
-            #[cfg(not(feature = "integration-tests"))]
+            #[cfg(not(any(feature = "integration-tests", feature = "bench-el0")))]
             loop {
                 crate::frame::arch::halt();
             }
         }
 
         Ok(0)
+    }
+
+    #[cfg(feature = "bench-el0")]
+    fn print_el0_bench_results(args: &[u64; 6]) {
+        // args: [0]=exit_code, [1]=svc_ticks, [2]=clock_ticks,
+        //       [3]=handle_ticks, [4]=event_ticks, [5]=batch_n
+        let batch_n = args[5] as usize;
+
+        if batch_n == 0 {
+            crate::println!("EL0 BENCH: no results (batch_n=0)");
+            return;
+        }
+
+        crate::println!("--- EL0 cycle estimates ({}x, 24MHz->4.5GHz) ---", batch_n);
+
+        let benches: [(&str, u64, u64); 4] = [
+            ("svc null (EL0 fast path)", args[1], 50),
+            ("clock_read (full syscall)", args[2], 55),
+            ("handle_info (full syscall)", args[3], 55),
+            ("event_signal (full syscall)", args[4], 65),
+        ];
+
+        for (name, total_ticks, theoretical) in &benches {
+            // 1 tick at 24 MHz = 187.5 CPU cycles at 4.5 GHz.
+            // cycles_x10 = total_ticks * 1875 / batch_n
+            let cycles_x10 = total_ticks * 1875 / batch_n as u64;
+            let ratio_x10 = cycles_x10.checked_div(*theoretical).unwrap_or(0);
+
+            crate::println!(
+                "  {:36} {:>5}.{} cyc  (floor ~{:>3})  {}.{}x",
+                name,
+                cycles_x10 / 10,
+                cycles_x10 % 10,
+                theoretical,
+                ratio_x10 / 10,
+                ratio_x10 % 10,
+            );
+        }
     }
 
     #[inline(never)]
@@ -2035,9 +2079,9 @@ impl Kernel {
         }
 
         // 4. Dealloc the space.
-        self.spaces
-            .dealloc(target_id.0)
-            .ok_or(SyscallError::InvalidHandle)?;
+        if !self.spaces.dealloc(target_id.0) {
+            return Err(SyscallError::InvalidHandle);
+        }
 
         // 5. Close caller's handle to the destroyed space.
         let caller = self
@@ -5008,21 +5052,17 @@ mod tests {
             .unwrap()
             .object_id;
         let priorities = [
-            Priority::Low,
-            Priority::Low,
+            Priority::Idle,
+            Priority::Idle,
             Priority::Low,
             Priority::Low,
             Priority::Medium,
             Priority::Medium,
-            Priority::Medium,
-            Priority::Medium,
-            Priority::High,
-            Priority::High,
             Priority::High,
             Priority::High,
         ];
         let n = priorities.len();
-        let mut reply_bufs: [([u8; 128], ThreadId); 12] =
+        let mut reply_bufs: [([u8; 128], ThreadId); 8] =
             core::array::from_fn(|_| ([0u8; 128], ThreadId(0)));
 
         for i in 0..n {
@@ -7478,12 +7518,18 @@ mod tests {
             .lookup(HandleId(ep_hid as u32))
             .unwrap()
             .object_id;
+        let priorities = [
+            Priority::Low,
+            Priority::Medium,
+            Priority::High,
+            Priority::Idle,
+        ];
 
         for i in 0..4 {
             let t = Thread::new(
                 ThreadId(0),
                 Some(AddressSpaceId(0)),
-                Priority::Medium,
+                priorities[i],
                 0x1000,
                 0x2000,
                 0,
@@ -7500,7 +7546,7 @@ mod tests {
             let msg_obj = crate::endpoint::Message::from_bytes(&msg).unwrap();
             let pending = crate::endpoint::PendingCall {
                 caller: ThreadId(idx),
-                priority: Priority::Medium,
+                priority: priorities[i],
                 message: msg_obj,
                 handles: [const { None }; config::MAX_IPC_HANDLES],
                 handle_count: 0,

@@ -38,6 +38,12 @@ static MIRI_COUNTER: AtomicU64 = AtomicU64::new(1000);
 #[cfg(not(miri))]
 pub fn init() {
     sysreg::set_cntv_ctl_el0(0);
+
+    // Enable EL0 access to the virtual counter (CNTVCT_EL0). Bit 1
+    // (EL0VCTEN) allows userspace to read the timer without trapping.
+    let cntkctl = sysreg::cntkctl_el1();
+
+    sysreg::set_cntkctl_el1(cntkctl | (1 << 1));
     sysreg::isb();
 }
 

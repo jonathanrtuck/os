@@ -232,6 +232,9 @@ sysreg_write!(set_mair_el1, "mair_el1");
 // Timer
 // ---------------------------------------------------------------------------
 
+sysreg_read!(cntkctl_el1, "cntkctl_el1");
+sysreg_write!(set_cntkctl_el1, "cntkctl_el1");
+
 sysreg_read!(cntpct_el0, "cntpct_el0");
 sysreg_read!(cntvct_el0, "cntvct_el0");
 sysreg_read!(cntv_ctl_el0, "cntv_ctl_el0");

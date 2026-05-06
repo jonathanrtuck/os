@@ -69,21 +69,23 @@ impl<T, const MAX: usize> ObjectTable<T, MAX> {
         Some((head, generation))
     }
 
-    pub fn dealloc(&mut self, idx: u32) -> Option<T> {
+    pub fn dealloc(&mut self, idx: u32) -> bool {
         let i = idx as usize;
 
         if i >= MAX {
-            return None;
+            return false;
         }
 
-        let value = *self.entries[i].take()?;
+        if self.entries[i].take().is_none() {
+            return false;
+        }
 
         self.generations[i] += 1;
         self.free_next[i] = self.free_head;
         self.free_head = idx;
         self.count -= 1;
 
-        Some(value)
+        true
     }
 
     pub fn get(&self, idx: u32) -> Option<&T> {
@@ -344,11 +346,11 @@ mod tests {
     }
 
     #[test]
-    fn dealloc_nonexistent_returns_none() {
+    fn dealloc_nonexistent_returns_false() {
         let mut t: ObjectTable<u64, 4> = ObjectTable::new();
 
-        assert!(t.dealloc(0).is_none());
-        assert!(t.dealloc(99).is_none());
+        assert!(!t.dealloc(0));
+        assert!(!t.dealloc(99));
     }
 
     #[test]

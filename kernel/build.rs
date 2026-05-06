@@ -17,15 +17,16 @@ fn main() {
 
 fn build_init(kernel_dir: &std::path::Path) {
     let integration = env::var("CARGO_FEATURE_INTEGRATION_TESTS").is_ok();
-    let init_dir = if integration {
-        kernel_dir.join("../userspace/integration-tests")
+    let bench_el0 = env::var("CARGO_FEATURE_BENCH_EL0").is_ok();
+    let (init_dir, crate_name) = if bench_el0 {
+        (kernel_dir.join("../userspace/bench"), "bench")
+    } else if integration {
+        (
+            kernel_dir.join("../userspace/integration-tests"),
+            "integration-tests",
+        )
     } else {
-        kernel_dir.join("../userspace/init")
-    };
-    let crate_name = if integration {
-        "integration-tests"
-    } else {
-        "init"
+        (kernel_dir.join("../userspace/init"), "init")
     };
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let init_bin = out_dir.join("init.bin");
@@ -64,4 +65,7 @@ fn build_init(kernel_dir: &std::path::Path) {
     println!("cargo:rerun-if-changed=../userspace/integration-tests/src/main.rs");
     println!("cargo:rerun-if-changed=../userspace/integration-tests/link.ld");
     println!("cargo:rerun-if-changed=../userspace/integration-tests/Cargo.toml");
+    println!("cargo:rerun-if-changed=../userspace/bench/src/main.rs");
+    println!("cargo:rerun-if-changed=../userspace/bench/link.ld");
+    println!("cargo:rerun-if-changed=../userspace/bench/Cargo.toml");
 }

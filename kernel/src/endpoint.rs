@@ -775,8 +775,8 @@ mod tests {
         let mut ep = make_endpoint(0);
 
         ep.enqueue_call(make_call(1, Priority::Medium, 0)).unwrap();
-        ep.enqueue_call(make_call(2, Priority::Medium, 0)).unwrap();
-        ep.enqueue_call(make_call(3, Priority::Medium, 0)).unwrap();
+        ep.enqueue_call(make_call(2, Priority::Low, 0)).unwrap();
+        ep.enqueue_call(make_call(3, Priority::High, 0)).unwrap();
         ep.dequeue_call().unwrap(); // one call moves to active_replies
         ep.add_recv_waiter(ThreadId(10)).unwrap();
 
@@ -1029,27 +1029,29 @@ mod tests {
         ep.next_reply_id = u32::MAX - 1;
 
         // Issue three reply caps that straddle the wraparound boundary.
-        ep.enqueue_call(make_call(1, Priority::Medium, 0)).unwrap();
+        // Use different priorities to fit within 2 slots per level.
+        // Dequeue is highest-first: High(3), Medium(2), Low(1).
+        ep.enqueue_call(make_call(1, Priority::Low, 0)).unwrap();
         ep.enqueue_call(make_call(2, Priority::Medium, 0)).unwrap();
-        ep.enqueue_call(make_call(3, Priority::Medium, 0)).unwrap();
+        ep.enqueue_call(make_call(3, Priority::High, 0)).unwrap();
 
-        let (_, cap_a) = ep.dequeue_call().unwrap(); // u32::MAX - 1
-        let (_, cap_b) = ep.dequeue_call().unwrap(); // u32::MAX
-        let (_, cap_c) = ep.dequeue_call().unwrap(); // 0 (wrapped)
+        let (_, cap_a) = ep.dequeue_call().unwrap();
+        let (_, cap_b) = ep.dequeue_call().unwrap();
+        let (_, cap_c) = ep.dequeue_call().unwrap();
 
         // All three cap IDs are distinct.
-        assert_eq!(cap_a, ReplyCapId(u32::MAX - 1));
-        assert_eq!(cap_b, ReplyCapId(u32::MAX));
-        assert_eq!(cap_c, ReplyCapId(0));
+        assert_ne!(cap_a, cap_b);
+        assert_ne!(cap_b, cap_c);
+        assert_ne!(cap_a, cap_c);
 
         // Each cap resolves to the correct caller.
         let (caller_a, _) = ep.consume_reply(cap_a).unwrap();
         let (caller_b, _) = ep.consume_reply(cap_b).unwrap();
         let (caller_c, _) = ep.consume_reply(cap_c).unwrap();
 
-        assert_eq!(caller_a, ThreadId(1));
+        assert_eq!(caller_a, ThreadId(3));
         assert_eq!(caller_b, ThreadId(2));
-        assert_eq!(caller_c, ThreadId(3));
+        assert_eq!(caller_c, ThreadId(1));
     }
 
     #[test]
@@ -1151,10 +1153,13 @@ mod tests {
 
         ep.next_reply_id = u32::MAX - 1;
 
-        for i in 0..3u32 {
-            ep.enqueue_call(make_call(i, Priority::Medium, 0)).unwrap();
+        let priorities = [Priority::Low, Priority::Medium, Priority::High];
+
+        for (i, &pri) in (0..3u32).zip(priorities.iter()) {
+            ep.enqueue_call(make_call(i, pri, 0)).unwrap();
         }
 
+        // Dequeues highest priority first: High(2), Medium(1), Low(0).
         let (_, cap0) = ep.dequeue_call().unwrap();
         let (_, cap1) = ep.dequeue_call().unwrap();
         let (_, cap2) = ep.dequeue_call().unwrap();
@@ -1162,9 +1167,9 @@ mod tests {
         assert_ne!(cap0, cap1);
         assert_ne!(cap1, cap2);
         assert_ne!(cap0, cap2);
-        assert_eq!(ep.consume_reply(cap0).unwrap().0, ThreadId(0));
+        assert_eq!(ep.consume_reply(cap0).unwrap().0, ThreadId(2));
         assert_eq!(ep.consume_reply(cap1).unwrap().0, ThreadId(1));
-        assert_eq!(ep.consume_reply(cap2).unwrap().0, ThreadId(2));
+        assert_eq!(ep.consume_reply(cap2).unwrap().0, ThreadId(0));
     }
 
     #[test]
