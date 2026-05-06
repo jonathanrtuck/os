@@ -60,17 +60,27 @@ benchmarks.
 **Performance gates:** Per-benchmark statistical thresholds (P99 + 3σ) in
 `kernel/bench_baselines.toml`. Regression = bug.
 
-## SMP Remaining (Optional)
+## SMP Remaining
 
-Per-object locking is structurally complete. Two items deferred:
+Per-object locking is structurally complete. Multi-core benchmark harness is
+built (`make bench-smp`), awaiting first bare-metal run. One item deferred:
 
-- **Multi-core benchmarks** — `ipc_call_reply_2core` (two cores, independent
-  endpoints, should show ~2x throughput). Needs multi-core thread execution
-  harness.
 - **HandleTable RwSpinLock** — concurrent handle lookups within the same address
   space. Currently serialized via AddressSpace slot lock; benefits only
-  multi-threaded services. Requires extracting HandleTable from AddressSpace or
-  adding RW mode to ConcurrentTable slot locks.
+  multi-threaded services. Decision: run `bench-smp` first; if handle lookup
+  shows < 1.5x scaling at 2 cores, implement RwSpinLock.
+
+### Performance optimization completed
+
+- **Endpoint struct: 2432 -> 352 bytes** — PrioritySendQueue boxed to reduce
+  slab placement memcpy from 19 to 3 cache lines. Expected: endpoint_create_close
+  drops from 4 ticks to ~2 ticks.
+
+### Benchmarks awaiting bare-metal run
+
+- `make bench-smp`: IPC 2-core round-trip, object churn scaling (1 vs N cores),
+  cross-core wake latency (event ping-pong). Run with hypervisor (2+ cores).
+- `make bench-check`: verify single-core baselines reflect Endpoint optimization.
 
 ## What's Next
 
