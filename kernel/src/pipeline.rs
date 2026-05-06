@@ -241,7 +241,7 @@ mod tests {
 
         assert_eq!(ep.recv_waiter_count(), 1);
 
-        let result = ep.close_peer();
+        let result = ep.close_peer().unwrap();
         let all_ids: alloc::vec::Vec<_> = result.all_thread_ids().collect();
 
         assert!(all_ids.contains(&s.comp_thread));

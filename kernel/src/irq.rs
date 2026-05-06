@@ -31,6 +31,7 @@ pub struct IrqSignal {
 
 pub struct IrqTable {
     bindings: [Option<IrqBinding>; config::MAX_IRQS],
+    bound_count: usize,
 }
 
 #[allow(clippy::new_without_default)]
@@ -38,7 +39,12 @@ impl IrqTable {
     pub fn new() -> Self {
         IrqTable {
             bindings: [None; config::MAX_IRQS],
+            bound_count: 0,
         }
+    }
+
+    pub fn has_bindings(&self) -> bool {
+        self.bound_count > 0
     }
 
     pub fn bind(
@@ -63,6 +69,7 @@ impl IrqTable {
             signal_bits,
             ack_pending: false,
         });
+        self.bound_count += 1;
 
         Ok(())
     }
@@ -79,6 +86,7 @@ impl IrqTable {
         }
 
         *slot = None;
+        self.bound_count -= 1;
 
         Ok(())
     }
@@ -126,6 +134,10 @@ impl IrqTable {
     /// Return INTIDs bound to a given event whose signal_bits overlap
     /// with `cleared_bits`. Used by event_clear to auto-unmask IRQs.
     pub fn intids_for_event_bits(&self, event_id: EventId, cleared_bits: u64) -> ([u32; 4], usize) {
+        if self.bound_count == 0 {
+            return ([0; 4], 0);
+        }
+
         let mut result = [0u32; 4];
         let mut count = 0;
 

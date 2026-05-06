@@ -864,7 +864,9 @@ impl Kernel {
         let Some(ep) = self.endpoints.get_mut(ep_id) else {
             return;
         };
-        let mut close_result = ep.close_peer();
+        let Some(mut close_result) = ep.close_peer() else {
+            return;
+        };
 
         for canceled in close_result.canceled_callers_mut() {
             if let Some(caller) = canceled.take() {
@@ -928,13 +930,15 @@ impl Kernel {
             ep.unbind_event();
         }
 
-        for intid in 0..config::MAX_IRQS {
-            if self
-                .irqs
-                .binding_at(intid)
-                .is_some_and(|b| b.event_id.0 == event_id)
-            {
-                let _ = self.irqs.unbind(intid as u32);
+        if self.irqs.has_bindings() {
+            for intid in 0..config::MAX_IRQS {
+                if self
+                    .irqs
+                    .binding_at(intid)
+                    .is_some_and(|b| b.event_id.0 == event_id)
+                {
+                    let _ = self.irqs.unbind(intid as u32);
+                }
             }
         }
 

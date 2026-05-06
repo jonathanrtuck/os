@@ -130,6 +130,10 @@ impl Event {
     pub fn signal(&mut self, bits: u64) -> WakeList {
         self.bits |= bits;
 
+        if self.waiter_count == 0 {
+            return WakeList::new();
+        }
+
         let current_bits = self.bits;
         let mut woken = WakeList::new();
 

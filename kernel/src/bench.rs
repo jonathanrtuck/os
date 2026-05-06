@@ -19,6 +19,8 @@ use crate::{
 
 const WARMUP: usize = 10;
 const ITERATIONS: usize = 1000;
+const BATCH_N: usize = 500;
+const BATCH_SAMPLES: usize = 100;
 
 struct BenchResult {
     name: &'static str,
@@ -31,6 +33,18 @@ impl BenchResult {
     fn passed(&self) -> bool {
         self.median <= self.threshold_mult
     }
+}
+
+struct CycleEstimate {
+    name: &'static str,
+    cycles_x10: u64,
+    theoretical: u64,
+}
+
+fn ticks_to_cycles_x10(total_ticks: u64, batch_size: usize) -> u64 {
+    // 1 tick at 24 MHz = 187.5 CPU cycles at 4.5 GHz.
+    // Returns cycles × 10 for one decimal place of precision.
+    total_ticks * 1875 / batch_size as u64
 }
 
 fn stats(samples: &mut [u64; ITERATIONS]) -> (u64, u64) {
@@ -118,6 +132,74 @@ fn bench_create_close(
         p99,
         threshold_mult: threshold * 10,
     }
+}
+
+fn bench_batched_dispatch(
+    kern: &mut Kernel,
+    current: ThreadId,
+    syscall_num: u64,
+    args: [u64; 6],
+) -> u64 {
+    for _ in 0..BATCH_N {
+        kern.dispatch(current, 0, syscall_num, &args);
+    }
+
+    let mut samples = [0u64; BATCH_SAMPLES];
+
+    for s in &mut samples {
+        arch::isb();
+
+        let start = arch::read_cycle_counter();
+
+        for _ in 0..BATCH_N {
+            kern.dispatch(current, 0, syscall_num, &args);
+        }
+
+        arch::isb();
+
+        *s = arch::read_cycle_counter().wrapping_sub(start);
+    }
+
+    samples.sort_unstable();
+    samples[BATCH_SAMPLES / 2]
+}
+
+fn bench_batched_create_close(
+    kern: &mut Kernel,
+    current: ThreadId,
+    create_num: u64,
+    create_args: [u64; 6],
+) -> u64 {
+    for _ in 0..BATCH_N {
+        let (err, h) = kern.dispatch(current, 0, create_num, &create_args);
+
+        if err == 0 {
+            kern.dispatch(current, 0, num::HANDLE_CLOSE, &[h, 0, 0, 0, 0, 0]);
+        }
+    }
+
+    let mut samples = [0u64; BATCH_SAMPLES];
+
+    for s in &mut samples {
+        arch::isb();
+
+        let start = arch::read_cycle_counter();
+
+        for _ in 0..BATCH_N {
+            let (err, h) = kern.dispatch(current, 0, create_num, &create_args);
+
+            if err == 0 {
+                kern.dispatch(current, 0, num::HANDLE_CLOSE, &[h, 0, 0, 0, 0, 0]);
+            }
+        }
+
+        arch::isb();
+
+        *s = arch::read_cycle_counter().wrapping_sub(start);
+    }
+
+    samples.sort_unstable();
+    samples[BATCH_SAMPLES / 2]
 }
 
 fn setup_bench_env(kern: &mut Kernel) -> ThreadId {
@@ -434,6 +516,7 @@ pub fn run(kern: &mut Kernel) {
         crate::println!("benchmarks: STRUCTURAL REGRESSION DETECTED");
     }
 
+    run_cycle_estimates(kern, current);
     teardown_bench_env(kern, current);
 }
 
@@ -625,4 +708,268 @@ fn object_churn_iteration(kern: &mut Kernel, current: ThreadId) {
     for h in handles.iter().rev() {
         kern.dispatch(current, 0, num::HANDLE_CLOSE, &[*h, 0, 0, 0, 0, 0]);
     }
+}
+
+fn run_cycle_estimates(kern: &mut Kernel, current: ThreadId) {
+    crate::println!(
+        "--- cycle estimates ({}x{} samples, 24MHz->4.5GHz) ---",
+        BATCH_N,
+        BATCH_SAMPLES,
+    );
+
+    let mut estimates: alloc::vec::Vec<CycleEstimate> = alloc::vec::Vec::new();
+
+    // ── SVC null (real trap + ERET round-trip) ───────────────────
+    {
+        for _ in 0..BATCH_N {
+            let _ = arch::svc_null();
+        }
+
+        let mut samples = [0u64; BATCH_SAMPLES];
+
+        for s in &mut samples {
+            arch::isb();
+
+            let start = arch::read_cycle_counter();
+
+            for _ in 0..BATCH_N {
+                let _ = arch::svc_null();
+            }
+
+            arch::isb();
+
+            *s = arch::read_cycle_counter().wrapping_sub(start);
+        }
+
+        samples.sort_unstable();
+        estimates.push(CycleEstimate {
+            name: "svc null (trap+eret)",
+            cycles_x10: ticks_to_cycles_x10(samples[BATCH_SAMPLES / 2], BATCH_N),
+            theoretical: 50,
+        });
+    }
+
+    // ── Dispatch-only syscalls ───────────────────────────────────
+    estimates.push(CycleEstimate {
+        name: "dispatch overhead",
+        cycles_x10: ticks_to_cycles_x10(
+            bench_batched_dispatch(kern, current, 255, [0; 6]),
+            BATCH_N,
+        ),
+        theoretical: 5,
+    });
+    estimates.push(CycleEstimate {
+        name: "clock_read",
+        cycles_x10: ticks_to_cycles_x10(
+            bench_batched_dispatch(kern, current, num::CLOCK_READ, [0; 6]),
+            BATCH_N,
+        ),
+        theoretical: 10,
+    });
+    estimates.push(CycleEstimate {
+        name: "system_info",
+        cycles_x10: ticks_to_cycles_x10(
+            bench_batched_dispatch(kern, current, num::SYSTEM_INFO, [0; 6]),
+            BATCH_N,
+        ),
+        theoretical: 10,
+    });
+
+    // ── Handle operations (need a live VMO) ──────────────────────
+    let (_, vmo_h) = kern.dispatch(
+        current,
+        0,
+        num::VMO_CREATE,
+        &[config::PAGE_SIZE as u64, 0, 0, 0, 0, 0],
+    );
+
+    estimates.push(CycleEstimate {
+        name: "handle_info",
+        cycles_x10: ticks_to_cycles_x10(
+            bench_batched_dispatch(kern, current, num::HANDLE_INFO, [vmo_h, 0, 0, 0, 0, 0]),
+            BATCH_N,
+        ),
+        theoretical: 15,
+    });
+
+    {
+        for _ in 0..BATCH_N {
+            let (err, dup) = kern.dispatch(
+                current,
+                0,
+                num::HANDLE_DUP,
+                &[vmo_h, Rights::ALL.0 as u64, 0, 0, 0, 0],
+            );
+
+            if err == 0 {
+                kern.dispatch(current, 0, num::HANDLE_CLOSE, &[dup, 0, 0, 0, 0, 0]);
+            }
+        }
+
+        let mut samples = [0u64; BATCH_SAMPLES];
+
+        for s in &mut samples {
+            arch::isb();
+
+            let start = arch::read_cycle_counter();
+
+            for _ in 0..BATCH_N {
+                let (err, dup) = kern.dispatch(
+                    current,
+                    0,
+                    num::HANDLE_DUP,
+                    &[vmo_h, Rights::ALL.0 as u64, 0, 0, 0, 0],
+                );
+
+                if err == 0 {
+                    kern.dispatch(current, 0, num::HANDLE_CLOSE, &[dup, 0, 0, 0, 0, 0]);
+                }
+            }
+
+            arch::isb();
+
+            *s = arch::read_cycle_counter().wrapping_sub(start);
+        }
+
+        samples.sort_unstable();
+        estimates.push(CycleEstimate {
+            name: "handle_dup+close",
+            cycles_x10: ticks_to_cycles_x10(samples[BATCH_SAMPLES / 2], BATCH_N),
+            theoretical: 30,
+        });
+    }
+
+    // ── VMO snapshot+close ───────────────────────────────────────
+    {
+        for _ in 0..BATCH_N {
+            let (err, snap) = kern.dispatch(current, 0, num::VMO_SNAPSHOT, &[vmo_h, 0, 0, 0, 0, 0]);
+
+            if err == 0 {
+                kern.dispatch(current, 0, num::HANDLE_CLOSE, &[snap, 0, 0, 0, 0, 0]);
+            }
+        }
+
+        let mut samples = [0u64; BATCH_SAMPLES];
+
+        for s in &mut samples {
+            arch::isb();
+
+            let start = arch::read_cycle_counter();
+
+            for _ in 0..BATCH_N {
+                let (err, snap) =
+                    kern.dispatch(current, 0, num::VMO_SNAPSHOT, &[vmo_h, 0, 0, 0, 0, 0]);
+
+                if err == 0 {
+                    kern.dispatch(current, 0, num::HANDLE_CLOSE, &[snap, 0, 0, 0, 0, 0]);
+                }
+            }
+
+            arch::isb();
+
+            *s = arch::read_cycle_counter().wrapping_sub(start);
+        }
+
+        samples.sort_unstable();
+        estimates.push(CycleEstimate {
+            name: "vmo_snapshot+close",
+            cycles_x10: ticks_to_cycles_x10(samples[BATCH_SAMPLES / 2], BATCH_N),
+            theoretical: 60,
+        });
+    }
+
+    kern.dispatch(current, 0, num::HANDLE_CLOSE, &[vmo_h, 0, 0, 0, 0, 0]);
+
+    // ── Event operations ─────────────────────────────────────────
+    let (_, evt_h) = kern.dispatch(current, 0, num::EVENT_CREATE, &[0; 6]);
+
+    estimates.push(CycleEstimate {
+        name: "event_signal",
+        cycles_x10: ticks_to_cycles_x10(
+            bench_batched_dispatch(kern, current, num::EVENT_SIGNAL, [evt_h, 0x1, 0, 0, 0, 0]),
+            BATCH_N,
+        ),
+        theoretical: 15,
+    });
+    estimates.push(CycleEstimate {
+        name: "event_clear",
+        cycles_x10: ticks_to_cycles_x10(
+            bench_batched_dispatch(kern, current, num::EVENT_CLEAR, [evt_h, 0x1, 0, 0, 0, 0]),
+            BATCH_N,
+        ),
+        theoretical: 15,
+    });
+    kern.dispatch(current, 0, num::EVENT_SIGNAL, &[evt_h, 0xFF, 0, 0, 0, 0]);
+    estimates.push(CycleEstimate {
+        name: "event_wait (signaled)",
+        cycles_x10: ticks_to_cycles_x10(
+            bench_batched_dispatch(kern, current, num::EVENT_WAIT, [evt_h, 0xFF, 1, 0, 0, 0]),
+            BATCH_N,
+        ),
+        theoretical: 15,
+    });
+    kern.dispatch(current, 0, num::HANDLE_CLOSE, &[evt_h, 0, 0, 0, 0, 0]);
+
+    // ── Object create+close pairs ────────────────────────────────
+    estimates.push(CycleEstimate {
+        name: "vmo create+close",
+        cycles_x10: ticks_to_cycles_x10(
+            bench_batched_create_close(
+                kern,
+                current,
+                num::VMO_CREATE,
+                [config::PAGE_SIZE as u64, 0, 0, 0, 0, 0],
+            ),
+            BATCH_N,
+        ),
+        theoretical: 50,
+    });
+    estimates.push(CycleEstimate {
+        name: "event create+close",
+        cycles_x10: ticks_to_cycles_x10(
+            bench_batched_create_close(kern, current, num::EVENT_CREATE, [0; 6]),
+            BATCH_N,
+        ),
+        theoretical: 50,
+    });
+    estimates.push(CycleEstimate {
+        name: "endpoint create+close",
+        cycles_x10: ticks_to_cycles_x10(
+            bench_batched_create_close(kern, current, num::ENDPOINT_CREATE, [0; 6]),
+            BATCH_N,
+        ),
+        theoretical: 50,
+    });
+
+    // ── Print results ────────────────────────────────────────────
+    let mut within_2x = 0u32;
+    let mut total_rated = 0u32;
+
+    for e in &estimates {
+        let ratio_x10 = e.cycles_x10.checked_div(e.theoretical).unwrap_or(0);
+
+        if e.theoretical > 0 {
+            total_rated += 1;
+
+            if ratio_x10 <= 20 {
+                within_2x += 1;
+            }
+        }
+
+        crate::println!(
+            "  {:30} {:>5}.{} cyc  (floor ~{:>3})  {}.{}x",
+            e.name,
+            e.cycles_x10 / 10,
+            e.cycles_x10 % 10,
+            e.theoretical,
+            ratio_x10 / 10,
+            ratio_x10 % 10,
+        );
+    }
+
+    crate::println!(
+        "  {}/{} within 2x of theoretical floor",
+        within_2x,
+        total_rated,
+    );
 }

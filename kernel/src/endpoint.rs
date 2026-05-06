@@ -513,8 +513,13 @@ impl Endpoint {
 
     /// Close the peer end. Returns structured close result preserving handles
     /// from pending calls so they can be recovered by the caller.
-    pub fn close_peer(&mut self) -> CloseResult {
+    pub fn close_peer(&mut self) -> Option<CloseResult> {
         self.peer_closed = true;
+
+        if self.send_queue.is_empty() && self.active_reply_count == 0 && self.recv_waiter_count == 0
+        {
+            return None;
+        }
 
         let mut result = CloseResult::new();
 
@@ -555,7 +560,7 @@ impl Endpoint {
 
         self.recv_waiter_count = 0;
 
-        result
+        Some(result)
     }
 
     /// Bind an event to this endpoint (for channel-event integration).
@@ -775,7 +780,7 @@ mod tests {
         ep.dequeue_call().unwrap(); // one call moves to active_replies
         ep.add_recv_waiter(ThreadId(10)).unwrap();
 
-        let result = ep.close_peer();
+        let result = ep.close_peer().unwrap();
         let all_ids: alloc::vec::Vec<_> = result.all_thread_ids().collect();
 
         assert_eq!(all_ids.len(), 4);
@@ -1119,7 +1124,7 @@ mod tests {
         ep.add_recv_waiter(ThreadId(10)).unwrap();
         ep.add_recv_waiter(ThreadId(11)).unwrap();
 
-        let result = ep.close_peer();
+        let result = ep.close_peer().unwrap();
         let all_ids: alloc::vec::Vec<_> = result.all_thread_ids().collect();
 
         // Expected blocked threads:
@@ -1201,7 +1206,7 @@ mod tests {
 
         ep.enqueue_call(call).unwrap();
 
-        let mut result = ep.close_peer();
+        let mut result = ep.close_peer().unwrap();
 
         assert_eq!(result.canceled_callers().len(), 1);
 
