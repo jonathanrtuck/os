@@ -413,47 +413,30 @@ impl RunQueue {
     }
 }
 
-/// Multi-core fixed-priority preemptive scheduler with bitmap-indexed queues.
+/// Per-core scheduler state: run queue + linked-list links.
 ///
-/// All link data is self-contained in the `links` array (indexed by thread ID,
-/// shared across cores — a thread is only in one queue at a time). No external
-/// borrows needed for any operation.
-pub struct Scheduler {
-    cores: Vec<RunQueue>,
+/// Links are per-core (not global) so each core's enqueue/dequeue/pick_next
+/// touches only its own state. A thread is in at most one core's queue at a
+/// time, so per-core links cannot conflict. This structure is the unit of
+/// locking for SMP: local-core operations need no lock; cross-core wake
+/// acquires the remote core's lock.
+struct PerCoreState {
+    queue: RunQueue,
     links: Vec<SchedLink>,
 }
 
-impl Scheduler {
-    pub fn new(num_cores: usize) -> Self {
-        let mut cores = Vec::with_capacity(num_cores);
-
-        for _ in 0..num_cores {
-            cores.push(RunQueue::new());
-        }
-
-        Scheduler {
-            cores,
+impl PerCoreState {
+    fn new() -> Self {
+        PerCoreState {
+            queue: RunQueue::new(),
             links: alloc::vec![SchedLink::EMPTY; crate::config::MAX_THREADS],
         }
     }
 
-    pub fn core(&self, core_id: usize) -> &RunQueue {
-        &self.cores[core_id]
-    }
-
-    pub fn core_mut(&mut self, core_id: usize) -> &mut RunQueue {
-        &mut self.cores[core_id]
-    }
-
-    pub fn num_cores(&self) -> usize {
-        self.cores.len()
-    }
-
-    pub fn enqueue(&mut self, core_id: usize, thread: ThreadId, priority: Priority) {
+    fn enqueue(&mut self, thread: ThreadId, priority: Priority) {
         let level = priority.0;
         let id = thread.0 as usize;
-        let rq = &mut self.cores[core_id];
-        let old_tail = rq.tails[level as usize];
+        let old_tail = self.queue.tails[level as usize];
 
         self.links[id] = SchedLink {
             prev: old_tail,
@@ -463,60 +446,57 @@ impl Scheduler {
         if let Some(t) = old_tail {
             self.links[t as usize].next = Some(thread.0);
         } else {
-            rq.heads[level as usize] = Some(thread.0);
+            self.queue.heads[level as usize] = Some(thread.0);
         }
 
-        rq.tails[level as usize] = Some(thread.0);
-        rq.set_bit(level);
-        rq.count += 1;
+        self.queue.tails[level as usize] = Some(thread.0);
+        self.queue.set_bit(level);
+        self.queue.count += 1;
     }
 
-    fn unlink(&mut self, core_id: usize, thread_id: u32, level: u8) {
+    fn unlink(&mut self, thread_id: u32, level: u8) {
         let link = self.links[thread_id as usize];
-        let rq = &mut self.cores[core_id];
 
         if let Some(p) = link.prev {
             self.links[p as usize].next = link.next;
         } else {
-            rq.heads[level as usize] = link.next;
+            self.queue.heads[level as usize] = link.next;
         }
 
         if let Some(n) = link.next {
             self.links[n as usize].prev = link.prev;
         } else {
-            rq.tails[level as usize] = link.prev;
+            self.queue.tails[level as usize] = link.prev;
         }
 
         self.links[thread_id as usize] = SchedLink::EMPTY;
 
-        if rq.heads[level as usize].is_none() {
-            rq.clear_bit(level);
+        if self.queue.heads[level as usize].is_none() {
+            self.queue.clear_bit(level);
         }
 
-        rq.count -= 1;
+        self.queue.count -= 1;
     }
 
-    pub fn pick_next(&mut self, core_id: usize) -> Option<ThreadId> {
-        let level = self.cores[core_id].highest_set_bit()?;
-        let head = self.cores[core_id].heads[level as usize]?;
+    fn pick_next(&mut self) -> Option<ThreadId> {
+        let level = self.queue.highest_set_bit()?;
+        let head = self.queue.heads[level as usize]?;
 
-        self.unlink(core_id, head, level);
+        self.unlink(head, level);
 
         Some(ThreadId(head))
     }
 
-    pub fn dequeue(&mut self, core_id: usize, thread: ThreadId, priority: Priority) -> bool {
-        let rq = &self.cores[core_id];
-
-        if rq.heads[priority.0 as usize].is_none() {
+    fn dequeue(&mut self, thread: ThreadId, priority: Priority) -> bool {
+        if self.queue.heads[priority.0 as usize].is_none() {
             return false;
         }
 
-        let mut cursor = rq.heads[priority.0 as usize];
+        let mut cursor = self.queue.heads[priority.0 as usize];
 
         while let Some(id) = cursor {
             if id == thread.0 {
-                self.unlink(core_id, id, priority.0);
+                self.unlink(id, priority.0);
 
                 return true;
             }
@@ -526,34 +506,79 @@ impl Scheduler {
 
         false
     }
+}
+
+/// Multi-core fixed-priority preemptive scheduler with bitmap-indexed queues.
+///
+/// Each core has independent state (run queue + linked-list links). A thread
+/// is in at most one core's queue at a time. Per-core operations touch only
+/// the target core's `PerCoreState`.
+pub struct Scheduler {
+    cores: Vec<PerCoreState>,
+}
+
+impl Scheduler {
+    pub fn new(num_cores: usize) -> Self {
+        let mut cores = Vec::with_capacity(num_cores);
+
+        for _ in 0..num_cores {
+            cores.push(PerCoreState::new());
+        }
+
+        Scheduler { cores }
+    }
+
+    pub fn core(&self, core_id: usize) -> &RunQueue {
+        &self.cores[core_id].queue
+    }
+
+    pub fn core_mut(&mut self, core_id: usize) -> &mut RunQueue {
+        &mut self.cores[core_id].queue
+    }
+
+    pub fn num_cores(&self) -> usize {
+        self.cores.len()
+    }
+
+    pub fn enqueue(&mut self, core_id: usize, thread: ThreadId, priority: Priority) {
+        self.cores[core_id].enqueue(thread, priority);
+    }
+
+    pub fn pick_next(&mut self, core_id: usize) -> Option<ThreadId> {
+        self.cores[core_id].pick_next()
+    }
+
+    pub fn dequeue(&mut self, core_id: usize, thread: ThreadId, priority: Priority) -> bool {
+        self.cores[core_id].dequeue(thread, priority)
+    }
 
     pub fn rotate_current(&mut self, core_id: usize, priority: Priority) {
-        let current = self.cores[core_id].current.take();
+        let current = self.cores[core_id].queue.current.take();
 
         if let Some(tid) = current {
-            self.enqueue(core_id, tid, priority);
+            self.cores[core_id].enqueue(tid, priority);
         }
     }
 
     pub fn remove(&mut self, thread: ThreadId) {
-        for i in 0..self.cores.len() {
-            if self.cores[i].current == Some(thread) {
-                self.cores[i].current = None;
+        for pcs in &mut self.cores {
+            if pcs.queue.current == Some(thread) {
+                pcs.queue.current = None;
 
                 return;
             }
 
             for level in 0..Priority::NUM_LEVELS {
-                let mut cursor = self.cores[i].heads[level];
+                let mut cursor = pcs.queue.heads[level];
 
                 while let Some(id) = cursor {
                     if id == thread.0 {
-                        self.unlink(i, id, level as u8);
+                        pcs.unlink(id, level as u8);
 
                         return;
                     }
 
-                    cursor = self.links[id as usize].next;
+                    cursor = pcs.links[id as usize].next;
                 }
             }
         }
@@ -563,22 +588,22 @@ impl Scheduler {
         self.cores
             .iter()
             .enumerate()
-            .min_by_key(|(_, rq)| rq.total_ready())
+            .min_by_key(|(_, pcs)| pcs.queue.total_ready())
             .map_or(0, |(i, _)| i)
     }
 
     #[cfg(any(test, fuzzing, debug_assertions))]
     pub fn all_queued_on_core(&self, core_id: usize) -> alloc::vec::Vec<ThreadId> {
         let mut ids = alloc::vec::Vec::new();
-        let rq = &self.cores[core_id];
+        let pcs = &self.cores[core_id];
 
         for level in 0..Priority::NUM_LEVELS {
-            let mut cursor = rq.heads[level];
+            let mut cursor = pcs.queue.heads[level];
 
             while let Some(id) = cursor {
                 ids.push(ThreadId(id));
 
-                cursor = self.links[id as usize].next;
+                cursor = pcs.links[id as usize].next;
             }
         }
 

@@ -16,6 +16,12 @@ Research documents informing OS design decisions.
   BeOS/Haiku, Singularity, Midori, Oberon.
 - `font-rendering.md` -- Font rendering pipeline research and implementation
   status.
+- `control-plane-ipc.md` -- Control plane IPC research.
+- `smp-concurrency.md` -- SMP concurrency model evaluation. Five approaches
+  (BKL, per-object, multikernel, per-cluster, QNX preemptible) ranked against M4
+  Pro hardware and project design principles. Decision: per-object locking
+  (Zircon model) with per-CPU scheduler, RW+PI handle table locks, per-object
+  SpinLocks, and IPI for cross-core wake.
 
 These documents capture findings at a point in time. Some decisions they
 informed are now settled; the research remains as rationale.

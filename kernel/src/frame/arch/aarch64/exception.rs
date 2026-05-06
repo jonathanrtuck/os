@@ -159,6 +159,17 @@ fn irq_handler(_frame: &mut TrapFrame) {
     }
 
     match intid {
+        // SGI 0 — reschedule IPI from another core.
+        super::gic::SGI_RESCHEDULE => {
+            #[cfg(target_os = "none")]
+            // SAFETY: percpu_mut() requires init_percpu to have been called.
+            // IRQ handlers only fire after boot completes.
+            unsafe {
+                super::cpu::percpu_mut().reschedule_pending = 1;
+            }
+        }
+        // SGIs 1–15 — reserved, ignore.
+        1..=15 => {}
         super::gic::INTID_VTIMER => {
             #[cfg(target_os = "none")]
             // SAFETY: percpu() requires init_percpu to have been called.

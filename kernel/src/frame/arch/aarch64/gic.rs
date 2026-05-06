@@ -18,6 +18,10 @@ static DIST_BASE: AtomicUsize = AtomicUsize::new(0);
 // INTID constants
 // ---------------------------------------------------------------------------
 
+/// Reschedule SGI — sent via [`send_sgi`] to trigger a reschedule check
+/// on the target core.
+pub const SGI_RESCHEDULE: u32 = 0;
+
 /// Virtual timer PPI (EL1 virtual timer).
 pub const INTID_VTIMER: u32 = 27;
 
@@ -182,8 +186,8 @@ fn init_redistributor(redist_base: usize) {
         mmio::write8(redist_base + GICR_IPRIORITYR + intid, 0xA0);
     }
 
-    // Enable the virtual timer PPI (INTID 27).
-    mmio::write32(redist_base + GICR_ISENABLER0, 1 << INTID_VTIMER);
+    // Enable SGIs 0–15 (for IPI) and the virtual timer PPI (INTID 27).
+    mmio::write32(redist_base + GICR_ISENABLER0, 0xFFFF | (1 << INTID_VTIMER));
 
     // Ensure all redistributor writes complete before CPU interface setup.
     sysreg::dsb_sy();
@@ -244,6 +248,50 @@ pub fn unmask_spi(intid: u32) {
     mmio::write32(dist + GICD_ISENABLER + reg_off, 1 << bit);
 }
 
+// ---------------------------------------------------------------------------
+// SGI (Software Generated Interrupt) — inter-processor interrupt
+// ---------------------------------------------------------------------------
+
+/// Send an SGI to a specific core via GICv3 affinity routing.
+///
+/// `target_core` is the logical core ID (0–MAX_CORES). `sgi_id` is the
+/// SGI number (0–15). The SGI is delivered as a Group 1 non-secure
+/// interrupt via ICC_SGI1R_EL1.
+///
+/// # ICC_SGI1R_EL1 encoding
+///
+/// - bits [55:48] = Aff3
+/// - bits [39:32] = Aff2
+/// - bits [23:16] = Aff1
+/// - bits [15:0]  = target list (bitmask within the Aff3.Aff2.Aff1 cluster)
+/// - bits [27:24] = INTID (SGI number)
+/// - bit [40]     = IRM (0 = use target list)
+///
+/// For this kernel, core_id maps directly to MPIDR Aff0 (Aff1–3 are zero
+/// for <256 cores). The target list bitmask selects the core within Aff0.
+pub fn send_sgi(target_core: u32, sgi_id: u32) {
+    debug_assert!(sgi_id < 16, "send_sgi: SGI ID must be 0–15");
+    debug_assert!(
+        (target_core as usize) < crate::config::MAX_CORES,
+        "send_sgi: target_core out of range"
+    );
+
+    // Target list: bit N in the 16-bit field selects Aff0=N within the
+    // cluster identified by Aff3.Aff2.Aff1. Since all higher affinities
+    // are zero, the target list is simply (1 << core_id).
+    let target_list: u64 = 1 << (target_core & 0xF);
+    let intid: u64 = (sgi_id as u64 & 0xF) << 24;
+
+    // Aff1/2/3 are all zero for cores 0–255.
+    let val = intid | target_list;
+
+    // SAFETY: ICC_SGI1R_EL1 is a write-only system register that sends an
+    // SGI. The value encodes the target core and SGI number. ISB ensures
+    // the register write takes effect before we continue.
+    sysreg::set_icc_sgi1r_el1(val);
+    sysreg::isb();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,5 +341,10 @@ mod tests {
 
         assert_eq!(reg_off, 0x8);
         assert_eq!(bit, 0);
+    }
+
+    #[test]
+    fn sgi_reschedule_is_zero() {
+        assert_eq!(SGI_RESCHEDULE, 0);
     }
 }

@@ -257,6 +257,7 @@ sysreg_write!(set_icc_pmr_el1, "icc_pmr_el1");
 sysreg_write!(set_icc_bpr1_el1, "icc_bpr1_el1");
 sysreg_write!(set_icc_igrpen1_el1, "icc_igrpen1_el1");
 sysreg_write!(set_icc_eoir1_el1, "icc_eoir1_el1");
+sysreg_write!(set_icc_sgi1r_el1, "icc_sgi1r_el1");
 
 // ---------------------------------------------------------------------------
 // TLBI operations (per-page, per-ASID)
