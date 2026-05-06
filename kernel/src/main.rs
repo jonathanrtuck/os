@@ -63,17 +63,14 @@ extern "C" fn kernel_main_upper() -> ! {
         arch::page_alloc::free_pages(),
     );
 
-    let mut kern =
-        alloc::boxed::Box::new(kernel::syscall::Kernel::new(arch::platform::core_count()));
-
-    arch::set_kernel_ptr(&mut *kern as *mut _ as *mut u8);
+    kernel::frame::state::init(arch::platform::core_count());
 
     #[cfg(feature = "integration-tests")]
-    kernel::post::run(&mut kern);
+    kernel::post::run();
 
     #[cfg(feature = "bench")]
     {
-        kernel::bench::run(&mut kern);
+        kernel::bench::run();
         arch::psci::system_off();
     }
 
@@ -81,38 +78,53 @@ extern "C" fn kernel_main_upper() -> ! {
     {
         let init_binary = include_bytes!(concat!(env!("OUT_DIR"), "/init.bin"));
 
-        match kernel::bootstrap::create_init(&mut kern, init_binary) {
+        match kernel::bootstrap::create_init(init_binary) {
             Ok(tid) => {
                 println!("init: bootstrapped as thread {}", tid.0);
 
                 arch::cpu::set_current_thread(tid.0);
 
-                let thread = kern.threads.get(tid.0).unwrap();
-                let entry = thread.entry_point() as u64;
-                let stack = thread.stack_top() as u64;
-                let arg = thread.arg() as u64;
-                let rs = kern.threads.get_mut(tid.0).unwrap().init_register_state();
+                let (entry, stack, arg) = {
+                    let thread = kernel::frame::state::threads().read(tid.0).unwrap();
 
-                rs.pc = entry;
-                rs.sp = stack;
-                rs.gprs[0] = arg;
-                rs.pstate = 0; // EL0t
+                    (
+                        thread.entry_point() as u64,
+                        thread.stack_top() as u64,
+                        thread.arg() as u64,
+                    )
+                };
+
+                {
+                    let mut thread = kernel::frame::state::threads().write(tid.0).unwrap();
+                    let rs = thread.init_register_state();
+
+                    rs.pc = entry;
+                    rs.sp = stack;
+                    rs.gprs[0] = arg;
+                    rs.pstate = 0; // EL0t
+                }
 
                 println!("alive");
 
                 arch::cpu::activate_secondaries();
 
-                let space = kern.threads.get(tid.0).unwrap().address_space().unwrap();
-                let space_obj = kern.spaces.get(space.0).unwrap();
+                let (pt_root, asid) = {
+                    let space_id = kernel::frame::state::threads()
+                        .read(tid.0)
+                        .unwrap()
+                        .address_space()
+                        .unwrap();
+                    let space = kernel::frame::state::spaces().read(space_id.0).unwrap();
+
+                    (space.page_table_root(), space.asid())
+                };
 
                 arch::page_table::switch_table(
-                    arch::page_alloc::PhysAddr(space_obj.page_table_root()),
-                    arch::page_table::Asid(space_obj.asid()),
+                    arch::page_alloc::PhysAddr(pt_root),
+                    arch::page_table::Asid(asid),
                 );
 
-                let rs = kern.threads.get(tid.0).unwrap().register_state().unwrap();
-
-                arch::context::enter_userspace(rs);
+                arch::context::enter_userspace_by_id(tid.0);
             }
             Err(e) => {
                 println!("init: bootstrap failed: {:?}", e);

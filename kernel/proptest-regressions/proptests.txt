@@ -5,3 +5,11 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc bd397bbf1313766dd5d4e9d59b79da1b8402228c4fc8073c1c2ac71a8d8da369 # shrinks to new_size = 51539607553
+cc a1f9849a53670b4dfee2c49353e245dc7e076c2ae59a7339bfb413663f1d4f1d # shrinks to dup_count = 3
+cc 75b04c35f46fe953f36b526f939e32a1c0543beed765b97a909ddb728b86d187 # shrinks to iterations = 35, obj_type = 1
+cc c85a60fb893e1f424be180cf245be8f69b649a006c9164784e6ff00f93afad82 # shrinks to iterations = 11
+cc b7bc87a30de06d95c48b29595ae8cdc759bc3e01e95ce9cc020fb3797ea9c8a7 # shrinks to rights = 0
+cc 69ccb126287cc6fbe2046f6e9d750fb138f52c593fde466a37cbfe88a98bb04c # shrinks to initial = 11733397352768526336, clear_mask = 0
+cc 7b95419b44e069510d0bc917072505e3fc2970ed0fee399410b05799669bf6ed # shrinks to bits1 = 4294967296, bits2 = 0
+cc 4d2df3238438353d5e56e394927a7b29987c63052baa6d3136cdf828435182e5 # shrinks to ops = [3, 0, 3, 2, 0, 3]
+cc 38a50b8d42bbc3a64326c35e36b6942c3c6d2cc4161faff57851d74018573065 # shrinks to dup_count = 5

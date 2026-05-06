@@ -62,17 +62,19 @@ extern crate std;
 pub mod address_space;
 #[cfg(target_os = "none")]
 pub mod bench;
+#[cfg(any(target_os = "none", test))]
 pub mod bootstrap;
 pub mod config;
 #[cfg(test)]
 mod differential;
 pub mod endpoint;
 pub mod event;
+#[cfg(any(target_os = "none", test))]
 pub mod fault;
 #[allow(unsafe_code)]
 pub mod frame;
 pub mod handle;
-#[cfg(any(test, fuzzing, debug_assertions))]
+#[cfg(any(test, fuzzing, all(target_os = "none", debug_assertions)))]
 pub mod invariants;
 pub mod irq;
 #[cfg(test)]
@@ -85,7 +87,9 @@ pub mod post;
 pub mod print;
 #[cfg(test)]
 mod proptests;
+#[cfg(any(target_os = "none", test))]
 pub mod sched;
+#[cfg(any(target_os = "none", test))]
 pub mod syscall;
 pub mod table;
 pub mod thread;

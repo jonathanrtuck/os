@@ -12,7 +12,8 @@ use alloc::{collections::BTreeSet, format, string::String, vec::Vec};
 use core::fmt::Write;
 
 use crate::{
-    syscall::Kernel,
+    config,
+    frame::state,
     thread::ThreadRunState,
     types::{AddressSpaceId, ObjectType, ThreadId},
 };
@@ -29,23 +30,23 @@ impl core::fmt::Display for Violation {
     }
 }
 
-pub fn verify(kernel: &Kernel) -> Vec<Violation> {
+pub fn verify() -> Vec<Violation> {
     let mut violations = Vec::new();
 
-    check_handle_referential_integrity(kernel, &mut violations);
-    check_endpoint_internal_counts(kernel, &mut violations);
-    check_event_internal_counts(kernel, &mut violations);
-    check_thread_space_linked_lists(kernel, &mut violations);
-    check_scheduler_uniqueness(kernel, &mut violations);
-    check_thread_state_consistency(kernel, &mut violations);
-    check_mapping_consistency(kernel, &mut violations);
-    check_ipc_blocked_thread_consistency(kernel, &mut violations);
-    check_event_waiter_validity(kernel, &mut violations);
-    check_irq_binding_consistency(kernel, &mut violations);
-    check_vmo_mapping_range_validity(kernel, &mut violations);
-    check_refcount_consistency(kernel, &mut violations);
-    check_endpoint_event_binding_bidirectionality(kernel, &mut violations);
-    check_priority_inheritance_consistency(kernel, &mut violations);
+    check_handle_referential_integrity(&mut violations);
+    check_endpoint_internal_counts(&mut violations);
+    check_event_internal_counts(&mut violations);
+    check_thread_space_linked_lists(&mut violations);
+    check_scheduler_uniqueness(&mut violations);
+    check_thread_state_consistency(&mut violations);
+    check_mapping_consistency(&mut violations);
+    check_ipc_blocked_thread_consistency(&mut violations);
+    check_event_waiter_validity(&mut violations);
+    check_irq_binding_consistency(&mut violations);
+    check_vmo_mapping_range_validity(&mut violations);
+    check_refcount_consistency(&mut violations);
+    check_endpoint_event_binding_bidirectionality(&mut violations);
+    check_priority_inheritance_consistency(&mut violations);
 
     violations
 }
@@ -54,26 +55,34 @@ pub fn verify(kernel: &Kernel) -> Vec<Violation> {
 /// Call this only when all objects should be reachable — e.g., after full
 /// lifecycle tests. NOT suitable for per-syscall checking because handle_close
 /// does not automatically destroy objects (space_destroy does).
-pub fn verify_no_leaks(kernel: &Kernel) -> Vec<Violation> {
-    let mut violations = verify(kernel);
+pub fn verify_no_leaks() -> Vec<Violation> {
+    let mut violations = verify();
 
-    check_exact_refcounts(kernel, &mut violations);
-    check_object_reachability(kernel, &mut violations);
+    check_exact_refcounts(&mut violations);
+    check_object_reachability(&mut violations);
 
     violations
 }
 
-fn check_handle_referential_integrity(kernel: &Kernel, violations: &mut Vec<Violation>) {
-    for (space_idx, space) in kernel.spaces.iter_allocated() {
+fn check_handle_referential_integrity(violations: &mut Vec<Violation>) {
+    state::spaces().for_each(|space_idx, space| {
         let space_id = AddressSpaceId(space_idx);
 
         for (hid, handle) in space.handles().iter_handles() {
             let obj_exists = match handle.object_type {
-                ObjectType::Vmo => kernel.vmos.is_allocated(handle.object_id),
-                ObjectType::Endpoint => kernel.endpoints.is_allocated(handle.object_id),
-                ObjectType::Event => kernel.events.is_allocated(handle.object_id),
-                ObjectType::Thread => kernel.threads.is_allocated(handle.object_id),
-                ObjectType::AddressSpace => kernel.spaces.is_allocated(handle.object_id),
+                ObjectType::Vmo => state::vmos().read(handle.object_id).is_some(),
+                ObjectType::Endpoint => state::endpoints().read(handle.object_id).is_some(),
+                ObjectType::Event => state::events().read(handle.object_id).is_some(),
+                ObjectType::Thread => state::threads().read(handle.object_id).is_some(),
+                // Avoid deadlock: for_each holds this space's slot lock, so
+                // read() on the same slot would spin forever. If the handle
+                // points to the space we are currently iterating, it exists
+                // by definition. For other spaces, read() acquires a
+                // different slot lock and is safe.
+                ObjectType::AddressSpace => {
+                    handle.object_id == space_idx
+                        || state::spaces().read(handle.object_id).is_some()
+                }
             };
 
             if !obj_exists {
@@ -87,11 +96,11 @@ fn check_handle_referential_integrity(kernel: &Kernel, violations: &mut Vec<Viol
             }
 
             let current_gen = match handle.object_type {
-                ObjectType::Vmo => kernel.vmos.generation(handle.object_id),
-                ObjectType::Endpoint => kernel.endpoints.generation(handle.object_id),
-                ObjectType::Event => kernel.events.generation(handle.object_id),
-                ObjectType::Thread => kernel.threads.generation(handle.object_id),
-                ObjectType::AddressSpace => kernel.spaces.generation(handle.object_id),
+                ObjectType::Vmo => state::vmos().generation(handle.object_id),
+                ObjectType::Endpoint => state::endpoints().generation(handle.object_id),
+                ObjectType::Event => state::events().generation(handle.object_id),
+                ObjectType::Thread => state::threads().generation(handle.object_id),
+                ObjectType::AddressSpace => state::spaces().generation(handle.object_id),
             };
 
             if obj_exists && handle.generation != current_gen {
@@ -109,33 +118,33 @@ fn check_handle_referential_integrity(kernel: &Kernel, violations: &mut Vec<Viol
                 });
             }
         }
-    }
+    });
 }
 
-fn check_endpoint_internal_counts(kernel: &Kernel, violations: &mut Vec<Violation>) {
-    for (idx, ep) in kernel.endpoints.iter_allocated() {
+fn check_endpoint_internal_counts(violations: &mut Vec<Violation>) {
+    state::endpoints().for_each(|idx, ep| {
         if let Err(msg) = ep.verify_internal_counts() {
             violations.push(Violation {
                 category: "endpoint",
                 detail: format!("endpoint #{idx}: {msg}"),
             });
         }
-    }
+    });
 }
 
-fn check_event_internal_counts(kernel: &Kernel, violations: &mut Vec<Violation>) {
-    for (idx, evt) in kernel.events.iter_allocated() {
+fn check_event_internal_counts(violations: &mut Vec<Violation>) {
+    state::events().for_each(|idx, evt| {
         if let Err(msg) = evt.verify_internal_counts() {
             violations.push(Violation {
                 category: "event",
                 detail: format!("event #{idx}: {msg}"),
             });
         }
-    }
+    });
 }
 
-fn check_thread_space_linked_lists(kernel: &Kernel, violations: &mut Vec<Violation>) {
-    for (space_idx, space) in kernel.spaces.iter_allocated() {
+fn check_thread_space_linked_lists(violations: &mut Vec<Violation>) {
+    state::spaces().for_each(|space_idx, space| {
         let mut visited = BTreeSet::new();
         let mut cursor = space.thread_head();
 
@@ -149,7 +158,7 @@ fn check_thread_space_linked_lists(kernel: &Kernel, violations: &mut Vec<Violati
                 break;
             }
 
-            let Some(thread) = kernel.threads.get(tid) else {
+            let Some(thread) = state::threads().read(tid) else {
                 violations.push(Violation {
                     category: "thread-list",
                     detail: format!(
@@ -174,14 +183,15 @@ fn check_thread_space_linked_lists(kernel: &Kernel, violations: &mut Vec<Violati
 
             cursor = thread.space_next();
         }
-    }
+    });
 }
 
-fn check_scheduler_uniqueness(kernel: &Kernel, violations: &mut Vec<Violation>) {
+fn check_scheduler_uniqueness(violations: &mut Vec<Violation>) {
+    let sched = state::scheduler().lock();
     let mut seen = BTreeSet::new();
 
-    for core_id in 0..kernel.scheduler.num_cores() {
-        let rq = kernel.scheduler.core(core_id);
+    for core_id in 0..sched.num_cores() {
+        let rq = sched.core(core_id);
 
         if let Some(current) = rq.current()
             && !seen.insert(current)
@@ -195,7 +205,7 @@ fn check_scheduler_uniqueness(kernel: &Kernel, violations: &mut Vec<Violation>) 
             });
         }
 
-        for tid in kernel.scheduler.all_queued_on_core(core_id) {
+        for tid in sched.all_queued_on_core(core_id) {
             if !seen.insert(tid) {
                 violations.push(Violation {
                     category: "scheduler",
@@ -209,22 +219,25 @@ fn check_scheduler_uniqueness(kernel: &Kernel, violations: &mut Vec<Violation>) 
     }
 }
 
-fn check_thread_state_consistency(kernel: &Kernel, violations: &mut Vec<Violation>) {
+fn check_thread_state_consistency(violations: &mut Vec<Violation>) {
+    let sched = state::scheduler().lock();
     let mut scheduler_threads = BTreeSet::new();
 
-    for core_id in 0..kernel.scheduler.num_cores() {
-        let rq = kernel.scheduler.core(core_id);
+    for core_id in 0..sched.num_cores() {
+        let rq = sched.core(core_id);
 
         if let Some(c) = rq.current() {
             scheduler_threads.insert(c);
         }
 
-        for tid in kernel.scheduler.all_queued_on_core(core_id) {
+        for tid in sched.all_queued_on_core(core_id) {
             scheduler_threads.insert(tid);
         }
     }
 
-    for (idx, thread) in kernel.threads.iter_allocated() {
+    drop(sched);
+
+    state::threads().for_each(|idx, thread| {
         let tid = ThreadId(idx);
         let in_scheduler = scheduler_threads.contains(&tid);
 
@@ -262,11 +275,11 @@ fn check_thread_state_consistency(kernel: &Kernel, violations: &mut Vec<Violatio
                 }
             }
         }
-    }
+    });
 }
 
-fn check_mapping_consistency(kernel: &Kernel, violations: &mut Vec<Violation>) {
-    for (space_idx, space) in kernel.spaces.iter_allocated() {
+fn check_mapping_consistency(violations: &mut Vec<Violation>) {
+    state::spaces().for_each(|space_idx, space| {
         let mappings = space.mappings();
 
         for i in 0..mappings.len() {
@@ -294,7 +307,7 @@ fn check_mapping_consistency(kernel: &Kernel, violations: &mut Vec<Violation>) {
                 });
             }
 
-            if !kernel.vmos.is_allocated(m.vmo_id.0) {
+            if state::vmos().read(m.vmo_id.0).is_none() {
                 violations.push(Violation {
                     category: "mapping→vmo",
                     detail: format!(
@@ -304,13 +317,13 @@ fn check_mapping_consistency(kernel: &Kernel, violations: &mut Vec<Violation>) {
                 });
             }
         }
-    }
+    });
 }
 
-fn check_ipc_blocked_thread_consistency(kernel: &Kernel, violations: &mut Vec<Violation>) {
-    for (ep_idx, ep) in kernel.endpoints.iter_allocated() {
+fn check_ipc_blocked_thread_consistency(violations: &mut Vec<Violation>) {
+    state::endpoints().for_each(|ep_idx, ep| {
         for caller_tid in ep.all_caller_thread_ids() {
-            match kernel.threads.get(caller_tid.0) {
+            match state::threads().read(caller_tid.0) {
                 None => {
                     violations.push(Violation {
                         category: "ipc-caller",
@@ -337,7 +350,7 @@ fn check_ipc_blocked_thread_consistency(kernel: &Kernel, violations: &mut Vec<Vi
         }
 
         for waiter_tid in ep.all_recv_waiter_ids() {
-            match kernel.threads.get(waiter_tid.0) {
+            match state::threads().read(waiter_tid.0) {
                 None => {
                     violations.push(Violation {
                         category: "ipc-waiter",
@@ -362,13 +375,13 @@ fn check_ipc_blocked_thread_consistency(kernel: &Kernel, violations: &mut Vec<Vi
                 }
             }
         }
-    }
+    });
 }
 
-fn check_event_waiter_validity(kernel: &Kernel, violations: &mut Vec<Violation>) {
-    for (evt_idx, event) in kernel.events.iter_allocated() {
+fn check_event_waiter_validity(violations: &mut Vec<Violation>) {
+    state::events().for_each(|evt_idx, event| {
         for waiter_tid in event.all_waiter_thread_ids() {
-            match kernel.threads.get(waiter_tid.0) {
+            match state::threads().read(waiter_tid.0) {
                 None => {
                     violations.push(Violation {
                         category: "event-waiter",
@@ -393,13 +406,15 @@ fn check_event_waiter_validity(kernel: &Kernel, violations: &mut Vec<Violation>)
                 }
             }
         }
-    }
+    });
 }
 
-fn check_irq_binding_consistency(kernel: &Kernel, violations: &mut Vec<Violation>) {
-    for intid in 0..crate::config::MAX_IRQS {
-        if let Some(binding) = kernel.irqs.binding_at(intid)
-            && !kernel.events.is_allocated(binding.event_id.0)
+fn check_irq_binding_consistency(violations: &mut Vec<Violation>) {
+    let irqs = state::irqs().lock();
+
+    for intid in 0..config::MAX_IRQS {
+        if let Some(binding) = irqs.binding_at(intid)
+            && state::events().read(binding.event_id.0).is_none()
         {
             violations.push(Violation {
                 category: "irq-binding",
@@ -412,11 +427,11 @@ fn check_irq_binding_consistency(kernel: &Kernel, violations: &mut Vec<Violation
     }
 }
 
-fn check_vmo_mapping_range_validity(kernel: &Kernel, violations: &mut Vec<Violation>) {
-    for (space_idx, space) in kernel.spaces.iter_allocated() {
+fn check_vmo_mapping_range_validity(violations: &mut Vec<Violation>) {
+    state::spaces().for_each(|space_idx, space| {
         for (i, m) in space.mappings().iter().enumerate() {
-            if let Some(vmo) = kernel.vmos.get(m.vmo_id.0) {
-                let aligned_vmo_size = vmo.size().next_multiple_of(crate::config::PAGE_SIZE);
+            if let Some(vmo) = state::vmos().read(m.vmo_id.0) {
+                let aligned_vmo_size = vmo.size().next_multiple_of(config::PAGE_SIZE);
 
                 if m.size > aligned_vmo_size {
                     violations.push(Violation {
@@ -435,17 +450,17 @@ fn check_vmo_mapping_range_validity(kernel: &Kernel, violations: &mut Vec<Violat
                 }
             }
         }
-    }
+    });
 }
 
-fn check_refcount_consistency(kernel: &Kernel, violations: &mut Vec<Violation>) {
+fn check_refcount_consistency(violations: &mut Vec<Violation>) {
     use alloc::collections::BTreeMap;
 
     let mut vmo_handle_counts: BTreeMap<u32, usize> = BTreeMap::new();
     let mut endpoint_handle_counts: BTreeMap<u32, usize> = BTreeMap::new();
     let mut event_handle_counts: BTreeMap<u32, usize> = BTreeMap::new();
 
-    for (_, space) in kernel.spaces.iter_allocated() {
+    state::spaces().for_each(|_, space| {
         for (_, handle) in space.handles().iter_handles() {
             match handle.object_type {
                 ObjectType::Vmo => {
@@ -460,12 +475,12 @@ fn check_refcount_consistency(kernel: &Kernel, violations: &mut Vec<Violation>) 
                 ObjectType::Thread | ObjectType::AddressSpace => {}
             }
         }
-    }
+    });
 
     // Lower-bound check: refcount >= handle_count. Catches dangling handles
     // (use-after-free). Does NOT catch leaks — that requires the exact check
     // in verify_no_leaks().
-    for (idx, vmo) in kernel.vmos.iter_allocated() {
+    state::vmos().for_each(|idx, vmo| {
         let handle_count = vmo_handle_counts.get(&idx).copied().unwrap_or(0);
 
         if vmo.refcount() < handle_count {
@@ -479,9 +494,9 @@ fn check_refcount_consistency(kernel: &Kernel, violations: &mut Vec<Violation>) 
                 ),
             });
         }
-    }
+    });
 
-    for (idx, ep) in kernel.endpoints.iter_allocated() {
+    state::endpoints().for_each(|idx, ep| {
         let handle_count = endpoint_handle_counts.get(&idx).copied().unwrap_or(0);
 
         if ep.refcount() < handle_count {
@@ -495,9 +510,9 @@ fn check_refcount_consistency(kernel: &Kernel, violations: &mut Vec<Violation>) 
                 ),
             });
         }
-    }
+    });
 
-    for (idx, evt) in kernel.events.iter_allocated() {
+    state::events().for_each(|idx, evt| {
         let handle_count = event_handle_counts.get(&idx).copied().unwrap_or(0);
 
         if evt.refcount() < handle_count {
@@ -511,10 +526,10 @@ fn check_refcount_consistency(kernel: &Kernel, violations: &mut Vec<Violation>) 
                 ),
             });
         }
-    }
+    });
 }
 
-fn check_exact_refcounts(kernel: &Kernel, violations: &mut Vec<Violation>) {
+fn check_exact_refcounts(violations: &mut Vec<Violation>) {
     use alloc::collections::BTreeMap;
 
     let mut vmo_handle_counts: BTreeMap<u32, usize> = BTreeMap::new();
@@ -522,7 +537,7 @@ fn check_exact_refcounts(kernel: &Kernel, violations: &mut Vec<Violation>) {
     let mut event_handle_counts: BTreeMap<u32, usize> = BTreeMap::new();
     let mut vmo_mapping_counts: BTreeMap<u32, usize> = BTreeMap::new();
 
-    for (_, space) in kernel.spaces.iter_allocated() {
+    state::spaces().for_each(|_, space| {
         for (_, handle) in space.handles().iter_handles() {
             match handle.object_type {
                 ObjectType::Vmo => {
@@ -541,9 +556,9 @@ fn check_exact_refcounts(kernel: &Kernel, violations: &mut Vec<Violation>) {
         for m in space.mappings() {
             *vmo_mapping_counts.entry(m.vmo_id.0).or_insert(0) += 1;
         }
-    }
+    });
 
-    for (idx, vmo) in kernel.vmos.iter_allocated() {
+    state::vmos().for_each(|idx, vmo| {
         let handles = vmo_handle_counts.get(&idx).copied().unwrap_or(0);
         let mappings = vmo_mapping_counts.get(&idx).copied().unwrap_or(0);
         let expected = handles + mappings;
@@ -561,9 +576,9 @@ fn check_exact_refcounts(kernel: &Kernel, violations: &mut Vec<Violation>) {
                 ),
             });
         }
-    }
+    });
 
-    for (idx, ep) in kernel.endpoints.iter_allocated() {
+    state::endpoints().for_each(|idx, ep| {
         let expected = endpoint_handle_counts.get(&idx).copied().unwrap_or(0);
 
         if ep.refcount() != expected {
@@ -577,9 +592,9 @@ fn check_exact_refcounts(kernel: &Kernel, violations: &mut Vec<Violation>) {
                 ),
             });
         }
-    }
+    });
 
-    for (idx, evt) in kernel.events.iter_allocated() {
+    state::events().for_each(|idx, evt| {
         let expected = event_handle_counts.get(&idx).copied().unwrap_or(0);
 
         if evt.refcount() != expected {
@@ -593,13 +608,13 @@ fn check_exact_refcounts(kernel: &Kernel, violations: &mut Vec<Violation>) {
                 ),
             });
         }
-    }
+    });
 }
 
-fn check_endpoint_event_binding_bidirectionality(kernel: &Kernel, violations: &mut Vec<Violation>) {
-    for (ep_idx, ep) in kernel.endpoints.iter_allocated() {
+fn check_endpoint_event_binding_bidirectionality(violations: &mut Vec<Violation>) {
+    state::endpoints().for_each(|ep_idx, ep| {
         if let Some(event_id) = ep.bound_event() {
-            match kernel.events.get(event_id.0) {
+            match state::events().read(event_id.0) {
                 None => {
                     violations.push(Violation {
                         category: "binding-ep→evt",
@@ -624,11 +639,11 @@ fn check_endpoint_event_binding_bidirectionality(kernel: &Kernel, violations: &m
                 }
             }
         }
-    }
+    });
 
-    for (evt_idx, evt) in kernel.events.iter_allocated() {
+    state::events().for_each(|evt_idx, evt| {
         if let Some(endpoint_id) = evt.bound_endpoint() {
-            match kernel.endpoints.get(endpoint_id.0) {
+            match state::endpoints().read(endpoint_id.0) {
                 None => {
                     violations.push(Violation {
                         category: "binding-evt→ep",
@@ -653,14 +668,14 @@ fn check_endpoint_event_binding_bidirectionality(kernel: &Kernel, violations: &m
                 }
             }
         }
-    }
+    });
 }
 
-fn check_priority_inheritance_consistency(kernel: &Kernel, violations: &mut Vec<Violation>) {
-    for (ep_idx, ep) in kernel.endpoints.iter_allocated() {
+fn check_priority_inheritance_consistency(violations: &mut Vec<Violation>) {
+    state::endpoints().for_each(|ep_idx, ep| {
         if let Some(server_tid) = ep.active_server()
             && let Some(highest_caller) = ep.highest_caller_priority()
-            && let Some(thread) = kernel.threads.get(server_tid.0)
+            && let Some(thread) = state::threads().read(server_tid.0)
         {
             let effective = thread.effective_priority();
 
@@ -679,15 +694,15 @@ fn check_priority_inheritance_consistency(kernel: &Kernel, violations: &mut Vec<
                 });
             }
         }
-    }
+    });
 }
 
-fn check_object_reachability(kernel: &Kernel, violations: &mut Vec<Violation>) {
+fn check_object_reachability(violations: &mut Vec<Violation>) {
     let mut vmo_refs = BTreeSet::new();
     let mut endpoint_refs = BTreeSet::new();
     let mut event_refs = BTreeSet::new();
 
-    for (_, space) in kernel.spaces.iter_allocated() {
+    state::spaces().for_each(|_, space| {
         for (_, handle) in space.handles().iter_handles() {
             match handle.object_type {
                 ObjectType::Vmo => {
@@ -702,14 +717,24 @@ fn check_object_reachability(kernel: &Kernel, violations: &mut Vec<Violation>) {
                 ObjectType::Thread | ObjectType::AddressSpace => {}
             }
         }
-    }
+    });
 
-    for (idx, _) in kernel.vmos.iter_allocated() {
-        if !vmo_refs.contains(&idx) {
-            let is_mapped = kernel
-                .spaces
-                .iter_allocated()
-                .any(|(_, space)| space.mappings().iter().any(|m| m.vmo_id.0 == idx));
+    // Use manual loop for VMOs because we need to check mappings across
+    // spaces for each unreferenced VMO (nested for_each on a different
+    // table is safe — different locks — but we capture the mapped flag).
+    // We explicitly drop the VMO read guard before entering spaces.for_each
+    // to avoid holding a VMO slot lock across a space iteration.
+    for idx in 0..config::MAX_VMOS as u32 {
+        let allocated = state::vmos().read(idx).is_some();
+
+        if allocated && !vmo_refs.contains(&idx) {
+            let mut is_mapped = false;
+
+            state::spaces().for_each(|_, space| {
+                if space.mappings().iter().any(|m| m.vmo_id.0 == idx) {
+                    is_mapped = true;
+                }
+            });
 
             if !is_mapped {
                 violations.push(Violation {
@@ -720,8 +745,10 @@ fn check_object_reachability(kernel: &Kernel, violations: &mut Vec<Violation>) {
         }
     }
 
-    for (idx, _) in kernel.endpoints.iter_allocated() {
-        if !endpoint_refs.contains(&idx) {
+    for idx in 0..config::MAX_ENDPOINTS as u32 {
+        let allocated = state::endpoints().read(idx).is_some();
+
+        if allocated && !endpoint_refs.contains(&idx) {
             violations.push(Violation {
                 category: "orphan-endpoint",
                 detail: format!("endpoint #{idx} has no handles (orphaned)"),
@@ -729,8 +756,10 @@ fn check_object_reachability(kernel: &Kernel, violations: &mut Vec<Violation>) {
         }
     }
 
-    for (idx, _) in kernel.events.iter_allocated() {
-        if !event_refs.contains(&idx) {
+    for idx in 0..config::MAX_EVENTS as u32 {
+        let allocated = state::events().read(idx).is_some();
+
+        if allocated && !event_refs.contains(&idx) {
             violations.push(Violation {
                 category: "orphan-event",
                 detail: format!("event #{idx} has no handles (orphaned)"),
@@ -739,8 +768,8 @@ fn check_object_reachability(kernel: &Kernel, violations: &mut Vec<Violation>) {
     }
 }
 
-pub fn assert_valid(kernel: &Kernel) {
-    let violations = verify(kernel);
+pub fn assert_valid() {
+    let violations = verify();
 
     if !violations.is_empty() {
         let mut msg = String::from("KERNEL INVARIANT VIOLATIONS:\n");

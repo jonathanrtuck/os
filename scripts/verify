@@ -24,8 +24,8 @@ info() { printf "${DIM}info${RESET}  %s\n" "$1"; }
 cargo clippy -p kernel -- -D warnings 2>&1 | tail -1
 pass "clippy clean"
 
-# 2. Host tests.
-TEST_OUTPUT=$(cargo test -p kernel --target aarch64-apple-darwin 2>&1)
+# 2. Host tests (single-threaded: state::init() writes static mut globals).
+TEST_OUTPUT=$(cargo test -p kernel --target aarch64-apple-darwin -- --test-threads=1 2>&1)
 TEST_LINE=$(echo "$TEST_OUTPUT" | grep "^test result:" | head -1)
 
 if echo "$TEST_LINE" | grep -q "0 failed"; then

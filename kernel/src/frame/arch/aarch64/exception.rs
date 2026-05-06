@@ -290,16 +290,13 @@ pub fn register_handlers() {
 #[cfg(target_os = "none")]
 fn fault_dispatch(fault_addr: u64, is_write: bool, _esr: u64) -> FaultAction {
     // SAFETY: percpu() requires init_percpu to have been called.
-    // kernel_ptr was set during boot via set_kernel_ptr.
-    let (kernel, current) = unsafe {
+    let current = unsafe {
         let pc = super::cpu::percpu();
-        let kernel = &mut *(pc.kernel_ptr as *mut crate::syscall::Kernel);
-        let current = crate::types::ThreadId(pc.current_thread);
 
-        (kernel, current)
+        crate::types::ThreadId(pc.current_thread)
     };
 
-    match crate::fault::handle_data_abort(kernel, current, fault_addr as usize, is_write) {
+    match crate::fault::handle_data_abort(current, fault_addr as usize, is_write) {
         crate::fault::FaultAction::Resolved => FaultAction::Resolved,
         crate::fault::FaultAction::Kill => FaultAction::Kill,
     }
@@ -330,18 +327,17 @@ extern "C" fn svc_fast_handler(
 ) -> (u64, u64) {
     let args = [a0, a1, a2, a3, a4, a5];
     // SAFETY: percpu_mut() requires init_percpu_bsp to have been called.
-    // kernel_ptr was set during boot via set_kernel_ptr.
-    let (kernel, current_thread, core_id) = unsafe {
+    let (current_thread, core_id) = unsafe {
         let pc = super::cpu::percpu_mut();
 
         pc.mark_syscall_entry();
 
-        let kernel = &mut *(pc.kernel_ptr as *mut crate::syscall::Kernel);
-        let current = crate::types::ThreadId(pc.current_thread);
-
-        (kernel, current, pc.core_id as usize)
+        (
+            crate::types::ThreadId(pc.current_thread),
+            pc.core_id as usize,
+        )
     };
-    let result = kernel.dispatch(current_thread, core_id, syscall_num, &args);
+    let result = crate::syscall::dispatch(current_thread, core_id, syscall_num, &args);
 
     // SAFETY: same as above — percpu is valid for this core's lifetime.
     unsafe {
@@ -392,18 +388,15 @@ fn el1_sync_handler(frame: &mut TrapFrame) {
                     frame.gprs[5],
                 ];
                 // SAFETY: percpu() requires init_percpu_bsp to have been called.
-                // kernel_ptr was set during boot via set_kernel_ptr.
-                let (kernel, current, core_id) = unsafe {
+                let (current, core_id) = unsafe {
                     let pc = super::cpu::percpu();
-                    let kernel = &mut *(pc.kernel_ptr as *mut crate::syscall::Kernel);
 
                     (
-                        kernel,
                         crate::types::ThreadId(pc.current_thread),
                         pc.core_id as usize,
                     )
                 };
-                let (error, value) = kernel.dispatch(current, core_id, syscall_num, &args);
+                let (error, value) = crate::syscall::dispatch(current, core_id, syscall_num, &args);
 
                 frame.gprs[0] = error;
                 frame.gprs[1] = value;
@@ -489,30 +482,19 @@ fn handle_fp_trap() {
     };
     let prev_owner = FP_OWNER[core_id].swap(current_tid, core::sync::atomic::Ordering::Relaxed);
 
-    if prev_owner != super::cpu::PerCpu::IDLE && prev_owner != current_tid {
-        // SAFETY: kernel_ptr was set during boot. prev_owner is a valid
-        // thread ID because we set it when that thread last used FP.
-        unsafe {
-            let kernel = &mut *(super::cpu::percpu().kernel_ptr as *mut crate::syscall::Kernel);
+    if prev_owner != super::cpu::PerCpu::IDLE
+        && prev_owner != current_tid
+        && let Some(mut thread) = crate::frame::state::threads().write(prev_owner)
+    {
+        let rs = thread.init_register_state();
 
-            if let Some(thread) = kernel.threads.get_mut(prev_owner) {
-                let rs = thread.init_register_state();
-
-                save_fp_state(rs);
-            }
-        }
+        save_fp_state(rs);
     }
 
-    // SAFETY: percpu().kernel_ptr was set during boot via set_kernel_ptr.
-    // current_tid is the thread that triggered the FP trap — it exists.
-    unsafe {
-        let kernel = &*(super::cpu::percpu().kernel_ptr as *const crate::syscall::Kernel);
-
-        if let Some(thread) = kernel.threads.get(current_tid)
-            && let Some(rs) = thread.register_state()
-        {
-            load_fp_state(rs);
-        }
+    if let Some(thread) = crate::frame::state::threads().read(current_tid)
+        && let Some(rs) = thread.register_state()
+    {
+        load_fp_state(rs);
     }
 
     // Re-enable FP access.

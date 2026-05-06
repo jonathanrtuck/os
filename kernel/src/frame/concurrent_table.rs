@@ -14,6 +14,7 @@
 use alloc::vec::Vec;
 use core::{
     cell::UnsafeCell,
+    ops::{Deref, DerefMut},
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -59,6 +60,42 @@ pub struct SlotGuard<'a> {
 impl Drop for SlotGuard<'_> {
     fn drop(&mut self) {
         self.lock.unlock(self.daif);
+    }
+}
+
+/// Guard providing read-only access to a locked slot. The per-slot lock
+/// is held for the lifetime of the guard and released on drop.
+pub struct SlotReadGuard<'a, T> {
+    _guard: SlotGuard<'a>,
+    value: &'a T,
+}
+
+impl<T> Deref for SlotReadGuard<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        self.value
+    }
+}
+
+/// Guard providing mutable access to a locked slot. The per-slot lock
+/// is held for the lifetime of the guard and released on drop.
+pub struct SlotWriteGuard<'a, T> {
+    _guard: SlotGuard<'a>,
+    value: &'a mut T,
+}
+
+impl<T> Deref for SlotWriteGuard<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        self.value
+    }
+}
+
+impl<T> DerefMut for SlotWriteGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        self.value
     }
 }
 
@@ -194,6 +231,75 @@ impl<T, const MAX: usize, S: Storage<T>> ConcurrentTable<T, MAX, S> {
 
         guard.count
     }
+
+    /// Lock a slot and return a read guard. Returns None if the slot is
+    /// empty or out of bounds.
+    pub fn read(&self, idx: u32) -> Option<SlotReadGuard<'_, T>> {
+        if (idx as usize) >= MAX {
+            return None;
+        }
+
+        let guard = self.lock_slot(idx);
+        // SAFETY: slot lock held, preventing concurrent mutation of this
+        // slot. The reference lifetime is tied to the SlotGuard via the
+        // returned SlotReadGuard, so it cannot outlive the lock.
+        let value = unsafe { (*self.storage.get()).get(idx as usize) }?;
+
+        Some(SlotReadGuard {
+            _guard: guard,
+            value,
+        })
+    }
+
+    /// Lock a slot and return a write guard. Returns None if the slot is
+    /// empty or out of bounds.
+    ///
+    /// Multiple `SlotWriteGuard`s for *different* slots may coexist —
+    /// per-slot TicketLocks prevent same-slot aliasing, and different
+    /// slots are non-overlapping in the storage backend.
+    pub fn write(&self, idx: u32) -> Option<SlotWriteGuard<'_, T>> {
+        if (idx as usize) >= MAX {
+            return None;
+        }
+
+        let guard = self.lock_slot(idx);
+        // SAFETY: slot lock held — exclusive access to this slot.
+        // Different slots have independent TicketLocks and non-overlapping
+        // storage, so concurrent SlotWriteGuards for different indices
+        // do not alias.
+        let value = unsafe { (*self.storage.get()).get_mut(idx as usize) }?;
+
+        Some(SlotWriteGuard {
+            _guard: guard,
+            value,
+        })
+    }
+
+    /// Iterate all occupied slots with read access. Each slot is locked
+    /// individually during the callback — NOT atomic across slots.
+    pub fn for_each<F: FnMut(u32, &T)>(&self, mut f: F) {
+        for i in 0..MAX {
+            let _guard = self.lock_slot(i as u32);
+
+            // SAFETY: slot lock held for the duration of the callback.
+            if let Some(val) = unsafe { (*self.storage.get()).get(i) } {
+                f(i as u32, val);
+            }
+        }
+    }
+
+    /// Iterate all occupied slots with write access. Each slot is locked
+    /// individually during the callback — NOT atomic across slots.
+    pub fn for_each_mut<F: FnMut(u32, &mut T)>(&self, mut f: F) {
+        for i in 0..MAX {
+            let _guard = self.lock_slot(i as u32);
+
+            // SAFETY: slot lock held — exclusive access to this slot.
+            if let Some(val) = unsafe { (*self.storage.get()).get_mut(i) } {
+                f(i as u32, val);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -322,5 +428,126 @@ mod tests {
         assert_eq!(ct.generation(a), gen_a);
         assert_eq!(ct.generation(b), gen_b);
         assert_eq!(ct.count(), 2);
+    }
+
+    // ── Guard API tests ─────────────────────────────────────────
+
+    #[test]
+    fn read_guard_provides_access() {
+        let table: ObjectTable<u64, 4> = ObjectTable::new();
+        let ct = ConcurrentTable::from_table(table);
+        let (id, _) = ct.alloc_shared(42).unwrap();
+        let guard = ct.read(id).unwrap();
+
+        assert_eq!(*guard, 42);
+    }
+
+    #[test]
+    fn read_guard_empty_slot_returns_none() {
+        let table: ObjectTable<u64, 4> = ObjectTable::new();
+        let ct = ConcurrentTable::from_table(table);
+
+        assert!(ct.read(0).is_none());
+    }
+
+    #[test]
+    fn read_guard_out_of_bounds_returns_none() {
+        let table: ObjectTable<u64, 4> = ObjectTable::new();
+        let ct = ConcurrentTable::from_table(table);
+
+        assert!(ct.read(99).is_none());
+    }
+
+    #[test]
+    fn write_guard_provides_mut_access() {
+        let table: ObjectTable<u64, 4> = ObjectTable::new();
+        let ct = ConcurrentTable::from_table(table);
+        let (id, _) = ct.alloc_shared(10).unwrap();
+
+        {
+            let mut guard = ct.write(id).unwrap();
+
+            *guard = 20;
+        }
+
+        let guard = ct.read(id).unwrap();
+
+        assert_eq!(*guard, 20);
+    }
+
+    #[test]
+    fn write_guard_empty_returns_none() {
+        let table: ObjectTable<u64, 4> = ObjectTable::new();
+        let ct = ConcurrentTable::from_table(table);
+
+        assert!(ct.write(0).is_none());
+    }
+
+    #[test]
+    fn for_each_visits_all_occupied() {
+        let table: ObjectTable<u64, 4> = ObjectTable::new();
+        let ct = ConcurrentTable::from_table(table);
+
+        ct.alloc_shared(10).unwrap();
+        ct.alloc_shared(20).unwrap();
+        ct.alloc_shared(30).unwrap();
+
+        let mut sum = 0u64;
+
+        ct.for_each(|_, val| sum += *val);
+
+        assert_eq!(sum, 60);
+    }
+
+    #[test]
+    fn for_each_mut_modifies_all() {
+        let table: ObjectTable<u64, 4> = ObjectTable::new();
+        let ct = ConcurrentTable::from_table(table);
+
+        ct.alloc_shared(1).unwrap();
+        ct.alloc_shared(2).unwrap();
+        ct.for_each_mut(|_, val| *val *= 10);
+
+        let mut sum = 0u64;
+
+        ct.for_each(|_, val| sum += *val);
+
+        assert_eq!(sum, 30);
+    }
+
+    #[test]
+    fn for_each_skips_empty_and_dealloced() {
+        let table: ObjectTable<u64, 4> = ObjectTable::new();
+        let ct = ConcurrentTable::from_table(table);
+        let (a, _) = ct.alloc_shared(10).unwrap();
+
+        ct.alloc_shared(20).unwrap();
+
+        let (c, _) = ct.alloc_shared(30).unwrap();
+
+        ct.dealloc_shared(a);
+
+        let mut items = alloc::vec::Vec::new();
+
+        ct.for_each(|id, val| items.push((id, *val)));
+
+        assert_eq!(items.len(), 2);
+        assert!(items.contains(&(1, 20)));
+        assert!(items.contains(&(c, 30)));
+    }
+
+    #[test]
+    fn two_read_guards_different_slots() {
+        let table: ObjectTable<u64, 4> = ObjectTable::new();
+        let ct = ConcurrentTable::from_table(table);
+
+        ct.alloc_shared(10).unwrap();
+        ct.alloc_shared(20).unwrap();
+
+        let g0 = ct.read(0).unwrap();
+        let g1 = ct.read(1).unwrap();
+
+        assert_eq!(*g0, 10);
+        assert_eq!(*g1, 20);
     }
 }

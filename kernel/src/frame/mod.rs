@@ -14,4 +14,6 @@ pub mod firmware;
 pub mod heap;
 pub mod ring;
 pub mod slab;
+#[cfg(any(target_os = "none", test))]
+pub mod state;
 pub mod user_mem;

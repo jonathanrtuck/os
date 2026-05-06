@@ -9,14 +9,12 @@
 
 #[cfg(test)]
 mod tests {
-    use alloc::boxed::Box;
-
     use crate::{
         address_space::AddressSpace,
         bootstrap, config,
         endpoint::Endpoint,
         event::Event,
-        syscall::Kernel,
+        frame::state,
         thread::Thread,
         types::{
             AddressSpaceId, EndpointId, EventId, ObjectType, Priority, Rights, ThreadId, VmoId,
@@ -25,7 +23,6 @@ mod tests {
     };
 
     struct TwoServiceSetup {
-        kernel: Box<Kernel>,
         _svc_thread: ThreadId,
         comp_thread: ThreadId,
         svc_space: AddressSpaceId,
@@ -38,16 +35,17 @@ mod tests {
     fn setup_two_services() -> TwoServiceSetup {
         crate::frame::arch::page_table::reset_asid_pool();
 
-        let mut k = Box::new(Kernel::new(2));
-        let svc_space = AddressSpace::new(AddressSpaceId(0), 1, 0);
-        let (svc_idx, _) = k.spaces.alloc(svc_space).unwrap();
+        state::init(2);
 
-        k.spaces.get_mut(svc_idx).unwrap().id = AddressSpaceId(svc_idx);
+        let svc_space = AddressSpace::new(AddressSpaceId(0), 1, 0);
+        let (svc_idx, _) = state::spaces().alloc_shared(svc_space).unwrap();
+
+        state::spaces().write(svc_idx).unwrap().id = AddressSpaceId(svc_idx);
 
         let comp_space = AddressSpace::new(AddressSpaceId(0), 2, 0);
-        let (comp_idx, _) = k.spaces.alloc(comp_space).unwrap();
+        let (comp_idx, _) = state::spaces().alloc_shared(comp_space).unwrap();
 
-        k.spaces.get_mut(comp_idx).unwrap().id = AddressSpaceId(comp_idx);
+        state::spaces().write(comp_idx).unwrap().id = AddressSpaceId(comp_idx);
 
         let svc_thread = Thread::new(
             ThreadId(0),
@@ -57,14 +55,18 @@ mod tests {
             0x2000,
             0,
         );
-        let (svc_tid, _) = k.threads.alloc(svc_thread).unwrap();
+        let (svc_tid, _) = state::threads().alloc_shared(svc_thread).unwrap();
 
-        k.threads.get_mut(svc_tid).unwrap().id = ThreadId(svc_tid);
-        k.threads
-            .get_mut(svc_tid)
+        state::threads().write(svc_tid).unwrap().id = ThreadId(svc_tid);
+        state::threads()
+            .write(svc_tid)
             .unwrap()
             .set_state(crate::thread::ThreadRunState::Running);
-        k.scheduler.core_mut(0).set_current(Some(ThreadId(svc_tid)));
+        state::inc_alive_threads();
+        state::scheduler()
+            .lock()
+            .core_mut(0)
+            .set_current(Some(ThreadId(svc_tid)));
 
         let comp_thread = Thread::new(
             ThreadId(0),
@@ -74,28 +76,30 @@ mod tests {
             0x2000,
             0,
         );
-        let (comp_tid, _) = k.threads.alloc(comp_thread).unwrap();
+        let (comp_tid, _) = state::threads().alloc_shared(comp_thread).unwrap();
 
-        k.threads.get_mut(comp_tid).unwrap().id = ThreadId(comp_tid);
-        k.scheduler.enqueue(1, ThreadId(comp_tid), Priority::Medium);
+        state::threads().write(comp_tid).unwrap().id = ThreadId(comp_tid);
+        state::inc_alive_threads();
+        state::scheduler()
+            .lock()
+            .enqueue(1, ThreadId(comp_tid), Priority::Medium);
 
         let shared_vmo = Vmo::new(VmoId(0), config::PAGE_SIZE * 4, VmoFlags::NONE);
-        let (vmo_idx, _) = k.vmos.alloc(shared_vmo).unwrap();
+        let (vmo_idx, _) = state::vmos().alloc_shared(shared_vmo).unwrap();
 
-        k.vmos.get_mut(vmo_idx).unwrap().id = VmoId(vmo_idx);
+        state::vmos().write(vmo_idx).unwrap().id = VmoId(vmo_idx);
 
         let event = Event::new(EventId(0));
-        let (evt_idx, _) = k.events.alloc(event).unwrap();
+        let (evt_idx, _) = state::events().alloc_shared(event).unwrap();
 
-        k.events.get_mut(evt_idx).unwrap().id = EventId(evt_idx);
+        state::events().write(evt_idx).unwrap().id = EventId(evt_idx);
 
         let endpoint = Endpoint::new(EndpointId(0));
-        let (ep_idx, _) = k.endpoints.alloc(endpoint).unwrap();
+        let (ep_idx, _) = state::endpoints().alloc_shared(endpoint).unwrap();
 
-        k.endpoints.get_mut(ep_idx).unwrap().id = EndpointId(ep_idx);
+        state::endpoints().write(ep_idx).unwrap().id = EndpointId(ep_idx);
 
         TwoServiceSetup {
-            kernel: k,
             _svc_thread: ThreadId(svc_tid),
             comp_thread: ThreadId(comp_tid),
             svc_space: AddressSpaceId(svc_idx),
@@ -110,21 +114,17 @@ mod tests {
 
     #[test]
     fn shared_vmo_mapped_in_both_spaces() {
-        let mut s = setup_two_services();
+        let s = setup_two_services();
         let vmo_size = config::PAGE_SIZE * 4;
         let rw = Rights(Rights::READ.0 | Rights::WRITE.0);
         let ro = Rights::READ;
-        let svc_va = s
-            .kernel
-            .spaces
-            .get_mut(s.svc_space.0)
+        let svc_va = state::spaces()
+            .write(s.svc_space.0)
             .unwrap()
             .map_vmo(s.shared_vmo, vmo_size, rw, 0)
             .unwrap();
-        let comp_va = s
-            .kernel
-            .spaces
-            .get_mut(s.comp_space.0)
+        let comp_va = state::spaces()
+            .write(s.comp_space.0)
             .unwrap()
             .map_vmo(s.shared_vmo, vmo_size, ro, 0)
             .unwrap();
@@ -132,37 +132,31 @@ mod tests {
         assert!(svc_va > 0);
         assert!(comp_va > 0);
 
-        let svc_mapping = s
-            .kernel
-            .spaces
-            .get(s.svc_space.0)
-            .unwrap()
-            .find_mapping(svc_va)
-            .unwrap();
+        let svc_space = state::spaces().read(s.svc_space.0).unwrap();
+        let svc_mapping = svc_space.find_mapping(svc_va).unwrap();
 
         assert_eq!(svc_mapping.vmo_id, s.shared_vmo);
         assert!(svc_mapping.rights.contains(Rights::WRITE));
 
-        let comp_mapping = s
-            .kernel
-            .spaces
-            .get(s.comp_space.0)
-            .unwrap()
-            .find_mapping(comp_va)
-            .unwrap();
+        drop(svc_space);
+
+        let comp_space = state::spaces().read(s.comp_space.0).unwrap();
+        let comp_mapping = comp_space.find_mapping(comp_va).unwrap();
 
         assert_eq!(comp_mapping.vmo_id, s.shared_vmo);
         assert!(!comp_mapping.rights.contains(Rights::WRITE));
 
-        crate::invariants::assert_valid(&*s.kernel);
+        drop(comp_space);
+
+        crate::invariants::assert_valid();
     }
 
     // -- Event signaling (control plane) --
 
     #[test]
     fn event_signal_wakes_compositor() {
-        let mut s = setup_two_services();
-        let event = s.kernel.events.get_mut(s.event.0).unwrap();
+        let s = setup_two_services();
+        let mut event = state::events().write(s.event.0).unwrap();
 
         event.add_waiter(s.comp_thread, 0b1).unwrap();
 
@@ -172,15 +166,17 @@ mod tests {
         assert_eq!(woken.as_slice()[0].thread_id, s.comp_thread);
         assert_eq!(woken.as_slice()[0].fired_bits, 0b1);
 
-        crate::invariants::assert_valid(&*s.kernel);
+        drop(event);
+
+        crate::invariants::assert_valid();
     }
 
     #[test]
     fn multi_frame_event_cycle() {
-        let mut s = setup_two_services();
+        let s = setup_two_services();
 
         for frame in 0..10 {
-            let event = s.kernel.events.get_mut(s.event.0).unwrap();
+            let mut event = state::events().write(s.event.0).unwrap();
 
             event.add_waiter(s.comp_thread, 0b1).unwrap();
 
@@ -196,28 +192,30 @@ mod tests {
             );
         }
 
-        crate::invariants::assert_valid(&*s.kernel);
+        crate::invariants::assert_valid();
     }
 
     // -- Handle rights enforcement --
 
     #[test]
     fn handle_rights_attenuate_on_dup() {
-        let mut s = setup_two_services();
-        let vmo_gen = s.kernel.vmos.generation(s.shared_vmo.0);
+        let s = setup_two_services();
+        let vmo_gen = state::vmos().generation(s.shared_vmo.0);
 
         // Maintain refcount when installing handles outside the syscall layer.
-        s.kernel.vmos.get_mut(s.shared_vmo.0).unwrap().add_ref();
+        state::vmos().write(s.shared_vmo.0).unwrap().add_ref();
 
-        let svc_space = s.kernel.spaces.get_mut(s.svc_space.0).unwrap();
+        let mut svc_space = state::spaces().write(s.svc_space.0).unwrap();
         let full_hid = svc_space
             .handles_mut()
             .allocate(ObjectType::Vmo, s.shared_vmo.0, Rights::ALL, vmo_gen)
             .unwrap();
 
-        s.kernel.vmos.get_mut(s.shared_vmo.0).unwrap().add_ref();
+        drop(svc_space);
 
-        let svc_space = s.kernel.spaces.get_mut(s.svc_space.0).unwrap();
+        state::vmos().write(s.shared_vmo.0).unwrap().add_ref();
+
+        let mut svc_space = state::spaces().write(s.svc_space.0).unwrap();
         let read_only_hid = svc_space
             .handles_mut()
             .duplicate(full_hid, Rights::READ)
@@ -227,15 +225,17 @@ mod tests {
         assert!(dup_handle.rights.contains(Rights::READ));
         assert!(!dup_handle.rights.contains(Rights::WRITE));
 
-        crate::invariants::assert_valid(&*s.kernel);
+        drop(svc_space);
+
+        crate::invariants::assert_valid();
     }
 
     // -- Endpoint peer closed --
 
     #[test]
     fn endpoint_peer_closed_unblocks() {
-        let mut s = setup_two_services();
-        let ep = s.kernel.endpoints.get_mut(s.endpoint.0).unwrap();
+        let s = setup_two_services();
+        let mut ep = state::endpoints().write(s.endpoint.0).unwrap();
 
         ep.add_recv_waiter(s.comp_thread).unwrap();
 
@@ -247,37 +247,46 @@ mod tests {
         assert!(all_ids.contains(&s.comp_thread));
         assert!(ep.is_peer_closed());
 
-        crate::invariants::assert_valid(&*s.kernel);
+        drop(ep);
+
+        crate::invariants::assert_valid();
     }
 
     // -- VMO snapshot (COW for undo) --
 
     #[test]
     fn snapshot_creates_independent_copy() {
-        let mut s = setup_two_services();
-        let parent = s.kernel.vmos.get(s.shared_vmo.0).unwrap();
-        let snap = parent.snapshot(VmoId(0));
-        let (snap_idx, _) = s.kernel.vmos.alloc(snap).unwrap();
+        let s = setup_two_services();
+        let snap = state::vmos()
+            .read(s.shared_vmo.0)
+            .unwrap()
+            .snapshot(VmoId(0));
+        let (snap_idx, _) = state::vmos().alloc_shared(snap).unwrap();
 
-        s.kernel.vmos.get_mut(snap_idx).unwrap().id = VmoId(snap_idx);
+        state::vmos().write(snap_idx).unwrap().id = VmoId(snap_idx);
 
-        assert_eq!(s.kernel.vmos.count(), 2);
+        assert_eq!(state::vmos().count(), 2);
 
-        let snap_vmo = s.kernel.vmos.get(snap_idx).unwrap();
+        let snap_vmo = state::vmos().read(snap_idx).unwrap();
 
         assert_eq!(snap_vmo.size(), config::PAGE_SIZE * 4);
         assert_eq!(snap_vmo.cow_parent(), Some(s.shared_vmo));
 
-        crate::invariants::assert_valid(&*s.kernel);
+        drop(snap_vmo);
+
+        crate::invariants::assert_valid();
     }
 
     // -- Bootstrap integration --
 
     #[test]
     fn bootstrap_creates_schedulable_init() {
-        let mut k = Box::new(Kernel::new(2));
-        let tid = bootstrap::create_init(&mut k, &[0u8; 100]).unwrap();
-        let thread = k.threads.get(tid.0).unwrap();
+        crate::frame::arch::page_table::reset_asid_pool();
+
+        state::init(2);
+
+        let tid = bootstrap::create_init(&[0u8; 100]).unwrap();
+        let thread = state::threads().read(tid.0).unwrap();
 
         assert!(thread.entry_point() >= config::PAGE_SIZE);
         assert!(thread.entry_point().is_multiple_of(config::PAGE_SIZE));
@@ -288,39 +297,40 @@ mod tests {
             crate::thread::ThreadRunState::Running,
             "init should be marked Running"
         );
+
+        drop(thread);
+
         assert_eq!(
-            k.scheduler.core(0).current(),
+            state::scheduler().lock().core(0).current(),
             Some(tid),
             "init should be set as current on core 0"
         );
 
-        crate::invariants::assert_valid(&*k);
+        crate::invariants::assert_valid();
     }
 
     // -- Full pipeline validation --
 
     #[test]
     fn pipeline_data_control_plane_10_frames() {
-        let mut s = setup_two_services();
+        let s = setup_two_services();
         let vmo_size = config::PAGE_SIZE * 4;
         let rw = Rights(Rights::READ.0 | Rights::WRITE.0);
         let ro = Rights::READ;
 
-        s.kernel
-            .spaces
-            .get_mut(s.svc_space.0)
+        state::spaces()
+            .write(s.svc_space.0)
             .unwrap()
             .map_vmo(s.shared_vmo, vmo_size, rw, 0)
             .unwrap();
-        s.kernel
-            .spaces
-            .get_mut(s.comp_space.0)
+        state::spaces()
+            .write(s.comp_space.0)
             .unwrap()
             .map_vmo(s.shared_vmo, vmo_size, ro, 0)
             .unwrap();
 
         for frame in 0..10 {
-            let event = s.kernel.events.get_mut(s.event.0).unwrap();
+            let mut event = state::events().write(s.event.0).unwrap();
 
             event.add_waiter(s.comp_thread, 0b1).unwrap();
 
@@ -332,6 +342,6 @@ mod tests {
             event.clear(0b1);
         }
 
-        crate::invariants::assert_valid(&*s.kernel);
+        crate::invariants::assert_valid();
     }
 }
