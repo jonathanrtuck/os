@@ -1227,6 +1227,82 @@ impl Kernel {
 
         let message = user_mem::read_user_message(msg_ptr, msg_len)?;
         let staged = self.remove_handles_atomic(space_id, handles_ptr, handles_count)?;
+        // ── Fast path: direct transfer when a server is waiting ──
+        let ep = self
+            .endpoints
+            .get_mut(ep_obj_id)
+            .ok_or(SyscallError::InvalidHandle)?;
+        let server_tid = ep.pop_recv_waiter();
+
+        if let Some(server_tid) = server_tid {
+            let recv_state = self
+                .threads
+                .get_mut(server_tid.0)
+                .and_then(|t| t.take_recv_state());
+
+            if recv_state.is_none()
+                && let Some(ep) = self.endpoints.get_mut(ep_obj_id)
+            {
+                let _ = ep.add_recv_waiter(server_tid);
+            }
+
+            if let Some(rs) = recv_state {
+                let msg_bytes = message.as_bytes();
+
+                if msg_bytes.len() <= rs.out_cap {
+                    let _ = user_mem::write_user_bytes(rs.out_buf, msg_bytes);
+                }
+
+                let msg_len_val = msg_bytes.len() as u64;
+                let h_count = if staged.count > 0 {
+                    let mut staged = staged;
+
+                    self.install_handles(rs.space_id, &mut staged, rs.handles_out, rs.handles_cap)
+                        .unwrap_or(0) as u64
+                } else {
+                    0
+                };
+                let ep = self
+                    .endpoints
+                    .get_mut(ep_obj_id)
+                    .ok_or(SyscallError::InvalidHandle)?;
+                let reply_cap = ep.allocate_reply_cap(current, msg_ptr);
+
+                ep.set_active_server(Some(server_tid));
+
+                if let Some(cap_id) = reply_cap {
+                    let packed = (cap_id.0 as u64) << 32 | (h_count << 16) | msg_len_val;
+
+                    if let Some(server) = self.threads.get_mut(server_tid.0) {
+                        server.set_wakeup_value(packed);
+                    }
+                }
+
+                let caller_pri = self
+                    .threads
+                    .get(current.0)
+                    .map_or(Priority::Idle, |t| t.effective_priority());
+
+                if let Some(server) = self.threads.get_mut(server_tid.0) {
+                    server.boost_priority(caller_pri);
+                }
+
+                crate::sched::wake(self, server_tid, self.core_id);
+                crate::sched::block_current(self, current, self.core_id);
+
+                if let Some(err) = self
+                    .threads
+                    .get_mut(current.0)
+                    .and_then(|t| t.take_wakeup_error())
+                {
+                    return Err(err);
+                }
+
+                return Ok(0);
+            }
+        }
+
+        // ── Slow path: enqueue into priority send queue ──────────
         let priority = self
             .threads
             .get(current.0)
@@ -1317,6 +1393,14 @@ impl Kernel {
             return result;
         }
 
+        if let Some(val) = self
+            .threads
+            .get_mut(current.0)
+            .and_then(|t| t.take_wakeup_value())
+        {
+            return Ok(val);
+        }
+
         let ep = self
             .endpoints
             .get(obj_id)
@@ -1332,7 +1416,23 @@ impl Kernel {
             .ok_or(SyscallError::InvalidHandle)?;
 
         ep.add_recv_waiter(current)?;
+
+        if let Some(t) = self.threads.get_mut(current.0) {
+            t.set_recv_state(crate::thread::RecvState {
+                endpoint_id: obj_id,
+                space_id,
+                out_buf,
+                out_cap,
+                handles_out,
+                handles_cap,
+            });
+        }
+
         crate::sched::block_current(self, current, self.core_id);
+
+        if let Some(t) = self.threads.get_mut(current.0) {
+            t.take_recv_state();
+        }
 
         if let Some(err) = self
             .threads
@@ -1340,6 +1440,14 @@ impl Kernel {
             .and_then(|t| t.take_wakeup_error())
         {
             return Err(err);
+        }
+
+        if let Some(val) = self
+            .threads
+            .get_mut(current.0)
+            .and_then(|t| t.take_wakeup_value())
+        {
+            return Ok(val);
         }
 
         if let Some(result) = self.try_dequeue_and_deliver(

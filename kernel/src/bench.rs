@@ -827,6 +827,21 @@ fn ipc_null_iteration(kern: &mut Kernel, env: &IpcBenchEnv, client: ThreadId) {
         .unwrap()
         .add_recv_waiter(env.server)
         .ok();
+
+    let server_space_id = kern
+        .thread_space_id(env.server)
+        .unwrap_or(AddressSpaceId(env.server_space_idx));
+
+    if let Some(t) = kern.threads.get_mut(env.server.0) {
+        t.set_recv_state(crate::thread::RecvState {
+            endpoint_id: env.ep_obj_id,
+            space_id: server_space_id,
+            out_buf: 0,
+            out_cap: 0,
+            handles_out: 0,
+            handles_cap: 0,
+        });
+    }
     kern.dispatch(client, 0, num::CALL, &[env.client_ep_h, 0, 0, 0, 0, 0]);
 
     force_running(kern, env.server);

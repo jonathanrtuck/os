@@ -436,6 +436,54 @@ impl Endpoint {
         Err(SyscallError::BufferFull)
     }
 
+    /// Pop the first recv waiter for IPC direct transfer.
+    pub fn pop_recv_waiter(&mut self) -> Option<ThreadId> {
+        for slot in &mut self.recv_waiters {
+            if let Some(tid) = slot.take() {
+                self.recv_waiter_count -= 1;
+
+                return Some(tid);
+            }
+        }
+
+        None
+    }
+
+    /// Allocate a reply cap without dequeuing from the send queue.
+    /// Used by CALL's direct-transfer fast path.
+    pub fn allocate_reply_cap(
+        &mut self,
+        caller: ThreadId,
+        reply_buf: usize,
+    ) -> Option<ReplyCapId> {
+        let free_slot = self.active_replies.iter().position(|s| s.is_none())?;
+
+        loop {
+            let collides = self
+                .active_replies
+                .iter()
+                .any(|s| s.as_ref().is_some_and(|r| r.cap_id.0 == self.next_reply_id));
+
+            if !collides {
+                break;
+            }
+
+            self.next_reply_id = self.next_reply_id.wrapping_add(1);
+        }
+
+        let cap_id = ReplyCapId(self.next_reply_id);
+
+        self.next_reply_id = self.next_reply_id.wrapping_add(1);
+        self.active_replies[free_slot] = Some(ActiveReply {
+            cap_id,
+            caller,
+            reply_buf,
+        });
+        self.active_reply_count += 1;
+
+        Some(cap_id)
+    }
+
     /// Remove a recv waiter (on timeout or cancel).
     pub fn remove_recv_waiter(&mut self, thread: ThreadId) -> bool {
         for slot in &mut self.recv_waiters {

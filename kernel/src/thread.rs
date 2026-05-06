@@ -29,6 +29,22 @@ pub enum ThreadRunState {
     Exited,
 }
 
+/// Saved RECV buffer state for IPC direct transfer.
+///
+/// When a server blocks in RECV, it saves its buffer addresses here.
+/// If a client calls CALL while this server is waiting, CALL reads
+/// these addresses to deliver the message directly — skipping the
+/// endpoint's priority send queue entirely.
+#[derive(Debug, Clone, Copy)]
+pub struct RecvState {
+    pub endpoint_id: u32,
+    pub space_id: AddressSpaceId,
+    pub out_buf: usize,
+    pub out_cap: usize,
+    pub handles_out: usize,
+    pub handles_cap: usize,
+}
+
 /// A thread — schedulable execution context.
 pub struct Thread {
     pub id: ThreadId,
@@ -48,6 +64,8 @@ pub struct Thread {
     wait_events: [u32; crate::config::MAX_MULTI_WAIT],
     wait_count: u8,
     wakeup_error: Option<SyscallError>,
+    wakeup_value: Option<u64>,
+    recv_state: Option<RecvState>,
     space_next: Option<u32>,
     space_prev: Option<u32>,
     #[cfg(any(target_os = "none", test))]
@@ -59,7 +77,7 @@ pub struct Thread {
 // Rust's default repr (the compiler places the wait_events array first).
 // Instead, track total size to catch field bloat.
 const _: () = {
-    assert!(core::mem::size_of::<Thread>() <= 512);
+    assert!(core::mem::size_of::<Thread>() <= 576);
 };
 
 #[allow(clippy::new_without_default)]
@@ -90,6 +108,8 @@ impl Thread {
             wait_events: [0; crate::config::MAX_MULTI_WAIT],
             wait_count: 0,
             wakeup_error: None,
+            wakeup_value: None,
+            recv_state: None,
             space_next: None,
             space_prev: None,
             #[cfg(any(target_os = "none", test))]
@@ -255,6 +275,22 @@ impl Thread {
 
     pub fn take_wakeup_error(&mut self) -> Option<SyscallError> {
         self.wakeup_error.take()
+    }
+
+    pub fn set_wakeup_value(&mut self, val: u64) {
+        self.wakeup_value = Some(val);
+    }
+
+    pub fn take_wakeup_value(&mut self) -> Option<u64> {
+        self.wakeup_value.take()
+    }
+
+    pub fn set_recv_state(&mut self, state: RecvState) {
+        self.recv_state = Some(state);
+    }
+
+    pub fn take_recv_state(&mut self) -> Option<RecvState> {
+        self.recv_state.take()
     }
 
     /// Terminate the thread with an exit code.
