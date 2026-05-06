@@ -214,13 +214,27 @@ fn lookup_handle(space_id: AddressSpaceId, handle_id: HandleId) -> Result<Handle
 
 #[inline]
 fn lookup_endpoint_id(space_id: AddressSpaceId, handle_id: HandleId) -> Result<u32, SyscallError> {
-    let (obj_type, obj_id, handle_gen) = {
+    let (obj_id, _) = lookup_endpoint_id_badge(space_id, handle_id)?;
+
+    Ok(obj_id)
+}
+
+fn lookup_endpoint_id_badge(
+    space_id: AddressSpaceId,
+    handle_id: HandleId,
+) -> Result<(u32, u32), SyscallError> {
+    let (obj_type, obj_id, handle_gen, badge) = {
         let space = state::spaces()
             .read(space_id.0)
             .ok_or(SyscallError::InvalidHandle)?;
         let handle = space.handles().lookup(handle_id)?;
 
-        (handle.object_type, handle.object_id, handle.generation)
+        (
+            handle.object_type,
+            handle.object_id,
+            handle.generation,
+            handle.badge,
+        )
     };
 
     if obj_type != ObjectType::Endpoint {
@@ -231,7 +245,7 @@ fn lookup_endpoint_id(space_id: AddressSpaceId, handle_id: HandleId) -> Result<u
         return Err(SyscallError::GenerationMismatch);
     }
 
-    Ok(obj_id)
+    Ok((obj_id, badge))
 }
 
 // ── Handle transfer helpers ─────────────────────────────────
@@ -1281,7 +1295,7 @@ fn sys_call(current: ThreadId, core_id: usize, args: &[u64; 6]) -> Result<u64, S
     }
 
     let space_id = thread_space_id(current)?;
-    let ep_obj_id = lookup_endpoint_id(space_id, handle_id)?;
+    let (ep_obj_id, badge) = lookup_endpoint_id_badge(space_id, handle_id)?;
 
     {
         let ep = state::endpoints()
@@ -1347,7 +1361,7 @@ fn sys_call(current: ThreadId, core_id: usize, args: &[u64; 6]) -> Result<u64, S
                     let _ = user_mem::write_user_u64(rs.reply_cap_out, cap_id.0);
                 }
 
-                let packed = (h_count << 16) | msg_len_val;
+                let packed = (badge as u64) << 32 | (h_count << 16) | msg_len_val;
 
                 if let Some(mut server) = state::threads().write(server_tid.0) {
                     server.set_wakeup_value(packed);
@@ -1387,7 +1401,7 @@ fn sys_call(current: ThreadId, core_id: usize, args: &[u64; 6]) -> Result<u64, S
         message,
         handles: staged.handles,
         handle_count: staged.count,
-        badge: 0,
+        badge,
         reply_buf: msg_ptr,
     };
     let (signal_info, active_server, recv_waiters) = {
