@@ -17,7 +17,7 @@ use super::{
 };
 use crate::{
     address_space::AddressSpace, config, endpoint::Endpoint, event::Event, irq::IrqTable,
-    table::ObjectTable, thread::Scheduler, vmo::Vmo,
+    table::ObjectTable, thread::PerCoreState, types::ThreadId, vmo::Vmo,
 };
 
 pub type VmoTable = ConcurrentTable<Vmo, { config::MAX_VMOS }, InlineSlab<Vmo>>;
@@ -31,12 +31,55 @@ pub type ThreadTable = ConcurrentTable<
 pub type SpaceTable =
     ConcurrentTable<AddressSpace, { config::MAX_ADDRESS_SPACES }, BoxStorage<AddressSpace>>;
 
+/// Per-CPU scheduler array — each core's `PerCoreState` behind its own
+/// `SpinLock`. Independent cores never contend; cross-core wake contends
+/// only with the target core.
+pub struct Schedulers {
+    cores: alloc::vec::Vec<SpinLock<PerCoreState>>,
+}
+
+impl Schedulers {
+    pub fn new(num_cores: usize) -> Self {
+        let mut cores = alloc::vec::Vec::with_capacity(num_cores);
+
+        for _ in 0..num_cores {
+            cores.push(SpinLock::new(PerCoreState::new()));
+        }
+
+        Schedulers { cores }
+    }
+
+    pub fn core(&self, core_id: usize) -> &SpinLock<PerCoreState> {
+        &self.cores[core_id]
+    }
+
+    pub fn num_cores(&self) -> usize {
+        self.cores.len()
+    }
+
+    pub fn remove(&self, thread: ThreadId) {
+        for core in &self.cores {
+            if core.lock().remove_if_present(thread) {
+                return;
+            }
+        }
+    }
+
+    pub fn least_loaded_core(&self) -> usize {
+        self.cores
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, core)| core.lock().total_ready())
+            .map_or(0, |(i, _)| i)
+    }
+}
+
 static mut VMOS: Option<VmoTable> = None;
 static mut EVENTS: Option<EventTable> = None;
 static mut ENDPOINTS: Option<EndpointTable> = None;
 static mut THREADS: Option<ThreadTable> = None;
 static mut SPACES: Option<SpaceTable> = None;
-static mut SCHEDULER: Option<SpinLock<Scheduler>> = None;
+static mut SCHEDULERS: Option<Schedulers> = None;
 static mut IRQS: Option<SpinLock<IrqTable>> = None;
 static ALIVE_THREADS: AtomicU32 = AtomicU32::new(0);
 
@@ -53,7 +96,7 @@ pub fn init(num_cores: usize) {
         addr_of_mut!(ENDPOINTS).write(Some(ConcurrentTable::from_table(ObjectTable::new())));
         addr_of_mut!(THREADS).write(Some(ConcurrentTable::from_table(ObjectTable::new())));
         addr_of_mut!(SPACES).write(Some(ConcurrentTable::from_table(ObjectTable::new())));
-        addr_of_mut!(SCHEDULER).write(Some(SpinLock::new(Scheduler::new(num_cores))));
+        addr_of_mut!(SCHEDULERS).write(Some(Schedulers::new(num_cores)));
         addr_of_mut!(IRQS).write(Some(SpinLock::new(IrqTable::new())));
         ALIVE_THREADS.store(0, Ordering::Relaxed);
     }
@@ -82,8 +125,8 @@ pub fn spaces() -> &'static SpaceTable {
     unsafe { (*addr_of_mut!(SPACES)).as_ref().unwrap_unchecked() }
 }
 
-pub fn scheduler() -> &'static SpinLock<Scheduler> {
-    unsafe { (*addr_of_mut!(SCHEDULER)).as_ref().unwrap_unchecked() }
+pub fn schedulers() -> &'static Schedulers {
+    unsafe { (*addr_of_mut!(SCHEDULERS)).as_ref().unwrap_unchecked() }
 }
 
 pub fn irqs() -> &'static SpinLock<IrqTable> {
@@ -143,9 +186,8 @@ mod tests {
         let _ = threads().count();
         let _ = spaces().count();
         let _ = alive_thread_count();
-        let sched = scheduler().lock();
 
-        assert_eq!(sched.num_cores(), 1);
+        assert_eq!(schedulers().num_cores(), 1);
     }
 
     #[test]

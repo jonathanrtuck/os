@@ -8,7 +8,7 @@ HOST_TARGET := aarch64-apple-darwin
 # -- Core targets --
 
 test:
-	cargo test -p kernel --lib --target $(HOST_TARGET)
+	cargo test -p kernel --lib --target $(HOST_TARGET) -- --test-threads=1
 
 build:
 	cargo build -p kernel

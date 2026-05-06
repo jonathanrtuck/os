@@ -39,9 +39,10 @@ pub fn wake(thread_id: ThreadId, core_id: usize) {
         priority
     };
 
-    state::scheduler()
+    state::schedulers()
+        .core(core_id)
         .lock()
-        .enqueue(core_id, thread_id, priority);
+        .enqueue(thread_id, priority);
 }
 
 /// Yield the current thread — move it to the back of its run queue and
@@ -52,7 +53,10 @@ pub fn yield_current(current: ThreadId, core_id: usize) {
         .unwrap()
         .effective_priority();
 
-    state::scheduler().lock().rotate_current(core_id, priority);
+    state::schedulers()
+        .core(core_id)
+        .lock()
+        .rotate_current(priority);
 
     switch_away(current, core_id);
 }
@@ -73,9 +77,9 @@ pub fn exit_current(current: ThreadId, core_id: usize, code: u32) {
 #[inline(never)]
 fn switch_away(_current: ThreadId, core_id: usize) {
     let next_id = {
-        let mut sched = state::scheduler().lock();
-        let Some(next_id) = sched.pick_next(core_id) else {
-            sched.core_mut(core_id).set_current(None);
+        let mut pcs = state::schedulers().core(core_id).lock();
+        let Some(next_id) = pcs.pick_next() else {
+            pcs.set_current(None);
 
             return;
         };
@@ -87,9 +91,9 @@ fn switch_away(_current: ThreadId, core_id: usize) {
         .write(next_id.0)
         .unwrap()
         .set_state(ThreadRunState::Running);
-    state::scheduler()
+    state::schedulers()
+        .core(core_id)
         .lock()
-        .core_mut(core_id)
         .set_current(Some(next_id));
 
     #[cfg(target_os = "none")]
@@ -151,7 +155,10 @@ mod tests {
         let tid = add_thread(Priority::Medium);
         let t2 = add_thread(Priority::Medium);
 
-        state::scheduler().lock().enqueue(0, t2, Priority::Medium);
+        state::schedulers()
+            .core(0)
+            .lock()
+            .enqueue(t2, Priority::Medium);
 
         block_current(tid, 0);
 
@@ -178,7 +185,7 @@ mod tests {
             state::threads().read(tid.0).unwrap().state(),
             ThreadRunState::Ready
         );
-        assert_eq!(state::scheduler().lock().core(0).total_ready(), 1);
+        assert_eq!(state::schedulers().core(0).lock().total_ready(), 1);
     }
 
     #[test]
@@ -195,7 +202,7 @@ mod tests {
 
         wake(tid, 0);
 
-        assert_eq!(state::scheduler().lock().core(0).total_ready(), 0);
+        assert_eq!(state::schedulers().core(0).lock().total_ready(), 0);
     }
 
     #[test]
@@ -219,7 +226,10 @@ mod tests {
         let t1 = add_thread(Priority::Medium);
         let t2 = add_thread(Priority::Medium);
 
-        state::scheduler().lock().enqueue(0, t2, Priority::Medium);
+        state::schedulers()
+            .core(0)
+            .lock()
+            .enqueue(t2, Priority::Medium);
 
         block_current(t1, 0);
 
@@ -242,11 +252,11 @@ mod tests {
 
         let tid = add_thread(Priority::Medium);
 
-        state::scheduler().lock().core_mut(0).set_current(Some(tid));
+        state::schedulers().core(0).lock().set_current(Some(tid));
 
         block_current(tid, 0);
 
-        assert_eq!(state::scheduler().lock().core(0).current(), None);
+        assert_eq!(state::schedulers().core(0).lock().current(), None);
         assert_eq!(
             state::threads().read(tid.0).unwrap().state(),
             ThreadRunState::Blocked
@@ -259,11 +269,11 @@ mod tests {
 
         let tid = add_thread(Priority::Medium);
 
-        state::scheduler().lock().core_mut(0).set_current(Some(tid));
+        state::schedulers().core(0).lock().set_current(Some(tid));
 
         exit_current(tid, 0, 0);
 
-        assert_eq!(state::scheduler().lock().core(0).current(), None);
+        assert_eq!(state::schedulers().core(0).lock().current(), None);
     }
 
     #[test]
@@ -272,11 +282,11 @@ mod tests {
 
         let tid = add_thread(Priority::Medium);
 
-        state::scheduler().lock().core_mut(0).set_current(Some(tid));
+        state::schedulers().core(0).lock().set_current(Some(tid));
 
         yield_current(tid, 0);
 
-        assert_eq!(state::scheduler().lock().core(0).current(), Some(tid));
+        assert_eq!(state::schedulers().core(0).lock().current(), Some(tid));
         assert_eq!(
             state::threads().read(tid.0).unwrap().state(),
             ThreadRunState::Running,
@@ -290,12 +300,15 @@ mod tests {
         let t1 = add_thread(Priority::Medium);
         let t2 = add_thread(Priority::Medium);
 
-        state::scheduler().lock().enqueue(0, t2, Priority::Medium);
-        state::scheduler().lock().core_mut(0).set_current(Some(t1));
+        state::schedulers()
+            .core(0)
+            .lock()
+            .enqueue(t2, Priority::Medium);
+        state::schedulers().core(0).lock().set_current(Some(t1));
 
         yield_current(t1, 0);
 
-        assert_eq!(state::scheduler().lock().core(0).current(), Some(t2));
+        assert_eq!(state::schedulers().core(0).lock().current(), Some(t2));
         assert_eq!(
             state::threads().read(t2.0).unwrap().state(),
             ThreadRunState::Running

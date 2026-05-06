@@ -46,9 +46,9 @@ mod tests {
             .unwrap()
             .set_state(crate::thread::ThreadRunState::Running);
         state::inc_alive_threads();
-        state::scheduler()
+        state::schedulers()
+            .core(0)
             .lock()
-            .core_mut(0)
             .set_current(Some(ThreadId(0)));
     }
 

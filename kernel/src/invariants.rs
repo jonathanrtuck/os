@@ -187,13 +187,13 @@ fn check_thread_space_linked_lists(violations: &mut Vec<Violation>) {
 }
 
 fn check_scheduler_uniqueness(violations: &mut Vec<Violation>) {
-    let sched = state::scheduler().lock();
+    let scheds = state::schedulers();
     let mut seen = BTreeSet::new();
 
-    for core_id in 0..sched.num_cores() {
-        let rq = sched.core(core_id);
+    for core_id in 0..scheds.num_cores() {
+        let pcs = scheds.core(core_id).lock();
 
-        if let Some(current) = rq.current()
+        if let Some(current) = pcs.current()
             && !seen.insert(current)
         {
             violations.push(Violation {
@@ -205,7 +205,7 @@ fn check_scheduler_uniqueness(violations: &mut Vec<Violation>) {
             });
         }
 
-        for tid in sched.all_queued_on_core(core_id) {
+        for tid in pcs.all_queued() {
             if !seen.insert(tid) {
                 violations.push(Violation {
                     category: "scheduler",
@@ -220,22 +220,20 @@ fn check_scheduler_uniqueness(violations: &mut Vec<Violation>) {
 }
 
 fn check_thread_state_consistency(violations: &mut Vec<Violation>) {
-    let sched = state::scheduler().lock();
+    let scheds = state::schedulers();
     let mut scheduler_threads = BTreeSet::new();
 
-    for core_id in 0..sched.num_cores() {
-        let rq = sched.core(core_id);
+    for core_id in 0..scheds.num_cores() {
+        let pcs = scheds.core(core_id).lock();
 
-        if let Some(c) = rq.current() {
+        if let Some(c) = pcs.current() {
             scheduler_threads.insert(c);
         }
 
-        for tid in sched.all_queued_on_core(core_id) {
+        for tid in pcs.all_queued() {
             scheduler_threads.insert(tid);
         }
     }
-
-    drop(sched);
 
     state::threads().for_each(|idx, thread| {
         let tid = ThreadId(idx);

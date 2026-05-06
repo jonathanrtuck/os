@@ -157,9 +157,9 @@ pub fn create_init(init_binary: &[u8]) -> Result<ThreadId, SyscallError> {
         thread.set_state(crate::thread::ThreadRunState::Running);
     }
 
-    state::scheduler()
+    state::schedulers()
+        .core(0)
         .lock()
-        .core_mut(0)
         .set_current(Some(ThreadId(thread_idx)));
     state::inc_alive_threads();
 
@@ -261,12 +261,9 @@ mod tests {
         setup();
 
         let tid = create_init(fake_init_binary()).unwrap();
-        let sched = state::scheduler().lock();
 
-        assert_eq!(sched.core(0).current(), Some(tid));
-        assert_eq!(sched.core(0).total_ready(), 0);
-
-        drop(sched);
+        assert_eq!(state::schedulers().core(0).lock().current(), Some(tid));
+        assert_eq!(state::schedulers().core(0).lock().total_ready(), 0);
 
         crate::invariants::assert_valid();
     }

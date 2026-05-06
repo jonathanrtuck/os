@@ -417,23 +417,29 @@ impl RunQueue {
 ///
 /// Links are per-core (not global) so each core's enqueue/dequeue/pick_next
 /// touches only its own state. A thread is in at most one core's queue at a
-/// time, so per-core links cannot conflict. This structure is the unit of
-/// locking for SMP: local-core operations need no lock; cross-core wake
-/// acquires the remote core's lock.
-struct PerCoreState {
+/// time, so per-core links cannot conflict. This is the unit of locking for
+/// SMP: each core's `PerCoreState` lives behind its own `SpinLock` so
+/// independent cores never contend.
+pub struct PerCoreState {
     queue: RunQueue,
     links: Vec<SchedLink>,
 }
 
+impl Default for PerCoreState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PerCoreState {
-    fn new() -> Self {
+    pub fn new() -> Self {
         PerCoreState {
             queue: RunQueue::new(),
             links: alloc::vec![SchedLink::EMPTY; crate::config::MAX_THREADS],
         }
     }
 
-    fn enqueue(&mut self, thread: ThreadId, priority: Priority) {
+    pub fn enqueue(&mut self, thread: ThreadId, priority: Priority) {
         let level = priority.0;
         let id = thread.0 as usize;
         let old_tail = self.queue.tails[level as usize];
@@ -462,7 +468,6 @@ impl PerCoreState {
         } else {
             self.queue.heads[level as usize] = link.next;
         }
-
         if let Some(n) = link.next {
             self.links[n as usize].prev = link.prev;
         } else {
@@ -478,7 +483,7 @@ impl PerCoreState {
         self.queue.count -= 1;
     }
 
-    fn pick_next(&mut self) -> Option<ThreadId> {
+    pub fn pick_next(&mut self) -> Option<ThreadId> {
         let level = self.queue.highest_set_bit()?;
         let head = self.queue.heads[level as usize]?;
 
@@ -487,7 +492,7 @@ impl PerCoreState {
         Some(ThreadId(head))
     }
 
-    fn dequeue(&mut self, thread: ThreadId, priority: Priority) -> bool {
+    pub fn dequeue(&mut self, thread: ThreadId, priority: Priority) -> bool {
         if self.queue.heads[priority.0 as usize].is_none() {
             return false;
         }
@@ -506,104 +511,66 @@ impl PerCoreState {
 
         false
     }
-}
 
-/// Multi-core fixed-priority preemptive scheduler with bitmap-indexed queues.
-///
-/// Each core has independent state (run queue + linked-list links). A thread
-/// is in at most one core's queue at a time. Per-core operations touch only
-/// the target core's `PerCoreState`.
-pub struct Scheduler {
-    cores: Vec<PerCoreState>,
-}
-
-impl Scheduler {
-    pub fn new(num_cores: usize) -> Self {
-        let mut cores = Vec::with_capacity(num_cores);
-
-        for _ in 0..num_cores {
-            cores.push(PerCoreState::new());
-        }
-
-        Scheduler { cores }
-    }
-
-    pub fn core(&self, core_id: usize) -> &RunQueue {
-        &self.cores[core_id].queue
-    }
-
-    pub fn core_mut(&mut self, core_id: usize) -> &mut RunQueue {
-        &mut self.cores[core_id].queue
-    }
-
-    pub fn num_cores(&self) -> usize {
-        self.cores.len()
-    }
-
-    pub fn enqueue(&mut self, core_id: usize, thread: ThreadId, priority: Priority) {
-        self.cores[core_id].enqueue(thread, priority);
-    }
-
-    pub fn pick_next(&mut self, core_id: usize) -> Option<ThreadId> {
-        self.cores[core_id].pick_next()
-    }
-
-    pub fn dequeue(&mut self, core_id: usize, thread: ThreadId, priority: Priority) -> bool {
-        self.cores[core_id].dequeue(thread, priority)
-    }
-
-    pub fn rotate_current(&mut self, core_id: usize, priority: Priority) {
-        let current = self.cores[core_id].queue.current.take();
+    pub fn rotate_current(&mut self, priority: Priority) {
+        let current = self.queue.current.take();
 
         if let Some(tid) = current {
-            self.cores[core_id].enqueue(tid, priority);
+            self.enqueue(tid, priority);
         }
     }
 
-    pub fn remove(&mut self, thread: ThreadId) {
-        for pcs in &mut self.cores {
-            if pcs.queue.current == Some(thread) {
-                pcs.queue.current = None;
+    pub fn remove_if_present(&mut self, thread: ThreadId) -> bool {
+        if self.queue.current == Some(thread) {
+            self.queue.current = None;
 
-                return;
-            }
+            return true;
+        }
 
-            for level in 0..Priority::NUM_LEVELS {
-                let mut cursor = pcs.queue.heads[level];
+        for level in 0..Priority::NUM_LEVELS {
+            let mut cursor = self.queue.heads[level];
 
-                while let Some(id) = cursor {
-                    if id == thread.0 {
-                        pcs.unlink(id, level as u8);
+            while let Some(id) = cursor {
+                if id == thread.0 {
+                    self.unlink(id, level as u8);
 
-                        return;
-                    }
-
-                    cursor = pcs.links[id as usize].next;
+                    return true;
                 }
+
+                cursor = self.links[id as usize].next;
             }
         }
+
+        false
     }
 
-    pub fn least_loaded_core(&self) -> usize {
-        self.cores
-            .iter()
-            .enumerate()
-            .min_by_key(|(_, pcs)| pcs.queue.total_ready())
-            .map_or(0, |(i, _)| i)
+    pub fn current(&self) -> Option<ThreadId> {
+        self.queue.current()
+    }
+
+    pub fn set_current(&mut self, thread: Option<ThreadId>) {
+        self.queue.set_current(thread);
+    }
+
+    pub fn total_ready(&self) -> usize {
+        self.queue.total_ready()
+    }
+
+    pub fn has_higher_priority_than(&self, threshold: Priority) -> bool {
+        self.queue.has_higher_priority_than(threshold)
     }
 
     #[cfg(any(test, fuzzing, debug_assertions))]
-    pub fn all_queued_on_core(&self, core_id: usize) -> alloc::vec::Vec<ThreadId> {
+    pub fn all_queued(&self) -> alloc::vec::Vec<ThreadId> {
         let mut ids = alloc::vec::Vec::new();
-        let pcs = &self.cores[core_id];
 
         for level in 0..Priority::NUM_LEVELS {
-            let mut cursor = pcs.queue.heads[level];
+            let mut cursor = self.queue.heads[level];
 
             while let Some(id) = cursor {
                 ids.push(ThreadId(id));
 
-                cursor = pcs.links[id as usize].next;
+                cursor = self.links[id as usize].next;
             }
         }
 
@@ -614,6 +581,7 @@ impl Scheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::frame::state::Schedulers;
 
     fn make_thread(id: u32, priority: Priority) -> Thread {
         Thread::new(
@@ -750,119 +718,127 @@ mod tests {
 
     #[test]
     fn pick_next_returns_highest_priority() {
-        let mut sched = Scheduler::new(1);
+        let scheds = Schedulers::new(1);
 
-        sched.enqueue(0, ThreadId(1), Priority::Low);
-        sched.enqueue(0, ThreadId(2), Priority::High);
-        sched.enqueue(0, ThreadId(3), Priority::Medium);
+        scheds.core(0).lock().enqueue(ThreadId(1), Priority::Low);
+        scheds.core(0).lock().enqueue(ThreadId(2), Priority::High);
+        scheds.core(0).lock().enqueue(ThreadId(3), Priority::Medium);
 
-        assert_eq!(sched.pick_next(0), Some(ThreadId(2)));
-        assert_eq!(sched.pick_next(0), Some(ThreadId(3)));
-        assert_eq!(sched.pick_next(0), Some(ThreadId(1)));
-        assert_eq!(sched.pick_next(0), None);
+        assert_eq!(scheds.core(0).lock().pick_next(), Some(ThreadId(2)));
+        assert_eq!(scheds.core(0).lock().pick_next(), Some(ThreadId(3)));
+        assert_eq!(scheds.core(0).lock().pick_next(), Some(ThreadId(1)));
+        assert_eq!(scheds.core(0).lock().pick_next(), None);
     }
 
     // -- Round-robin --
 
     #[test]
     fn round_robin_same_priority() {
-        let mut sched = Scheduler::new(1);
+        let scheds = Schedulers::new(1);
 
-        sched.enqueue(0, ThreadId(1), Priority::Medium);
-        sched.enqueue(0, ThreadId(2), Priority::Medium);
-        sched.enqueue(0, ThreadId(3), Priority::Medium);
+        scheds.core(0).lock().enqueue(ThreadId(1), Priority::Medium);
+        scheds.core(0).lock().enqueue(ThreadId(2), Priority::Medium);
+        scheds.core(0).lock().enqueue(ThreadId(3), Priority::Medium);
 
-        let first = sched.pick_next(0).unwrap();
+        let first = scheds.core(0).lock().pick_next().unwrap();
 
         assert_eq!(first, ThreadId(1));
 
-        sched.core_mut(0).set_current(Some(first));
-        sched.rotate_current(0, Priority::Medium);
+        scheds.core(0).lock().set_current(Some(first));
+        scheds.core(0).lock().rotate_current(Priority::Medium);
 
-        let second = sched.pick_next(0).unwrap();
+        let second = scheds.core(0).lock().pick_next().unwrap();
 
         assert_eq!(second, ThreadId(2));
 
-        sched.core_mut(0).set_current(Some(second));
-        sched.rotate_current(0, Priority::Medium);
+        scheds.core(0).lock().set_current(Some(second));
+        scheds.core(0).lock().rotate_current(Priority::Medium);
 
-        assert_eq!(sched.pick_next(0), Some(ThreadId(3)));
-
-        // Thread 1 wraps back to front after 3 rotates
+        assert_eq!(scheds.core(0).lock().pick_next(), Some(ThreadId(3)));
     }
 
     // -- Idle thread --
 
     #[test]
     fn idle_thread_selected_last() {
-        let mut sched = Scheduler::new(1);
+        let scheds = Schedulers::new(1);
 
-        sched.enqueue(0, ThreadId(100), Priority::Idle);
-        sched.enqueue(0, ThreadId(1), Priority::Low);
+        scheds.core(0).lock().enqueue(ThreadId(100), Priority::Idle);
+        scheds.core(0).lock().enqueue(ThreadId(1), Priority::Low);
 
-        assert_eq!(sched.pick_next(0), Some(ThreadId(1)));
-        assert_eq!(sched.pick_next(0), Some(ThreadId(100)));
+        assert_eq!(scheds.core(0).lock().pick_next(), Some(ThreadId(1)));
+        assert_eq!(scheds.core(0).lock().pick_next(), Some(ThreadId(100)));
     }
 
     #[test]
     fn idle_thread_when_all_empty() {
-        let mut sched = Scheduler::new(1);
+        let scheds = Schedulers::new(1);
 
-        sched.enqueue(0, ThreadId(100), Priority::Idle);
+        scheds.core(0).lock().enqueue(ThreadId(100), Priority::Idle);
 
-        assert_eq!(sched.pick_next(0), Some(ThreadId(100)));
+        assert_eq!(scheds.core(0).lock().pick_next(), Some(ThreadId(100)));
     }
 
     // -- Preemption detection --
 
     #[test]
     fn detects_higher_priority_ready() {
-        let mut sched = Scheduler::new(1);
+        let scheds = Schedulers::new(1);
 
-        sched.enqueue(0, ThreadId(2), Priority::High);
+        scheds.core(0).lock().enqueue(ThreadId(2), Priority::High);
 
-        assert!(sched.core(0).has_higher_priority_than(Priority::Low));
-        assert!(!sched.core(0).has_higher_priority_than(Priority::High));
+        assert!(
+            scheds
+                .core(0)
+                .lock()
+                .has_higher_priority_than(Priority::Low)
+        );
+        assert!(
+            !scheds
+                .core(0)
+                .lock()
+                .has_higher_priority_than(Priority::High)
+        );
     }
 
     // -- Dequeue --
 
     #[test]
     fn dequeue_removes_thread() {
-        let mut sched = Scheduler::new(1);
+        let scheds = Schedulers::new(1);
 
-        sched.enqueue(0, ThreadId(1), Priority::Medium);
-        sched.enqueue(0, ThreadId(2), Priority::Medium);
+        scheds.core(0).lock().enqueue(ThreadId(1), Priority::Medium);
+        scheds.core(0).lock().enqueue(ThreadId(2), Priority::Medium);
 
-        assert!(sched.dequeue(0, ThreadId(1), Priority::Medium));
-        assert_eq!(sched.pick_next(0), Some(ThreadId(2)));
-        assert!(sched.pick_next(0).is_none());
+        assert!(scheds.core(0).lock().dequeue(ThreadId(1), Priority::Medium));
+        assert_eq!(scheds.core(0).lock().pick_next(), Some(ThreadId(2)));
+        assert!(scheds.core(0).lock().pick_next().is_none());
     }
 
     // -- Multi-core --
 
     #[test]
     fn multi_core_isolation() {
-        let mut sched = Scheduler::new(2);
+        let scheds = Schedulers::new(2);
 
-        sched.enqueue(0, ThreadId(1), Priority::Medium);
-        sched.enqueue(1, ThreadId(2), Priority::Medium);
+        scheds.core(0).lock().enqueue(ThreadId(1), Priority::Medium);
+        scheds.core(1).lock().enqueue(ThreadId(2), Priority::Medium);
 
-        assert_eq!(sched.pick_next(0), Some(ThreadId(1)));
-        assert_eq!(sched.pick_next(1), Some(ThreadId(2)));
-        assert!(sched.pick_next(0).is_none());
-        assert!(sched.pick_next(1).is_none());
+        assert_eq!(scheds.core(0).lock().pick_next(), Some(ThreadId(1)));
+        assert_eq!(scheds.core(1).lock().pick_next(), Some(ThreadId(2)));
+        assert!(scheds.core(0).lock().pick_next().is_none());
+        assert!(scheds.core(1).lock().pick_next().is_none());
     }
 
     #[test]
     fn least_loaded_core_picks_empty() {
-        let mut sched = Scheduler::new(4);
+        let scheds = Schedulers::new(4);
 
-        sched.enqueue(0, ThreadId(1), Priority::Medium);
-        sched.enqueue(0, ThreadId(2), Priority::Medium);
-        sched.enqueue(1, ThreadId(3), Priority::Medium);
+        scheds.core(0).lock().enqueue(ThreadId(1), Priority::Medium);
+        scheds.core(0).lock().enqueue(ThreadId(2), Priority::Medium);
+        scheds.core(1).lock().enqueue(ThreadId(3), Priority::Medium);
 
-        let least = sched.least_loaded_core();
+        let least = scheds.least_loaded_core();
 
         assert!(least == 2 || least == 3);
     }
@@ -877,76 +853,101 @@ mod tests {
             Priority::Medium,
             Priority::High,
         ] {
-            let mut sched = Scheduler::new(1);
+            let scheds = Schedulers::new(1);
 
-            sched.enqueue(0, ThreadId(1), pri);
-            sched.enqueue(0, ThreadId(2), pri);
+            scheds.core(0).lock().enqueue(ThreadId(1), pri);
+            scheds.core(0).lock().enqueue(ThreadId(2), pri);
 
-            assert_eq!(sched.pick_next(0), Some(ThreadId(1)));
+            assert_eq!(scheds.core(0).lock().pick_next(), Some(ThreadId(1)));
 
-            sched.core_mut(0).set_current(Some(ThreadId(1)));
-            sched.rotate_current(0, pri);
+            scheds.core(0).lock().set_current(Some(ThreadId(1)));
+            scheds.core(0).lock().rotate_current(pri);
 
-            assert_eq!(sched.pick_next(0), Some(ThreadId(2)));
+            assert_eq!(scheds.core(0).lock().pick_next(), Some(ThreadId(2)));
         }
     }
 
     #[test]
     fn preemption_detection_at_every_boundary() {
-        let mut sched = Scheduler::new(1);
+        let scheds = Schedulers::new(1);
 
-        sched.enqueue(0, ThreadId(1), Priority::High);
+        scheds.core(0).lock().enqueue(ThreadId(1), Priority::High);
 
-        assert!(sched.core(0).has_higher_priority_than(Priority::Medium));
-        assert!(sched.core(0).has_higher_priority_than(Priority::Low));
-        assert!(sched.core(0).has_higher_priority_than(Priority::Idle));
-        assert!(!sched.core(0).has_higher_priority_than(Priority::High));
+        assert!(
+            scheds
+                .core(0)
+                .lock()
+                .has_higher_priority_than(Priority::Medium)
+        );
+        assert!(
+            scheds
+                .core(0)
+                .lock()
+                .has_higher_priority_than(Priority::Low)
+        );
+        assert!(
+            scheds
+                .core(0)
+                .lock()
+                .has_higher_priority_than(Priority::Idle)
+        );
+        assert!(
+            !scheds
+                .core(0)
+                .lock()
+                .has_higher_priority_than(Priority::High)
+        );
     }
 
     #[test]
     fn remove_thread_from_middle_of_queue() {
-        let mut sched = Scheduler::new(1);
+        let scheds = Schedulers::new(1);
 
-        sched.enqueue(0, ThreadId(1), Priority::Medium);
-        sched.enqueue(0, ThreadId(2), Priority::Medium);
-        sched.enqueue(0, ThreadId(3), Priority::Medium);
-        sched.dequeue(0, ThreadId(2), Priority::Medium);
+        scheds.core(0).lock().enqueue(ThreadId(1), Priority::Medium);
+        scheds.core(0).lock().enqueue(ThreadId(2), Priority::Medium);
+        scheds.core(0).lock().enqueue(ThreadId(3), Priority::Medium);
+        scheds.core(0).lock().dequeue(ThreadId(2), Priority::Medium);
 
-        assert_eq!(sched.pick_next(0), Some(ThreadId(1)));
-        assert_eq!(sched.pick_next(0), Some(ThreadId(3)));
-        assert!(sched.pick_next(0).is_none());
+        assert_eq!(scheds.core(0).lock().pick_next(), Some(ThreadId(1)));
+        assert_eq!(scheds.core(0).lock().pick_next(), Some(ThreadId(3)));
+        assert!(scheds.core(0).lock().pick_next().is_none());
     }
 
     #[test]
     fn remove_nonexistent_thread_is_noop() {
-        let mut sched = Scheduler::new(1);
+        let scheds = Schedulers::new(1);
 
-        sched.enqueue(0, ThreadId(1), Priority::Medium);
+        scheds.core(0).lock().enqueue(ThreadId(1), Priority::Medium);
 
-        assert!(!sched.dequeue(0, ThreadId(99), Priority::Medium));
-        assert_eq!(sched.core(0).total_ready(), 1);
+        assert!(
+            !scheds
+                .core(0)
+                .lock()
+                .dequeue(ThreadId(99), Priority::Medium)
+        );
+        assert_eq!(scheds.core(0).lock().total_ready(), 1);
     }
 
     #[test]
     fn remove_from_global_scheduler_finds_correct_core() {
-        let mut sched = Scheduler::new(3);
+        let scheds = Schedulers::new(3);
 
-        sched.enqueue(0, ThreadId(1), Priority::Medium);
-        sched.enqueue(1, ThreadId(2), Priority::Medium);
-        sched.enqueue(2, ThreadId(3), Priority::Medium);
-        sched.remove(ThreadId(2));
+        scheds.core(0).lock().enqueue(ThreadId(1), Priority::Medium);
+        scheds.core(1).lock().enqueue(ThreadId(2), Priority::Medium);
+        scheds.core(2).lock().enqueue(ThreadId(3), Priority::Medium);
+        scheds.remove(ThreadId(2));
 
-        assert_eq!(sched.core(0).total_ready(), 1);
-        assert_eq!(sched.core(1).total_ready(), 0);
-        assert_eq!(sched.core(2).total_ready(), 1);
+        assert_eq!(scheds.core(0).lock().total_ready(), 1);
+        assert_eq!(scheds.core(1).lock().total_ready(), 0);
+        assert_eq!(scheds.core(2).lock().total_ready(), 1);
     }
 
     #[test]
     fn empty_queue_pick_returns_none() {
-        let mut sched = Scheduler::new(1);
+        let scheds = Schedulers::new(1);
 
-        assert!(sched.pick_next(0).is_none());
-        assert!(sched.core(0).current().is_none());
+        assert!(scheds.core(0).lock().pick_next().is_none());
+        assert!(scheds.core(0).lock().current().is_none());
     }
 
     #[test]
@@ -1098,54 +1099,54 @@ mod tests {
 
     #[test]
     fn fixed_ring_fill_to_capacity() {
-        let mut sched = Scheduler::new(1);
+        let scheds = Schedulers::new(1);
 
         for i in 0..128 {
-            sched.enqueue(0, ThreadId(i), Priority::Medium);
+            scheds.core(0).lock().enqueue(ThreadId(i), Priority::Medium);
         }
 
-        assert_eq!(sched.core(0).total_ready(), 128);
+        assert_eq!(scheds.core(0).lock().total_ready(), 128);
 
         for i in 0..128 {
-            assert_eq!(sched.pick_next(0), Some(ThreadId(i)));
+            assert_eq!(scheds.core(0).lock().pick_next(), Some(ThreadId(i)));
         }
 
-        assert!(sched.pick_next(0).is_none());
+        assert!(scheds.core(0).lock().pick_next().is_none());
     }
 
     #[test]
     fn fixed_ring_remove_first_middle_last() {
-        let mut sched = Scheduler::new(1);
+        let scheds = Schedulers::new(1);
 
         for i in 0..5 {
-            sched.enqueue(0, ThreadId(i), Priority::Medium);
+            scheds.core(0).lock().enqueue(ThreadId(i), Priority::Medium);
         }
 
-        assert!(sched.dequeue(0, ThreadId(0), Priority::Medium));
-        assert!(sched.dequeue(0, ThreadId(2), Priority::Medium));
-        assert!(sched.dequeue(0, ThreadId(4), Priority::Medium));
-        assert_eq!(sched.pick_next(0), Some(ThreadId(1)));
-        assert_eq!(sched.pick_next(0), Some(ThreadId(3)));
-        assert!(sched.pick_next(0).is_none());
+        assert!(scheds.core(0).lock().dequeue(ThreadId(0), Priority::Medium));
+        assert!(scheds.core(0).lock().dequeue(ThreadId(2), Priority::Medium));
+        assert!(scheds.core(0).lock().dequeue(ThreadId(4), Priority::Medium));
+        assert_eq!(scheds.core(0).lock().pick_next(), Some(ThreadId(1)));
+        assert_eq!(scheds.core(0).lock().pick_next(), Some(ThreadId(3)));
+        assert!(scheds.core(0).lock().pick_next().is_none());
     }
 
     #[test]
     fn fixed_ring_wraparound() {
-        let mut sched = Scheduler::new(1);
+        let scheds = Schedulers::new(1);
 
         for i in 0..120 {
-            sched.enqueue(0, ThreadId(i), Priority::Medium);
+            scheds.core(0).lock().enqueue(ThreadId(i), Priority::Medium);
         }
 
         for _ in 0..120 {
-            sched.pick_next(0).unwrap();
+            scheds.core(0).lock().pick_next().unwrap();
         }
 
         for i in 200..210 {
-            sched.enqueue(0, ThreadId(i), Priority::Medium);
+            scheds.core(0).lock().enqueue(ThreadId(i), Priority::Medium);
         }
 
-        assert_eq!(sched.pick_next(0), Some(ThreadId(200)));
-        assert_eq!(sched.core(0).total_ready(), 9);
+        assert_eq!(scheds.core(0).lock().pick_next(), Some(ThreadId(200)));
+        assert_eq!(scheds.core(0).lock().total_ready(), 9);
     }
 }

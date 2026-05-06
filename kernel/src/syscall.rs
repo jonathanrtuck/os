@@ -1810,7 +1810,7 @@ fn sys_space_destroy(
             state::dec_alive_threads();
         }
 
-        state::scheduler().lock().remove(ThreadId(tid));
+        state::schedulers().remove(ThreadId(tid));
     }
 
     // 2. Walk the handle table and clean up referenced objects.
@@ -1976,7 +1976,7 @@ fn sys_system_info(
     match what {
         0 => Ok(crate::config::PAGE_SIZE as u64),
         1 => Ok(crate::endpoint::MSG_SIZE as u64),
-        2 => Ok(state::scheduler().lock().num_cores() as u64),
+        2 => Ok(state::schedulers().num_cores() as u64),
         _ => Err(SyscallError::InvalidArgument),
     }
 }
@@ -2039,9 +2039,10 @@ fn sys_thread_create(
 
     match hid {
         Ok(hid) => {
-            state::scheduler()
+            state::schedulers()
+                .core(core_id)
                 .lock()
-                .enqueue(core_id, ThreadId(idx), Priority::Medium);
+                .enqueue(ThreadId(idx), Priority::Medium);
             state::inc_alive_threads();
 
             Ok(hid.0 as u64)
@@ -2207,11 +2208,12 @@ fn sys_thread_create_in(
 
     match hid {
         Ok(hid) => {
-            let core = state::scheduler().lock().least_loaded_core();
+            let core = state::schedulers().least_loaded_core();
 
-            state::scheduler()
+            state::schedulers()
+                .core(core)
                 .lock()
-                .enqueue(core, ThreadId(idx), Priority::Medium);
+                .enqueue(ThreadId(idx), Priority::Medium);
             state::inc_alive_threads();
 
             Ok(hid.0 as u64)
@@ -2393,9 +2395,9 @@ mod tests {
             .unwrap()
             .set_state(ThreadRunState::Running);
         state::inc_alive_threads();
-        state::scheduler()
+        state::schedulers()
+            .core(0)
             .lock()
-            .core_mut(0)
             .set_current(Some(ThreadId(0)));
     }
 
@@ -2605,7 +2607,7 @@ mod tests {
     }
 
     fn resume_caller() {
-        let next = state::scheduler().lock().pick_next(0);
+        let next = state::schedulers().core(0).lock().pick_next();
 
         if let Some(tid) = next {
             assert_eq!(tid, ThreadId(0));
@@ -2614,7 +2616,7 @@ mod tests {
                 .write(0)
                 .unwrap()
                 .set_state(ThreadRunState::Running);
-            state::scheduler().lock().core_mut(0).set_current(Some(tid));
+            state::schedulers().core(0).lock().set_current(Some(tid));
         }
     }
 
@@ -3473,7 +3475,7 @@ mod tests {
         let caller_tid = ThreadId(caller_obj);
 
         {
-            let picked = state::scheduler().lock().pick_next(0);
+            let picked = state::schedulers().core(0).lock().pick_next();
 
             assert_eq!(picked, Some(caller_tid));
         }
@@ -3495,9 +3497,9 @@ mod tests {
 
         assert_eq!(err, 0);
 
-        state::scheduler()
+        state::schedulers()
+            .core(0)
             .lock()
-            .core_mut(0)
             .set_current(Some(ThreadId(0)));
 
         let event_obj = lookup_obj_id(event_hid);

@@ -35,9 +35,9 @@ mod tests {
             .unwrap()
             .set_state(crate::thread::ThreadRunState::Running);
         state::inc_alive_threads();
-        state::scheduler()
+        state::schedulers()
+            .core(0)
             .lock()
-            .core_mut(0)
             .set_current(Some(ThreadId(0)));
     }
 
@@ -800,9 +800,9 @@ mod tests {
             .write(0)
             .unwrap()
             .set_state(crate::thread::ThreadRunState::Running);
-        state::scheduler()
+        state::schedulers()
+            .core(0)
             .lock()
-            .core_mut(0)
             .set_current(Some(ThreadId(0)));
     }
 
@@ -832,13 +832,10 @@ mod tests {
             }
 
             let mut total_ready = 0;
-            let sched = state::scheduler().lock();
 
             for core_id in 0..4 {
-                total_ready += sched.core(core_id).total_ready();
+                total_ready += state::schedulers().core(core_id).lock().total_ready();
             }
-
-            drop(sched);
 
             prop_assert!(total_ready > 0 || thread_count == 0);
 

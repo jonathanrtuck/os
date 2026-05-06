@@ -63,9 +63,9 @@ mod tests {
             .unwrap()
             .set_state(crate::thread::ThreadRunState::Running);
         state::inc_alive_threads();
-        state::scheduler()
+        state::schedulers()
+            .core(0)
             .lock()
-            .core_mut(0)
             .set_current(Some(ThreadId(svc_tid)));
 
         let comp_thread = Thread::new(
@@ -80,9 +80,10 @@ mod tests {
 
         state::threads().write(comp_tid).unwrap().id = ThreadId(comp_tid);
         state::inc_alive_threads();
-        state::scheduler()
+        state::schedulers()
+            .core(1)
             .lock()
-            .enqueue(1, ThreadId(comp_tid), Priority::Medium);
+            .enqueue(ThreadId(comp_tid), Priority::Medium);
 
         let shared_vmo = Vmo::new(VmoId(0), config::PAGE_SIZE * 4, VmoFlags::NONE);
         let (vmo_idx, _) = state::vmos().alloc_shared(shared_vmo).unwrap();
@@ -301,7 +302,7 @@ mod tests {
         drop(thread);
 
         assert_eq!(
-            state::scheduler().lock().core(0).current(),
+            state::schedulers().core(0).lock().current(),
             Some(tid),
             "init should be set as current on core 0"
         );

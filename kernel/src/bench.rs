@@ -227,9 +227,10 @@ fn setup_bench_env() -> ThreadId {
         .expect("bench: thread alloc");
 
     state::threads().write(tid_idx).unwrap().id = ThreadId(tid_idx);
-    state::scheduler()
+    state::schedulers()
+        .core(0)
         .lock()
-        .enqueue(0, ThreadId(tid_idx), Priority::Medium);
+        .enqueue(ThreadId(tid_idx), Priority::Medium);
     state::inc_alive_threads();
 
     {
@@ -518,7 +519,7 @@ fn teardown_bench_env(thread_id: ThreadId) {
         .address_space()
         .unwrap();
 
-    state::scheduler().lock().remove(thread_id);
+    state::schedulers().remove(thread_id);
     state::threads().dealloc_shared(thread_id.0);
     state::dec_alive_threads();
 
@@ -785,7 +786,7 @@ fn setup_ipc_bench(client: ThreadId) -> IpcBenchEnv {
 }
 
 fn force_running(tid: ThreadId) {
-    state::scheduler().lock().remove(tid);
+    state::schedulers().remove(tid);
 
     if let Some(mut t) = state::threads().write(tid.0) {
         match t.state() {
@@ -875,7 +876,7 @@ fn teardown_ipc_bench(env: &IpcBenchEnv, client: ThreadId) {
         &[env.client_ep_h, 0, 0, 0, 0, 0],
     );
 
-    state::scheduler().lock().remove(env.server);
+    state::schedulers().remove(env.server);
     state::threads().dealloc_shared(env.server.0);
     state::dec_alive_threads();
 

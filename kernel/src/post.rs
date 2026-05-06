@@ -148,9 +148,10 @@ fn setup_post_env() -> ThreadId {
         .expect("POST: thread alloc");
 
     state::threads().write(tid_idx).unwrap().id = ThreadId(tid_idx);
-    state::scheduler()
+    state::schedulers()
+        .core(0)
         .lock()
-        .enqueue(0, ThreadId(tid_idx), Priority::Medium);
+        .enqueue(ThreadId(tid_idx), Priority::Medium);
     state::inc_alive_threads();
 
     {
@@ -169,7 +170,7 @@ fn teardown_post_env(thread_id: ThreadId) {
         .address_space()
         .unwrap();
 
-    state::scheduler().lock().remove(thread_id);
+    state::schedulers().remove(thread_id);
     state::threads().dealloc_shared(thread_id.0);
     state::dec_alive_threads();
 
