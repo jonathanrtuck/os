@@ -161,8 +161,19 @@ impl core::fmt::Debug for Message {
 }
 
 /// A one-shot reply capability identifier.
+///
+/// Encodes `(nonce << SLOT_BITS) | slot_index` so that consume_reply can
+/// extract the slot in O(1) instead of scanning all active replies. The
+/// nonce portion prevents stale cap IDs from matching after slot reuse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReplyCapId(pub u32);
+
+const SLOT_BITS: u32 = 4;
+const SLOT_MASK: u32 = (1 << SLOT_BITS) - 1;
+
+const _: () = {
+    assert!(config::MAX_PENDING_PER_ENDPOINT <= (1 << SLOT_BITS));
+};
 
 /// A pending call waiting in the send queue.
 #[derive(Debug)]
@@ -363,26 +374,9 @@ impl Endpoint {
     /// Returns `None` if the send queue is empty OR all reply slots are
     /// occupied (backpressure — the server must reply before receiving more).
     pub fn dequeue_call(&mut self) -> Option<(PendingCall, ReplyCapId)> {
-        // Check for a free reply slot BEFORE dequeuing. If we dequeue first
-        // and then find no slot, the call is lost and the caller deadlocks.
         let free_slot = self.active_replies.iter().position(|s| s.is_none())?;
         let call = self.send_queue.dequeue_highest()?;
-
-        // Advance past any ID that collides with a currently-active reply cap.
-        loop {
-            let collides = self
-                .active_replies
-                .iter()
-                .any(|s| s.as_ref().is_some_and(|r| r.cap_id.0 == self.next_reply_id));
-
-            if !collides {
-                break;
-            }
-
-            self.next_reply_id = self.next_reply_id.wrapping_add(1);
-        }
-
-        let cap_id = ReplyCapId(self.next_reply_id);
+        let cap_id = ReplyCapId((self.next_reply_id << SLOT_BITS) | (free_slot as u32));
 
         self.next_reply_id = self.next_reply_id.wrapping_add(1);
         self.active_replies[free_slot] = Some(ActiveReply {
@@ -396,21 +390,29 @@ impl Endpoint {
     }
 
     /// Consume a reply cap, returning (caller_thread_id, caller_reply_buf).
+    /// O(1) via the slot index encoded in the cap ID.
     pub fn consume_reply(&mut self, cap_id: ReplyCapId) -> Result<(ThreadId, usize), SyscallError> {
-        for slot in &mut self.active_replies {
-            if let Some(r) = slot
-                && r.cap_id == cap_id
-            {
-                let reply = *r;
+        let slot_idx = (cap_id.0 & SLOT_MASK) as usize;
 
-                *slot = None;
-                self.active_reply_count -= 1;
-
-                return Ok((reply.caller, reply.reply_buf));
-            }
+        if slot_idx >= config::MAX_PENDING_PER_ENDPOINT {
+            return Err(SyscallError::InvalidHandle);
         }
 
-        Err(SyscallError::InvalidHandle)
+        let slot = &mut self.active_replies[slot_idx];
+
+        if let Some(r) = slot
+            && r.cap_id == cap_id
+        {
+            let reply = *r;
+
+            *slot = None;
+
+            self.active_reply_count -= 1;
+
+            Ok((reply.caller, reply.reply_buf))
+        } else {
+            Err(SyscallError::InvalidHandle)
+        }
     }
 
     /// Highest priority among pending callers (for priority inheritance).
@@ -451,27 +453,9 @@ impl Endpoint {
 
     /// Allocate a reply cap without dequeuing from the send queue.
     /// Used by CALL's direct-transfer fast path.
-    pub fn allocate_reply_cap(
-        &mut self,
-        caller: ThreadId,
-        reply_buf: usize,
-    ) -> Option<ReplyCapId> {
+    pub fn allocate_reply_cap(&mut self, caller: ThreadId, reply_buf: usize) -> Option<ReplyCapId> {
         let free_slot = self.active_replies.iter().position(|s| s.is_none())?;
-
-        loop {
-            let collides = self
-                .active_replies
-                .iter()
-                .any(|s| s.as_ref().is_some_and(|r| r.cap_id.0 == self.next_reply_id));
-
-            if !collides {
-                break;
-            }
-
-            self.next_reply_id = self.next_reply_id.wrapping_add(1);
-        }
-
-        let cap_id = ReplyCapId(self.next_reply_id);
+        let cap_id = ReplyCapId((self.next_reply_id << SLOT_BITS) | (free_slot as u32));
 
         self.next_reply_id = self.next_reply_id.wrapping_add(1);
         self.active_replies[free_slot] = Some(ActiveReply {
