@@ -16,26 +16,33 @@ use crate::{
     types::{EndpointId, EventId, Priority, SyscallError, ThreadId},
 };
 
-const NUM_PRIORITY_LEVELS: usize = 4;
-const SLOTS_PER_PRIORITY: usize = config::MAX_PENDING_PER_ENDPOINT / NUM_PRIORITY_LEVELS;
+const IPC_BUCKETS: usize = 4;
+const SLOTS_PER_BUCKET: usize = config::MAX_PENDING_PER_ENDPOINT / IPC_BUCKETS;
+
+const IPC_BUCKET_REPRESENTATIVE: [Priority; IPC_BUCKETS] = [
+    Priority::IDLE,
+    Priority::LOW,
+    Priority::NORMAL,
+    Priority::HIGH,
+];
 
 struct PrioritySendQueue {
-    rings: [FixedRing<PendingCall, SLOTS_PER_PRIORITY>; NUM_PRIORITY_LEVELS],
+    rings: [FixedRing<PendingCall, SLOTS_PER_BUCKET>; IPC_BUCKETS],
     total: u16,
 }
 
 impl PrioritySendQueue {
     const fn new() -> Self {
         PrioritySendQueue {
-            rings: [const { FixedRing::new() }; NUM_PRIORITY_LEVELS],
+            rings: [const { FixedRing::new() }; IPC_BUCKETS],
             total: 0,
         }
     }
 
     fn enqueue(&mut self, call: PendingCall) -> Result<(), SyscallError> {
-        let level = call.priority as usize;
+        let bucket = call.priority.ipc_bucket();
 
-        if !self.rings[level].push(call) {
+        if !self.rings[bucket].push(call) {
             return Err(SyscallError::BufferFull);
         }
 
@@ -45,8 +52,8 @@ impl PrioritySendQueue {
     }
 
     fn dequeue_highest(&mut self) -> Option<PendingCall> {
-        for level in (0..NUM_PRIORITY_LEVELS).rev() {
-            if let Some(call) = self.rings[level].pop() {
+        for bucket in (0..IPC_BUCKETS).rev() {
+            if let Some(call) = self.rings[bucket].pop() {
                 self.total -= 1;
 
                 return Some(call);
@@ -65,15 +72,9 @@ impl PrioritySendQueue {
     }
 
     fn highest_priority(&self) -> Option<Priority> {
-        for level in (0..NUM_PRIORITY_LEVELS).rev() {
-            if !self.rings[level].is_empty() {
-                return match level {
-                    3 => Some(Priority::High),
-                    2 => Some(Priority::Medium),
-                    1 => Some(Priority::Low),
-                    0 => Some(Priority::Idle),
-                    _ => None,
-                };
+        for bucket in (0..IPC_BUCKETS).rev() {
+            if !self.rings[bucket].is_empty() {
+                return Some(IPC_BUCKET_REPRESENTATIVE[bucket]);
             }
         }
 
@@ -164,12 +165,12 @@ impl core::fmt::Debug for Message {
 ///
 /// Encodes `(nonce << SLOT_BITS) | slot_index` so that consume_reply can
 /// extract the slot in O(1) instead of scanning all active replies. The
-/// nonce portion prevents stale cap IDs from matching after slot reuse.
+/// 60-bit nonce prevents stale cap IDs from matching after slot reuse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ReplyCapId(pub u32);
+pub struct ReplyCapId(pub u64);
 
 const SLOT_BITS: u32 = 4;
-const SLOT_MASK: u32 = (1 << SLOT_BITS) - 1;
+const SLOT_MASK: u64 = (1 << SLOT_BITS) - 1;
 
 const _: () = {
     assert!(config::MAX_PENDING_PER_ENDPOINT <= (1 << SLOT_BITS));
@@ -263,7 +264,7 @@ pub struct Endpoint {
     active_reply_count: u8,
     recv_waiters: [Option<ThreadId>; config::MAX_RECV_WAITERS],
     recv_waiter_count: usize,
-    next_reply_id: u32,
+    next_reply_id: u64,
     badge_counter: u32,
     bound_event: Option<EventId>,
     active_server: Option<ThreadId>,
@@ -376,7 +377,7 @@ impl Endpoint {
     pub fn dequeue_call(&mut self) -> Option<(PendingCall, ReplyCapId)> {
         let free_slot = self.active_replies.iter().position(|s| s.is_none())?;
         let call = self.send_queue.dequeue_highest()?;
-        let cap_id = ReplyCapId((self.next_reply_id << SLOT_BITS) | (free_slot as u32));
+        let cap_id = ReplyCapId((self.next_reply_id << SLOT_BITS) | (free_slot as u64));
 
         self.next_reply_id = self.next_reply_id.wrapping_add(1);
         self.active_replies[free_slot] = Some(ActiveReply {
@@ -455,7 +456,7 @@ impl Endpoint {
     /// Used by CALL's direct-transfer fast path.
     pub fn allocate_reply_cap(&mut self, caller: ThreadId, reply_buf: usize) -> Option<ReplyCapId> {
         let free_slot = self.active_replies.iter().position(|s| s.is_none())?;
-        let cap_id = ReplyCapId((self.next_reply_id << SLOT_BITS) | (free_slot as u32));
+        let cap_id = ReplyCapId((self.next_reply_id << SLOT_BITS) | (free_slot as u64));
 
         self.next_reply_id = self.next_reply_id.wrapping_add(1);
         self.active_replies[free_slot] = Some(ActiveReply {
@@ -513,7 +514,7 @@ impl Endpoint {
 
         let mut result = CloseResult::new();
 
-        for level in 0..NUM_PRIORITY_LEVELS {
+        for level in 0..IPC_BUCKETS {
             while let Some(call) = self.send_queue.rings[level].pop() {
                 if result.canceled_len < config::MAX_PENDING_PER_ENDPOINT {
                     result.canceled[result.canceled_len] = Some(CanceledCaller {
@@ -832,7 +833,7 @@ mod tests {
     fn per_priority_ring_exhaustion() {
         let mut ep = make_endpoint(0);
 
-        for i in 0..SLOTS_PER_PRIORITY {
+        for i in 0..SLOTS_PER_BUCKET {
             ep.enqueue_call(make_call(i as u32, Priority::Medium, 0))
                 .unwrap();
         }
@@ -844,7 +845,7 @@ mod tests {
 
         ep.enqueue_call(make_call(100, Priority::High, 0)).unwrap();
 
-        assert_eq!(ep.pending_call_count(), SLOTS_PER_PRIORITY + 1);
+        assert_eq!(ep.pending_call_count(), SLOTS_PER_BUCKET + 1);
     }
 
     // -- Recv waiters --
@@ -989,7 +990,7 @@ mod tests {
             Err(SyscallError::InvalidHandle)
         );
         assert_eq!(
-            ep.consume_reply(ReplyCapId(u32::MAX)),
+            ep.consume_reply(ReplyCapId(u64::MAX)),
             Err(SyscallError::InvalidHandle)
         );
 
@@ -1012,7 +1013,7 @@ mod tests {
         let mut ep = make_endpoint(0);
 
         // Advance the internal counter to just before u32::MAX.
-        ep.next_reply_id = u32::MAX - 1;
+        ep.next_reply_id = u64::MAX - 1;
 
         // Issue three reply caps that straddle the wraparound boundary.
         // Use different priorities to fit within 2 slots per level.
@@ -1078,8 +1079,8 @@ mod tests {
     fn send_queue_full_single_priority() {
         let mut ep = make_endpoint(0);
 
-        // Fill all slots at Priority::High (only SLOTS_PER_PRIORITY available).
-        for i in 0..SLOTS_PER_PRIORITY {
+        // Fill all slots at Priority::High (only SLOTS_PER_BUCKET available).
+        for i in 0..SLOTS_PER_BUCKET {
             ep.enqueue_call(make_call(i as u32, Priority::High, 0))
                 .unwrap();
         }
@@ -1137,7 +1138,7 @@ mod tests {
     fn reply_cap_id_skips_active_collision_on_wraparound() {
         let mut ep = make_endpoint(0);
 
-        ep.next_reply_id = u32::MAX - 1;
+        ep.next_reply_id = u64::MAX - 1;
 
         let priorities = [Priority::Low, Priority::Medium, Priority::High];
 

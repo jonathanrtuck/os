@@ -64,15 +64,42 @@ impl Rights {
     }
 }
 
-/// Priority levels for threads.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
-#[repr(u8)]
-pub enum Priority {
-    Idle = 0,
-    Low = 1,
-    #[default]
-    Medium = 2,
-    High = 3,
+/// Thread priority — 256 levels (0 = idle, 255 = max).
+///
+/// Named constants provide semantic anchors. Any u8 value is valid.
+/// The scheduler uses a bitmap-indexed multi-level queue for O(1) operations
+/// across all 256 levels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Priority(pub u8);
+
+impl Default for Priority {
+    fn default() -> Self {
+        Self::NORMAL
+    }
+}
+
+impl Priority {
+    pub const IDLE: Self = Priority(0);
+    pub const LOW: Self = Priority(64);
+    pub const NORMAL: Self = Priority(128);
+    pub const HIGH: Self = Priority(192);
+    pub const MAX: Self = Priority(255);
+
+    pub const NUM_LEVELS: usize = 256;
+
+    /// Map to one of 4 IPC priority buckets (0-3) for endpoint send queues.
+    pub fn ipc_bucket(self) -> usize {
+        (self.0 >> 6) as usize
+    }
+}
+
+// Aliases matching the old 4-level enum for migration convenience.
+#[allow(non_upper_case_globals)]
+impl Priority {
+    pub const Idle: Self = Self::IDLE;
+    pub const Low: Self = Self::LOW;
+    pub const Medium: Self = Self::NORMAL;
+    pub const High: Self = Self::HIGH;
 }
 
 /// Topology placement hints.
@@ -159,7 +186,35 @@ mod tests {
 
     #[test]
     fn priority_ordering() {
-        assert!(Priority::High > Priority::Medium);
-        assert!(Priority::Medium > Priority::Low);
+        assert!(Priority::HIGH > Priority::NORMAL);
+        assert!(Priority::NORMAL > Priority::LOW);
+        assert!(Priority::LOW > Priority::IDLE);
+        assert!(Priority::MAX > Priority::HIGH);
+        assert!(Priority(100) > Priority(99));
+    }
+
+    #[test]
+    fn priority_ipc_bucket() {
+        assert_eq!(Priority::IDLE.ipc_bucket(), 0);
+        assert_eq!(Priority(63).ipc_bucket(), 0);
+        assert_eq!(Priority::LOW.ipc_bucket(), 1);
+        assert_eq!(Priority(127).ipc_bucket(), 1);
+        assert_eq!(Priority::NORMAL.ipc_bucket(), 2);
+        assert_eq!(Priority(191).ipc_bucket(), 2);
+        assert_eq!(Priority::HIGH.ipc_bucket(), 3);
+        assert_eq!(Priority::MAX.ipc_bucket(), 3);
+    }
+
+    #[test]
+    fn priority_default_is_normal() {
+        assert_eq!(Priority::default(), Priority::NORMAL);
+    }
+
+    #[test]
+    fn priority_aliases_match() {
+        assert_eq!(Priority::Idle, Priority::IDLE);
+        assert_eq!(Priority::Low, Priority::LOW);
+        assert_eq!(Priority::Medium, Priority::NORMAL);
+        assert_eq!(Priority::High, Priority::HIGH);
     }
 }

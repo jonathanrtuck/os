@@ -260,6 +260,12 @@ pub fn read_user_u32s(ptr: usize, count: usize, buf: &mut [u32]) -> Result<(), S
     copy_from_user(dst_bytes, ptr)
 }
 
+pub fn write_user_u64(ptr: usize, value: u64) -> Result<(), SyscallError> {
+    validate_user_range(ptr, 8)?;
+
+    copy_to_user(ptr, &value.to_ne_bytes())
+}
+
 pub fn write_user_u32s(ptr: usize, data: &[u32]) -> Result<(), SyscallError> {
     if data.is_empty() {
         return Ok(());

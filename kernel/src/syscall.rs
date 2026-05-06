@@ -104,6 +104,24 @@ impl Kernel {
         }
     }
 
+    /// Per-pool utilization as (count, max) pairs. Returns the pool with the
+    /// highest utilization percentage.
+    ///
+    /// Long-term target: per-address-space resource quotas that prevent one
+    /// space from exhausting the global pool. This monitoring is the first
+    /// step — it makes pressure visible so the quota design can be informed
+    /// by actual usage patterns.
+    #[cfg(any(test, fuzzing, debug_assertions))]
+    pub fn resource_pressure(&self) -> [(&'static str, usize, usize); 5] {
+        [
+            ("vmos", self.vmos.count(), config::MAX_VMOS),
+            ("events", self.events.count(), config::MAX_EVENTS),
+            ("endpoints", self.endpoints.count(), config::MAX_ENDPOINTS),
+            ("threads", self.threads.count(), config::MAX_THREADS),
+            ("spaces", self.spaces.count(), config::MAX_ADDRESS_SPACES),
+        ]
+    }
+
     #[cfg(any(target_os = "none", test))]
     pub fn alloc_asid(&self) -> Result<u8, SyscallError> {
         crate::frame::arch::page_table::alloc_asid()
@@ -414,6 +432,15 @@ impl Kernel {
                 }
 
                 panic!("kernel invariant violated");
+            }
+
+            for &(name, count, max) in &self.resource_pressure() {
+                if count * 4 > max * 3 {
+                    crate::println!(
+                        "RESOURCE PRESSURE: {name} at {count}/{max} ({}%)",
+                        count * 100 / max
+                    );
+                }
             }
         }
 
@@ -1296,7 +1323,11 @@ impl Kernel {
                 ep.set_active_server(Some(server_tid));
 
                 if let Some(cap_id) = reply_cap {
-                    let packed = (cap_id.0 as u64) << 32 | (h_count << 16) | msg_len_val;
+                    if rs.reply_cap_out != 0 {
+                        let _ = user_mem::write_user_u64(rs.reply_cap_out, cap_id.0);
+                    }
+
+                    let packed = (h_count << 16) | msg_len_val;
 
                     if let Some(server) = self.threads.get_mut(server_tid.0) {
                         server.set_wakeup_value(packed);
@@ -1397,6 +1428,7 @@ impl Kernel {
         let out_cap = args[2] as usize;
         let handles_out = args[3] as usize;
         let handles_cap = args[4] as usize;
+        let reply_cap_out = args[5] as usize;
         let space_id = self.thread_space_id(current)?;
         let obj_id = self.lookup_endpoint_id(space_id, handle_id)?;
 
@@ -1408,6 +1440,7 @@ impl Kernel {
             out_cap,
             handles_out,
             handles_cap,
+            reply_cap_out,
         ) {
             return result;
         }
@@ -1444,6 +1477,7 @@ impl Kernel {
                 out_cap,
                 handles_out,
                 handles_cap,
+                reply_cap_out,
             });
         }
 
@@ -1477,6 +1511,7 @@ impl Kernel {
             out_cap,
             handles_out,
             handles_cap,
+            reply_cap_out,
         ) {
             return result;
         }
@@ -1502,6 +1537,7 @@ impl Kernel {
         out_cap: usize,
         handles_out: usize,
         handles_cap: usize,
+        reply_cap_out: usize,
     ) -> Option<Result<u64, SyscallError>> {
         let ep = self.endpoints.get_mut(ep_obj_id)?;
         let (call, reply_cap) = ep.dequeue_call()?;
@@ -1522,6 +1558,7 @@ impl Kernel {
             out_cap,
             handles_out,
             handles_cap,
+            reply_cap_out,
         ))
     }
 
@@ -1535,6 +1572,7 @@ impl Kernel {
         out_cap: usize,
         handles_out: usize,
         handles_cap: usize,
+        reply_cap_out: usize,
     ) -> Result<u64, SyscallError> {
         let msg_bytes = call.message.as_bytes();
 
@@ -1543,6 +1581,10 @@ impl Kernel {
         }
 
         user_mem::write_user_bytes(out_buf, msg_bytes)?;
+
+        if reply_cap_out != 0 {
+            user_mem::write_user_u64(reply_cap_out, reply_cap.0)?;
+        }
 
         let msg_len = msg_bytes.len() as u64;
         let mut staged = StagedHandles {
@@ -1558,13 +1600,13 @@ impl Kernel {
             0
         };
 
-        Ok((reply_cap.0 as u64) << 32 | (h_count << 16) | msg_len)
+        Ok((call.badge as u64) << 32 | (h_count << 16) | msg_len)
     }
 
     #[inline(never)]
     fn sys_reply(&mut self, current: ThreadId, args: &[u64; 6]) -> Result<u64, SyscallError> {
         let handle_id = HandleId(args[0] as u32);
-        let reply_cap_id = ReplyCapId(args[1] as u32);
+        let reply_cap_id = ReplyCapId(args[1]);
         let msg_ptr = args[2] as usize;
         let msg_len = args[3] as usize;
         let handles_ptr = args[4] as usize;
@@ -2541,16 +2583,23 @@ mod tests {
     }
 
     fn do_recv(k: &mut Kernel, ep_hid: u64, out_buf: &mut [u8; 128]) -> (usize, u64) {
+        let mut reply_cap: u64 = 0;
         let (err, packed) = call(
             k,
             num::RECV,
-            &[ep_hid, out_buf.as_mut_ptr() as u64, 128, 0, 0, 0],
+            &[
+                ep_hid,
+                out_buf.as_mut_ptr() as u64,
+                128,
+                0,
+                0,
+                &raw mut reply_cap as u64,
+            ],
         );
 
         assert_eq!(err, 0, "RECV failed");
 
-        let msg_len = (packed & 0xFFFF_FFFF) as usize;
-        let reply_cap = packed >> 32;
+        let msg_len = (packed & 0xFFFF) as usize;
 
         (msg_len, reply_cap)
     }
@@ -3163,7 +3212,7 @@ mod tests {
 
         assert_eq!(err, 0);
 
-        let msg_len = (packed & 0xFFFF_FFFF) as usize;
+        let msg_len = (packed & 0xFFFF) as usize;
 
         assert_eq!(msg_len, request.len());
         assert_eq!(&recv_buf[..msg_len], request);
@@ -3195,16 +3244,23 @@ mod tests {
         assert_eq!(err, 0);
 
         let mut recv_buf = [0u8; 128];
+        let mut reply_cap: u64 = 0;
         let (err, packed) = call(
             &mut k,
             num::RECV,
-            &[ep_hid, recv_buf.as_mut_ptr() as u64, 128, 0, 0, 0],
+            &[
+                ep_hid,
+                recv_buf.as_mut_ptr() as u64,
+                128,
+                0,
+                0,
+                &raw mut reply_cap as u64,
+            ],
         );
 
         assert_eq!(err, 0);
 
-        let msg_len = (packed & 0xFFFF_FFFF) as usize;
-        let reply_cap = (packed >> 32) as u64;
+        let msg_len = (packed & 0xFFFF) as usize;
 
         assert_eq!(&recv_buf[..msg_len], request);
 
@@ -3244,7 +3300,7 @@ mod tests {
 
         assert_eq!(err, 0);
 
-        let msg_len = (packed & 0xFFFF_FFFF) as usize;
+        let msg_len = (packed & 0xFFFF) as usize;
 
         assert_eq!(msg_len, 0);
 
@@ -5234,16 +5290,23 @@ mod tests {
         }
         for i in 0..n {
             let mut recv_buf = [0u8; 128];
+            let mut reply_cap: u64 = 0;
             let (err, packed) = call(
                 &mut k,
                 num::RECV,
-                &[ep, recv_buf.as_mut_ptr() as u64, 128, 0, 0, 0],
+                &[
+                    ep,
+                    recv_buf.as_mut_ptr() as u64,
+                    128,
+                    0,
+                    0,
+                    &raw mut reply_cap as u64,
+                ],
             );
 
             assert_eq!(err, 0, "recv {i} failed");
 
-            let msg_len = (packed & 0xFFFF_FFFF) as usize;
-            let reply_cap = packed >> 32;
+            let msg_len = (packed & 0xFFFF) as usize;
 
             assert_eq!(msg_len, 1, "recv {i}: wrong length");
 
@@ -5378,6 +5441,7 @@ mod tests {
 
             let mut recv_buf = [0u8; 128];
             let mut handles_out = [0u32; 8];
+            let mut reply_cap: u64 = 0;
             let (err, packed) = call(
                 &mut k,
                 num::RECV,
@@ -5387,13 +5451,11 @@ mod tests {
                     128,
                     handles_out.as_mut_ptr() as u64,
                     8,
-                    0,
+                    &raw mut reply_cap as u64,
                 ],
             );
 
             assert_eq!(err, 0, "round {round}: recv failed");
-
-            let reply_cap = packed >> 32;
             let handle_count = ((packed >> 16) & 0xFFFF) as usize;
 
             assert_eq!(handle_count, 1, "round {round}: wrong handle count");
@@ -7082,12 +7144,19 @@ mod tests {
         );
 
         let mut recv_buf = [0u8; 128];
-        let (_, packed) = call(
+        let mut reply_cap: u64 = 0;
+        let (_, _packed) = call(
             &mut k,
             num::RECV,
-            &[ep_hid, recv_buf.as_mut_ptr() as u64, 128, 0, 0, 0],
+            &[
+                ep_hid,
+                recv_buf.as_mut_ptr() as u64,
+                128,
+                0,
+                0,
+                &raw mut reply_cap as u64,
+            ],
         );
-        let reply_cap = packed >> 32;
 
         crate::sched::wake(&mut k, ThreadId(0), 0);
 
@@ -7120,12 +7189,19 @@ mod tests {
         );
 
         let mut recv_buf = [0u8; 128];
-        let (_, packed) = call(
+        let mut reply_cap: u64 = 0;
+        let (_, _packed) = call(
             &mut k,
             num::RECV,
-            &[ep_hid, recv_buf.as_mut_ptr() as u64, 128, 0, 0, 0],
+            &[
+                ep_hid,
+                recv_buf.as_mut_ptr() as u64,
+                128,
+                0,
+                0,
+                &raw mut reply_cap as u64,
+            ],
         );
-        let reply_cap = packed >> 32;
 
         for _ in 0..config::MAX_HANDLES - 2 {
             let (err, _) = call(&mut k, num::EVENT_CREATE, &[0; 6]);
@@ -7615,23 +7691,30 @@ mod tests {
         let mut recv_buf = [0u8; 128];
 
         for i in 0..config::MAX_PENDING_PER_ENDPOINT {
+            let mut reply_cap: u64 = 0;
             let (err, packed) = k.dispatch(
                 ThreadId(0),
                 0,
                 num::RECV,
-                &[ep_hid, recv_buf.as_mut_ptr() as u64, 128, 0, 0, 0],
+                &[
+                    ep_hid,
+                    recv_buf.as_mut_ptr() as u64,
+                    128,
+                    0,
+                    0,
+                    &raw mut reply_cap as u64,
+                ],
             );
 
             assert_eq!(err, 0, "RECV {i} failed");
 
-            let msg_len = (packed & 0xFFFF_FFFF) as usize;
+            let msg_len = (packed & 0xFFFF) as usize;
 
             assert_eq!(msg_len, 4, "message length mismatch on RECV {i}");
 
-            let reply_cap = packed >> 32;
             let ep = k.endpoints.get_mut(ep_obj).unwrap();
 
-            ep.consume_reply(crate::endpoint::ReplyCapId(reply_cap as u32))
+            ep.consume_reply(crate::endpoint::ReplyCapId(reply_cap))
                 .ok();
 
             let caller_tid = ThreadId((i + 1) as u32);
@@ -8107,21 +8190,27 @@ mod tests {
             assert_eq!(err, 0, "CALL round {round} failed");
 
             let mut recv_buf = [0u8; 128];
+            let mut reply_cap: u64 = 0;
             let (err, packed) = k.dispatch(
                 ThreadId(0),
                 recv_core,
                 num::RECV,
-                &[ep_hid, recv_buf.as_mut_ptr() as u64, 128, 0, 0, 0],
+                &[
+                    ep_hid,
+                    recv_buf.as_mut_ptr() as u64,
+                    128,
+                    0,
+                    0,
+                    &raw mut reply_cap as u64,
+                ],
             );
 
             assert_eq!(err, 0, "RECV round {round} failed");
 
-            let msg_len = (packed & 0xFFFF_FFFF) as usize;
+            let msg_len = (packed & 0xFFFF) as usize;
 
             assert_eq!(msg_len, 1);
             assert_eq!(recv_buf[0], round);
-
-            let reply_cap = packed >> 32;
             let reply_msg = [round + 100];
             let (err, _) = k.dispatch(
                 ThreadId(0),
@@ -8190,6 +8279,7 @@ mod tests {
 
         let mut recv_buf = [0u8; 128];
         let mut recv_handles = [0u32; config::MAX_IPC_HANDLES];
+        let mut reply_cap: u64 = 0;
         let (err, packed) = call(
             &mut k,
             num::RECV,
@@ -8199,7 +8289,7 @@ mod tests {
                 128,
                 recv_handles.as_mut_ptr() as u64,
                 config::MAX_IPC_HANDLES as u64,
-                0,
+                &raw mut reply_cap as u64,
             ],
         );
 
@@ -8211,8 +8301,6 @@ mod tests {
         assert_eq!(msg_len, 128, "full 128-byte message");
         assert_eq!(h_count, config::MAX_IPC_HANDLES, "all handles transferred");
         assert_eq!(&recv_buf[..128], &msg, "message data integrity");
-
-        let reply_cap = packed >> 32;
         let (err, _) = call(&mut k, num::REPLY, &[ep_hid, reply_cap, 0, 0, 0, 0]);
 
         assert_eq!(err, 0, "REPLY failed");
@@ -8514,7 +8602,7 @@ mod tests {
         let (err, _) = call(
             &mut k,
             num::THREAD_SET_PRIORITY,
-            &[thr_hid.0 as u64, Priority::High as u64, 0, 0, 0, 0],
+            &[thr_hid.0 as u64, 3, 0, 0, 0, 0],
         );
 
         assert_eq!(err, 0);
@@ -8795,6 +8883,7 @@ mod tests {
 
             let mut recv_buf = [0u8; 128];
             let mut recv_handles = [0u32; config::MAX_IPC_HANDLES];
+            let mut reply_cap: u64 = 0;
             let (err, packed) = k.dispatch(
                 ThreadId(0),
                 recv_core,
@@ -8805,7 +8894,7 @@ mod tests {
                     128,
                     recv_handles.as_mut_ptr() as u64,
                     config::MAX_IPC_HANDLES as u64,
-                    0,
+                    &raw mut reply_cap as u64,
                 ],
             );
 
@@ -8827,8 +8916,6 @@ mod tests {
             );
 
             assert_eq!(err, 0, "close transferred handle");
-
-            let reply_cap = packed >> 32;
             let (err, _) = k.dispatch(
                 ThreadId(0),
                 reply_core,

@@ -850,8 +850,10 @@ fn ipc_null_iteration(kern: &mut Kernel, env: &IpcBenchEnv, client: ThreadId) {
             out_cap: 0,
             handles_out: 0,
             handles_cap: 0,
+            reply_cap_out: 0,
         });
     }
+
     kern.dispatch(client, 0, num::CALL, &[env.client_ep_h, 0, 0, 0, 0, 0]);
 
     force_running(kern, env.server);
@@ -925,7 +927,6 @@ fn bench_fault_lookup(kern: &mut Kernel, current: ThreadId) -> u64 {
 
     kern.dispatch(current, 0, num::VMO_UNMAP, &[va, 0, 0, 0, 0, 0]);
     kern.dispatch(current, 0, num::HANDLE_CLOSE, &[vmo_h, 0, 0, 0, 0, 0]);
-
     samples.sort_unstable();
     samples[BATCH_SAMPLES / 2]
 }

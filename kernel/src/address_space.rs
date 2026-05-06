@@ -37,6 +37,7 @@ pub struct VaAllocator {
     regions: [(usize, usize); config::MAX_VA_REGIONS],
     len: usize,
     rng_state: u64,
+    largest: usize,
 }
 
 impl VaAllocator {
@@ -45,11 +46,13 @@ impl VaAllocator {
             regions: [(0, 0); config::MAX_VA_REGIONS],
             len: 0,
             rng_state: 0,
+            largest: 0,
         };
 
         if size > 0 {
             va.regions[0] = (base, size);
             va.len = 1;
+            va.largest = size;
         }
 
         va
@@ -82,14 +85,33 @@ impl VaAllocator {
         if aligned == 0 {
             return Err(SyscallError::InvalidArgument);
         }
-        if hint != 0 {
-            return self.allocate_fixed(hint, aligned);
+
+        let result = if hint != 0 {
+            self.allocate_fixed(hint, aligned)
+        } else {
+            self.allocate_first_fit(aligned)
+        };
+
+        if result.is_ok() {
+            self.recompute_largest();
         }
 
-        self.allocate_first_fit(aligned)
+        result
+    }
+
+    fn recompute_largest(&mut self) {
+        self.largest = self.regions[..self.len]
+            .iter()
+            .map(|&(_, len)| len)
+            .max()
+            .unwrap_or(0);
     }
 
     fn allocate_first_fit(&mut self, size: usize) -> Result<usize, SyscallError> {
+        if size > self.largest {
+            return Err(SyscallError::OutOfMemory);
+        }
+
         for i in 0..self.len {
             let (start, len) = self.regions[i];
 
@@ -221,6 +243,8 @@ impl VaAllocator {
                 self.insert_at(pos, (addr, size));
             }
         }
+
+        self.recompute_largest();
     }
 
     fn insert_sorted(&mut self, start: usize, len: usize) {

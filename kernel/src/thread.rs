@@ -13,12 +13,8 @@ use alloc::vec::Vec;
 use crate::frame::arch::register_state::RegisterState;
 use crate::types::{AddressSpaceId, EventId, Priority, SyscallError, ThreadId, TopologyHint};
 
-/// Number of priority levels: Idle, Low, Medium, High.
-const NUM_PRIORITY_LEVELS: usize = 4;
-
-fn priority_index(p: Priority) -> usize {
-    p as usize
-}
+/// Bitmap words needed for 256 priority levels.
+const BITMAP_WORDS: usize = Priority::NUM_LEVELS / 64;
 
 /// Thread execution state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +39,7 @@ pub struct RecvState {
     pub out_cap: usize,
     pub handles_out: usize,
     pub handles_cap: usize,
+    pub reply_cap_out: usize,
 }
 
 /// A thread — schedulable execution context.
@@ -72,10 +69,6 @@ pub struct Thread {
     register_state: Option<Box<RegisterState>>,
 }
 
-// Verify Thread doesn't grow unexpectedly. The struct is heap-allocated
-// (Box in ObjectTable), so absolute offset < 128 isn't achievable with
-// Rust's default repr (the compiler places the wait_events array first).
-// Instead, track total size to catch field bloat.
 const _: () = {
     assert!(core::mem::size_of::<Thread>() <= 576);
 };
@@ -316,100 +309,50 @@ impl Thread {
     }
 }
 
-const QUEUE_CAP: usize = 128;
-
-struct FixedRing {
-    buf: [ThreadId; QUEUE_CAP],
-    head: u16,
-    len: u16,
+/// Doubly-linked list link for scheduler queues. Stored in a parallel array
+/// inside the Scheduler, indexed by thread ID. Keeping links in the Scheduler
+/// (not the Thread) avoids borrow conflicts between `Kernel.scheduler` and
+/// `Kernel.threads`.
+#[derive(Clone, Copy)]
+struct SchedLink {
+    next: Option<u32>,
+    prev: Option<u32>,
 }
 
-impl FixedRing {
-    const fn new() -> Self {
-        FixedRing {
-            buf: [ThreadId(0); QUEUE_CAP],
-            head: 0,
-            len: 0,
-        }
-    }
-
-    fn push_back(&mut self, id: ThreadId) {
-        debug_assert!((self.len as usize) < QUEUE_CAP, "run queue overflow");
-
-        let tail = (self.head as usize + self.len as usize) % QUEUE_CAP;
-
-        self.buf[tail] = id;
-        self.len += 1;
-    }
-
-    fn pop_front(&mut self) -> Option<ThreadId> {
-        if self.len == 0 {
-            return None;
-        }
-
-        let id = self.buf[self.head as usize];
-
-        self.head = ((self.head as usize + 1) % QUEUE_CAP) as u16;
-        self.len -= 1;
-
-        Some(id)
-    }
-
-    fn remove(&mut self, id: ThreadId) -> bool {
-        let len = self.len as usize;
-
-        for i in 0..len {
-            let idx = (self.head as usize + i) % QUEUE_CAP;
-
-            if self.buf[idx] == id {
-                for j in i..len - 1 {
-                    let src = (self.head as usize + j + 1) % QUEUE_CAP;
-                    let dst = (self.head as usize + j) % QUEUE_CAP;
-
-                    self.buf[dst] = self.buf[src];
-                }
-
-                self.len -= 1;
-
-                return true;
-            }
-        }
-
-        false
-    }
-
-    fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    fn len(&self) -> usize {
-        self.len as usize
-    }
-
-    #[cfg(any(test, fuzzing, debug_assertions))]
-    fn iter(&self) -> impl Iterator<Item = ThreadId> + '_ {
-        (0..self.len as usize).map(|i| self.buf[(self.head as usize + i) % QUEUE_CAP])
-    }
+impl SchedLink {
+    const EMPTY: Self = SchedLink {
+        next: None,
+        prev: None,
+    };
 }
 
-/// Per-core run queue with priority-level FIFO queues.
+/// Per-core bitmap-indexed multi-level queue.
+///
+/// 256 priority levels, each a doubly-linked list of thread IDs. The bitmap
+/// tracks which levels are non-empty, giving O(1) `pick_next` via CLZ on
+/// ARM64. All list state is in the Scheduler's `links` array — RunQueue
+/// stores only head/tail pointers and the bitmap.
 pub struct RunQueue {
-    queues: [FixedRing; NUM_PRIORITY_LEVELS],
+    bitmap: [u64; BITMAP_WORDS],
+    heads: [Option<u32>; Priority::NUM_LEVELS],
+    tails: [Option<u32>; Priority::NUM_LEVELS],
     current: Option<ThreadId>,
+    count: usize,
 }
 
-// RunQueue.current is checked on every dispatch to identify the calling
-// thread. Verify it's within reach of the same cache line as the queues.
 const _: () = {
-    assert!(core::mem::offset_of!(RunQueue, current) < 128);
+    assert!(core::mem::size_of::<[u64; BITMAP_WORDS]>() == 32);
 };
 
 #[allow(clippy::new_without_default)]
 impl RunQueue {
     pub fn new() -> Self {
         RunQueue {
-            queues: [const { FixedRing::new() }; NUM_PRIORITY_LEVELS],
+            bitmap: [0; BITMAP_WORDS],
+            heads: [None; Priority::NUM_LEVELS],
+            tails: [None; Priority::NUM_LEVELS],
             current: None,
+            count: 0,
         }
     }
 
@@ -421,59 +364,63 @@ impl RunQueue {
         self.current = thread;
     }
 
-    /// Add a thread to the back of its priority queue.
-    pub fn enqueue(&mut self, thread: ThreadId, priority: Priority) {
-        self.queues[priority_index(priority)].push_back(thread);
+    fn set_bit(&mut self, level: u8) {
+        self.bitmap[(level >> 6) as usize] |= 1u64 << (level & 63);
     }
 
-    /// Remove a specific thread from its priority queue (for blocking).
-    pub fn dequeue(&mut self, thread: ThreadId, priority: Priority) -> bool {
-        self.queues[priority_index(priority)].remove(thread)
+    fn clear_bit(&mut self, level: u8) {
+        self.bitmap[(level >> 6) as usize] &= !(1u64 << (level & 63));
     }
 
-    /// Pick the highest-priority ready thread (removes from queue).
-    pub fn pick_next(&mut self) -> Option<ThreadId> {
-        for q in self.queues.iter_mut().rev() {
-            if let Some(thread) = q.pop_front() {
-                return Some(thread);
+    fn highest_set_bit(&self) -> Option<u8> {
+        for word_idx in (0..BITMAP_WORDS).rev() {
+            let word = self.bitmap[word_idx];
+
+            if word != 0 {
+                let bit = 63 - word.leading_zeros() as u8;
+
+                return Some((word_idx as u8) * 64 + bit);
             }
         }
+
         None
     }
 
-    /// Move current thread to the back of its queue (quantum expired).
-    pub fn rotate_current(&mut self, priority: Priority) {
-        if let Some(current) = self.current.take() {
-            self.queues[priority_index(priority)].push_back(current);
-        }
-    }
-
-    /// Check if any thread at higher priority than `threshold` is ready.
     pub fn has_higher_priority_than(&self, threshold: Priority) -> bool {
-        let idx = priority_index(threshold);
+        let Some(start_level) = threshold.0.checked_add(1) else {
+            return false;
+        };
+        let start_word = (start_level >> 6) as usize;
+        let start_bit = start_level & 63;
 
-        self.queues[idx + 1..].iter().any(|q| !q.is_empty())
+        if start_word < BITMAP_WORDS {
+            if (self.bitmap[start_word] >> start_bit) != 0 {
+                return true;
+            }
+
+            for word_idx in (start_word + 1)..BITMAP_WORDS {
+                if self.bitmap[word_idx] != 0 {
+                    return true;
+                }
+            }
+        }
+
+        false
     }
 
     pub fn total_ready(&self) -> usize {
-        self.queues.iter().map(|q| q.len()).sum()
-    }
-
-    #[cfg(any(test, fuzzing, debug_assertions))]
-    pub fn all_queued_thread_ids(&self) -> alloc::vec::Vec<ThreadId> {
-        let mut ids = alloc::vec::Vec::new();
-
-        for q in &self.queues {
-            ids.extend(q.iter());
-        }
-
-        ids
+        self.count
     }
 }
 
-/// Multi-core fixed-priority preemptive scheduler.
+/// Multi-core fixed-priority preemptive scheduler with bitmap-indexed queues.
+///
+/// All link data is self-contained in the `links` array (indexed by thread ID,
+/// shared across cores — a thread is only in one queue at a time). No external
+/// borrows needed for any operation.
 pub struct Scheduler {
     cores: Vec<RunQueue>,
+    links: Vec<SchedLink>,
 }
 
 impl Scheduler {
@@ -484,7 +431,10 @@ impl Scheduler {
             cores.push(RunQueue::new());
         }
 
-        Scheduler { cores }
+        Scheduler {
+            cores,
+            links: alloc::vec![SchedLink::EMPTY; crate::config::MAX_THREADS],
+        }
     }
 
     pub fn core(&self, core_id: usize) -> &RunQueue {
@@ -500,37 +450,139 @@ impl Scheduler {
     }
 
     pub fn enqueue(&mut self, core_id: usize, thread: ThreadId, priority: Priority) {
-        self.cores[core_id].enqueue(thread, priority);
+        let level = priority.0;
+        let id = thread.0 as usize;
+        let rq = &mut self.cores[core_id];
+        let old_tail = rq.tails[level as usize];
+
+        self.links[id] = SchedLink {
+            prev: old_tail,
+            next: None,
+        };
+
+        if let Some(t) = old_tail {
+            self.links[t as usize].next = Some(thread.0);
+        } else {
+            rq.heads[level as usize] = Some(thread.0);
+        }
+
+        rq.tails[level as usize] = Some(thread.0);
+        rq.set_bit(level);
+        rq.count += 1;
+    }
+
+    fn unlink(&mut self, core_id: usize, thread_id: u32, level: u8) {
+        let link = self.links[thread_id as usize];
+        let rq = &mut self.cores[core_id];
+
+        if let Some(p) = link.prev {
+            self.links[p as usize].next = link.next;
+        } else {
+            rq.heads[level as usize] = link.next;
+        }
+
+        if let Some(n) = link.next {
+            self.links[n as usize].prev = link.prev;
+        } else {
+            rq.tails[level as usize] = link.prev;
+        }
+
+        self.links[thread_id as usize] = SchedLink::EMPTY;
+
+        if rq.heads[level as usize].is_none() {
+            rq.clear_bit(level);
+        }
+
+        rq.count -= 1;
     }
 
     pub fn pick_next(&mut self, core_id: usize) -> Option<ThreadId> {
-        self.cores[core_id].pick_next()
+        let level = self.cores[core_id].highest_set_bit()?;
+        let head = self.cores[core_id].heads[level as usize]?;
+
+        self.unlink(core_id, head, level);
+
+        Some(ThreadId(head))
     }
 
-    /// Remove a thread from any core's run queue (for teardown).
+    pub fn dequeue(&mut self, core_id: usize, thread: ThreadId, priority: Priority) -> bool {
+        let rq = &self.cores[core_id];
+
+        if rq.heads[priority.0 as usize].is_none() {
+            return false;
+        }
+
+        let mut cursor = rq.heads[priority.0 as usize];
+
+        while let Some(id) = cursor {
+            if id == thread.0 {
+                self.unlink(core_id, id, priority.0);
+
+                return true;
+            }
+
+            cursor = self.links[id as usize].next;
+        }
+
+        false
+    }
+
+    pub fn rotate_current(&mut self, core_id: usize, priority: Priority) {
+        let current = self.cores[core_id].current.take();
+
+        if let Some(tid) = current {
+            self.enqueue(core_id, tid, priority);
+        }
+    }
+
     pub fn remove(&mut self, thread: ThreadId) {
-        for core in &mut self.cores {
-            if core.current == Some(thread) {
-                core.current = None;
+        for i in 0..self.cores.len() {
+            if self.cores[i].current == Some(thread) {
+                self.cores[i].current = None;
 
                 return;
             }
 
-            for q in &mut core.queues {
-                if q.remove(thread) {
-                    return;
+            for level in 0..Priority::NUM_LEVELS {
+                let mut cursor = self.cores[i].heads[level];
+
+                while let Some(id) = cursor {
+                    if id == thread.0 {
+                        self.unlink(i, id, level as u8);
+
+                        return;
+                    }
+
+                    cursor = self.links[id as usize].next;
                 }
             }
         }
     }
 
-    /// Find the core with the fewest ready threads.
     pub fn least_loaded_core(&self) -> usize {
         self.cores
             .iter()
             .enumerate()
             .min_by_key(|(_, rq)| rq.total_ready())
             .map_or(0, |(i, _)| i)
+    }
+
+    #[cfg(any(test, fuzzing, debug_assertions))]
+    pub fn all_queued_on_core(&self, core_id: usize) -> alloc::vec::Vec<ThreadId> {
+        let mut ids = alloc::vec::Vec::new();
+        let rq = &self.cores[core_id];
+
+        for level in 0..Priority::NUM_LEVELS {
+            let mut cursor = rq.heads[level];
+
+            while let Some(id) = cursor {
+                ids.push(ThreadId(id));
+
+                cursor = self.links[id as usize].next;
+            }
+        }
+
+        ids
     }
 }
 
@@ -700,14 +752,14 @@ mod tests {
         assert_eq!(first, ThreadId(1));
 
         sched.core_mut(0).set_current(Some(first));
-        sched.core_mut(0).rotate_current(Priority::Medium);
+        sched.rotate_current(0, Priority::Medium);
 
         let second = sched.pick_next(0).unwrap();
 
         assert_eq!(second, ThreadId(2));
 
         sched.core_mut(0).set_current(Some(second));
-        sched.core_mut(0).rotate_current(Priority::Medium);
+        sched.rotate_current(0, Priority::Medium);
 
         assert_eq!(sched.pick_next(0), Some(ThreadId(3)));
 
@@ -757,7 +809,7 @@ mod tests {
         sched.enqueue(0, ThreadId(1), Priority::Medium);
         sched.enqueue(0, ThreadId(2), Priority::Medium);
 
-        assert!(sched.core_mut(0).dequeue(ThreadId(1), Priority::Medium));
+        assert!(sched.dequeue(0, ThreadId(1), Priority::Medium));
         assert_eq!(sched.pick_next(0), Some(ThreadId(2)));
         assert!(sched.pick_next(0).is_none());
     }
@@ -808,7 +860,7 @@ mod tests {
             assert_eq!(sched.pick_next(0), Some(ThreadId(1)));
 
             sched.core_mut(0).set_current(Some(ThreadId(1)));
-            sched.core_mut(0).rotate_current(pri);
+            sched.rotate_current(0, pri);
 
             assert_eq!(sched.pick_next(0), Some(ThreadId(2)));
         }
@@ -833,8 +885,7 @@ mod tests {
         sched.enqueue(0, ThreadId(1), Priority::Medium);
         sched.enqueue(0, ThreadId(2), Priority::Medium);
         sched.enqueue(0, ThreadId(3), Priority::Medium);
-
-        sched.core_mut(0).dequeue(ThreadId(2), Priority::Medium);
+        sched.dequeue(0, ThreadId(2), Priority::Medium);
 
         assert_eq!(sched.pick_next(0), Some(ThreadId(1)));
         assert_eq!(sched.pick_next(0), Some(ThreadId(3)));
@@ -847,7 +898,7 @@ mod tests {
 
         sched.enqueue(0, ThreadId(1), Priority::Medium);
 
-        assert!(!sched.core_mut(0).dequeue(ThreadId(99), Priority::Medium));
+        assert!(!sched.dequeue(0, ThreadId(99), Priority::Medium));
         assert_eq!(sched.core(0).total_ready(), 1);
     }
 
@@ -858,7 +909,6 @@ mod tests {
         sched.enqueue(0, ThreadId(1), Priority::Medium);
         sched.enqueue(1, ThreadId(2), Priority::Medium);
         sched.enqueue(2, ThreadId(3), Priority::Medium);
-
         sched.remove(ThreadId(2));
 
         assert_eq!(sched.core(0).total_ready(), 1);
@@ -1046,9 +1096,9 @@ mod tests {
             sched.enqueue(0, ThreadId(i), Priority::Medium);
         }
 
-        assert!(sched.core_mut(0).dequeue(ThreadId(0), Priority::Medium));
-        assert!(sched.core_mut(0).dequeue(ThreadId(2), Priority::Medium));
-        assert!(sched.core_mut(0).dequeue(ThreadId(4), Priority::Medium));
+        assert!(sched.dequeue(0, ThreadId(0), Priority::Medium));
+        assert!(sched.dequeue(0, ThreadId(2), Priority::Medium));
+        assert!(sched.dequeue(0, ThreadId(4), Priority::Medium));
         assert_eq!(sched.pick_next(0), Some(ThreadId(1)));
         assert_eq!(sched.pick_next(0), Some(ThreadId(3)));
         assert!(sched.pick_next(0).is_none());

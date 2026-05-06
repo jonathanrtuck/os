@@ -57,6 +57,7 @@ pub fn verify(kernel: &Kernel) -> Vec<Violation> {
 pub fn verify_no_leaks(kernel: &Kernel) -> Vec<Violation> {
     let mut violations = verify(kernel);
 
+    check_exact_refcounts(kernel, &mut violations);
     check_object_reachability(kernel, &mut violations);
 
     violations
@@ -194,7 +195,7 @@ fn check_scheduler_uniqueness(kernel: &Kernel, violations: &mut Vec<Violation>) 
             });
         }
 
-        for tid in rq.all_queued_thread_ids() {
+        for tid in kernel.scheduler.all_queued_on_core(core_id) {
             if !seen.insert(tid) {
                 violations.push(Violation {
                     category: "scheduler",
@@ -218,7 +219,7 @@ fn check_thread_state_consistency(kernel: &Kernel, violations: &mut Vec<Violatio
             scheduler_threads.insert(c);
         }
 
-        for tid in rq.all_queued_thread_ids() {
+        for tid in kernel.scheduler.all_queued_on_core(core_id) {
             scheduler_threads.insert(tid);
         }
     }
@@ -461,10 +462,9 @@ fn check_refcount_consistency(kernel: &Kernel, violations: &mut Vec<Violation>) 
         }
     }
 
-    // refcount >= handle_count: objects may have kernel-internal references
-    // beyond handles (e.g., bootstrap-created objects without handles, or
-    // mapped VMOs). But handles must never exceed refcount — that would mean
-    // dangling handle access.
+    // Lower-bound check: refcount >= handle_count. Catches dangling handles
+    // (use-after-free). Does NOT catch leaks — that requires the exact check
+    // in verify_no_leaks().
     for (idx, vmo) in kernel.vmos.iter_allocated() {
         let handle_count = vmo_handle_counts.get(&idx).copied().unwrap_or(0);
 
@@ -472,7 +472,7 @@ fn check_refcount_consistency(kernel: &Kernel, violations: &mut Vec<Violation>) 
             violations.push(Violation {
                 category: "refcount-vmo",
                 detail: format!(
-                    "VMO #{} refcount {} < {} handles (dangling handles)",
+                    "VMO #{} refcount {} < {} handles (dangling)",
                     idx,
                     vmo.refcount(),
                     handle_count
@@ -488,7 +488,7 @@ fn check_refcount_consistency(kernel: &Kernel, violations: &mut Vec<Violation>) 
             violations.push(Violation {
                 category: "refcount-endpoint",
                 detail: format!(
-                    "endpoint #{} refcount {} < {} handles (dangling handles)",
+                    "endpoint #{} refcount {} < {} handles (dangling)",
                     idx,
                     ep.refcount(),
                     handle_count
@@ -504,10 +504,92 @@ fn check_refcount_consistency(kernel: &Kernel, violations: &mut Vec<Violation>) 
             violations.push(Violation {
                 category: "refcount-event",
                 detail: format!(
-                    "event #{} refcount {} < {} handles (dangling handles)",
+                    "event #{} refcount {} < {} handles (dangling)",
                     idx,
                     evt.refcount(),
                     handle_count
+                ),
+            });
+        }
+    }
+}
+
+fn check_exact_refcounts(kernel: &Kernel, violations: &mut Vec<Violation>) {
+    use alloc::collections::BTreeMap;
+
+    let mut vmo_handle_counts: BTreeMap<u32, usize> = BTreeMap::new();
+    let mut endpoint_handle_counts: BTreeMap<u32, usize> = BTreeMap::new();
+    let mut event_handle_counts: BTreeMap<u32, usize> = BTreeMap::new();
+    let mut vmo_mapping_counts: BTreeMap<u32, usize> = BTreeMap::new();
+
+    for (_, space) in kernel.spaces.iter_allocated() {
+        for (_, handle) in space.handles().iter_handles() {
+            match handle.object_type {
+                ObjectType::Vmo => {
+                    *vmo_handle_counts.entry(handle.object_id).or_insert(0) += 1;
+                }
+                ObjectType::Endpoint => {
+                    *endpoint_handle_counts.entry(handle.object_id).or_insert(0) += 1;
+                }
+                ObjectType::Event => {
+                    *event_handle_counts.entry(handle.object_id).or_insert(0) += 1;
+                }
+                ObjectType::Thread | ObjectType::AddressSpace => {}
+            }
+        }
+
+        for m in space.mappings() {
+            *vmo_mapping_counts.entry(m.vmo_id.0).or_insert(0) += 1;
+        }
+    }
+
+    for (idx, vmo) in kernel.vmos.iter_allocated() {
+        let handles = vmo_handle_counts.get(&idx).copied().unwrap_or(0);
+        let mappings = vmo_mapping_counts.get(&idx).copied().unwrap_or(0);
+        let expected = handles + mappings;
+
+        if vmo.refcount() != expected {
+            violations.push(Violation {
+                category: "exact-refcount-vmo",
+                detail: format!(
+                    "VMO #{} refcount {} != {} handles + {} mappings = {}",
+                    idx,
+                    vmo.refcount(),
+                    handles,
+                    mappings,
+                    expected
+                ),
+            });
+        }
+    }
+
+    for (idx, ep) in kernel.endpoints.iter_allocated() {
+        let expected = endpoint_handle_counts.get(&idx).copied().unwrap_or(0);
+
+        if ep.refcount() != expected {
+            violations.push(Violation {
+                category: "exact-refcount-endpoint",
+                detail: format!(
+                    "endpoint #{} refcount {} != {} handles",
+                    idx,
+                    ep.refcount(),
+                    expected
+                ),
+            });
+        }
+    }
+
+    for (idx, evt) in kernel.events.iter_allocated() {
+        let expected = event_handle_counts.get(&idx).copied().unwrap_or(0);
+
+        if evt.refcount() != expected {
+            violations.push(Violation {
+                category: "exact-refcount-event",
+                detail: format!(
+                    "event #{} refcount {} != {} handles",
+                    idx,
+                    evt.refcount(),
+                    expected
                 ),
             });
         }

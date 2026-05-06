@@ -42,7 +42,7 @@ pub fn yield_current(kernel: &mut Kernel, current: ThreadId, core_id: usize) {
     let thread = kernel.threads.get(current.0).unwrap();
     let priority = thread.effective_priority();
 
-    kernel.scheduler.core_mut(core_id).rotate_current(priority);
+    kernel.scheduler.rotate_current(core_id, priority);
 
     switch_away(kernel, current, core_id);
 }
