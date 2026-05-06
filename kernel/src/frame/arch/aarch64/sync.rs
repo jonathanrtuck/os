@@ -168,6 +168,23 @@ impl<T> SpinLock<T> {
             daif,
         }
     }
+
+    /// Direct mutable access when the caller already holds `&mut self`
+    /// (no lock needed — exclusive ownership proven by the borrow).
+    pub fn get_mut(&mut self) -> &mut T {
+        self.data.get_mut()
+    }
+
+    /// Direct shared access when the caller holds `&self` and can prove
+    /// no concurrent mutation (e.g., during single-threaded init).
+    pub fn get_ref(&self) -> &T {
+        // SAFETY: caller guarantees no concurrent mutation. This is used
+        // by ObjectTable::count() which reads the alloc state without
+        // locking, safe only when the caller holds &self or &mut self on
+        // the enclosing ObjectTable (which is either single-threaded or
+        // the count is approximate).
+        unsafe { &*self.data.get() }
+    }
 }
 
 pub struct SpinGuard<'a, T> {

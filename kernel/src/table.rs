@@ -12,6 +12,9 @@
 //!
 //! The free list uses a singly-linked stack. Alloc pops from head,
 //! dealloc pushes back. O(1) both directions.
+//!
+//! For concurrent (per-object locking) access, see
+//! [`frame::concurrent_table::ConcurrentTable`].
 
 use alloc::{vec, vec::Vec};
 
@@ -20,11 +23,11 @@ use crate::frame::slab::{BoxStorage, Storage};
 const EMPTY: u32 = u32::MAX;
 
 pub struct ObjectTable<T, const MAX: usize, S: Storage<T> = BoxStorage<T>> {
-    storage: S,
-    generations: Vec<u64>,
-    free_head: u32,
-    free_next: Vec<u32>,
-    count: usize,
+    pub(crate) storage: S,
+    pub(crate) generations: Vec<u64>,
+    pub(crate) free_head: u32,
+    pub(crate) free_next: Vec<u32>,
+    pub(crate) count: usize,
     _phantom: core::marker::PhantomData<T>,
 }
 

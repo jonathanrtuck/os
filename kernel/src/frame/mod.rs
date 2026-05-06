@@ -6,6 +6,8 @@
 
 #[cfg(any(target_os = "none", test))]
 pub mod arch;
+#[cfg(any(target_os = "none", test))]
+pub mod concurrent_table;
 pub mod fault_resolve;
 pub mod firmware;
 #[cfg(target_os = "none")]
