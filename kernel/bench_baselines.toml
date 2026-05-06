@@ -7,7 +7,7 @@
 # A measured median exceeding `threshold` is a regression.
 #
 # Timer frequency is 24 MHz (1 tick = 42 ns).
-# Updated: 2026-05-05 (endpoint InlineSlab + MaybeUninit ring slots)
+# Updated: 2026-05-05 (Event InlineSlab + VMO mapping scan skip + inline helpers)
 
 [svc_null]
 median = 1
@@ -101,11 +101,11 @@ stddev = 1
 threshold = 4
 
 [workload_doc_editing]
-median = 8
-p95 = 20
-p99 = 45
-stddev = 12
-threshold = 81
+median = 3
+p95 = 4
+p99 = 4
+stddev = 1
+threshold = 7
 
 [workload_ipc_storm]
 median = 1
@@ -115,8 +115,8 @@ stddev = 1
 threshold = 5
 
 [workload_object_churn]
-median = 20
-p95 = 22
-p99 = 25
-stddev = 3
-threshold = 34
+median = 14
+p95 = 17
+p99 = 19
+stddev = 2
+threshold = 25

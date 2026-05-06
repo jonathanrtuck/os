@@ -116,6 +116,7 @@ pub struct Vmo {
     pager: Option<EndpointId>,
     cow_parent: Option<VmoId>,
     has_pages: bool,
+    mapping_count: usize,
     refcount: usize,
 }
 
@@ -133,6 +134,7 @@ impl Vmo {
             pager: None,
             cow_parent: None,
             has_pages: false,
+            mapping_count: 0,
             refcount: 1,
         }
     }
@@ -178,6 +180,18 @@ impl Vmo {
         self.refcount == 0
     }
 
+    pub fn mapping_count(&self) -> usize {
+        self.mapping_count
+    }
+
+    pub fn inc_mapping_count(&mut self) {
+        self.mapping_count += 1;
+    }
+
+    pub fn dec_mapping_count(&mut self) {
+        self.mapping_count = self.mapping_count.saturating_sub(1);
+    }
+
     /// Allocate a physical page at the given offset (page index).
     /// Returns the physical address. Called by the fault handler or eager map.
     pub fn alloc_page_at(
@@ -219,6 +233,7 @@ impl Vmo {
             pager: self.pager,
             cow_parent: Some(self.id),
             has_pages: self.has_pages,
+            mapping_count: 0,
             refcount: 1,
         }
     }

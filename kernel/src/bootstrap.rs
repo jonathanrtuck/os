@@ -58,6 +58,10 @@ pub fn create_init(kernel: &mut Kernel, init_binary: &[u8]) -> Result<ThreadId, 
         .ok_or(SyscallError::InvalidArgument)?;
     let code_va = space.map_vmo(VmoId(code_idx), code_size, rx, INIT_CODE_VA)?;
     let stack_va = space.map_vmo(VmoId(stack_idx), INIT_STACK_SIZE, rw, INIT_STACK_VA)?;
+
+    kernel.vmos.get_mut(code_idx).unwrap().inc_mapping_count();
+    kernel.vmos.get_mut(stack_idx).unwrap().inc_mapping_count();
+
     let space = kernel
         .spaces
         .get_mut(space_idx)

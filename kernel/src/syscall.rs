@@ -74,7 +74,7 @@ impl StagedHandles {
 /// Central kernel state — all object tables and the scheduler.
 pub struct Kernel {
     pub vmos: ObjectTable<Vmo, { config::MAX_VMOS }, InlineSlab<Vmo>>,
-    pub events: ObjectTable<Event, { config::MAX_EVENTS }>,
+    pub events: ObjectTable<Event, { config::MAX_EVENTS }, InlineSlab<Event>>,
     pub endpoints: ObjectTable<Endpoint, { config::MAX_ENDPOINTS }, InlineSlab<Endpoint>>,
     pub threads: ObjectTable<Thread, { config::MAX_THREADS }>,
     pub spaces: ObjectTable<AddressSpace, { config::MAX_ADDRESS_SPACES }>,
@@ -206,6 +206,7 @@ impl Kernel {
         }
     }
 
+    #[inline]
     pub fn thread_space_id(&self, thread: ThreadId) -> Result<AddressSpaceId, SyscallError> {
         self.threads
             .get(thread.0)
@@ -214,6 +215,7 @@ impl Kernel {
             .ok_or(SyscallError::InvalidArgument)
     }
 
+    #[inline]
     fn lookup_handle(
         &self,
         space_id: AddressSpaceId,
@@ -451,16 +453,22 @@ impl Kernel {
             return Err(SyscallError::InsufficientRights);
         }
 
+        let vmo_id = handle.object_id;
         let vmo_size = self
             .vmos
-            .get(handle.object_id)
+            .get(vmo_id)
             .ok_or(SyscallError::InvalidHandle)?
             .size();
         let space = self
             .spaces
             .get_mut(space_id.0)
             .ok_or(SyscallError::InvalidArgument)?;
-        let va = space.map_vmo(VmoId(handle.object_id), vmo_size, perms, addr_hint)?;
+        let va = space.map_vmo(VmoId(vmo_id), vmo_size, perms, addr_hint)?;
+
+        self.vmos
+            .get_mut(vmo_id)
+            .ok_or(SyscallError::InvalidHandle)?
+            .inc_mapping_count();
 
         Ok(va as u64)
     }
@@ -474,7 +482,11 @@ impl Kernel {
             .get_mut(space_id.0)
             .ok_or(SyscallError::InvalidArgument)?;
 
-        space.unmap(addr)?;
+        let record = space.unmap(addr)?;
+
+        if let Some(vmo) = self.vmos.get_mut(record.vmo_id.0) {
+            vmo.dec_mapping_count();
+        }
 
         Ok(0)
     }
@@ -826,10 +838,16 @@ impl Kernel {
                 if let Some(vmo) = self.vmos.get_mut(object_id)
                     && vmo.release_ref()
                 {
-                    let vmo_id = crate::types::VmoId(object_id);
-                    for (_, space) in self.spaces.iter_allocated_mut() {
-                        space.remove_mappings_for_vmo(vmo_id);
+                    let has_mappings = vmo.mapping_count() > 0;
+
+                    if has_mappings {
+                        let vmo_id = crate::types::VmoId(object_id);
+
+                        for (_, space) in self.spaces.iter_allocated_mut() {
+                            space.remove_mappings_for_vmo(vmo_id);
+                        }
                     }
+
                     self.vmos.dealloc(object_id);
                 }
             }
@@ -2115,16 +2133,22 @@ impl Kernel {
             return Err(SyscallError::WrongHandleType);
         }
 
+        let vmo_id = vmo_handle.object_id;
         let vmo_size = self
             .vmos
-            .get(vmo_handle.object_id)
+            .get(vmo_id)
             .ok_or(SyscallError::InvalidHandle)?
             .size();
         let target_space = self
             .spaces
             .get_mut(space_handle.object_id)
             .ok_or(SyscallError::InvalidArgument)?;
-        let va = target_space.map_vmo(VmoId(vmo_handle.object_id), vmo_size, perms, addr_hint)?;
+        let va = target_space.map_vmo(VmoId(vmo_id), vmo_size, perms, addr_hint)?;
+
+        self.vmos
+            .get_mut(vmo_id)
+            .ok_or(SyscallError::InvalidHandle)?
+            .inc_mapping_count();
 
         Ok(va as u64)
     }
