@@ -5,12 +5,27 @@ use crate::{
     types::{Handle, Rights, SyscallError},
 };
 
+pub const FLAG_DMA: u64 = 1 << 2;
+
 pub fn create(size: usize, flags: u64) -> Result<Handle, SyscallError> {
     check(raw::syscall(
         num::VMO_CREATE,
         size as u64,
         flags,
         0,
+        0,
+        0,
+        0,
+    ))
+    .map(|v| Handle(v as u32))
+}
+
+pub fn create_dma(size: usize, resource: Handle) -> Result<Handle, SyscallError> {
+    check(raw::syscall(
+        num::VMO_CREATE,
+        size as u64,
+        FLAG_DMA,
+        resource.0 as u64,
         0,
         0,
         0,

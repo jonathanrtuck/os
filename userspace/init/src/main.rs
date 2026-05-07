@@ -8,10 +8,11 @@
 //!   Handle 3: device manifest VMO
 //!   Handle 4: UART MMIO VMO (device)
 //!   Handle 5: Virtio MMIO VMO (device)
+//!   Handle 6: DMA Resource
 //!
-//! Parses the service pack, creates a name service endpoint, and spawns
-//! all services. The name service gets the endpoint to recv on; other
-//! services get the name service endpoint + device handles as appropriate.
+//! Parses the service pack, creates a name service endpoint, spawns all
+//! services, then enters a persistent serve loop handling DMA allocation
+//! requests from drivers.
 
 #![no_std]
 #![no_main]
@@ -27,30 +28,27 @@ const _HANDLE_CODE_VMO: Handle = Handle(1);
 const HANDLE_PACK_VMO: Handle = Handle(2);
 const _HANDLE_MANIFEST_VMO: Handle = Handle(3);
 const HANDLE_UART_VMO: Handle = Handle(4);
-const _HANDLE_VIRTIO_VMO: Handle = Handle(5);
+const HANDLE_VIRTIO_VMO: Handle = Handle(5);
+const HANDLE_DMA_RESOURCE: Handle = Handle(6);
 
 const PAGE_SIZE: usize = 16384;
 const STACK_SIZE: usize = PAGE_SIZE * 4;
+const MSG_SIZE: usize = 128;
 
 const SERVICE_CODE_VA: usize = 0x0020_0000;
 const SERVICE_STACK_VA: usize = 0x1_0000_0000;
 
 const NAME_SVC: &[u8] = b"name";
 const CONSOLE_SVC: &[u8] = b"console";
+const INPUT_SVC: &[u8] = b"input";
 
-fn spawn_from_pack(pack_base: *const u8, pack_len: usize) {
+fn spawn_from_pack(pack_base: *const u8, pack_len: usize, ns_ep: Handle, init_ep: Handle) {
     let header = pack::read_header(pack_base);
 
     if !header.is_valid() {
         return;
     }
 
-    let ns_ep = match abi::ipc::endpoint_create() {
-        Ok(h) => h,
-        Err(_) => return,
-    };
-
-    // First pass: spawn the name service (entry named "name").
     for i in 0..header.count as usize {
         let entry = pack::read_entry(pack_base, i);
         let name = pack::read_name(pack_base, i);
@@ -64,7 +62,6 @@ fn spawn_from_pack(pack_base: *const u8, pack_len: usize) {
         }
     }
 
-    // Second pass: spawn all other services with appropriate handles.
     for i in 0..header.count as usize {
         let entry = pack::read_entry(pack_base, i);
         let name = pack::read_name(pack_base, i);
@@ -75,6 +72,13 @@ fn spawn_from_pack(pack_base: *const u8, pack_len: usize) {
 
         if name == CONSOLE_SVC {
             let _ = spawn_service(pack_base, &entry, pack_len, &[ns_ep, HANDLE_UART_VMO]);
+        } else if name == INPUT_SVC {
+            let _ = spawn_service(
+                pack_base,
+                &entry,
+                pack_len,
+                &[ns_ep, HANDLE_VIRTIO_VMO, init_ep],
+            );
         } else {
             let _ = spawn_service(pack_base, &entry, pack_len, &[ns_ep]);
         }
@@ -121,7 +125,6 @@ fn spawn_service(
     abi::vmo::map_into(stack_vmo, space, SERVICE_STACK_VA, stack_rw)?;
 
     let stack_top = SERVICE_STACK_VA + STACK_SIZE;
-    // handle[0] = code VMO, handle[1] = stack VMO, handle[2..] = extra handles
     let mut bootstrap_handles = [0u32; 8];
 
     bootstrap_handles[0] = code_vmo.0;
@@ -143,20 +146,72 @@ fn spawn_service(
     Ok(thread)
 }
 
+fn serve_dma_requests(init_ep: Handle) -> ! {
+    let mut msg_buf = [0u8; MSG_SIZE];
+    let mut handles_buf = [0u32; 4];
+
+    loop {
+        let recv = match abi::ipc::recv(init_ep, &mut msg_buf, &mut handles_buf) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let method = if recv.msg_len >= 4 {
+            u32::from_le_bytes(msg_buf[0..4].try_into().unwrap_or([0; 4]))
+        } else {
+            0
+        };
+
+        if method == protocol::bootstrap::DMA_ALLOC && recv.msg_len >= 8 {
+            let req = protocol::bootstrap::DmaAllocRequest::read_from(&msg_buf[4..8]);
+            let size = (req.size as usize).next_multiple_of(PAGE_SIZE);
+
+            match abi::vmo::create_dma(size, HANDLE_DMA_RESOURCE) {
+                Ok(vmo_handle) => {
+                    let reply_data = [0u8; 4];
+                    let _ = abi::ipc::reply(init_ep, recv.reply_cap, &reply_data, &[vmo_handle.0]);
+                }
+                Err(e) => {
+                    let status = e as u16;
+                    let mut reply_data = [0u8; 4];
+
+                    reply_data[0..2].copy_from_slice(&status.to_le_bytes());
+
+                    let _ = abi::ipc::reply(init_ep, recv.reply_cap, &reply_data, &[]);
+                }
+            }
+        } else {
+            let _ = abi::ipc::reply(init_ep, recv.reply_cap, &[0u8; 4], &[]);
+        }
+    }
+}
+
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.boot")]
 extern "C" fn _start() -> ! {
     let ro = Rights(Rights::READ.0 | Rights::MAP.0);
+    let ns_ep = match abi::ipc::endpoint_create() {
+        Ok(h) => h,
+        Err(_) => abi::thread::exit(0xE001),
+    };
+    let init_ep = match abi::ipc::endpoint_create() {
+        Ok(h) => h,
+        Err(_) => abi::thread::exit(0xE002),
+    };
 
     if let Ok(pack_va) = abi::vmo::map(HANDLE_PACK_VMO, 0, ro) {
         let header = pack::read_header(pack_va as *const u8);
 
         if header.is_valid() {
-            spawn_from_pack(pack_va as *const u8, header.total_size as usize);
+            spawn_from_pack(
+                pack_va as *const u8,
+                header.total_size as usize,
+                ns_ep,
+                init_ep,
+            );
         }
     }
 
-    abi::thread::exit(0);
+    serve_dma_requests(init_ep);
 }
 
 #[panic_handler]

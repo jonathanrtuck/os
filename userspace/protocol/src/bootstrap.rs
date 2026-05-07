@@ -124,6 +124,30 @@ impl DeviceEntry {
     }
 }
 
+// ── DMA allocation protocol (init serves this) ────────────
+
+pub const DMA_ALLOC: u32 = 2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DmaAllocRequest {
+    pub size: u32,
+}
+
+impl DmaAllocRequest {
+    pub const SIZE: usize = 4;
+
+    pub fn write_to(&self, buf: &mut [u8]) {
+        buf[0..4].copy_from_slice(&self.size.to_le_bytes());
+    }
+
+    #[must_use]
+    pub fn read_from(buf: &[u8]) -> Self {
+        Self {
+            size: u32::from_le_bytes(buf[0..4].try_into().unwrap()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,6 +250,18 @@ mod tests {
         assert_eq!(decoded.handle_index, 5);
         assert_eq!(decoded.irq, 49);
         assert_eq!(decoded.mmio_offset, 0x200);
+    }
+
+    #[test]
+    fn dma_alloc_round_trip() {
+        let req = DmaAllocRequest { size: 0x4000 };
+        let mut buf = [0u8; DmaAllocRequest::SIZE];
+
+        req.write_to(&mut buf);
+
+        let decoded = DmaAllocRequest::read_from(&buf);
+
+        assert_eq!(decoded, req);
     }
 
     #[test]
