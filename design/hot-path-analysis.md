@@ -127,6 +127,95 @@ lookup. Handle at 24 bytes fits in a single cache line.
 | Return               | ~20     |                       |
 | **Total**            | **~47** | Floor for any syscall |
 
+## HVF Ground Truth (2026-05-07)
+
+The numbers above are theoretical floors. Until 2026-05-07 we could only compare
+them against blended `make bench` totals — guest cycles + macOS
+Hypervisor.framework (HVF) emulation cycles fused into one number. To know which
+floors are reachable in software, we need to subtract the HVF tax.
+
+The hypervisor now stamps a per-vCPU counter page inside guest RAM (advertised
+in the DTB as `arts,hvf-timing-v1`) updated at every VMEXIT. Each slot exposes
+`guest_ticks` (time inside `hv_vcpu_run`), `host_ticks` (time in HVF dispatch +
+emulation handlers), and per-class exit counters (data abort, HVC, sysreg trap,
+WFI/WFE, vtimer). The kernel reads it via `frame::arch::aarch64::hvf_timing`,
+and every line in `make bench` output — the per-syscall benchmarks, the workload
+benchmarks, and the cycle estimates — carries a `guest / host / exits/k` split.
+The benchmarks-section columns are per-iteration ticks; the cycle-estimates
+columns are per-iteration cycles ×10 (4.5 GHz).
+
+The instrumentation needs a fence: HVF only updates the counters at exit
+boundaries, so a long bench that never traps would see a zero delta. Each
+`estimate_with_hvf` call brackets the bench with an unrecognized HVC
+(`hvf_timing::force_snapshot`) which forces the hypervisor to flush in-flight
+`mach_absolute_time` deltas into the page before the kernel reads. The fence
+costs one HVC-class exit per side.
+
+### Sanity check
+
+| Bench    | Total (cyc) | guest (cyc) | host (cyc) | exits/kop |
+| -------- | ----------- | ----------- | ---------- | --------- |
+| nop; nop | 1.1         | 1.2         | 0.0        | 0.0       |
+
+Pure guest instructions, no traps. `guest ≈ total` and `host ≈ 0` confirms the
+page is being read coherently and there is no host time-stealing during the
+bench window.
+
+### Four hot-path floors under HVF
+
+| Path                | Theoretical floor | Measured |  guest | host | Ratio (measured/floor) |
+| ------------------- | ----------------: | -------: | -----: | ---: | ---------------------: |
+| svc null trap+eret  |                50 |    146.6 |  147.1 |  0.0 |                   2.9× |
+| dispatch overhead   |                 5 |      4.1 |    4.2 |  0.0 |                   0.8× |
+| IPC null round-trip |               150 |   6957.3 | 6997.9 |  0.2 |                  46.4× |
+| fault lookup        |                15 |    147.3 |  147.5 |  0.0 |                   9.8× |
+
+All numbers in 4.5 GHz cycles per op (one decimal of precision). Sample size 500
+× 100 = 50,000 ops measured + 500 warmup, taken under HVF on M4 Pro (macOS
+Tahoe-class host, 4 vCPUs, no GPU).
+
+**Reading the table.**
+
+- `guest_ticks ≈ total` for every bench — the kernel's bench paths run entirely
+  inside `hv_vcpu_run` with no trap-out. Optimizing kernel code pays back at the
+  kernel rate; HVF is not the bottleneck.
+- `host_ticks ≈ 0` because the bench window has no MMIO (no UART writes, no
+  virtio descriptors). The 0.2 cyc/op on IPC round-trip is fence-HVC handler
+  time amortized over 50,500 ops.
+- `exits/kop ≈ 0` (1 exit per 50,000 ops = 0.02/k, rounds to zero). The fence is
+  the only exit cause during measurement.
+
+**Implication for `IPC null round-trip` (46.4× the floor).** This is the single
+biggest gap and it is _all kernel work_, not HVF tax. The 6800 cyc delta from
+the 150-cyc theoretical floor is software cost in the IPC fast path: handle
+lookups, address-space switch, reply-cap allocation, priority-inheritance
+bookkeeping, scheduler dequeue/enqueue. None of that has been profiled;
+instrumentation is the next step.
+
+**Implication for `svc null` (2.9× the floor).** Not zero, but the floor itself
+is conservative — the 50-cycle estimate covered the abstract "trap+ERET"
+round-trip but not the kernel's full trap-frame save sequence, the per-CPU
+current-thread read, the ESR decode, or the dispatch table jump. The 146.6 cyc
+figure is closer to "fully unloaded SVC" than "minimum possible."
+
+**Implication for `fault lookup` (9.8× the floor).** Worth investigating — the
+floor assumed a ~15-cycle hash lookup; the measured path includes a binary
+search over `find_mapping`, a slot-lock acquire, and a VMO table read. Two of
+three are eliminable with a per-thread cache.
+
+### Limits of this technique
+
+- One fence HVC per snapshot is the minimum perturbation but not zero. For
+  benches that already include real exits the relative cost is negligible; for
+  sub-cycle ops the fence still adds one VMEXIT to each interval.
+- The host-side timer is `mach_absolute_time` (24 MHz on Apple Silicon, same
+  source as guest `CNTVCT_EL0`). Host pauses (e.g., GCD scheduling the vCPU
+  thread off-CPU) inflate `host_ticks`, not `guest_ticks` — that is the correct
+  attribution.
+- The classification surface is what HVF reports as `HV_EXIT_REASON_*` and
+  `ESR.EC`. WFI vs WFE is collapsed into a single `exits_wfx` bucket; if finer
+  detail is needed, decode the `ISS` field and add new slots.
+
 ## Optimization Priorities (by impact)
 
 1. **IPC round-trip** — dominates all tool↔OS interaction. Every cycle saved

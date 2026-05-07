@@ -108,11 +108,17 @@ pub fn init(dtb_ptr: usize) {
                 }
             }
         }
+
         if info.ram_size != 0 {
             RAM_SIZE_VAL.store(info.ram_size, Ordering::Relaxed);
         }
+
         if info.core_count != 0 {
             CORE_COUNT.store(info.core_count, Ordering::Relaxed);
+        }
+
+        if info.hvf_timing_pa != 0 && info.hvf_timing_size != 0 {
+            super::hvf_timing::init_phys(info.hvf_timing_pa, info.hvf_timing_size);
         }
     }
 }
@@ -125,4 +131,6 @@ pub fn print_info() {
         ram_size(),
         core_count(),
     );
+
+    super::hvf_timing::print_info();
 }

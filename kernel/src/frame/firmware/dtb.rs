@@ -19,9 +19,12 @@ const HEADER_SIZE: usize = 40;
 // FDT node and property names used during scanning.
 const NODE_CPUS: &[u8] = b"cpus";
 const NODE_CPU_PREFIX: &[u8] = b"cpu@";
+const NODE_HVF_TIMING_PREFIX: &[u8] = b"hvf-timing@";
 const PROP_DEVICE_TYPE: &str = "device_type";
+const PROP_COMPATIBLE: &str = "compatible";
 const PROP_REG: &str = "reg";
 const DEVICE_TYPE_MEMORY: &str = "memory";
+const HVF_TIMING_COMPATIBLE_V1: &str = "arts,hvf-timing-v1";
 
 /// Hardware information discovered from the device tree.
 pub struct BootInfo {
@@ -31,6 +34,12 @@ pub struct BootInfo {
     pub ram_size: usize,
     /// Number of CPU cores.
     pub core_count: usize,
+    /// HVF timing counter page (paravirtual, optional). Present when running
+    /// under our macOS hypervisor; absent otherwise. The reader trusts the
+    /// magic stamped at the page so a stale or incorrect address is harmless.
+    pub hvf_timing_pa: usize,
+    /// Size of the HVF timing region in bytes. 0 when no node is present.
+    pub hvf_timing_size: usize,
 }
 
 /// Scan the FDT blob at `dtb_ptr` and extract boot-critical hardware info.
@@ -107,9 +116,13 @@ pub fn scan_blob(blob: &[u8]) -> Option<BootInfo> {
         ram_base: 0,
         ram_size: 0,
         core_count: 0,
+        hvf_timing_pa: 0,
+        hvf_timing_size: 0,
     };
     // Per-node state (reset at each depth-2 BEGIN_NODE, committed at END_NODE).
     let mut is_memory = false;
+    let mut is_hvf_timing = false;
+    let mut hvf_timing_compatible_ok = false;
     let mut reg_base: u64 = 0;
     let mut reg_size: u64 = 0;
     let mut has_reg = false;
@@ -150,6 +163,8 @@ pub fn scan_blob(blob: &[u8]) -> Option<BootInfo> {
                 if depth == 2 {
                     // Top-level node — reset accumulator.
                     is_memory = false;
+                    is_hvf_timing = starts_with(name, NODE_HVF_TIMING_PREFIX);
+                    hvf_timing_compatible_ok = false;
                     has_reg = false;
                     in_cpus = name == NODE_CPUS;
 
@@ -165,6 +180,11 @@ pub fn scan_blob(blob: &[u8]) -> Option<BootInfo> {
                     if is_memory && has_reg {
                         info.ram_base = reg_base as usize;
                         info.ram_size = reg_size as usize;
+                    }
+
+                    if is_hvf_timing && hvf_timing_compatible_ok && has_reg {
+                        info.hvf_timing_pa = reg_base as usize;
+                        info.hvf_timing_size = reg_size as usize;
                     }
 
                     if depth == cpus_depth {
@@ -197,6 +217,11 @@ pub fn scan_blob(blob: &[u8]) -> Option<BootInfo> {
 
                     if name == PROP_DEVICE_TYPE && data_eq_str(data, DEVICE_TYPE_MEMORY) {
                         is_memory = true;
+                    } else if name == PROP_COMPATIBLE
+                        && is_hvf_timing
+                        && data_eq_str(data, HVF_TIMING_COMPATIBLE_V1)
+                    {
+                        hvf_timing_compatible_ok = true;
                     } else if name == PROP_REG && data.len() >= 16 {
                         // #address-cells=2, #size-cells=2: first entry is 16 bytes.
                         reg_base = read_be_u64(data, 0);

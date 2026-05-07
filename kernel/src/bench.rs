@@ -22,11 +22,21 @@ const ITERATIONS: usize = 1000;
 const BATCH_N: usize = 500;
 const BATCH_SAMPLES: usize = 100;
 
+#[derive(Default)]
 struct BenchResult {
     name: &'static str,
     median: u64,
     p99: u64,
     threshold_mult: u64,
+    /// HVF guest ticks per op (24 MHz), captured around the bench. Zero
+    /// when HVF timing is not advertised.
+    guest_ticks_per_op: u64,
+    /// HVF host ticks per op. Zero when HVF timing is not advertised.
+    host_ticks_per_op: u64,
+    /// VMEXITs per 1000 ops, ×10 for one decimal of precision. The single
+    /// fence HVC per snapshot interval contributes ~1/(WARMUP+ITERATIONS)
+    /// per op, well below 0.1/k for the run() bench shape.
+    exits_per_kop_x10: u64,
 }
 
 impl BenchResult {
@@ -35,16 +45,188 @@ impl BenchResult {
     }
 }
 
+/// Capture an HVF timing delta around a `bench_*` helper invocation that
+/// reports a `BenchResult`. Per-op fields are filled in from the captured
+/// deltas; on hosts without HVF timing they stay zero.
+fn capture_hvf_into(result: &mut BenchResult, total_ops: usize, hvf: HvfDelta) {
+    let ops = total_ops as u64;
+
+    if ops == 0 || !arch::hvf_timing::enabled() {
+        return;
+    }
+
+    result.guest_ticks_per_op = hvf.guest_ticks / ops;
+    result.host_ticks_per_op = hvf.host_ticks / ops;
+    result.exits_per_kop_x10 = hvf.exits_total * 10_000 / ops;
+}
+
+/// Run a `bench_*` helper and overlay HVF per-op columns onto its result.
+/// `total_ops` is the number of "iterations" the helper executes —
+/// matching the unit reported by `BenchResult::median` (per-syscall for
+/// `bench_syscall`, per-create-pair for `bench_create_close`).
+fn bench_with_hvf<F: FnOnce() -> BenchResult>(total_ops: usize, do_bench: F) -> BenchResult {
+    let (mut r, hvf) = capture_hvf(do_bench);
+
+    capture_hvf_into(&mut r, total_ops, hvf);
+    r
+}
+
+/// Snapshot a delta around a closure. Issues fence HVCs to make HVF flush
+/// its accumulated counters into the shared page before each read.
+fn capture_hvf<R, F: FnOnce() -> R>(do_bench: F) -> (R, HvfDelta) {
+    arch::hvf_timing::force_snapshot();
+
+    let start = arch::hvf_timing::read(0);
+    let result = do_bench();
+
+    arch::hvf_timing::force_snapshot();
+
+    let end = arch::hvf_timing::read(0);
+    let d = end.diff(&start);
+
+    (
+        result,
+        HvfDelta {
+            guest_ticks: d.guest_ticks,
+            host_ticks: d.host_ticks,
+            exits_total: d.exits_total,
+        },
+    )
+}
+
+#[derive(Clone, Copy, Default)]
+struct HvfDelta {
+    guest_ticks: u64,
+    host_ticks: u64,
+    exits_total: u64,
+}
+
 struct CycleEstimate {
     name: &'static str,
     cycles_x10: u64,
     theoretical: u64,
+    /// HVF guest cycles per op, ×10. Zero when HVF timing is not advertised.
+    guest_cycles_x10: u64,
+    /// HVF host cycles per op, ×10. Zero when HVF timing is not advertised.
+    host_cycles_x10: u64,
+    /// VMEXITs per 1000 ops. Zero when HVF timing is not advertised. Scaling
+    /// to 1000 because most syscalls do not VMEXIT — exits/op rounds to zero.
+    exits_per_kop: u64,
 }
 
 fn ticks_to_cycles_x10(total_ticks: u64, batch_size: usize) -> u64 {
     // 1 tick at 24 MHz = 187.5 CPU cycles at 4.5 GHz.
     // Returns cycles × 10 for one decimal place of precision.
     total_ticks * 1875 / batch_size as u64
+}
+
+/// Total ops per `bench_batched_*` invocation: BATCH_N warmup +
+/// BATCH_SAMPLES outer × BATCH_N inner. Used to scale HVF deltas captured
+/// around the entire invocation into per-op cycles.
+const TOTAL_BATCHED_OPS: usize = BATCH_N + BATCH_N * BATCH_SAMPLES;
+
+/// Run an op closure in the standard batched-measurement shape: BATCH_N
+/// warmup iterations, then BATCH_SAMPLES outer × BATCH_N inner. Returns the
+/// median outer-iteration tick count (i.e., ticks for BATCH_N invocations).
+fn run_batched_op<F: FnMut()>(mut op: F) -> u64 {
+    for _ in 0..BATCH_N {
+        op();
+    }
+
+    let mut samples = [0u64; BATCH_SAMPLES];
+
+    for s in &mut samples {
+        arch::isb();
+
+        let start = arch::read_cycle_counter();
+
+        for _ in 0..BATCH_N {
+            op();
+        }
+
+        arch::isb();
+
+        *s = arch::read_cycle_counter().wrapping_sub(start);
+    }
+
+    samples.sort_unstable();
+
+    samples[BATCH_SAMPLES / 2]
+}
+
+/// Capture an HVF timing delta around `do_bench`. Returns a `CycleEstimate`
+/// with HVF columns filled in. `total_ops` is the number of operations the
+/// closure executes — used to scale the captured deltas into per-op cycles.
+/// On hosts without HVF timing the HVF fields are zero.
+///
+/// The fence HVC at each boundary (`force_snapshot`) is what makes the
+/// reading meaningful: HVF only updates per-vCPU `guest_ticks` at exit
+/// boundaries, so without the fence a bench that never VMEXITs would
+/// produce a zero delta even after millions of iterations. The fence
+/// itself contributes one HVC-class exit to each side of the interval.
+fn estimate_with_hvf<F: FnOnce() -> u64>(
+    name: &'static str,
+    theoretical: u64,
+    cycles_x10_per_op_div: usize,
+    total_ops: usize,
+    do_bench: F,
+) -> CycleEstimate {
+    arch::hvf_timing::force_snapshot();
+    let start = arch::hvf_timing::read(0);
+    let median_ticks = do_bench();
+    arch::hvf_timing::force_snapshot();
+    let end = arch::hvf_timing::read(0);
+    let delta = end.diff(&start);
+    let ops = total_ops as u64;
+    let (guest_x10, host_x10, exits_kop) = if ops == 0 || !arch::hvf_timing::enabled() {
+        (0, 0, 0)
+    } else {
+        (
+            delta.guest_ticks * 1875 / ops,
+            delta.host_ticks * 1875 / ops,
+            delta.exits_total * 1000 / ops,
+        )
+    };
+
+    CycleEstimate {
+        name,
+        cycles_x10: ticks_to_cycles_x10(median_ticks, cycles_x10_per_op_div),
+        theoretical,
+        guest_cycles_x10: guest_x10,
+        host_cycles_x10: host_x10,
+        exits_per_kop: exits_kop,
+    }
+}
+
+/// Print a `BenchResult` row, with HVF columns if the counter page is
+/// advertised. The HVF columns are per-iteration ticks (24 MHz, divide by
+/// the host's tick rate to get cycles) — guest, host, and exits/kop ×10.
+/// Iteration units are bench-helper specific:
+///   `bench_syscall`        → 1 syscall
+///   `bench_create_close`   → 1 create + 1 close pair
+///   workload helpers       → 1 workload run
+fn print_bench_row(r: &BenchResult, status: &str, hvf_on: bool) {
+    if hvf_on {
+        crate::println!(
+            "  {:24} median {:>6}  P99 {:>6}  [{}]   guest {:>6}  host {:>6}  exits {:>3}.{}/k",
+            r.name,
+            r.median,
+            r.p99,
+            status,
+            r.guest_ticks_per_op,
+            r.host_ticks_per_op,
+            r.exits_per_kop_x10 / 10,
+            r.exits_per_kop_x10 % 10,
+        );
+    } else {
+        crate::println!(
+            "  {:30} median {:>6}  P99 {:>6}  [{}]",
+            r.name,
+            r.median,
+            r.p99,
+            status,
+        );
+    }
 }
 
 fn stats(samples: &mut [u64; ITERATIONS]) -> (u64, u64) {
@@ -88,6 +270,7 @@ fn bench_syscall(
         median,
         p99,
         threshold_mult: threshold * 10,
+        ..Default::default()
     }
 }
 
@@ -130,6 +313,7 @@ fn bench_create_close(
         median,
         p99,
         threshold_mult: threshold * 10,
+        ..Default::default()
     }
 }
 
@@ -249,7 +433,7 @@ pub fn run() {
     let mut results = alloc::vec::Vec::new();
 
     // ── Trap overhead ─────────────────────────────────────────────
-    {
+    let svc_null_result = bench_with_hvf(WARMUP + ITERATIONS, || {
         for _ in 0..WARMUP {
             let _ = arch::svc_null();
         }
@@ -269,74 +453,88 @@ pub fn run() {
 
         let (median, p99) = stats(&mut samples);
 
-        results.push(BenchResult {
+        BenchResult {
             name: "svc null (trap+eret)",
             median,
             p99,
             threshold_mult: 2000,
-        });
-    }
+            ..Default::default()
+        }
+    });
+
+    results.push(svc_null_result);
 
     // ── Dispatch overhead (no SVC) ────────────────────────────────
-    results.push(bench_syscall(
-        current,
-        "invalid syscall (dispatch)",
-        200,
-        255,
-        [0; 6],
-    ));
-
+    results.push(bench_with_hvf(WARMUP + ITERATIONS, || {
+        bench_syscall(current, "invalid syscall (dispatch)", 200, 255, [0; 6])
+    }));
     // ── Object creation + close ───────────────────────────────────
-    results.push(bench_create_close(
-        current,
-        "vmo_create+close",
-        400,
-        num::VMO_CREATE,
-        [config::PAGE_SIZE as u64, 0, 0, 0, 0, 0],
-    ));
-    results.push(bench_create_close(
-        current,
-        "event_create+close",
-        400,
-        num::EVENT_CREATE,
-        [0; 6],
-    ));
-    results.push(bench_create_close(
-        current,
-        "endpoint_create+close",
-        400,
-        num::ENDPOINT_CREATE,
-        [0; 6],
-    ));
+    // Each iteration runs two syscalls (create + close), so total_ops
+    // doubles. The cycles_x10 column reports the create-only median
+    // (close runs outside the cycle counter window); the HVF columns
+    // span both — that is the actual per-pair cost.
+    results.push(bench_with_hvf(2 * (WARMUP + ITERATIONS), || {
+        bench_create_close(
+            current,
+            "vmo_create+close",
+            400,
+            num::VMO_CREATE,
+            [config::PAGE_SIZE as u64, 0, 0, 0, 0, 0],
+        )
+    }));
+    results.push(bench_with_hvf(2 * (WARMUP + ITERATIONS), || {
+        bench_create_close(
+            current,
+            "event_create+close",
+            400,
+            num::EVENT_CREATE,
+            [0; 6],
+        )
+    }));
+    results.push(bench_with_hvf(2 * (WARMUP + ITERATIONS), || {
+        bench_create_close(
+            current,
+            "endpoint_create+close",
+            400,
+            num::ENDPOINT_CREATE,
+            [0; 6],
+        )
+    }));
 
     // ── Event operations ──────────────────────────────────────────
     let (_, evt_h) = crate::syscall::dispatch(current, 0, num::EVENT_CREATE, &[0; 6]);
 
-    results.push(bench_syscall(
-        current,
-        "event_signal",
-        300,
-        num::EVENT_SIGNAL,
-        [evt_h, 0x1, 0, 0, 0, 0],
-    ));
-    results.push(bench_syscall(
-        current,
-        "event_clear",
-        300,
-        num::EVENT_CLEAR,
-        [evt_h, 0x1, 0, 0, 0, 0],
-    ));
+    results.push(bench_with_hvf(WARMUP + ITERATIONS, || {
+        bench_syscall(
+            current,
+            "event_signal",
+            300,
+            num::EVENT_SIGNAL,
+            [evt_h, 0x1, 0, 0, 0, 0],
+        )
+    }));
+    results.push(bench_with_hvf(WARMUP + ITERATIONS, || {
+        bench_syscall(
+            current,
+            "event_clear",
+            300,
+            num::EVENT_CLEAR,
+            [evt_h, 0x1, 0, 0, 0, 0],
+        )
+    }));
 
     // Signal bits so wait returns immediately.
     crate::syscall::dispatch(current, 0, num::EVENT_SIGNAL, &[evt_h, 0xFF, 0, 0, 0, 0]);
 
-    results.push(bench_syscall(
-        current,
-        "event_wait (signaled)",
-        300,
-        num::EVENT_WAIT,
-        [evt_h, 0xFF, 1, 0, 0, 0],
-    ));
+    results.push(bench_with_hvf(WARMUP + ITERATIONS, || {
+        bench_syscall(
+            current,
+            "event_wait (signaled)",
+            300,
+            num::EVENT_WAIT,
+            [evt_h, 0xFF, 1, 0, 0, 0],
+        )
+    }));
 
     crate::syscall::dispatch(current, 0, num::HANDLE_CLOSE, &[evt_h, 0, 0, 0, 0, 0]);
 
@@ -348,16 +546,18 @@ pub fn run() {
         &[config::PAGE_SIZE as u64, 0, 0, 0, 0, 0],
     );
 
-    results.push(bench_syscall(
-        current,
-        "handle_info",
-        100,
-        num::HANDLE_INFO,
-        [vmo_h, 0, 0, 0, 0, 0],
-    ));
+    results.push(bench_with_hvf(WARMUP + ITERATIONS, || {
+        bench_syscall(
+            current,
+            "handle_info",
+            100,
+            num::HANDLE_INFO,
+            [vmo_h, 0, 0, 0, 0, 0],
+        )
+    }));
 
     // handle_dup + close (paired)
-    {
+    let handle_dup_result = bench_with_hvf(2 * (WARMUP + ITERATIONS), || {
         for _ in 0..WARMUP {
             let (err, dup) = crate::syscall::dispatch(
                 current,
@@ -395,16 +595,19 @@ pub fn run() {
 
         let (median, p99) = stats(&mut samples);
 
-        results.push(BenchResult {
+        BenchResult {
             name: "handle_dup",
             median,
             p99,
             threshold_mult: 2000,
-        });
-    }
+            ..Default::default()
+        }
+    });
+
+    results.push(handle_dup_result);
 
     // ── VMO operations ────────────────────────────────────────────
-    {
+    let vmo_snap_result = bench_with_hvf(2 * (WARMUP + ITERATIONS), || {
         for _ in 0..WARMUP {
             let (err, snap) =
                 crate::syscall::dispatch(current, 0, num::VMO_SNAPSHOT, &[vmo_h, 0, 0, 0, 0, 0]);
@@ -434,34 +637,30 @@ pub fn run() {
 
         let (median, p99) = stats(&mut samples);
 
-        results.push(BenchResult {
+        BenchResult {
             name: "vmo_snapshot+close",
             median,
             p99,
             threshold_mult: 8000,
-        });
-    }
+            ..Default::default()
+        }
+    });
+
+    results.push(vmo_snap_result);
 
     crate::syscall::dispatch(current, 0, num::HANDLE_CLOSE, &[vmo_h, 0, 0, 0, 0, 0]);
 
     // ── Info syscalls ─────────────────────────────────────────────
-    results.push(bench_syscall(
-        current,
-        "clock_read",
-        50,
-        num::CLOCK_READ,
-        [0; 6],
-    ));
-    results.push(bench_syscall(
-        current,
-        "system_info",
-        100,
-        num::SYSTEM_INFO,
-        [0; 6],
-    ));
+    results.push(bench_with_hvf(WARMUP + ITERATIONS, || {
+        bench_syscall(current, "clock_read", 50, num::CLOCK_READ, [0; 6])
+    }));
+    results.push(bench_with_hvf(WARMUP + ITERATIONS, || {
+        bench_syscall(current, "system_info", 100, num::SYSTEM_INFO, [0; 6])
+    }));
 
     // ── Print results ─────────────────────────────────────────────
     let mut all_pass = true;
+    let hvf_on = arch::hvf_timing::enabled();
 
     for r in &results {
         let status = if r.passed() {
@@ -471,35 +670,31 @@ pub fn run() {
             "FAIL"
         };
 
-        crate::println!(
-            "  {:30} median {:>6}  P99 {:>6}  [{}]",
-            r.name,
-            r.median,
-            r.p99,
-            status,
-        );
+        print_bench_row(r, status, hvf_on);
     }
 
     // ── Workload benchmarks ─────────────────────────────────────────
     crate::println!("--- workloads ---");
 
-    results.push(bench_document_editing(current));
-    results.push(bench_ipc_storm(current));
-    results.push(bench_object_lifecycle_churn(current));
+    results.push(bench_with_hvf(WARMUP + ITERATIONS, || {
+        bench_document_editing(current)
+    }));
+    results.push(bench_with_hvf(WARMUP + ITERATIONS, || {
+        bench_ipc_storm(current)
+    }));
+    results.push(bench_with_hvf(WARMUP + ITERATIONS, || {
+        bench_object_lifecycle_churn(current)
+    }));
 
     for r in results.iter().skip(results.len() - 3) {
-        crate::println!(
-            "  {:30} median {:>6}  P99 {:>6}  [{}]",
-            r.name,
-            r.median,
-            r.p99,
-            if r.passed() {
-                "PASS"
-            } else {
-                all_pass = false;
-                "FAIL"
-            },
-        );
+        let status = if r.passed() {
+            "PASS"
+        } else {
+            all_pass = false;
+            "FAIL"
+        };
+
+        print_bench_row(r, status, hvf_on);
     }
 
     if all_pass {
@@ -560,6 +755,7 @@ fn bench_document_editing(current: ThreadId) -> BenchResult {
         median,
         p99,
         threshold_mult: 50000,
+        ..Default::default()
     }
 }
 
@@ -607,6 +803,7 @@ fn bench_ipc_storm(current: ThreadId) -> BenchResult {
         median,
         p99,
         threshold_mult: 100000,
+        ..Default::default()
     }
 }
 
@@ -672,6 +869,7 @@ fn bench_object_lifecycle_churn(current: ThreadId) -> BenchResult {
         median,
         p99,
         threshold_mult: 100000,
+        ..Default::default()
     }
 }
 
@@ -824,6 +1022,7 @@ fn bench_ipc_null_round_trip(env: &IpcBenchEnv, client: ThreadId) -> u64 {
     }
 
     samples.sort_unstable();
+
     samples[BATCH_SAMPLES / 2]
 }
 
@@ -836,14 +1035,15 @@ fn ipc_null_iteration(env: &IpcBenchEnv, client: ThreadId) {
     // and switch_away parks into the idle loop — never returning to the
     // bench code.
     state::schedulers().remove(client);
+
     if let Some(mut t) = state::threads().write(client.0) {
         t.set_state(crate::thread::ThreadRunState::Ready);
     }
+
     state::schedulers()
         .core(0)
         .lock()
         .enqueue(client, Priority::Medium);
-
     state::endpoints()
         .write(env.ep_obj_id)
         .unwrap()
@@ -870,7 +1070,6 @@ fn ipc_null_iteration(env: &IpcBenchEnv, client: ThreadId) {
     force_running(env.server);
 
     let _ = crate::syscall::dispatch(env.server, 0, num::RECV, &[env.server_ep_h, 0, 0, 0, 0, 0]);
-
     // The reply_cap is normally written into the server's recv_state.reply_cap_out
     // userspace buffer. The bench has no userspace pointer (passes 0), so reach
     // into the endpoint's active_replies and pull the cap out directly. Without
@@ -958,6 +1157,7 @@ fn bench_fault_lookup(current: ThreadId) -> u64 {
     crate::syscall::dispatch(current, 0, num::HANDLE_CLOSE, &[vmo_h, 0, 0, 0, 0, 0]);
 
     samples.sort_unstable();
+
     samples[BATCH_SAMPLES / 2]
 }
 
@@ -970,58 +1170,60 @@ fn run_cycle_estimates(current: ThreadId) {
 
     let mut estimates: alloc::vec::Vec<CycleEstimate> = alloc::vec::Vec::new();
 
+    // ── Empty nop microbench (HVF instrumentation sanity check) ──
+    //
+    // A pair of nops: pure guest cycles, no traps, no MMIO. With the HVF
+    // instrumentation working correctly we expect:
+    //   guest_cycles ≈ measured_cycles
+    //   host_cycles  ≈ 0
+    //   exits        ≈ 0/k (only the fence HVCs, amortized)
+    //
+    // If guest_cycles diverges from measured_cycles, the host is "stealing"
+    // time (timer interrupts, hv_vcpu_run scheduling jitter). If exits is
+    // non-zero, we're picking up unexpected VMEXITs in the bench window.
+    estimates.push(estimate_with_hvf(
+        "nop;nop (sanity)",
+        2,
+        BATCH_N,
+        TOTAL_BATCHED_OPS,
+        || run_batched_op(arch::nop_pair),
+    ));
+
     // ── SVC null (real trap + ERET round-trip) ───────────────────
-    {
-        for _ in 0..BATCH_N {
-            let _ = arch::svc_null();
-        }
-
-        let mut samples = [0u64; BATCH_SAMPLES];
-
-        for s in &mut samples {
-            arch::isb();
-
-            let start = arch::read_cycle_counter();
-
-            for _ in 0..BATCH_N {
+    estimates.push(estimate_with_hvf(
+        "svc null (trap+eret)",
+        50,
+        BATCH_N,
+        TOTAL_BATCHED_OPS,
+        || {
+            run_batched_op(|| {
                 let _ = arch::svc_null();
-            }
-
-            arch::isb();
-
-            *s = arch::read_cycle_counter().wrapping_sub(start);
-        }
-
-        samples.sort_unstable();
-        estimates.push(CycleEstimate {
-            name: "svc null (trap+eret)",
-            cycles_x10: ticks_to_cycles_x10(samples[BATCH_SAMPLES / 2], BATCH_N),
-            theoretical: 50,
-        });
-    }
+            })
+        },
+    ));
 
     // ── Dispatch-only syscalls ───────────────────────────────────
-    estimates.push(CycleEstimate {
-        name: "dispatch overhead",
-        cycles_x10: ticks_to_cycles_x10(bench_batched_dispatch(current, 255, [0; 6]), BATCH_N),
-        theoretical: 5,
-    });
-    estimates.push(CycleEstimate {
-        name: "clock_read",
-        cycles_x10: ticks_to_cycles_x10(
-            bench_batched_dispatch(current, num::CLOCK_READ, [0; 6]),
-            BATCH_N,
-        ),
-        theoretical: 10,
-    });
-    estimates.push(CycleEstimate {
-        name: "system_info",
-        cycles_x10: ticks_to_cycles_x10(
-            bench_batched_dispatch(current, num::SYSTEM_INFO, [0; 6]),
-            BATCH_N,
-        ),
-        theoretical: 10,
-    });
+    estimates.push(estimate_with_hvf(
+        "dispatch overhead",
+        5,
+        BATCH_N,
+        TOTAL_BATCHED_OPS,
+        || bench_batched_dispatch(current, 255, [0; 6]),
+    ));
+    estimates.push(estimate_with_hvf(
+        "clock_read",
+        10,
+        BATCH_N,
+        TOTAL_BATCHED_OPS,
+        || bench_batched_dispatch(current, num::CLOCK_READ, [0; 6]),
+    ));
+    estimates.push(estimate_with_hvf(
+        "system_info",
+        10,
+        BATCH_N,
+        TOTAL_BATCHED_OPS,
+        || bench_batched_dispatch(current, num::SYSTEM_INFO, [0; 6]),
+    ));
 
     // ── Handle operations (need a live VMO) ──────────────────────
     let (_, vmo_h) = crate::syscall::dispatch(
@@ -1031,37 +1233,21 @@ fn run_cycle_estimates(current: ThreadId) {
         &[config::PAGE_SIZE as u64, 0, 0, 0, 0, 0],
     );
 
-    estimates.push(CycleEstimate {
-        name: "handle_info",
-        cycles_x10: ticks_to_cycles_x10(
-            bench_batched_dispatch(current, num::HANDLE_INFO, [vmo_h, 0, 0, 0, 0, 0]),
-            BATCH_N,
-        ),
-        theoretical: 15,
-    });
+    estimates.push(estimate_with_hvf(
+        "handle_info",
+        15,
+        BATCH_N,
+        TOTAL_BATCHED_OPS,
+        || bench_batched_dispatch(current, num::HANDLE_INFO, [vmo_h, 0, 0, 0, 0, 0]),
+    ));
 
-    {
-        for _ in 0..BATCH_N {
-            let (err, dup) = crate::syscall::dispatch(
-                current,
-                0,
-                num::HANDLE_DUP,
-                &[vmo_h, Rights::ALL.0 as u64, 0, 0, 0, 0],
-            );
-
-            if err == 0 {
-                crate::syscall::dispatch(current, 0, num::HANDLE_CLOSE, &[dup, 0, 0, 0, 0, 0]);
-            }
-        }
-
-        let mut samples = [0u64; BATCH_SAMPLES];
-
-        for s in &mut samples {
-            arch::isb();
-
-            let start = arch::read_cycle_counter();
-
-            for _ in 0..BATCH_N {
+    estimates.push(estimate_with_hvf(
+        "handle_dup+close",
+        30,
+        BATCH_N,
+        TOTAL_BATCHED_OPS,
+        || {
+            run_batched_op(|| {
                 let (err, dup) = crate::syscall::dispatch(
                     current,
                     0,
@@ -1072,40 +1258,18 @@ fn run_cycle_estimates(current: ThreadId) {
                 if err == 0 {
                     crate::syscall::dispatch(current, 0, num::HANDLE_CLOSE, &[dup, 0, 0, 0, 0, 0]);
                 }
-            }
-
-            arch::isb();
-
-            *s = arch::read_cycle_counter().wrapping_sub(start);
-        }
-
-        samples.sort_unstable();
-        estimates.push(CycleEstimate {
-            name: "handle_dup+close",
-            cycles_x10: ticks_to_cycles_x10(samples[BATCH_SAMPLES / 2], BATCH_N),
-            theoretical: 30,
-        });
-    }
+            })
+        },
+    ));
 
     // ── VMO snapshot+close ───────────────────────────────────────
-    {
-        for _ in 0..BATCH_N {
-            let (err, snap) =
-                crate::syscall::dispatch(current, 0, num::VMO_SNAPSHOT, &[vmo_h, 0, 0, 0, 0, 0]);
-
-            if err == 0 {
-                crate::syscall::dispatch(current, 0, num::HANDLE_CLOSE, &[snap, 0, 0, 0, 0, 0]);
-            }
-        }
-
-        let mut samples = [0u64; BATCH_SAMPLES];
-
-        for s in &mut samples {
-            arch::isb();
-
-            let start = arch::read_cycle_counter();
-
-            for _ in 0..BATCH_N {
+    estimates.push(estimate_with_hvf(
+        "vmo_snapshot+close",
+        60,
+        BATCH_N,
+        TOTAL_BATCHED_OPS,
+        || {
+            run_batched_op(|| {
                 let (err, snap) = crate::syscall::dispatch(
                     current,
                     0,
@@ -1116,107 +1280,98 @@ fn run_cycle_estimates(current: ThreadId) {
                 if err == 0 {
                     crate::syscall::dispatch(current, 0, num::HANDLE_CLOSE, &[snap, 0, 0, 0, 0, 0]);
                 }
-            }
-
-            arch::isb();
-
-            *s = arch::read_cycle_counter().wrapping_sub(start);
-        }
-
-        samples.sort_unstable();
-        estimates.push(CycleEstimate {
-            name: "vmo_snapshot+close",
-            cycles_x10: ticks_to_cycles_x10(samples[BATCH_SAMPLES / 2], BATCH_N),
-            theoretical: 60,
-        });
-    }
+            })
+        },
+    ));
 
     crate::syscall::dispatch(current, 0, num::HANDLE_CLOSE, &[vmo_h, 0, 0, 0, 0, 0]);
 
     // ── Event operations ─────────────────────────────────────────
     let (_, evt_h) = crate::syscall::dispatch(current, 0, num::EVENT_CREATE, &[0; 6]);
 
-    estimates.push(CycleEstimate {
-        name: "event_signal",
-        cycles_x10: ticks_to_cycles_x10(
-            bench_batched_dispatch(current, num::EVENT_SIGNAL, [evt_h, 0x1, 0, 0, 0, 0]),
-            BATCH_N,
-        ),
-        theoretical: 15,
-    });
-    estimates.push(CycleEstimate {
-        name: "event_clear",
-        cycles_x10: ticks_to_cycles_x10(
-            bench_batched_dispatch(current, num::EVENT_CLEAR, [evt_h, 0x1, 0, 0, 0, 0]),
-            BATCH_N,
-        ),
-        theoretical: 15,
-    });
+    estimates.push(estimate_with_hvf(
+        "event_signal",
+        15,
+        BATCH_N,
+        TOTAL_BATCHED_OPS,
+        || bench_batched_dispatch(current, num::EVENT_SIGNAL, [evt_h, 0x1, 0, 0, 0, 0]),
+    ));
+    estimates.push(estimate_with_hvf(
+        "event_clear",
+        15,
+        BATCH_N,
+        TOTAL_BATCHED_OPS,
+        || bench_batched_dispatch(current, num::EVENT_CLEAR, [evt_h, 0x1, 0, 0, 0, 0]),
+    ));
 
     crate::syscall::dispatch(current, 0, num::EVENT_SIGNAL, &[evt_h, 0xFF, 0, 0, 0, 0]);
 
-    estimates.push(CycleEstimate {
-        name: "event_wait (signaled)",
-        cycles_x10: ticks_to_cycles_x10(
-            bench_batched_dispatch(current, num::EVENT_WAIT, [evt_h, 0xFF, 1, 0, 0, 0]),
-            BATCH_N,
-        ),
-        theoretical: 15,
-    });
+    estimates.push(estimate_with_hvf(
+        "event_wait (signaled)",
+        15,
+        BATCH_N,
+        TOTAL_BATCHED_OPS,
+        || bench_batched_dispatch(current, num::EVENT_WAIT, [evt_h, 0xFF, 1, 0, 0, 0]),
+    ));
 
     crate::syscall::dispatch(current, 0, num::HANDLE_CLOSE, &[evt_h, 0, 0, 0, 0, 0]);
 
     // ── Object create+close pairs ────────────────────────────────
-    estimates.push(CycleEstimate {
-        name: "vmo create+close",
-        cycles_x10: ticks_to_cycles_x10(
+    estimates.push(estimate_with_hvf(
+        "vmo create+close",
+        50,
+        BATCH_N,
+        TOTAL_BATCHED_OPS,
+        || {
             bench_batched_create_close(
                 current,
                 num::VMO_CREATE,
                 [config::PAGE_SIZE as u64, 0, 0, 0, 0, 0],
-            ),
-            BATCH_N,
-        ),
-        theoretical: 50,
-    });
-    estimates.push(CycleEstimate {
-        name: "event create+close",
-        cycles_x10: ticks_to_cycles_x10(
-            bench_batched_create_close(current, num::EVENT_CREATE, [0; 6]),
-            BATCH_N,
-        ),
-        theoretical: 50,
-    });
-    estimates.push(CycleEstimate {
-        name: "endpoint create+close",
-        cycles_x10: ticks_to_cycles_x10(
-            bench_batched_create_close(current, num::ENDPOINT_CREATE, [0; 6]),
-            BATCH_N,
-        ),
-        theoretical: 50,
-    });
+            )
+        },
+    ));
+    estimates.push(estimate_with_hvf(
+        "event create+close",
+        50,
+        BATCH_N,
+        TOTAL_BATCHED_OPS,
+        || bench_batched_create_close(current, num::EVENT_CREATE, [0; 6]),
+    ));
+    estimates.push(estimate_with_hvf(
+        "endpoint create+close",
+        50,
+        BATCH_N,
+        TOTAL_BATCHED_OPS,
+        || bench_batched_create_close(current, num::ENDPOINT_CREATE, [0; 6]),
+    ));
 
     // ── IPC round-trip ──────────────────────────────────────────
+
     let ipc_env = setup_ipc_bench(current);
 
-    estimates.push(CycleEstimate {
-        name: "IPC null round-trip",
-        cycles_x10: ticks_to_cycles_x10(bench_ipc_null_round_trip(&ipc_env, current), BATCH_N),
-        theoretical: 150,
-    });
+    estimates.push(estimate_with_hvf(
+        "IPC null round-trip",
+        150,
+        BATCH_N,
+        TOTAL_BATCHED_OPS,
+        || bench_ipc_null_round_trip(&ipc_env, current),
+    ));
 
     teardown_ipc_bench(&ipc_env, current);
 
     // ── Page fault kernel path ──────────────────────────────────
-    estimates.push(CycleEstimate {
-        name: "fault lookup+page_at",
-        cycles_x10: ticks_to_cycles_x10(bench_fault_lookup(current), BATCH_N),
-        theoretical: 15,
-    });
+    estimates.push(estimate_with_hvf(
+        "fault lookup+page_at",
+        15,
+        BATCH_N,
+        BATCH_N + BATCH_N * BATCH_SAMPLES,
+        || bench_fault_lookup(current),
+    ));
 
     // ── Print results ────────────────────────────────────────────
     let mut within_2x = 0u32;
     let mut total_rated = 0u32;
+    let hvf_on = arch::hvf_timing::enabled();
 
     for e in &estimates {
         let ratio_x10 = e.cycles_x10.checked_div(e.theoretical).unwrap_or(0);
@@ -1229,15 +1384,35 @@ fn run_cycle_estimates(current: ThreadId) {
             }
         }
 
-        crate::println!(
-            "  {:30} {:>5}.{} cyc  (floor ~{:>3})  {}.{}x",
-            e.name,
-            e.cycles_x10 / 10,
-            e.cycles_x10 % 10,
-            e.theoretical,
-            ratio_x10 / 10,
-            ratio_x10 % 10,
-        );
+        if hvf_on {
+            // Per-op breakdown: total cycles, guest cycles inside hv_vcpu_run,
+            // host cycles in HVF handlers, exit count scaled to per-1000-ops.
+            crate::println!(
+                "  {:24} {:>5}.{} cyc  (floor ~{:>3})  {}.{}x  guest {:>5}.{}  host {:>5}.{}  exits {:>3}.{}/k",
+                e.name,
+                e.cycles_x10 / 10,
+                e.cycles_x10 % 10,
+                e.theoretical,
+                ratio_x10 / 10,
+                ratio_x10 % 10,
+                e.guest_cycles_x10 / 10,
+                e.guest_cycles_x10 % 10,
+                e.host_cycles_x10 / 10,
+                e.host_cycles_x10 % 10,
+                e.exits_per_kop / 10,
+                e.exits_per_kop % 10,
+            );
+        } else {
+            crate::println!(
+                "  {:30} {:>5}.{} cyc  (floor ~{:>3})  {}.{}x",
+                e.name,
+                e.cycles_x10 / 10,
+                e.cycles_x10 % 10,
+                e.theoretical,
+                ratio_x10 / 10,
+                ratio_x10 % 10,
+            );
+        }
     }
 
     crate::println!(

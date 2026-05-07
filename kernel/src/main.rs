@@ -46,6 +46,10 @@ extern "C" fn kernel_main_upper() -> ! {
     arch::cpu::reinit_percpu_bsp();
     arch::exception::register_handlers();
     arch::serial::enable_lock();
+    // Switch the HVF timing reader from physical to upper-half VA before
+    // anything reads it. After MMU enable, raw PA loads through TTBR1 are
+    // not mapped — print_info would dereference a stale PA otherwise.
+    arch::hvf_timing::reinit_to_va();
     arch::platform::print_info();
     arch::entropy::init();
     arch::interrupts::init();

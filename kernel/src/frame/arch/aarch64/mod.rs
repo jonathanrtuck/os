@@ -14,6 +14,7 @@ pub use cpu::{init_percpu_bsp, set_kernel_ptr};
 pub mod entropy;
 pub mod exception;
 pub mod gic;
+pub mod hvf_timing;
 pub mod page_alloc;
 pub mod page_table;
 pub mod sync;
@@ -83,6 +84,20 @@ pub fn halt() {
 #[inline(always)]
 pub fn read_cycle_counter() -> u64 {
     sysreg::cntvct_el0()
+}
+
+/// Pair of `nop` hint instructions. Used by the HVF timing sanity bench
+/// to measure pure guest cycles with no traps or MMIO. Lives here (not in
+/// `bench.rs`) because the framekernel rule forbids `unsafe` outside the
+/// `frame/` module.
+#[inline(always)]
+pub fn nop_pair() {
+    // SAFETY: `nop` is a hint instruction with no architectural side
+    // effects on registers, memory, or the exception state. `nomem`
+    // promises LLVM no memory access, which is true for nop.
+    unsafe {
+        core::arch::asm!("nop", "nop", options(nomem, nostack));
+    }
 }
 
 /// Instruction Synchronization Barrier — serializes the pipeline.
