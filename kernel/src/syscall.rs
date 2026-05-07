@@ -1414,9 +1414,11 @@ fn sys_call(
 
     profile::stamp(slot::IPC_EP_LOOKUP);
 
-    {
-        let ep = state::endpoints()
-            .read(ep_obj_id)
+    // Batch: check peer_closed + is_full + pop_recv_waiter in one locked
+    // section (was 2 separate endpoint accesses: 1 read + 1 write).
+    let server_tid = {
+        let mut ep = state::endpoints()
+            .write(ep_obj_id)
             .ok_or(SyscallError::InvalidHandle)?;
 
         if ep.is_peer_closed() {
@@ -1425,7 +1427,9 @@ fn sys_call(
         if ep.is_full() {
             return Err(SyscallError::BufferFull);
         }
-    }
+
+        ep.pop_recv_waiter()
+    };
 
     profile::stamp(slot::IPC_PEER_CHECK);
 
@@ -1436,12 +1440,6 @@ fn sys_call(
     let staged = remove_handles_atomic(space_id, handles_ptr, handles_count)?;
 
     profile::stamp(slot::IPC_HANDLE_STAGE);
-
-    // ── Fast path: direct transfer when a server is waiting ──
-    let server_tid = state::endpoints()
-        .write(ep_obj_id)
-        .ok_or(SyscallError::InvalidHandle)?
-        .pop_recv_waiter();
 
     profile::stamp(slot::IPC_RECV_POP);
 
@@ -1832,20 +1830,24 @@ fn sys_reply(
     let space_id = space_id.ok_or(SyscallError::InvalidArgument)?;
     let ep_obj_id = lookup_endpoint_id(space_id, handle_id)?;
     let reply_msg = user_mem::read_user_message(msg_ptr, msg_len)?;
-    let (caller_id, caller_reply_buf, caller_recv_handles_ptr) = state::endpoints()
-        .write(ep_obj_id)
-        .ok_or(SyscallError::InvalidHandle)?
-        .consume_reply(reply_cap_id)?;
-    let next_highest = state::endpoints()
-        .read(ep_obj_id)
-        .and_then(|ep| ep.highest_caller_priority());
+    // Batch: consume_reply + highest_caller_priority in one locked section
+    // (was 2 separate endpoint accesses).
+    let (caller_id, caller_reply_buf, caller_recv_handles_ptr, next_highest) = {
+        let mut ep = state::endpoints()
+            .write(ep_obj_id)
+            .ok_or(SyscallError::InvalidHandle)?;
+        let (cid, buf, hptr) = ep.consume_reply(reply_cap_id)?;
+        let pri = ep.highest_caller_priority();
 
-    if let Some(pri) = next_highest {
-        if let Some(mut server) = state::threads().write(current.0) {
+        (cid, buf, hptr, pri)
+    };
+
+    if let Some(mut server) = state::threads().write(current.0) {
+        if let Some(pri) = next_highest {
             server.boost_priority(pri);
+        } else {
+            server.release_boost();
         }
-    } else if let Some(mut server) = state::threads().write(current.0) {
-        server.release_boost();
     }
 
     // Batch: read caller state + address space in one locked section
