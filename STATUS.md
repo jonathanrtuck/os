@@ -200,20 +200,30 @@ or extend existing ones, never break the existing interface.
 
 1. **Console driver (PL011)** — DONE. Maps UART device VMO, registers with name
    service, prints "console: ready" on boot. `userspace/drivers/console/`
-2. **virtio-input** — next. Requires: persistent init (DMA allocator), virtio
-   library, DMA VMO allocation via IPC to init.
+2. **virtio-input** — DONE (skeleton). Probes MMIO for input devices, requests
+   DMA from init, sets up virtqueue, binds IRQ, event loop reads EV_KEY/EV_ABS
+   with modifier tracking. Event output to presenter not yet wired (Phase 4).
+   `userspace/drivers/input/`
 3. **virtio-blk** — pending
 4. **Metal render driver** — pending
 
-**Next steps for Phase 2.2:**
+**Phase 2.2 infrastructure (DONE):**
 
-1. Make init persistent — serve loop after spawning, handles DMA allocation
-   requests from drivers via IPC (driver sends size, init calls `vmo_create`
-   with DMA Resource handle, returns VMO handle via reply).
-2. Build virtio library crate (`userspace/drivers/virtio/`) — adapted from
-   `v0.6-pre-rewrite:libraries/virtio/lib.rs`. Device probe, virtqueue setup,
-   DMA buffer management. Uses identity-mapped VMOs (VA = PA in descriptors).
-3. Build virtio-input driver — keyboard + tablet, event ring output.
+- **Persistent init** — serve loop after spawning services, handles DMA_ALLOC
+  requests via sync IPC. Driver sends size → init calls `vmo_create_dma` with
+  DMA Resource → returns VMO handle via reply. `protocol::bootstrap::DmaAllocRequest`.
+- **Virtio library** (`userspace/drivers/virtio/`) — MMIO transport + split
+  virtqueue. Adapted from v0.6 prototype, 16 KiB pages, pure no_std, no deps.
+- **ABI extension** — `vmo::create_dma(size, resource)` wraps vmo_create with
+  DMA flag and Resource handle argument.
+
+**Next steps for Phase 2.3:**
+
+1. Add virtio-input to service pack (mkservices integration).
+2. Verify end-to-end: hypervisor event script sends keystrokes → input driver
+   receives events → console output confirms receipt.
+3. Build virtio-blk driver (same DMA/virtio infrastructure).
+4. Metal render driver (compositor).
 
 ## Session Resume
 
