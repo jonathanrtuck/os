@@ -58,9 +58,11 @@ struct VirtioInputEvent {
 fn request_dma(init_ep: Handle, size: usize) -> Result<(Handle, usize), SyscallError> {
     let mut msg = [0u8; MSG_SIZE];
     let method = protocol::bootstrap::DMA_ALLOC;
+
     msg[0..4].copy_from_slice(&method.to_le_bytes());
 
     let req = protocol::bootstrap::DmaAllocRequest { size: size as u32 };
+
     req.write_to(&mut msg[4..8]);
 
     let mut recv_handles = [0u32; 4];
@@ -82,7 +84,6 @@ fn register_with_name_service(ns_ep: Handle, name: &[u8]) {
         Ok(h) => h,
         Err(_) => return,
     };
-
     let req = protocol::name_service::NameRequest::new(name);
     let mut buf = [0u8; MSG_SIZE];
     let total = ipc::message::write_request(&mut buf, protocol::name_service::REGISTER, &req.name);
@@ -103,19 +104,20 @@ fn modifier_bit(code: u16) -> u8 {
 #[unsafe(link_section = ".text.boot")]
 extern "C" fn _start() -> ! {
     let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
-
     let virtio_va = match abi::vmo::map(HANDLE_VIRTIO_VMO, 0, rw) {
         Ok(va) => va,
         Err(_) => abi::thread::exit(1),
     };
 
     let mut input_base: usize = 0;
+
     for i in 0..MAX_VIRTIO_DEVICES {
         let base = virtio_va + i * VIRTIO_MMIO_STRIDE;
         let dev = virtio::Device::new(base);
 
         if dev.is_valid() && dev.device_id() == virtio::DEVICE_INPUT {
             input_base = base;
+
             break;
         }
     }
@@ -135,7 +137,6 @@ extern "C" fn _start() -> ! {
         .min(virtio::DEFAULT_QUEUE_SIZE);
     let vq_bytes = virtio::Virtqueue::total_bytes(queue_size);
     let vq_alloc = ((vq_bytes + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
-
     let (_vq_vmo, vq_va) = match request_dma(HANDLE_INIT_EP, vq_alloc) {
         Ok(r) => r,
         Err(_) => abi::thread::exit(4),
@@ -168,6 +169,7 @@ extern "C" fn _start() -> ! {
 
     for i in 0..NUM_EVENT_BUFS {
         let buf_pa = event_pa + (i as u64 * VIRTIO_EVENT_SIZE as u64);
+
         vq.push(buf_pa, VIRTIO_EVENT_SIZE, true);
     }
 
@@ -197,6 +199,7 @@ extern "C" fn _start() -> ! {
 
         while let Some(used) = vq.pop_used() {
             let idx = used.id as usize;
+
             if idx >= NUM_EVENT_BUFS {
                 continue;
             }
@@ -204,7 +207,6 @@ extern "C" fn _start() -> ! {
             let buf_offset = idx * VIRTIO_EVENT_SIZE as usize;
             let buf_va = event_va + buf_offset;
             let buf_pa = event_pa + buf_offset as u64;
-
             // SAFETY: buf_va points to DMA buffer written by device.
             let event: VirtioInputEvent =
                 unsafe { core::ptr::read_volatile(buf_va as *const VirtioInputEvent) };
@@ -249,6 +251,7 @@ extern "C" fn _start() -> ! {
             };
 
             vq.push(buf_pa, VIRTIO_EVENT_SIZE, true);
+
             repost_count += 1;
         }
 

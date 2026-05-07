@@ -211,7 +211,8 @@ or extend existing ones, never break the existing interface.
 
 - **Persistent init** — serve loop after spawning services, handles DMA_ALLOC
   requests via sync IPC. Driver sends size → init calls `vmo_create_dma` with
-  DMA Resource → returns VMO handle via reply. `protocol::bootstrap::DmaAllocRequest`.
+  DMA Resource → returns VMO handle via reply.
+  `protocol::bootstrap::DmaAllocRequest`.
 - **Virtio library** (`userspace/drivers/virtio/`) — MMIO transport + split
   virtqueue. Adapted from v0.6 prototype, 16 KiB pages, pure no_std, no deps.
 - **ABI extension** — `vmo::create_dma(size, resource)` wraps vmo_create with
