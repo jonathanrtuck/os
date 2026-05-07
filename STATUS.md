@@ -133,7 +133,7 @@ build order, verification strategy).
   address spaces
 - `userspace/servers/hello` — test service (Phase 1.3 verification)
 
-### Phase 1 — Protocol + Service Infrastructure
+### Phase 1 — Protocol + Service Infrastructure (COMPLETE)
 
 1. **Protocol crate** — DONE. 7 modules, 17 message types, 56 tests. Covers all
    IPC boundaries: name service, bootstrap, input, edit, store, view, decode.
@@ -145,12 +145,10 @@ build order, verification strategy).
    syscall and exits cleanly in its own address space. Kernel fixes: page table
    creation in `space_create`, cross-space page table switch in context switch,
    existing-page fault resolution, instruction abort handling.
-4. Name service (register/lookup/unregister via sync IPC)
-
-**Known gap:** kernel `call` syscall installs reply-side transferred handles but
-doesn't report the new IDs to the caller (arg[5] unused). Needs a small ABI
-extension for name service Lookup. Non-breaking — adds receive-handle support to
-an unused argument slot.
+4. **Name service** — DONE. Register/Lookup/Unregister via sync IPC. Integration
+   test: init spawns name service + test-a + test-b. test-a registers its
+   endpoint, test-b looks it up (with handle transfer through reply), calls
+   test-a directly, verifies magic reply value. All exit code 0.
 
 The kernel's ABI is frozen. Changes driven by userspace needs will add syscalls
 or extend existing ones, never break the existing interface.

@@ -2603,6 +2603,14 @@ fn sys_thread_exit(
 
     #[cfg(target_os = "none")]
     {
+        #[cfg(not(any(feature = "bench", feature = "bench-smp", feature = "bench-el0")))]
+        crate::println!(
+            "thread {} exited (code={:#x}, {} remaining)",
+            current.0,
+            code,
+            remaining
+        );
+
         #[cfg(feature = "bench-smp")]
         if code == 0xBEEF {
             print_smp_bench_results(args);
