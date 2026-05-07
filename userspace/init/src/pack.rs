@@ -4,8 +4,9 @@
 const MAGIC: [u8; 4] = *b"SVPK";
 const VERSION: u32 = 1;
 
-const HEADER_SIZE: usize = 16;
+pub const HEADER_SIZE: usize = 16;
 const ENTRY_SIZE: usize = 48;
+const NAME_LEN: usize = 32;
 
 pub struct PackHeader {
     pub count: u32,
@@ -25,57 +26,50 @@ pub struct PackEntry {
     pub size: u32,
 }
 
-pub fn read_header(base: *const u8) -> PackHeader {
-    // SAFETY: caller guarantees base points to at least HEADER_SIZE readable bytes.
-    unsafe {
-        let mut magic = [0u8; 4];
+fn read_u32_le(data: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes([
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        data[offset + 3],
+    ])
+}
 
-        core::ptr::copy_nonoverlapping(base, magic.as_mut_ptr(), 4);
+pub fn read_header(data: &[u8]) -> PackHeader {
+    if data.len() < HEADER_SIZE {
+        return PackHeader {
+            magic: [0; 4],
+            version: 0,
+            count: 0,
+            total_size: 0,
+        };
+    }
 
-        PackHeader {
-            magic,
-            version: read_u32(base, 4),
-            count: read_u32(base, 8),
-            total_size: read_u32(base, 12),
-        }
+    let mut magic = [0u8; 4];
+
+    magic.copy_from_slice(&data[0..4]);
+
+    PackHeader {
+        magic,
+        version: read_u32_le(data, 4),
+        count: read_u32_le(data, 8),
+        total_size: read_u32_le(data, 12),
     }
 }
 
-pub fn read_entry(base: *const u8, index: usize) -> PackEntry {
+pub fn read_entry(data: &[u8], index: usize) -> PackEntry {
     let offset = HEADER_SIZE + index * ENTRY_SIZE;
 
-    // SAFETY: caller guarantees base + offset + ENTRY_SIZE is within the mapping.
-    unsafe {
-        PackEntry {
-            offset: read_u32(base, offset + 32),
-            size: read_u32(base, offset + 36),
-        }
+    PackEntry {
+        offset: read_u32_le(data, offset + 32),
+        size: read_u32_le(data, offset + 36),
     }
 }
 
-const NAME_LEN: usize = 32;
-
-pub fn read_name(base: *const u8, index: usize) -> &'static [u8] {
+pub fn read_name(data: &[u8], index: usize) -> &[u8] {
     let offset = HEADER_SIZE + index * ENTRY_SIZE;
+    let name_bytes = &data[offset..offset + NAME_LEN];
+    let end = name_bytes.iter().position(|&b| b == 0).unwrap_or(NAME_LEN);
 
-    // SAFETY: caller guarantees base + offset + NAME_LEN is within the mapping.
-    // The returned slice borrows from the mapped VMO which outlives init.
-    unsafe {
-        let ptr = base.add(offset);
-        let slice = core::slice::from_raw_parts(ptr, NAME_LEN);
-        let end = slice.iter().position(|&b| b == 0).unwrap_or(NAME_LEN);
-
-        &slice[..end]
-    }
-}
-
-unsafe fn read_u32(base: *const u8, offset: usize) -> u32 {
-    let mut bytes = [0u8; 4];
-
-    // SAFETY: caller guarantees base + offset + 4 is readable.
-    unsafe {
-        core::ptr::copy_nonoverlapping(base.add(offset), bytes.as_mut_ptr(), 4);
-    }
-
-    u32::from_le_bytes(bytes)
+    &name_bytes[..end]
 }

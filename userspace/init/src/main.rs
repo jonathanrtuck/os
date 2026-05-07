@@ -42,77 +42,64 @@ const NAME_SVC: &[u8] = b"name";
 const CONSOLE_SVC: &[u8] = b"console";
 const INPUT_SVC: &[u8] = b"input";
 
-fn spawn_from_pack(pack_base: *const u8, pack_len: usize, ns_ep: Handle, init_ep: Handle) {
-    let header = pack::read_header(pack_base);
+fn spawn_from_pack(pack_data: &[u8], ns_ep: Handle, init_ep: Handle) {
+    let header = pack::read_header(pack_data);
 
     if !header.is_valid() {
         return;
     }
 
     for i in 0..header.count as usize {
-        let entry = pack::read_entry(pack_base, i);
-        let name = pack::read_name(pack_base, i);
+        let entry = pack::read_entry(pack_data, i);
+        let name = pack::read_name(pack_data, i);
 
         if entry.size == 0 {
             continue;
         }
 
         if name == NAME_SVC {
-            let _ = spawn_service(pack_base, &entry, pack_len, &[ns_ep]);
+            let _ = spawn_service(pack_data, &entry, &[ns_ep]);
         }
     }
 
     for i in 0..header.count as usize {
-        let entry = pack::read_entry(pack_base, i);
-        let name = pack::read_name(pack_base, i);
+        let entry = pack::read_entry(pack_data, i);
+        let name = pack::read_name(pack_data, i);
 
         if entry.size == 0 || name == NAME_SVC {
             continue;
         }
 
         if name == CONSOLE_SVC {
-            let _ = spawn_service(pack_base, &entry, pack_len, &[ns_ep, HANDLE_UART_VMO]);
+            let _ = spawn_service(pack_data, &entry, &[ns_ep, HANDLE_UART_VMO]);
         } else if name == INPUT_SVC {
-            let _ = spawn_service(
-                pack_base,
-                &entry,
-                pack_len,
-                &[ns_ep, HANDLE_VIRTIO_VMO, init_ep],
-            );
+            let _ = spawn_service(pack_data, &entry, &[ns_ep, HANDLE_VIRTIO_VMO, init_ep]);
         } else {
-            let _ = spawn_service(pack_base, &entry, pack_len, &[ns_ep]);
+            let _ = spawn_service(pack_data, &entry, &[ns_ep]);
         }
     }
 }
 
 fn spawn_service(
-    pack_base: *const u8,
+    pack_data: &[u8],
     entry: &pack::PackEntry,
-    pack_len: usize,
     extra_handles: &[Handle],
 ) -> Result<Handle, SyscallError> {
     let binary_end = entry.offset as usize + entry.size as usize;
 
-    if binary_end > pack_len {
+    if binary_end > pack_data.len() {
         return Err(SyscallError::InvalidArgument);
     }
 
     let code_size = (entry.size as usize).next_multiple_of(PAGE_SIZE);
     let code_vmo = abi::vmo::create(code_size, 0)?;
     let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
-    let code_local = abi::vmo::map(code_vmo, 0, rw)?;
+    let mut code_mapping = abi::vmo::map_region(code_vmo, code_size, rw)?;
 
-    // SAFETY: The kernel mapped code_local as RW for code_size bytes.
-    // pack_base + entry.offset is within the pack VMO mapping (checked above).
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            pack_base.add(entry.offset as usize),
-            code_local as *mut u8,
-            entry.size as usize,
-        );
-    }
+    code_mapping[..entry.size as usize]
+        .copy_from_slice(&pack_data[entry.offset as usize..binary_end]);
 
-    abi::vmo::unmap(code_local)?;
+    drop(code_mapping);
 
     let space = abi::space::create()?;
     let rx = Rights(Rights::READ.0 | Rights::EXECUTE.0 | Rights::MAP.0);
@@ -199,15 +186,17 @@ extern "C" fn _start() -> ! {
     };
 
     if let Ok(pack_va) = abi::vmo::map(HANDLE_PACK_VMO, 0, ro) {
-        let header = pack::read_header(pack_va as *const u8);
+        // SAFETY: pack VMO is at least one page; header is 16 bytes.
+        let peek = unsafe { core::slice::from_raw_parts(pack_va as *const u8, pack::HEADER_SIZE) };
+        let header = pack::read_header(peek);
 
         if header.is_valid() {
-            spawn_from_pack(
-                pack_va as *const u8,
-                header.total_size as usize,
-                ns_ep,
-                init_ep,
-            );
+            // SAFETY: kernel mapped the full pack VMO at pack_va.
+            let pack_data = unsafe {
+                core::slice::from_raw_parts(pack_va as *const u8, header.total_size as usize)
+            };
+
+            spawn_from_pack(pack_data, ns_ep, init_ep);
         }
     }
 

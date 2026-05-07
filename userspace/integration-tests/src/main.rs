@@ -47,6 +47,19 @@ fn assert_err(result: Result<u64, SyscallError>, expected: SyscallError, code: u
     }
 }
 
+fn read_u64_le(data: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes([
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        data[offset + 3],
+        data[offset + 4],
+        data[offset + 5],
+        data[offset + 6],
+        data[offset + 7],
+    ])
+}
+
 // ── System info tests ─────────────────────────────────────────────
 
 fn test_system_info_page_size() {
@@ -105,16 +118,16 @@ fn test_vmo_create_and_info() {
 fn test_vmo_map_and_access() {
     let vmo = assert_ok(abi::vmo::create(PAGE_SIZE, 0), 150);
     let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
-    let va = assert_ok(abi::vmo::map(vmo, 0, rw), 151);
+    let mut mapping = match abi::vmo::map_region(vmo, PAGE_SIZE, rw) {
+        Ok(m) => m,
+        Err(_) => fail(151),
+    };
 
-    assert_true(va != 0, 152);
+    assert_true(mapping.addr() != 0, 152);
 
-    let ptr = va as *mut u64;
+    mapping[0..8].copy_from_slice(&0xCAFE_BABEu64.to_le_bytes());
 
-    // SAFETY: The kernel mapped this page RW at `va`. We write within bounds.
-    unsafe { core::ptr::write_volatile(ptr, 0xCAFE_BABE) };
-
-    let read_back = unsafe { core::ptr::read_volatile(ptr) };
+    let read_back = read_u64_le(&mapping, 0);
 
     assert_eq_u64(read_back, 0xCAFE_BABE, 153);
 }
@@ -122,17 +135,20 @@ fn test_vmo_map_and_access() {
 fn test_vmo_map_write_pattern() {
     let vmo = assert_ok(abi::vmo::create(PAGE_SIZE, 0), 154);
     let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
-    let va = assert_ok(abi::vmo::map(vmo, 0, rw), 155);
-    let ptr = va as *mut u64;
+    let mut mapping = match abi::vmo::map_region(vmo, PAGE_SIZE, rw) {
+        Ok(m) => m,
+        Err(_) => fail(155),
+    };
 
-    // Write a pattern across the full page.
     for i in 0..(PAGE_SIZE / 8) {
-        unsafe { core::ptr::write_volatile(ptr.add(i), i as u64 * 0x0101_0101) };
+        let val = (i as u64 * 0x0101_0101).to_le_bytes();
+        let off = i * 8;
+
+        mapping[off..off + 8].copy_from_slice(&val);
     }
 
-    // Verify every word.
     for i in 0..(PAGE_SIZE / 8) {
-        let val = unsafe { core::ptr::read_volatile(ptr.add(i)) };
+        let val = read_u64_le(&mapping, i * 8);
 
         assert_eq_u64(val, i as u64 * 0x0101_0101, 156);
     }
