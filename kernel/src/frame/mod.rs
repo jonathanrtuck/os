@@ -14,6 +14,7 @@ pub mod firmware;
 pub mod heap;
 #[cfg(any(target_os = "none", test))]
 pub mod lockdep;
+pub mod profile;
 pub mod ring;
 pub mod slab;
 #[cfg(any(target_os = "none", test))]

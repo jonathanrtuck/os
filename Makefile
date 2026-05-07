@@ -25,6 +25,9 @@ fmt:
 bench:
 	cargo run -p kernel --release --features bench
 
+bench-profile:
+	cargo run -p kernel --release --features bench,profile
+
 bench-el0:
 	cargo run -p kernel --release --features bench-el0
 

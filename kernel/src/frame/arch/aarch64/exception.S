@@ -181,10 +181,24 @@ __exception_common:
 
 .Lskip_fp_save:
 
+.ifdef PROFILE
+    mrs     x9, cntvct_el0
+    adrp    x10, __profile_buf
+    add     x10, x10, :lo12:__profile_buf
+    str     x9, [x10, #(0 * 8)]        // slot ASM_BEFORE_HANDLER
+.endif
+
     // Call Rust: exception_handler(frame: &mut TrapFrame, source: u64)
     mov     x0, sp
     ldr     x1, [sp, #280]
     bl      exception_handler
+
+.ifdef PROFILE
+    mrs     x9, cntvct_el0
+    adrp    x10, __profile_buf
+    add     x10, x10, :lo12:__profile_buf
+    str     x9, [x10, #(1 * 8)]        // slot ASM_AFTER_HANDLER
+.endif
 
     // Conditional FP restore: use the entry-time decision, not live CPACR.
     // handle_fp_trap may have enabled CPACR mid-exception without saving
@@ -265,6 +279,13 @@ __exception_common:
 // Callee-saved x19-x28 are preserved by the Rust calling convention.
 // ---------------------------------------------------------------------------
 __svc_fast:
+.ifdef PROFILE
+    mrs     x9, cntvct_el0
+    adrp    x10, __profile_buf
+    add     x10, x10, :lo12:__profile_buf
+    str     x9, [x10, #(2 * 8)]        // slot ASM_SVC_ENTRY
+.endif
+
     // Allocate mini-frame: 48 bytes (already have 16 from x0-x1 push).
     sub     sp, sp, #48
 
@@ -286,7 +307,22 @@ __svc_fast:
     // Now: x0-x5 = user args, x8 = syscall number.
     // Call Rust: svc_fast_handler(a0, a1, a2, a3, a4, a5, syscall_num)
     mov     x6, x8                  // x6 = syscall number
+
+.ifdef PROFILE
+    mrs     x9, cntvct_el0
+    adrp    x10, __profile_buf
+    add     x10, x10, :lo12:__profile_buf
+    str     x9, [x10, #(3 * 8)]        // slot ASM_SVC_BEFORE_BL
+.endif
+
     bl      svc_fast_handler
+
+.ifdef PROFILE
+    mrs     x9, cntvct_el0
+    adrp    x10, __profile_buf
+    add     x10, x10, :lo12:__profile_buf
+    str     x9, [x10, #(4 * 8)]        // slot ASM_SVC_AFTER_BL
+.endif
 
     // x0 = error, x1 = value (returned from Rust).
 

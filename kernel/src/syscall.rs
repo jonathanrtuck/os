@@ -520,43 +520,50 @@ fn check_clear_readable(ep: &Endpoint) -> Option<(EventId, u64)> {
 #[inline(never)]
 pub fn dispatch(
     current: ThreadId,
+    space_id: Option<AddressSpaceId>,
     core_id: usize,
     syscall_num: u64,
     args: &[u64; 6],
 ) -> (u64, u64) {
+    use crate::frame::profile::{self, slot};
+
+    profile::stamp(slot::DISPATCH_ENTER);
+
     let result = match syscall_num {
-        num::VMO_CREATE => sys_vmo_create(current, core_id, args),
-        num::VMO_MAP => sys_vmo_map(current, core_id, args),
-        num::VMO_MAP_INTO => sys_vmo_map_into(current, core_id, args),
-        num::VMO_UNMAP => sys_vmo_unmap(current, core_id, args),
-        num::VMO_SNAPSHOT => sys_vmo_snapshot(current, core_id, args),
-        num::VMO_SEAL => sys_vmo_seal(current, core_id, args),
-        num::VMO_RESIZE => sys_vmo_resize(current, core_id, args),
-        num::VMO_SET_PAGER => sys_vmo_set_pager(current, core_id, args),
-        num::ENDPOINT_CREATE => sys_endpoint_create(current, core_id, args),
-        num::CALL => sys_call(current, core_id, args),
-        num::RECV => sys_recv(current, core_id, args),
-        num::REPLY => sys_reply(current, core_id, args),
-        num::EVENT_CREATE => sys_event_create(current, core_id, args),
-        num::EVENT_SIGNAL => sys_event_signal(current, core_id, args),
-        num::EVENT_WAIT => sys_event_wait(current, core_id, args),
-        num::EVENT_CLEAR => sys_event_clear(current, core_id, args),
-        num::THREAD_CREATE => sys_thread_create(current, core_id, args),
-        num::THREAD_CREATE_IN => sys_thread_create_in(current, core_id, args),
-        num::THREAD_EXIT => sys_thread_exit(current, core_id, args),
-        num::THREAD_SET_PRIORITY => sys_thread_set_priority(current, core_id, args),
-        num::THREAD_SET_AFFINITY => sys_thread_set_affinity(current, core_id, args),
-        num::SPACE_CREATE => sys_space_create(current, core_id, args),
-        num::SPACE_DESTROY => sys_space_destroy(current, core_id, args),
-        num::HANDLE_DUP => sys_handle_dup(current, core_id, args),
-        num::HANDLE_CLOSE => sys_handle_close(current, core_id, args),
-        num::HANDLE_INFO => sys_handle_info(current, core_id, args),
-        num::CLOCK_READ => sys_clock_read(current, core_id, args),
-        num::SYSTEM_INFO => sys_system_info(current, core_id, args),
-        num::EVENT_BIND_IRQ => sys_event_bind_irq(current, core_id, args),
-        num::ENDPOINT_BIND_EVENT => sys_endpoint_bind_event(current, core_id, args),
+        num::VMO_CREATE => sys_vmo_create(current, space_id, core_id, args),
+        num::VMO_MAP => sys_vmo_map(current, space_id, core_id, args),
+        num::VMO_MAP_INTO => sys_vmo_map_into(current, space_id, core_id, args),
+        num::VMO_UNMAP => sys_vmo_unmap(current, space_id, core_id, args),
+        num::VMO_SNAPSHOT => sys_vmo_snapshot(current, space_id, core_id, args),
+        num::VMO_SEAL => sys_vmo_seal(current, space_id, core_id, args),
+        num::VMO_RESIZE => sys_vmo_resize(current, space_id, core_id, args),
+        num::VMO_SET_PAGER => sys_vmo_set_pager(current, space_id, core_id, args),
+        num::ENDPOINT_CREATE => sys_endpoint_create(current, space_id, core_id, args),
+        num::CALL => sys_call(current, space_id, core_id, args),
+        num::RECV => sys_recv(current, space_id, core_id, args),
+        num::REPLY => sys_reply(current, space_id, core_id, args),
+        num::EVENT_CREATE => sys_event_create(current, space_id, core_id, args),
+        num::EVENT_SIGNAL => sys_event_signal(current, space_id, core_id, args),
+        num::EVENT_WAIT => sys_event_wait(current, space_id, core_id, args),
+        num::EVENT_CLEAR => sys_event_clear(current, space_id, core_id, args),
+        num::THREAD_CREATE => sys_thread_create(current, space_id, core_id, args),
+        num::THREAD_CREATE_IN => sys_thread_create_in(current, space_id, core_id, args),
+        num::THREAD_EXIT => sys_thread_exit(current, space_id, core_id, args),
+        num::THREAD_SET_PRIORITY => sys_thread_set_priority(current, space_id, core_id, args),
+        num::THREAD_SET_AFFINITY => sys_thread_set_affinity(current, space_id, core_id, args),
+        num::SPACE_CREATE => sys_space_create(current, space_id, core_id, args),
+        num::SPACE_DESTROY => sys_space_destroy(current, space_id, core_id, args),
+        num::HANDLE_DUP => sys_handle_dup(current, space_id, core_id, args),
+        num::HANDLE_CLOSE => sys_handle_close(current, space_id, core_id, args),
+        num::HANDLE_INFO => sys_handle_info(current, space_id, core_id, args),
+        num::CLOCK_READ => sys_clock_read(current, space_id, core_id, args),
+        num::SYSTEM_INFO => sys_system_info(current, space_id, core_id, args),
+        num::EVENT_BIND_IRQ => sys_event_bind_irq(current, space_id, core_id, args),
+        num::ENDPOINT_BIND_EVENT => sys_endpoint_bind_event(current, space_id, core_id, args),
         _ => Err(SyscallError::InvalidArgument),
     };
+
+    profile::stamp(slot::DISPATCH_EXIT);
 
     let outcome = match result {
         Ok(value) => (0, value),
@@ -594,10 +601,13 @@ pub fn dispatch(
 
 #[inline(never)]
 fn sys_vmo_create(
-    current: ThreadId,
+    _current: ThreadId,
+    space_id: Option<AddressSpaceId>,
     _core_id: usize,
     args: &[u64; 6],
 ) -> Result<u64, SyscallError> {
+    use crate::frame::profile::{self, slot};
+
     let size = args[0] as usize;
     let flags = args[1] as u32;
 
@@ -611,12 +621,16 @@ fn sys_vmo_create(
         return Err(SyscallError::InvalidArgument);
     }
 
-    let space_id = thread_space_id(current)?;
+    let space_id = space_id.ok_or(SyscallError::InvalidArgument)?;
+
+    profile::stamp(slot::SYS_SPACE_ID);
+
     let vmo = Vmo::new(VmoId(0), size, VmoFlags(flags));
     let (idx, generation) = state::vmos()
         .alloc_shared(vmo)
         .ok_or(SyscallError::OutOfMemory)?;
 
+    profile::stamp(slot::SYS_ALLOC);
     state::vmos().write(idx).unwrap().id = VmoId(idx);
 
     let hid = state::spaces()
@@ -624,6 +638,8 @@ fn sys_vmo_create(
         .ok_or(SyscallError::InvalidArgument)?
         .handles_mut()
         .allocate(ObjectType::Vmo, idx, Rights::ALL, generation);
+
+    profile::stamp(slot::SYS_HANDLE_INSTALL);
 
     match hid {
         Ok(hid) => Ok(hid.0 as u64),
@@ -636,11 +652,16 @@ fn sys_vmo_create(
 }
 
 #[inline(never)]
-fn sys_vmo_map(current: ThreadId, _core_id: usize, args: &[u64; 6]) -> Result<u64, SyscallError> {
+fn sys_vmo_map(
+    _current: ThreadId,
+    space_id: Option<AddressSpaceId>,
+    _core_id: usize,
+    args: &[u64; 6],
+) -> Result<u64, SyscallError> {
     let handle_id = HandleId(args[0] as u32);
     let addr_hint = args[1] as usize;
     let perms = Rights(args[2] as u32);
-    let space_id = thread_space_id(current)?;
+    let space_id = space_id.ok_or(SyscallError::InvalidArgument)?;
     let handle = lookup_handle(space_id, handle_id)?;
 
     if handle.object_type != ObjectType::Vmo {
@@ -672,9 +693,14 @@ fn sys_vmo_map(current: ThreadId, _core_id: usize, args: &[u64; 6]) -> Result<u6
 }
 
 #[inline(never)]
-fn sys_vmo_unmap(current: ThreadId, _core_id: usize, args: &[u64; 6]) -> Result<u64, SyscallError> {
+fn sys_vmo_unmap(
+    _current: ThreadId,
+    space_id: Option<AddressSpaceId>,
+    _core_id: usize,
+    args: &[u64; 6],
+) -> Result<u64, SyscallError> {
     let addr = args[0] as usize;
-    let space_id = thread_space_id(current)?;
+    let space_id = space_id.ok_or(SyscallError::InvalidArgument)?;
     let record = state::spaces()
         .write(space_id.0)
         .ok_or(SyscallError::InvalidArgument)?
@@ -689,13 +715,21 @@ fn sys_vmo_unmap(current: ThreadId, _core_id: usize, args: &[u64; 6]) -> Result<
 
 #[inline(never)]
 fn sys_vmo_snapshot(
-    current: ThreadId,
+    _current: ThreadId,
+    space_id: Option<AddressSpaceId>,
     _core_id: usize,
     args: &[u64; 6],
 ) -> Result<u64, SyscallError> {
+    use crate::frame::profile::{self, slot};
+
     let handle_id = HandleId(args[0] as u32);
-    let space_id = thread_space_id(current)?;
+    let space_id = space_id.ok_or(SyscallError::InvalidArgument)?;
+
+    profile::stamp(slot::SYS_SPACE_ID);
+
     let handle = lookup_handle(space_id, handle_id)?;
+
+    profile::stamp(slot::SYS_HANDLE_LOOKUP);
 
     if handle.object_type != ObjectType::Vmo {
         return Err(SyscallError::WrongHandleType);
@@ -705,9 +739,14 @@ fn sys_vmo_snapshot(
         .read(handle.object_id)
         .ok_or(SyscallError::InvalidHandle)?
         .snapshot(VmoId(0));
+
+    profile::stamp(slot::SYS_WORK);
+
     let (idx, generation) = state::vmos()
         .alloc_shared(snap)
         .ok_or(SyscallError::OutOfMemory)?;
+
+    profile::stamp(slot::SYS_ALLOC);
 
     state::vmos().write(idx).unwrap().id = VmoId(idx);
 
@@ -716,6 +755,8 @@ fn sys_vmo_snapshot(
         .ok_or(SyscallError::InvalidArgument)?
         .handles_mut()
         .allocate(ObjectType::Vmo, idx, Rights::ALL, generation);
+
+    profile::stamp(slot::SYS_HANDLE_INSTALL);
 
     match hid {
         Ok(hid) => Ok(hid.0 as u64),
@@ -728,9 +769,14 @@ fn sys_vmo_snapshot(
 }
 
 #[inline(never)]
-fn sys_vmo_seal(current: ThreadId, _core_id: usize, args: &[u64; 6]) -> Result<u64, SyscallError> {
+fn sys_vmo_seal(
+    _current: ThreadId,
+    space_id: Option<AddressSpaceId>,
+    _core_id: usize,
+    args: &[u64; 6],
+) -> Result<u64, SyscallError> {
     let handle_id = HandleId(args[0] as u32);
-    let space_id = thread_space_id(current)?;
+    let space_id = space_id.ok_or(SyscallError::InvalidArgument)?;
     let handle = lookup_handle(space_id, handle_id)?;
 
     if handle.object_type != ObjectType::Vmo {
@@ -750,7 +796,8 @@ fn sys_vmo_seal(current: ThreadId, _core_id: usize, args: &[u64; 6]) -> Result<u
 
 #[inline(never)]
 fn sys_vmo_resize(
-    current: ThreadId,
+    _current: ThreadId,
+    space_id: Option<AddressSpaceId>,
     _core_id: usize,
     args: &[u64; 6],
 ) -> Result<u64, SyscallError> {
@@ -761,7 +808,7 @@ fn sys_vmo_resize(
         return Err(SyscallError::InvalidArgument);
     }
 
-    let space_id = thread_space_id(current)?;
+    let space_id = space_id.ok_or(SyscallError::InvalidArgument)?;
     let handle = lookup_handle(space_id, handle_id)?;
 
     if handle.object_type != ObjectType::Vmo {
@@ -797,7 +844,8 @@ fn sys_vmo_resize(
 
 #[inline(never)]
 fn sys_vmo_map_into(
-    current: ThreadId,
+    _current: ThreadId,
+    space_id: Option<AddressSpaceId>,
     _core_id: usize,
     args: &[u64; 6],
 ) -> Result<u64, SyscallError> {
@@ -805,7 +853,7 @@ fn sys_vmo_map_into(
     let space_handle_id = HandleId(args[1] as u32);
     let addr_hint = args[2] as usize;
     let perms = Rights(args[3] as u32);
-    let space_id = thread_space_id(current)?;
+    let space_id = space_id.ok_or(SyscallError::InvalidArgument)?;
     let vmo_handle = lookup_handle(space_id, vmo_handle_id)?;
 
     if vmo_handle.object_type != ObjectType::Vmo {
@@ -841,13 +889,14 @@ fn sys_vmo_map_into(
 
 #[inline(never)]
 fn sys_vmo_set_pager(
-    current: ThreadId,
+    _current: ThreadId,
+    space_id: Option<AddressSpaceId>,
     _core_id: usize,
     args: &[u64; 6],
 ) -> Result<u64, SyscallError> {
     let vmo_handle_id = HandleId(args[0] as u32);
     let ep_handle_id = HandleId(args[1] as u32);
-    let space_id = thread_space_id(current)?;
+    let space_id = space_id.ok_or(SyscallError::InvalidArgument)?;
     let vmo_handle = lookup_handle(space_id, vmo_handle_id)?;
 
     if vmo_handle.object_type != ObjectType::Vmo {
@@ -875,16 +924,24 @@ fn sys_vmo_set_pager(
 
 #[inline(never)]
 fn sys_endpoint_create(
-    current: ThreadId,
+    _current: ThreadId,
+    space_id: Option<AddressSpaceId>,
     _core_id: usize,
     args: &[u64; 6],
 ) -> Result<u64, SyscallError> {
+    use crate::frame::profile::{self, slot};
+
     let _ = args;
-    let space_id = thread_space_id(current)?;
+    let space_id = space_id.ok_or(SyscallError::InvalidArgument)?;
+
+    profile::stamp(slot::SYS_SPACE_ID);
+
     let ep = Endpoint::new(EndpointId(0));
     let (idx, generation) = state::endpoints()
         .alloc_shared(ep)
         .ok_or(SyscallError::OutOfMemory)?;
+
+    profile::stamp(slot::SYS_ALLOC);
 
     state::endpoints().write(idx).unwrap().id = EndpointId(idx);
 
@@ -893,6 +950,8 @@ fn sys_endpoint_create(
         .ok_or(SyscallError::InvalidArgument)?
         .handles_mut()
         .allocate(ObjectType::Endpoint, idx, Rights::ALL, generation);
+
+    profile::stamp(slot::SYS_HANDLE_INSTALL);
 
     match hid {
         Ok(hid) => Ok(hid.0 as u64),
@@ -906,13 +965,14 @@ fn sys_endpoint_create(
 
 #[inline(never)]
 fn sys_endpoint_bind_event(
-    current: ThreadId,
+    _current: ThreadId,
+    space_id: Option<AddressSpaceId>,
     core_id: usize,
     args: &[u64; 6],
 ) -> Result<u64, SyscallError> {
     let ep_handle_id = HandleId(args[0] as u32);
     let event_handle_id = HandleId(args[1] as u32);
-    let space_id = thread_space_id(current)?;
+    let space_id = space_id.ok_or(SyscallError::InvalidArgument)?;
     let ep_handle = lookup_handle(space_id, ep_handle_id)?;
 
     if ep_handle.object_type != ObjectType::Endpoint {
@@ -974,12 +1034,13 @@ fn sys_endpoint_bind_event(
 
 #[inline(never)]
 fn sys_event_create(
-    current: ThreadId,
+    _current: ThreadId,
+    space_id: Option<AddressSpaceId>,
     _core_id: usize,
     args: &[u64; 6],
 ) -> Result<u64, SyscallError> {
     let _ = args;
-    let space_id = thread_space_id(current)?;
+    let space_id = space_id.ok_or(SyscallError::InvalidArgument)?;
     let event = Event::new(EventId(0));
     let (idx, generation) = state::events()
         .alloc_shared(event)
@@ -1005,13 +1066,14 @@ fn sys_event_create(
 
 #[inline(never)]
 fn sys_event_signal(
-    current: ThreadId,
+    _current: ThreadId,
+    space_id: Option<AddressSpaceId>,
     core_id: usize,
     args: &[u64; 6],
 ) -> Result<u64, SyscallError> {
     let handle_id = HandleId(args[0] as u32);
     let bits = args[1];
-    let space_id = thread_space_id(current)?;
+    let space_id = space_id.ok_or(SyscallError::InvalidArgument)?;
     let handle = lookup_handle(space_id, handle_id)?;
 
     if handle.object_type != ObjectType::Event {
@@ -1035,13 +1097,14 @@ fn sys_event_signal(
 
 #[inline(never)]
 fn sys_event_clear(
-    current: ThreadId,
+    _current: ThreadId,
+    space_id: Option<AddressSpaceId>,
     _core_id: usize,
     args: &[u64; 6],
 ) -> Result<u64, SyscallError> {
     let handle_id = HandleId(args[0] as u32);
     let bits = args[1];
-    let space_id = thread_space_id(current)?;
+    let space_id = space_id.ok_or(SyscallError::InvalidArgument)?;
     let handle = lookup_handle(space_id, handle_id)?;
 
     if handle.object_type != ObjectType::Event {
@@ -1072,14 +1135,15 @@ fn sys_event_clear(
 
 #[inline(never)]
 fn sys_event_bind_irq(
-    current: ThreadId,
+    _current: ThreadId,
+    space_id: Option<AddressSpaceId>,
     _core_id: usize,
     args: &[u64; 6],
 ) -> Result<u64, SyscallError> {
     let handle_id = HandleId(args[0] as u32);
     let intid = args[1] as u32;
     let signal_bits = args[2];
-    let space_id = thread_space_id(current)?;
+    let space_id = space_id.ok_or(SyscallError::InvalidArgument)?;
     let handle = lookup_handle(space_id, handle_id)?;
 
     if handle.object_type != ObjectType::Event {
@@ -1099,8 +1163,13 @@ fn sys_event_bind_irq(
 // ── Event blocking ──────────────────────────────────────────
 
 #[inline(never)]
-fn sys_event_wait(current: ThreadId, core_id: usize, args: &[u64; 6]) -> Result<u64, SyscallError> {
-    let space_id = thread_space_id(current)?;
+fn sys_event_wait(
+    current: ThreadId,
+    space_id: Option<AddressSpaceId>,
+    core_id: usize,
+    args: &[u64; 6],
+) -> Result<u64, SyscallError> {
+    let space_id = space_id.ok_or(SyscallError::InvalidArgument)?;
 
     if args[0] as u32 > config::MAX_HANDLES as u32 {
         return event_wait_buffer(current, core_id, space_id, args);
@@ -1283,7 +1352,14 @@ fn event_wait_common(
 // ── IPC blocking ────────────────────────────────────────────
 
 #[inline(never)]
-fn sys_call(current: ThreadId, core_id: usize, args: &[u64; 6]) -> Result<u64, SyscallError> {
+fn sys_call(
+    current: ThreadId,
+    space_id: Option<AddressSpaceId>,
+    core_id: usize,
+    args: &[u64; 6],
+) -> Result<u64, SyscallError> {
+    use crate::frame::profile::{self, slot};
+
     let handle_id = HandleId(args[0] as u32);
     let msg_ptr = args[1] as usize;
     let msg_len = args[2] as usize;
@@ -1295,8 +1371,13 @@ fn sys_call(current: ThreadId, core_id: usize, args: &[u64; 6]) -> Result<u64, S
         return Err(SyscallError::InvalidArgument);
     }
 
-    let space_id = thread_space_id(current)?;
+    let space_id = space_id.ok_or(SyscallError::InvalidArgument)?;
+
+    profile::stamp(slot::SYS_SPACE_ID);
+
     let (ep_obj_id, badge) = lookup_endpoint_id_badge(space_id, handle_id)?;
+
+    profile::stamp(slot::IPC_EP_LOOKUP);
 
     {
         let ep = state::endpoints()
@@ -1311,13 +1392,23 @@ fn sys_call(current: ThreadId, core_id: usize, args: &[u64; 6]) -> Result<u64, S
         }
     }
 
+    profile::stamp(slot::IPC_PEER_CHECK);
+
     let message = user_mem::read_user_message(msg_ptr, msg_len)?;
+
+    profile::stamp(slot::IPC_MSG_READ);
+
     let staged = remove_handles_atomic(space_id, handles_ptr, handles_count)?;
+
+    profile::stamp(slot::IPC_HANDLE_STAGE);
+
     // ── Fast path: direct transfer when a server is waiting ──
     let server_tid = state::endpoints()
         .write(ep_obj_id)
         .ok_or(SyscallError::InvalidHandle)?
         .pop_recv_waiter();
+
+    profile::stamp(slot::IPC_RECV_POP);
 
     if let Some(server_tid) = server_tid {
         let recv_state = state::threads()
@@ -1335,11 +1426,15 @@ fn sys_call(current: ThreadId, core_id: usize, args: &[u64; 6]) -> Result<u64, S
             // server's address space before writing to its buffers.
             crate::sched::switch_to_space_of(server_tid);
 
+            profile::stamp(slot::IPC_SPACE_SWITCH);
+
             let msg_bytes = message.as_bytes();
 
             if msg_bytes.len() <= rs.out_cap {
                 let _ = user_mem::write_user_bytes(rs.out_buf, msg_bytes);
             }
+
+            profile::stamp(slot::IPC_MSG_WRITE);
 
             let msg_len_val = msg_bytes.len() as u64;
             let h_count = if staged.count > 0 {
@@ -1350,6 +1445,9 @@ fn sys_call(current: ThreadId, core_id: usize, args: &[u64; 6]) -> Result<u64, S
             } else {
                 0
             };
+
+            profile::stamp(slot::IPC_HANDLE_INSTALL);
+
             let reply_cap = {
                 let mut ep = state::endpoints()
                     .write(ep_obj_id)
@@ -1360,6 +1458,8 @@ fn sys_call(current: ThreadId, core_id: usize, args: &[u64; 6]) -> Result<u64, S
 
                 reply_cap
             };
+
+            profile::stamp(slot::IPC_REPLY_CAP);
 
             if let Some(cap_id) = reply_cap {
                 if rs.reply_cap_out != 0 {
@@ -1381,9 +1481,13 @@ fn sys_call(current: ThreadId, core_id: usize, args: &[u64; 6]) -> Result<u64, S
                 server.boost_priority(caller_pri);
             }
 
+            profile::stamp(slot::IPC_PRIORITY);
+
             let server_was_blocked = state::threads()
                 .read(server_tid.0)
                 .is_some_and(|t| t.state() == crate::thread::ThreadRunState::Blocked);
+
+            profile::stamp(slot::IPC_BEFORE_SWITCH);
 
             if server_was_blocked {
                 crate::sched::direct_switch(current, server_tid, core_id);
@@ -1391,6 +1495,8 @@ fn sys_call(current: ThreadId, core_id: usize, args: &[u64; 6]) -> Result<u64, S
                 crate::sched::wake(server_tid, core_id);
                 crate::sched::block_current(current, core_id);
             }
+
+            profile::stamp(slot::IPC_AFTER_SWITCH);
 
             if let Some(err) = state::threads()
                 .write(current.0)
@@ -1478,14 +1584,19 @@ fn sys_call(current: ThreadId, core_id: usize, args: &[u64; 6]) -> Result<u64, S
 }
 
 #[inline(never)]
-fn sys_recv(current: ThreadId, core_id: usize, args: &[u64; 6]) -> Result<u64, SyscallError> {
+fn sys_recv(
+    current: ThreadId,
+    space_id: Option<AddressSpaceId>,
+    core_id: usize,
+    args: &[u64; 6],
+) -> Result<u64, SyscallError> {
     let handle_id = HandleId(args[0] as u32);
     let out_buf = args[1] as usize;
     let out_cap = args[2] as usize;
     let handles_out = args[3] as usize;
     let handles_cap = args[4] as usize;
     let reply_cap_out = args[5] as usize;
-    let space_id = thread_space_id(current)?;
+    let space_id = space_id.ok_or(SyscallError::InvalidArgument)?;
     let obj_id = lookup_endpoint_id(space_id, handle_id)?;
 
     if out_cap > 0 && out_buf == 0 {
@@ -1665,7 +1776,12 @@ fn recv_deliver(
 }
 
 #[inline(never)]
-fn sys_reply(current: ThreadId, core_id: usize, args: &[u64; 6]) -> Result<u64, SyscallError> {
+fn sys_reply(
+    current: ThreadId,
+    space_id: Option<AddressSpaceId>,
+    core_id: usize,
+    args: &[u64; 6],
+) -> Result<u64, SyscallError> {
     let handle_id = HandleId(args[0] as u32);
     let reply_cap_id = ReplyCapId(args[1]);
     let msg_ptr = args[2] as usize;
@@ -1677,7 +1793,7 @@ fn sys_reply(current: ThreadId, core_id: usize, args: &[u64; 6]) -> Result<u64, 
         return Err(SyscallError::InvalidArgument);
     }
 
-    let space_id = thread_space_id(current)?;
+    let space_id = space_id.ok_or(SyscallError::InvalidArgument)?;
     let ep_obj_id = lookup_endpoint_id(space_id, handle_id)?;
     let reply_msg = user_mem::read_user_message(msg_ptr, msg_len)?;
     let (caller_id, caller_reply_buf, caller_recv_handles_ptr) = state::endpoints()
@@ -1803,12 +1919,13 @@ fn sys_reply(current: ThreadId, core_id: usize, args: &[u64; 6]) -> Result<u64, 
 
 #[inline(never)]
 fn sys_space_create(
-    current: ThreadId,
+    _current: ThreadId,
+    space_id: Option<AddressSpaceId>,
     _core_id: usize,
     args: &[u64; 6],
 ) -> Result<u64, SyscallError> {
     let _ = args;
-    let caller_space_id = thread_space_id(current)?;
+    let caller_space_id = space_id.ok_or(SyscallError::InvalidArgument)?;
     // create_page_table atomically allocates the L2 root + an ASID; using its
     // ASID for AddressSpace avoids the leak from a separate state::alloc_asid()
     // call (each space_create would otherwise burn 2 ASIDs from a 128-slot pool).
@@ -1877,12 +1994,13 @@ fn teardown_new_space_pt(_pt_root: usize, asid: u8) {
 
 #[inline(never)]
 fn sys_space_destroy(
-    current: ThreadId,
+    _current: ThreadId,
+    space_id: Option<AddressSpaceId>,
     core_id: usize,
     args: &[u64; 6],
 ) -> Result<u64, SyscallError> {
     let handle_id = HandleId(args[0] as u32);
-    let caller_space_id = thread_space_id(current)?;
+    let caller_space_id = space_id.ok_or(SyscallError::InvalidArgument)?;
     let handle = lookup_handle(caller_space_id, handle_id)?;
 
     if handle.object_type != ObjectType::AddressSpace {
@@ -2007,14 +2125,22 @@ fn sys_space_destroy(
 
 #[inline(never)]
 fn sys_handle_dup(
-    current: ThreadId,
+    _current: ThreadId,
+    space_id: Option<AddressSpaceId>,
     _core_id: usize,
     args: &[u64; 6],
 ) -> Result<u64, SyscallError> {
+    use crate::frame::profile::{self, slot};
+
     let handle_id = HandleId(args[0] as u32);
     let new_rights = Rights(args[1] as u32);
-    let space_id = thread_space_id(current)?;
+    let space_id = space_id.ok_or(SyscallError::InvalidArgument)?;
+
+    profile::stamp(slot::SYS_SPACE_ID);
+
     let handle = lookup_handle(space_id, handle_id)?;
+
+    profile::stamp(slot::SYS_HANDLE_LOOKUP);
 
     if !handle.rights.contains(Rights::DUP) {
         return Err(SyscallError::InsufficientRights);
@@ -2028,6 +2154,8 @@ fn sys_handle_dup(
         .handles_mut()
         .duplicate(handle_id, new_rights)?;
 
+    profile::stamp(slot::SYS_WORK);
+
     add_object_ref(obj_type, obj_id);
 
     Ok(new_id.0 as u64)
@@ -2035,12 +2163,13 @@ fn sys_handle_dup(
 
 #[inline(never)]
 fn sys_handle_close(
-    current: ThreadId,
+    _current: ThreadId,
+    space_id: Option<AddressSpaceId>,
     core_id: usize,
     args: &[u64; 6],
 ) -> Result<u64, SyscallError> {
     let handle_id = HandleId(args[0] as u32);
-    let space_id = thread_space_id(current)?;
+    let space_id = space_id.ok_or(SyscallError::InvalidArgument)?;
     let handle = state::spaces()
         .write(space_id.0)
         .ok_or(SyscallError::InvalidArgument)?
@@ -2054,13 +2183,21 @@ fn sys_handle_close(
 
 #[inline(never)]
 fn sys_handle_info(
-    current: ThreadId,
+    _current: ThreadId,
+    space_id: Option<AddressSpaceId>,
     _core_id: usize,
     args: &[u64; 6],
 ) -> Result<u64, SyscallError> {
+    use crate::frame::profile::{self, slot};
+
     let handle_id = HandleId(args[0] as u32);
-    let space_id = thread_space_id(current)?;
+    let space_id = space_id.ok_or(SyscallError::InvalidArgument)?;
+
+    profile::stamp(slot::SYS_SPACE_ID);
+
     let handle = lookup_handle(space_id, handle_id)?;
+
+    profile::stamp(slot::SYS_HANDLE_LOOKUP);
 
     Ok(((handle.object_type as u64) << 32) | (handle.rights.0 as u64))
 }
@@ -2070,9 +2207,14 @@ fn sys_handle_info(
 #[inline(never)]
 fn sys_clock_read(
     _current: ThreadId,
+    _space_id: Option<AddressSpaceId>,
     _core_id: usize,
     _args: &[u64; 6],
 ) -> Result<u64, SyscallError> {
+    use crate::frame::profile::{self, slot};
+
+    profile::stamp(slot::SYS_WORK);
+
     #[cfg(any(target_os = "none", test))]
     {
         const FREQ: u64 = crate::frame::arch::timer::TIMER_FREQ_HZ;
@@ -2091,6 +2233,7 @@ fn sys_clock_read(
 #[inline(never)]
 fn sys_system_info(
     _current: ThreadId,
+    _space_id: Option<AddressSpaceId>,
     _core_id: usize,
     args: &[u64; 6],
 ) -> Result<u64, SyscallError> {
@@ -2108,7 +2251,8 @@ fn sys_system_info(
 
 #[inline(never)]
 fn sys_thread_create(
-    current: ThreadId,
+    _current: ThreadId,
+    space_id: Option<AddressSpaceId>,
     core_id: usize,
     args: &[u64; 6],
 ) -> Result<u64, SyscallError> {
@@ -2117,7 +2261,7 @@ fn sys_thread_create(
     let entry = args[0] as usize;
     let stack_top = args[1] as usize;
     let arg = args[2] as usize;
-    let space_id = thread_space_id(current)?;
+    let space_id = space_id.ok_or(SyscallError::InvalidArgument)?;
     let thread = Thread::new(
         ThreadId(0),
         Some(space_id),
@@ -2196,7 +2340,8 @@ fn sys_thread_create(
 
 #[inline(never)]
 fn sys_thread_create_in(
-    current: ThreadId,
+    _current: ThreadId,
+    space_id: Option<AddressSpaceId>,
     _core_id: usize,
     args: &[u64; 6],
 ) -> Result<u64, SyscallError> {
@@ -2211,7 +2356,7 @@ fn sys_thread_create_in(
         return Err(SyscallError::InvalidArgument);
     }
 
-    let caller_space_id = thread_space_id(current)?;
+    let caller_space_id = space_id.ok_or(SyscallError::InvalidArgument)?;
     let space_handle = lookup_handle(caller_space_id, space_handle_id)?;
 
     if space_handle.object_type != ObjectType::AddressSpace {
@@ -2377,6 +2522,7 @@ fn sys_thread_create_in(
 #[inline(never)]
 fn sys_thread_exit(
     current: ThreadId,
+    _space_id: Option<AddressSpaceId>,
     core_id: usize,
     args: &[u64; 6],
 ) -> Result<u64, SyscallError> {
@@ -2560,13 +2706,14 @@ fn print_smp_bench_results(args: &[u64; 6]) {
 
 #[inline(never)]
 fn sys_thread_set_priority(
-    current: ThreadId,
+    _current: ThreadId,
+    space_id: Option<AddressSpaceId>,
     _core_id: usize,
     args: &[u64; 6],
 ) -> Result<u64, SyscallError> {
     let handle_id = HandleId(args[0] as u32);
     let priority_val = args[1] as u8;
-    let space_id = thread_space_id(current)?;
+    let space_id = space_id.ok_or(SyscallError::InvalidArgument)?;
     let handle = lookup_handle(space_id, handle_id)?;
 
     if handle.object_type != ObjectType::Thread {
@@ -2591,13 +2738,14 @@ fn sys_thread_set_priority(
 
 #[inline(never)]
 fn sys_thread_set_affinity(
-    current: ThreadId,
+    _current: ThreadId,
+    space_id: Option<AddressSpaceId>,
     _core_id: usize,
     args: &[u64; 6],
 ) -> Result<u64, SyscallError> {
     let handle_id = HandleId(args[0] as u32);
     let hint_val = args[1] as u8;
-    let space_id = thread_space_id(current)?;
+    let space_id = space_id.ok_or(SyscallError::InvalidArgument)?;
     let handle = lookup_handle(space_id, handle_id)?;
 
     if handle.object_type != ObjectType::Thread {
@@ -2657,11 +2805,15 @@ mod tests {
     }
 
     fn call(num: u64, args: &[u64; 6]) -> (u64, u64) {
-        dispatch(ThreadId(0), 0, num, args)
+        let space_id = thread_space_id(ThreadId(0)).ok();
+
+        dispatch(ThreadId(0), space_id, 0, num, args)
     }
 
     fn call_as(tid: ThreadId, num: u64, args: &[u64; 6]) -> (u64, u64) {
-        dispatch(tid, 0, num, args)
+        let space_id = thread_space_id(tid).ok();
+
+        dispatch(tid, space_id, 0, num, args)
     }
 
     fn assert_ok(result: (u64, u64)) -> u64 {

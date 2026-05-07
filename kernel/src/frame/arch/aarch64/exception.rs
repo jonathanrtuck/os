@@ -5,8 +5,10 @@
 //! decodes the exception, prints diagnostic output for fatal cases, and
 //! returns for recoverable ones (e.g., IRQ).
 
-#[cfg(target_os = "none")]
+#[cfg(all(target_os = "none", not(feature = "profile")))]
 core::arch::global_asm!(include_str!("exception.S"));
+#[cfg(all(target_os = "none", feature = "profile"))]
+core::arch::global_asm!(concat!(".set PROFILE, 1\n", include_str!("exception.S")));
 
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
@@ -325,24 +327,38 @@ extern "C" fn svc_fast_handler(
     a5: u64,
     syscall_num: u64,
 ) -> (u64, u64) {
+    crate::frame::profile::stamp(crate::frame::profile::slot::HANDLER_ENTRY);
+
     let args = [a0, a1, a2, a3, a4, a5];
     // SAFETY: percpu_mut() requires init_percpu_bsp to have been called.
-    let (current_thread, core_id) = unsafe {
+    let (current_thread, space_id, core_id) = unsafe {
         let pc = super::cpu::percpu_mut();
 
         pc.mark_syscall_entry();
 
+        let space = if pc.current_space == super::cpu::PerCpu::NO_SPACE {
+            None
+        } else {
+            Some(crate::types::AddressSpaceId(pc.current_space))
+        };
+
         (
             crate::types::ThreadId(pc.current_thread),
+            space,
             pc.core_id as usize,
         )
     };
-    let result = crate::syscall::dispatch(current_thread, core_id, syscall_num, &args);
+
+    crate::frame::profile::stamp(crate::frame::profile::slot::HANDLER_PERCPU_DONE);
+
+    let result = crate::syscall::dispatch(current_thread, space_id, core_id, syscall_num, &args);
 
     // SAFETY: same as above — percpu is valid for this core's lifetime.
     unsafe {
         super::cpu::percpu_mut().clear_syscall_entry();
     }
+
+    crate::frame::profile::stamp(crate::frame::profile::slot::HANDLER_EXIT);
 
     result
 }
@@ -378,6 +394,8 @@ fn el1_sync_handler(frame: &mut TrapFrame) {
         0x15 => {
             #[cfg(target_os = "none")]
             {
+                crate::frame::profile::stamp(crate::frame::profile::slot::HANDLER_ENTRY);
+
                 let syscall_num = frame.gprs[8];
                 let args: [u64; 6] = [
                     frame.gprs[0],
@@ -388,15 +406,27 @@ fn el1_sync_handler(frame: &mut TrapFrame) {
                     frame.gprs[5],
                 ];
                 // SAFETY: percpu() requires init_percpu_bsp to have been called.
-                let (current, core_id) = unsafe {
+                let (current, space_id, core_id) = unsafe {
                     let pc = super::cpu::percpu();
+                    let space = if pc.current_space == super::cpu::PerCpu::NO_SPACE {
+                        None
+                    } else {
+                        Some(crate::types::AddressSpaceId(pc.current_space))
+                    };
 
                     (
                         crate::types::ThreadId(pc.current_thread),
+                        space,
                         pc.core_id as usize,
                     )
                 };
-                let (error, value) = crate::syscall::dispatch(current, core_id, syscall_num, &args);
+
+                crate::frame::profile::stamp(crate::frame::profile::slot::HANDLER_PERCPU_DONE);
+
+                let (error, value) =
+                    crate::syscall::dispatch(current, space_id, core_id, syscall_num, &args);
+
+                crate::frame::profile::stamp(crate::frame::profile::slot::HANDLER_EXIT);
 
                 frame.gprs[0] = error;
                 frame.gprs[1] = value;

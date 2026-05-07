@@ -53,7 +53,9 @@ mod tests {
     }
 
     fn call(num: u64, args: &[u64; 6]) -> (u64, u64) {
-        crate::syscall::dispatch(ThreadId(0), 0, num, args)
+        let space_id = crate::syscall::thread_space_id(ThreadId(0)).ok();
+
+        crate::syscall::dispatch(ThreadId(0), space_id, 0, num, args)
     }
 
     // =========================================================================

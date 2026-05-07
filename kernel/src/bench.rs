@@ -172,9 +172,12 @@ fn estimate_with_hvf<F: FnOnce() -> u64>(
     do_bench: F,
 ) -> CycleEstimate {
     arch::hvf_timing::force_snapshot();
+
     let start = arch::hvf_timing::read(0);
     let median_ticks = do_bench();
+
     arch::hvf_timing::force_snapshot();
+
     let end = arch::hvf_timing::read(0);
     let delta = end.diff(&start);
     let ops = total_ops as u64;
@@ -245,8 +248,10 @@ fn bench_syscall(
     syscall_num: u64,
     args: [u64; 6],
 ) -> BenchResult {
+    let space_id = crate::syscall::thread_space_id(current).ok();
+
     for _ in 0..WARMUP {
-        crate::syscall::dispatch(current, 0, syscall_num, &args);
+        crate::syscall::dispatch(current, space_id, 0, syscall_num, &args);
     }
 
     let mut samples = [0u64; ITERATIONS];
@@ -256,7 +261,7 @@ fn bench_syscall(
 
         let start = arch::read_cycle_counter();
 
-        crate::syscall::dispatch(current, 0, syscall_num, &args);
+        crate::syscall::dispatch(current, space_id, 0, syscall_num, &args);
 
         arch::isb();
 
@@ -281,11 +286,20 @@ fn bench_create_close(
     create_num: u64,
     create_args: [u64; 6],
 ) -> BenchResult {
+    let space_id = crate::syscall::thread_space_id(current).ok();
+
     for _ in 0..WARMUP {
-        let (err, handle) = crate::syscall::dispatch(current, 0, create_num, &create_args);
+        let (err, handle) =
+            crate::syscall::dispatch(current, space_id, 0, create_num, &create_args);
 
         if err == 0 {
-            crate::syscall::dispatch(current, 0, num::HANDLE_CLOSE, &[handle, 0, 0, 0, 0, 0]);
+            crate::syscall::dispatch(
+                current,
+                space_id,
+                0,
+                num::HANDLE_CLOSE,
+                &[handle, 0, 0, 0, 0, 0],
+            );
         }
     }
 
@@ -295,14 +309,21 @@ fn bench_create_close(
         arch::isb();
 
         let start = arch::read_cycle_counter();
-        let (err, handle) = crate::syscall::dispatch(current, 0, create_num, &create_args);
+        let (err, handle) =
+            crate::syscall::dispatch(current, space_id, 0, create_num, &create_args);
 
         arch::isb();
 
         *s = arch::read_cycle_counter().wrapping_sub(start);
 
         if err == 0 {
-            crate::syscall::dispatch(current, 0, num::HANDLE_CLOSE, &[handle, 0, 0, 0, 0, 0]);
+            crate::syscall::dispatch(
+                current,
+                space_id,
+                0,
+                num::HANDLE_CLOSE,
+                &[handle, 0, 0, 0, 0, 0],
+            );
         }
     }
 
@@ -318,8 +339,10 @@ fn bench_create_close(
 }
 
 fn bench_batched_dispatch(current: ThreadId, syscall_num: u64, args: [u64; 6]) -> u64 {
+    let space_id = crate::syscall::thread_space_id(current).ok();
+
     for _ in 0..BATCH_N {
-        crate::syscall::dispatch(current, 0, syscall_num, &args);
+        crate::syscall::dispatch(current, space_id, 0, syscall_num, &args);
     }
 
     let mut samples = [0u64; BATCH_SAMPLES];
@@ -330,7 +353,7 @@ fn bench_batched_dispatch(current: ThreadId, syscall_num: u64, args: [u64; 6]) -
         let start = arch::read_cycle_counter();
 
         for _ in 0..BATCH_N {
-            crate::syscall::dispatch(current, 0, syscall_num, &args);
+            crate::syscall::dispatch(current, space_id, 0, syscall_num, &args);
         }
 
         arch::isb();
@@ -339,15 +362,18 @@ fn bench_batched_dispatch(current: ThreadId, syscall_num: u64, args: [u64; 6]) -
     }
 
     samples.sort_unstable();
+
     samples[BATCH_SAMPLES / 2]
 }
 
 fn bench_batched_create_close(current: ThreadId, create_num: u64, create_args: [u64; 6]) -> u64 {
+    let space_id = crate::syscall::thread_space_id(current).ok();
+
     for _ in 0..BATCH_N {
-        let (err, h) = crate::syscall::dispatch(current, 0, create_num, &create_args);
+        let (err, h) = crate::syscall::dispatch(current, space_id, 0, create_num, &create_args);
 
         if err == 0 {
-            crate::syscall::dispatch(current, 0, num::HANDLE_CLOSE, &[h, 0, 0, 0, 0, 0]);
+            crate::syscall::dispatch(current, space_id, 0, num::HANDLE_CLOSE, &[h, 0, 0, 0, 0, 0]);
         }
     }
 
@@ -359,10 +385,16 @@ fn bench_batched_create_close(current: ThreadId, create_num: u64, create_args: [
         let start = arch::read_cycle_counter();
 
         for _ in 0..BATCH_N {
-            let (err, h) = crate::syscall::dispatch(current, 0, create_num, &create_args);
+            let (err, h) = crate::syscall::dispatch(current, space_id, 0, create_num, &create_args);
 
             if err == 0 {
-                crate::syscall::dispatch(current, 0, num::HANDLE_CLOSE, &[h, 0, 0, 0, 0, 0]);
+                crate::syscall::dispatch(
+                    current,
+                    space_id,
+                    0,
+                    num::HANDLE_CLOSE,
+                    &[h, 0, 0, 0, 0, 0],
+                );
             }
         }
 
@@ -372,6 +404,7 @@ fn bench_batched_create_close(current: ThreadId, create_num: u64, create_args: [
     }
 
     samples.sort_unstable();
+
     samples[BATCH_SAMPLES / 2]
 }
 
@@ -430,8 +463,8 @@ pub fn run() {
     crate::println!("--- benchmarks ---");
 
     let current = setup_bench_env();
+    let space_id = crate::syscall::thread_space_id(current).ok();
     let mut results = alloc::vec::Vec::new();
-
     // ── Trap overhead ─────────────────────────────────────────────
     let svc_null_result = bench_with_hvf(WARMUP + ITERATIONS, || {
         for _ in 0..WARMUP {
@@ -463,7 +496,6 @@ pub fn run() {
     });
 
     results.push(svc_null_result);
-
     // ── Dispatch overhead (no SVC) ────────────────────────────────
     results.push(bench_with_hvf(WARMUP + ITERATIONS, || {
         bench_syscall(current, "invalid syscall (dispatch)", 200, 255, [0; 6])
@@ -502,7 +534,7 @@ pub fn run() {
     }));
 
     // ── Event operations ──────────────────────────────────────────
-    let (_, evt_h) = crate::syscall::dispatch(current, 0, num::EVENT_CREATE, &[0; 6]);
+    let (_, evt_h) = crate::syscall::dispatch(current, space_id, 0, num::EVENT_CREATE, &[0; 6]);
 
     results.push(bench_with_hvf(WARMUP + ITERATIONS, || {
         bench_syscall(
@@ -524,7 +556,13 @@ pub fn run() {
     }));
 
     // Signal bits so wait returns immediately.
-    crate::syscall::dispatch(current, 0, num::EVENT_SIGNAL, &[evt_h, 0xFF, 0, 0, 0, 0]);
+    crate::syscall::dispatch(
+        current,
+        space_id,
+        0,
+        num::EVENT_SIGNAL,
+        &[evt_h, 0xFF, 0, 0, 0, 0],
+    );
 
     results.push(bench_with_hvf(WARMUP + ITERATIONS, || {
         bench_syscall(
@@ -536,11 +574,18 @@ pub fn run() {
         )
     }));
 
-    crate::syscall::dispatch(current, 0, num::HANDLE_CLOSE, &[evt_h, 0, 0, 0, 0, 0]);
+    crate::syscall::dispatch(
+        current,
+        space_id,
+        0,
+        num::HANDLE_CLOSE,
+        &[evt_h, 0, 0, 0, 0, 0],
+    );
 
     // ── Handle operations ─────────────────────────────────────────
     let (_, vmo_h) = crate::syscall::dispatch(
         current,
+        space_id,
         0,
         num::VMO_CREATE,
         &[config::PAGE_SIZE as u64, 0, 0, 0, 0, 0],
@@ -561,13 +606,20 @@ pub fn run() {
         for _ in 0..WARMUP {
             let (err, dup) = crate::syscall::dispatch(
                 current,
+                space_id,
                 0,
                 num::HANDLE_DUP,
                 &[vmo_h, Rights::ALL.0 as u64, 0, 0, 0, 0],
             );
 
             if err == 0 {
-                crate::syscall::dispatch(current, 0, num::HANDLE_CLOSE, &[dup, 0, 0, 0, 0, 0]);
+                crate::syscall::dispatch(
+                    current,
+                    space_id,
+                    0,
+                    num::HANDLE_CLOSE,
+                    &[dup, 0, 0, 0, 0, 0],
+                );
             }
         }
 
@@ -579,6 +631,7 @@ pub fn run() {
             let start = arch::read_cycle_counter();
             let (err, dup) = crate::syscall::dispatch(
                 current,
+                space_id,
                 0,
                 num::HANDLE_DUP,
                 &[vmo_h, Rights::ALL.0 as u64, 0, 0, 0, 0],
@@ -589,7 +642,13 @@ pub fn run() {
             *s = arch::read_cycle_counter().wrapping_sub(start);
 
             if err == 0 {
-                crate::syscall::dispatch(current, 0, num::HANDLE_CLOSE, &[dup, 0, 0, 0, 0, 0]);
+                crate::syscall::dispatch(
+                    current,
+                    space_id,
+                    0,
+                    num::HANDLE_CLOSE,
+                    &[dup, 0, 0, 0, 0, 0],
+                );
             }
         }
 
@@ -609,11 +668,22 @@ pub fn run() {
     // ── VMO operations ────────────────────────────────────────────
     let vmo_snap_result = bench_with_hvf(2 * (WARMUP + ITERATIONS), || {
         for _ in 0..WARMUP {
-            let (err, snap) =
-                crate::syscall::dispatch(current, 0, num::VMO_SNAPSHOT, &[vmo_h, 0, 0, 0, 0, 0]);
+            let (err, snap) = crate::syscall::dispatch(
+                current,
+                space_id,
+                0,
+                num::VMO_SNAPSHOT,
+                &[vmo_h, 0, 0, 0, 0, 0],
+            );
 
             if err == 0 {
-                crate::syscall::dispatch(current, 0, num::HANDLE_CLOSE, &[snap, 0, 0, 0, 0, 0]);
+                crate::syscall::dispatch(
+                    current,
+                    space_id,
+                    0,
+                    num::HANDLE_CLOSE,
+                    &[snap, 0, 0, 0, 0, 0],
+                );
             }
         }
 
@@ -623,15 +693,26 @@ pub fn run() {
             arch::isb();
 
             let start = arch::read_cycle_counter();
-            let (err, snap) =
-                crate::syscall::dispatch(current, 0, num::VMO_SNAPSHOT, &[vmo_h, 0, 0, 0, 0, 0]);
+            let (err, snap) = crate::syscall::dispatch(
+                current,
+                space_id,
+                0,
+                num::VMO_SNAPSHOT,
+                &[vmo_h, 0, 0, 0, 0, 0],
+            );
 
             arch::isb();
 
             *s = arch::read_cycle_counter().wrapping_sub(start);
 
             if err == 0 {
-                crate::syscall::dispatch(current, 0, num::HANDLE_CLOSE, &[snap, 0, 0, 0, 0, 0]);
+                crate::syscall::dispatch(
+                    current,
+                    space_id,
+                    0,
+                    num::HANDLE_CLOSE,
+                    &[snap, 0, 0, 0, 0, 0],
+                );
             }
         }
 
@@ -648,7 +729,13 @@ pub fn run() {
 
     results.push(vmo_snap_result);
 
-    crate::syscall::dispatch(current, 0, num::HANDLE_CLOSE, &[vmo_h, 0, 0, 0, 0, 0]);
+    crate::syscall::dispatch(
+        current,
+        space_id,
+        0,
+        num::HANDLE_CLOSE,
+        &[vmo_h, 0, 0, 0, 0, 0],
+    );
 
     // ── Info syscalls ─────────────────────────────────────────────
     results.push(bench_with_hvf(WARMUP + ITERATIONS, || {
@@ -704,6 +791,10 @@ pub fn run() {
     }
 
     run_cycle_estimates(current);
+
+    #[cfg(feature = "profile")]
+    run_profile(current);
+
     teardown_bench_env(current);
 }
 
@@ -760,21 +851,65 @@ fn bench_document_editing(current: ThreadId) -> BenchResult {
 }
 
 fn document_editing_iteration(current: ThreadId, page: u64) {
+    let space_id = crate::syscall::thread_space_id(current).ok();
     // Simulate: create VMO (document content), map it, snapshot (undo point),
     // create event (compositor notify), signal it, close everything.
-    let (_, vmo) = crate::syscall::dispatch(current, 0, num::VMO_CREATE, &[page, 0, 0, 0, 0, 0]);
-    let (_, snap) = crate::syscall::dispatch(current, 0, num::VMO_SNAPSHOT, &[vmo, 0, 0, 0, 0, 0]);
-    let (_, evt) = crate::syscall::dispatch(current, 0, num::EVENT_CREATE, &[0; 6]);
+    let (_, vmo) = crate::syscall::dispatch(
+        current,
+        space_id,
+        0,
+        num::VMO_CREATE,
+        &[page, 0, 0, 0, 0, 0],
+    );
+    let (_, snap) = crate::syscall::dispatch(
+        current,
+        space_id,
+        0,
+        num::VMO_SNAPSHOT,
+        &[vmo, 0, 0, 0, 0, 0],
+    );
+    let (_, evt) = crate::syscall::dispatch(current, space_id, 0, num::EVENT_CREATE, &[0; 6]);
 
-    crate::syscall::dispatch(current, 0, num::EVENT_SIGNAL, &[evt, 0x1, 0, 0, 0, 0]);
-    crate::syscall::dispatch(current, 0, num::EVENT_CLEAR, &[evt, 0x1, 0, 0, 0, 0]);
-    crate::syscall::dispatch(current, 0, num::HANDLE_CLOSE, &[evt, 0, 0, 0, 0, 0]);
-    crate::syscall::dispatch(current, 0, num::HANDLE_CLOSE, &[snap, 0, 0, 0, 0, 0]);
-    crate::syscall::dispatch(current, 0, num::HANDLE_CLOSE, &[vmo, 0, 0, 0, 0, 0]);
+    crate::syscall::dispatch(
+        current,
+        space_id,
+        0,
+        num::EVENT_SIGNAL,
+        &[evt, 0x1, 0, 0, 0, 0],
+    );
+    crate::syscall::dispatch(
+        current,
+        space_id,
+        0,
+        num::EVENT_CLEAR,
+        &[evt, 0x1, 0, 0, 0, 0],
+    );
+    crate::syscall::dispatch(
+        current,
+        space_id,
+        0,
+        num::HANDLE_CLOSE,
+        &[evt, 0, 0, 0, 0, 0],
+    );
+    crate::syscall::dispatch(
+        current,
+        space_id,
+        0,
+        num::HANDLE_CLOSE,
+        &[snap, 0, 0, 0, 0, 0],
+    );
+    crate::syscall::dispatch(
+        current,
+        space_id,
+        0,
+        num::HANDLE_CLOSE,
+        &[vmo, 0, 0, 0, 0, 0],
+    );
 }
 
 fn bench_ipc_storm(current: ThreadId) -> BenchResult {
-    let (_, ep) = crate::syscall::dispatch(current, 0, num::ENDPOINT_CREATE, &[0; 6]);
+    let space_id = crate::syscall::thread_space_id(current).ok();
+    let (_, ep) = crate::syscall::dispatch(current, space_id, 0, num::ENDPOINT_CREATE, &[0; 6]);
 
     for _ in 0..WARMUP {
         ipc_storm_iteration(current, ep);
@@ -794,7 +929,13 @@ fn bench_ipc_storm(current: ThreadId) -> BenchResult {
         *s = arch::read_cycle_counter().wrapping_sub(start);
     }
 
-    crate::syscall::dispatch(current, 0, num::HANDLE_CLOSE, &[ep, 0, 0, 0, 0, 0]);
+    crate::syscall::dispatch(
+        current,
+        space_id,
+        0,
+        num::HANDLE_CLOSE,
+        &[ep, 0, 0, 0, 0, 0],
+    );
 
     let (median, p99) = stats(&mut samples);
 
@@ -808,6 +949,7 @@ fn bench_ipc_storm(current: ThreadId) -> BenchResult {
 }
 
 fn ipc_storm_iteration(current: ThreadId, ep: u64) {
+    let space_id = crate::syscall::thread_space_id(current).ok();
     let mut buf = [0u8; 128];
 
     // 10 rapid call attempts — each will enqueue a pending call (thread blocks
@@ -815,6 +957,7 @@ fn ipc_storm_iteration(current: ThreadId, ep: u64) {
     for _ in 0..10 {
         crate::syscall::dispatch(
             current,
+            space_id,
             0,
             num::CALL,
             &[ep, buf.as_mut_ptr() as u64, 8, 0, 0, 0],
@@ -874,30 +1017,43 @@ fn bench_object_lifecycle_churn(current: ThreadId) -> BenchResult {
 }
 
 fn object_churn_iteration(current: ThreadId) {
+    let space_id = crate::syscall::thread_space_id(current).ok();
     let page = config::PAGE_SIZE as u64;
     let mut handles = [0u64; 8];
 
     // Create 4 VMOs + 2 events + 2 endpoints
     for h in &mut handles[..4] {
-        let (_, hid) =
-            crate::syscall::dispatch(current, 0, num::VMO_CREATE, &[page, 0, 0, 0, 0, 0]);
+        let (_, hid) = crate::syscall::dispatch(
+            current,
+            space_id,
+            0,
+            num::VMO_CREATE,
+            &[page, 0, 0, 0, 0, 0],
+        );
 
         *h = hid;
     }
     for h in &mut handles[4..6] {
-        let (_, hid) = crate::syscall::dispatch(current, 0, num::EVENT_CREATE, &[0; 6]);
+        let (_, hid) = crate::syscall::dispatch(current, space_id, 0, num::EVENT_CREATE, &[0; 6]);
 
         *h = hid;
     }
     for h in &mut handles[6..8] {
-        let (_, hid) = crate::syscall::dispatch(current, 0, num::ENDPOINT_CREATE, &[0; 6]);
+        let (_, hid) =
+            crate::syscall::dispatch(current, space_id, 0, num::ENDPOINT_CREATE, &[0; 6]);
 
         *h = hid;
     }
 
     // Close all in reverse order — exercises different table paths
     for h in handles.iter().rev() {
-        crate::syscall::dispatch(current, 0, num::HANDLE_CLOSE, &[*h, 0, 0, 0, 0, 0]);
+        crate::syscall::dispatch(
+            current,
+            space_id,
+            0,
+            num::HANDLE_CLOSE,
+            &[*h, 0, 0, 0, 0, 0],
+        );
     }
 }
 
@@ -910,6 +1066,7 @@ struct IpcBenchEnv {
 }
 
 fn setup_ipc_bench(client: ThreadId) -> IpcBenchEnv {
+    let client_space_id = crate::syscall::thread_space_id(client).ok();
     let asid = state::alloc_asid().expect("ipc bench: server asid");
     let space = AddressSpace::new(AddressSpaceId(0), asid, 0);
     let (space_idx, space_gen) = state::spaces()
@@ -947,7 +1104,8 @@ fn setup_ipc_bench(client: ThreadId) -> IpcBenchEnv {
     state::threads().write(server_idx).unwrap().id = ThreadId(server_idx);
     state::inc_alive_threads();
 
-    let (err, client_ep_h) = crate::syscall::dispatch(client, 0, num::ENDPOINT_CREATE, &[0; 6]);
+    let (err, client_ep_h) =
+        crate::syscall::dispatch(client, client_space_id, 0, num::ENDPOINT_CREATE, &[0; 6]);
 
     assert_eq!(err, 0);
 
@@ -1027,6 +1185,7 @@ fn bench_ipc_null_round_trip(env: &IpcBenchEnv, client: ThreadId) -> u64 {
 }
 
 fn ipc_null_iteration(env: &IpcBenchEnv, client: ThreadId) {
+    let client_space_id = crate::syscall::thread_space_id(client).ok();
     // The bench drives a full IPC round-trip from kernel mode by issuing
     // CALL/RECV/REPLY directly, bypassing real thread context switches.
     // CALL's fast path calls sched::block_current(client) → switch_away →
@@ -1065,11 +1224,23 @@ fn ipc_null_iteration(env: &IpcBenchEnv, client: ThreadId) {
         });
     }
 
-    crate::syscall::dispatch(client, 0, num::CALL, &[env.client_ep_h, 0, 0, 0, 0, 0]);
+    crate::syscall::dispatch(
+        client,
+        client_space_id,
+        0,
+        num::CALL,
+        &[env.client_ep_h, 0, 0, 0, 0, 0],
+    );
 
     force_running(env.server);
 
-    let _ = crate::syscall::dispatch(env.server, 0, num::RECV, &[env.server_ep_h, 0, 0, 0, 0, 0]);
+    let _ = crate::syscall::dispatch(
+        env.server,
+        Some(server_space_id),
+        0,
+        num::RECV,
+        &[env.server_ep_h, 0, 0, 0, 0, 0],
+    );
     // The reply_cap is normally written into the server's recv_state.reply_cap_out
     // userspace buffer. The bench has no userspace pointer (passes 0), so reach
     // into the endpoint's active_replies and pull the cap out directly. Without
@@ -1082,6 +1253,7 @@ fn ipc_null_iteration(env: &IpcBenchEnv, client: ThreadId) {
 
     crate::syscall::dispatch(
         env.server,
+        Some(server_space_id),
         0,
         num::REPLY,
         &[env.server_ep_h, reply_cap, 0, 0, 0, 0],
@@ -1092,8 +1264,11 @@ fn ipc_null_iteration(env: &IpcBenchEnv, client: ThreadId) {
 }
 
 fn teardown_ipc_bench(env: &IpcBenchEnv, client: ThreadId) {
+    let client_space_id = crate::syscall::thread_space_id(client).ok();
+
     crate::syscall::dispatch(
         client,
+        client_space_id,
         0,
         num::HANDLE_CLOSE,
         &[env.client_ep_h, 0, 0, 0, 0, 0],
@@ -1115,15 +1290,26 @@ fn teardown_ipc_bench(env: &IpcBenchEnv, client: ThreadId) {
 fn bench_fault_lookup(current: ThreadId) -> u64 {
     let page = config::PAGE_SIZE as u64;
     let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
-    let space_id = crate::syscall::thread_space_id(current).unwrap();
-    let (_, vmo_h) =
-        crate::syscall::dispatch(current, 0, num::VMO_CREATE, &[page * 4, 0, 0, 0, 0, 0]);
-    let (_, va) =
-        crate::syscall::dispatch(current, 0, num::VMO_MAP, &[vmo_h, 0, rw.0 as u64, 0, 0, 0]);
+    let space_id_val = crate::syscall::thread_space_id(current).unwrap();
+    let space_id = Some(space_id_val);
+    let (_, vmo_h) = crate::syscall::dispatch(
+        current,
+        space_id,
+        0,
+        num::VMO_CREATE,
+        &[page * 4, 0, 0, 0, 0, 0],
+    );
+    let (_, va) = crate::syscall::dispatch(
+        current,
+        space_id,
+        0,
+        num::VMO_MAP,
+        &[vmo_h, 0, rw.0 as u64, 0, 0, 0],
+    );
     let fault_addr = va as usize + config::PAGE_SIZE;
 
     for _ in 0..BATCH_N {
-        let space = state::spaces().read(space_id.0).unwrap();
+        let space = state::spaces().read(space_id_val.0).unwrap();
         let _ = space.find_mapping(fault_addr);
     }
 
@@ -1135,7 +1321,7 @@ fn bench_fault_lookup(current: ThreadId) -> u64 {
         let start = arch::read_cycle_counter();
 
         for _ in 0..BATCH_N {
-            let space = state::spaces().read(space_id.0).unwrap();
+            let space = state::spaces().read(space_id_val.0).unwrap();
             let mapping = space.find_mapping(fault_addr);
 
             if let Some(m) = mapping {
@@ -1153,8 +1339,14 @@ fn bench_fault_lookup(current: ThreadId) -> u64 {
         *s = arch::read_cycle_counter().wrapping_sub(start);
     }
 
-    crate::syscall::dispatch(current, 0, num::VMO_UNMAP, &[va, 0, 0, 0, 0, 0]);
-    crate::syscall::dispatch(current, 0, num::HANDLE_CLOSE, &[vmo_h, 0, 0, 0, 0, 0]);
+    crate::syscall::dispatch(current, space_id, 0, num::VMO_UNMAP, &[va, 0, 0, 0, 0, 0]);
+    crate::syscall::dispatch(
+        current,
+        space_id,
+        0,
+        num::HANDLE_CLOSE,
+        &[vmo_h, 0, 0, 0, 0, 0],
+    );
 
     samples.sort_unstable();
 
@@ -1162,6 +1354,8 @@ fn bench_fault_lookup(current: ThreadId) -> u64 {
 }
 
 fn run_cycle_estimates(current: ThreadId) {
+    let space_id = crate::syscall::thread_space_id(current).ok();
+
     crate::println!(
         "--- cycle estimates ({}x{} samples, 24MHz->4.5GHz) ---",
         BATCH_N,
@@ -1188,7 +1382,6 @@ fn run_cycle_estimates(current: ThreadId) {
         TOTAL_BATCHED_OPS,
         || run_batched_op(arch::nop_pair),
     ));
-
     // ── SVC null (real trap + ERET round-trip) ───────────────────
     estimates.push(estimate_with_hvf(
         "svc null (trap+eret)",
@@ -1201,7 +1394,6 @@ fn run_cycle_estimates(current: ThreadId) {
             })
         },
     ));
-
     // ── Dispatch-only syscalls ───────────────────────────────────
     estimates.push(estimate_with_hvf(
         "dispatch overhead",
@@ -1228,6 +1420,7 @@ fn run_cycle_estimates(current: ThreadId) {
     // ── Handle operations (need a live VMO) ──────────────────────
     let (_, vmo_h) = crate::syscall::dispatch(
         current,
+        space_id,
         0,
         num::VMO_CREATE,
         &[config::PAGE_SIZE as u64, 0, 0, 0, 0, 0],
@@ -1240,7 +1433,6 @@ fn run_cycle_estimates(current: ThreadId) {
         TOTAL_BATCHED_OPS,
         || bench_batched_dispatch(current, num::HANDLE_INFO, [vmo_h, 0, 0, 0, 0, 0]),
     ));
-
     estimates.push(estimate_with_hvf(
         "handle_dup+close",
         30,
@@ -1250,18 +1442,24 @@ fn run_cycle_estimates(current: ThreadId) {
             run_batched_op(|| {
                 let (err, dup) = crate::syscall::dispatch(
                     current,
+                    space_id,
                     0,
                     num::HANDLE_DUP,
                     &[vmo_h, Rights::ALL.0 as u64, 0, 0, 0, 0],
                 );
 
                 if err == 0 {
-                    crate::syscall::dispatch(current, 0, num::HANDLE_CLOSE, &[dup, 0, 0, 0, 0, 0]);
+                    crate::syscall::dispatch(
+                        current,
+                        space_id,
+                        0,
+                        num::HANDLE_CLOSE,
+                        &[dup, 0, 0, 0, 0, 0],
+                    );
                 }
             })
         },
     ));
-
     // ── VMO snapshot+close ───────────────────────────────────────
     estimates.push(estimate_with_hvf(
         "vmo_snapshot+close",
@@ -1272,22 +1470,35 @@ fn run_cycle_estimates(current: ThreadId) {
             run_batched_op(|| {
                 let (err, snap) = crate::syscall::dispatch(
                     current,
+                    space_id,
                     0,
                     num::VMO_SNAPSHOT,
                     &[vmo_h, 0, 0, 0, 0, 0],
                 );
 
                 if err == 0 {
-                    crate::syscall::dispatch(current, 0, num::HANDLE_CLOSE, &[snap, 0, 0, 0, 0, 0]);
+                    crate::syscall::dispatch(
+                        current,
+                        space_id,
+                        0,
+                        num::HANDLE_CLOSE,
+                        &[snap, 0, 0, 0, 0, 0],
+                    );
                 }
             })
         },
     ));
 
-    crate::syscall::dispatch(current, 0, num::HANDLE_CLOSE, &[vmo_h, 0, 0, 0, 0, 0]);
+    crate::syscall::dispatch(
+        current,
+        space_id,
+        0,
+        num::HANDLE_CLOSE,
+        &[vmo_h, 0, 0, 0, 0, 0],
+    );
 
     // ── Event operations ─────────────────────────────────────────
-    let (_, evt_h) = crate::syscall::dispatch(current, 0, num::EVENT_CREATE, &[0; 6]);
+    let (_, evt_h) = crate::syscall::dispatch(current, space_id, 0, num::EVENT_CREATE, &[0; 6]);
 
     estimates.push(estimate_with_hvf(
         "event_signal",
@@ -1304,7 +1515,13 @@ fn run_cycle_estimates(current: ThreadId) {
         || bench_batched_dispatch(current, num::EVENT_CLEAR, [evt_h, 0x1, 0, 0, 0, 0]),
     ));
 
-    crate::syscall::dispatch(current, 0, num::EVENT_SIGNAL, &[evt_h, 0xFF, 0, 0, 0, 0]);
+    crate::syscall::dispatch(
+        current,
+        space_id,
+        0,
+        num::EVENT_SIGNAL,
+        &[evt_h, 0xFF, 0, 0, 0, 0],
+    );
 
     estimates.push(estimate_with_hvf(
         "event_wait (signaled)",
@@ -1314,7 +1531,13 @@ fn run_cycle_estimates(current: ThreadId) {
         || bench_batched_dispatch(current, num::EVENT_WAIT, [evt_h, 0xFF, 1, 0, 0, 0]),
     ));
 
-    crate::syscall::dispatch(current, 0, num::HANDLE_CLOSE, &[evt_h, 0, 0, 0, 0, 0]);
+    crate::syscall::dispatch(
+        current,
+        space_id,
+        0,
+        num::HANDLE_CLOSE,
+        &[evt_h, 0, 0, 0, 0, 0],
+    );
 
     // ── Object create+close pairs ────────────────────────────────
     estimates.push(estimate_with_hvf(
@@ -1420,4 +1643,548 @@ fn run_cycle_estimates(current: ThreadId) {
         within_2x,
         total_rated,
     );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 1+2: Cycle profile — per-stage breakdown of every measured path.
+//
+// CNTVCT_EL0 runs at 24 MHz (1 tick ≈ 187.5 CPU cycles at 4.5 GHz).
+// Most stages complete in < 1 tick, so single-iteration stamps read 0.
+// Fix: accumulate ticks over N iterations and divide. A stage that takes
+// 50 cycles (0.27 ticks) will advance the counter in ~27% of iterations,
+// giving ~135 accumulated ticks / 500 ops × 1875 = 50.6 cycles.
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[cfg(feature = "profile")]
+const PROFILE_N: usize = 500;
+#[cfg(feature = "profile")]
+const PROFILE_OUTER: usize = 100;
+
+#[cfg(feature = "profile")]
+fn print_stage(label: &str, cyc_x10: u64) {
+    crate::println!("    {:40} {:>5}.{} cyc", label, cyc_x10 / 10, cyc_x10 % 10,);
+}
+
+#[cfg(feature = "profile")]
+fn accum_dispatch(
+    current: ThreadId,
+    syscall_num: u64,
+    args: [u64; 6],
+    ref_slot: usize,
+) -> [u64; 32] {
+    use crate::frame::profile;
+
+    let space_id = crate::syscall::thread_space_id(current).ok();
+
+    for _ in 0..PROFILE_N {
+        profile::reset();
+        crate::syscall::dispatch(current, space_id, 0, syscall_num, &args);
+    }
+
+    let mut accum = [0u64; 32];
+    let mut outer_samples = alloc::vec![0u64; PROFILE_OUTER];
+
+    for (oi, sample) in outer_samples.iter_mut().enumerate() {
+        let mut inner_accum = [0u64; 32];
+
+        for _ in 0..PROFILE_N {
+            profile::reset();
+            crate::syscall::dispatch(current, space_id, 0, syscall_num, &args);
+            let t = profile::read();
+            let r = t[ref_slot];
+
+            if r == 0 {
+                continue;
+            }
+
+            for s in 0..32 {
+                if t[s] > 0 && t[s] >= r {
+                    inner_accum[s] += t[s] - r;
+                }
+            }
+        }
+
+        for s in 0..32 {
+            accum[s] += inner_accum[s];
+        }
+
+        let _ = (oi, sample);
+    }
+
+    let total_ops = (PROFILE_OUTER * PROFILE_N) as u64;
+    let mut result = [0u64; 32];
+
+    for s in 0..32 {
+        result[s] = accum[s] * 1875 / total_ops;
+    }
+
+    result
+}
+
+#[cfg(feature = "profile")]
+fn accum_svc(ref_slot: usize) -> [u64; 32] {
+    use crate::frame::profile;
+
+    for _ in 0..PROFILE_N {
+        let _ = arch::svc_null();
+    }
+
+    let mut accum = [0u64; 32];
+
+    for _ in 0..PROFILE_OUTER {
+        for _ in 0..PROFILE_N {
+            profile::reset();
+            profile::stamp(profile::slot::BENCH_BEFORE);
+
+            let _ = arch::svc_null();
+
+            profile::stamp(profile::slot::BENCH_AFTER);
+
+            let t = profile::read();
+            let r = t[ref_slot];
+
+            if r == 0 {
+                continue;
+            }
+
+            for s in 0..32 {
+                if t[s] > 0 && t[s] >= r {
+                    accum[s] += t[s] - r;
+                }
+            }
+        }
+    }
+
+    let total_ops = (PROFILE_OUTER * PROFILE_N) as u64;
+    let mut result = [0u64; 32];
+
+    for s in 0..32 {
+        result[s] = accum[s] * 1875 / total_ops;
+    }
+
+    result
+}
+
+#[cfg(feature = "profile")]
+fn accum_create_close(
+    current: ThreadId,
+    create_num: u64,
+    create_args: [u64; 6],
+    ref_slot: usize,
+) -> [u64; 32] {
+    use crate::frame::profile;
+
+    let space_id = crate::syscall::thread_space_id(current).ok();
+
+    for _ in 0..PROFILE_N {
+        let (err, h) = crate::syscall::dispatch(current, space_id, 0, create_num, &create_args);
+
+        if err == 0 {
+            crate::syscall::dispatch(current, space_id, 0, num::HANDLE_CLOSE, &[h, 0, 0, 0, 0, 0]);
+        }
+    }
+
+    let mut accum = [0u64; 32];
+
+    for _ in 0..PROFILE_OUTER {
+        for _ in 0..PROFILE_N {
+            profile::reset();
+            let (err, h) = crate::syscall::dispatch(current, space_id, 0, create_num, &create_args);
+            let t = profile::read();
+            let r = t[ref_slot];
+
+            if err == 0 {
+                crate::syscall::dispatch(
+                    current,
+                    space_id,
+                    0,
+                    num::HANDLE_CLOSE,
+                    &[h, 0, 0, 0, 0, 0],
+                );
+            }
+
+            if r == 0 {
+                continue;
+            }
+
+            for s in 0..32 {
+                if t[s] > 0 && t[s] >= r {
+                    accum[s] += t[s] - r;
+                }
+            }
+        }
+    }
+
+    let total_ops = (PROFILE_OUTER * PROFILE_N) as u64;
+    let mut result = [0u64; 32];
+
+    for s in 0..32 {
+        result[s] = accum[s] * 1875 / total_ops;
+    }
+
+    result
+}
+
+#[cfg(feature = "profile")]
+fn accum_dup_close(current: ThreadId, src_handle: u64, ref_slot: usize) -> [u64; 32] {
+    use crate::frame::profile;
+
+    let space_id = crate::syscall::thread_space_id(current).ok();
+
+    for _ in 0..PROFILE_N {
+        let (err, dup) = crate::syscall::dispatch(
+            current,
+            space_id,
+            0,
+            num::HANDLE_DUP,
+            &[src_handle, Rights::ALL.0 as u64, 0, 0, 0, 0],
+        );
+
+        if err == 0 {
+            crate::syscall::dispatch(
+                current,
+                space_id,
+                0,
+                num::HANDLE_CLOSE,
+                &[dup, 0, 0, 0, 0, 0],
+            );
+        }
+    }
+
+    let mut accum = [0u64; 32];
+
+    for _ in 0..PROFILE_OUTER {
+        for _ in 0..PROFILE_N {
+            profile::reset();
+            let (err, dup) = crate::syscall::dispatch(
+                current,
+                space_id,
+                0,
+                num::HANDLE_DUP,
+                &[src_handle, Rights::ALL.0 as u64, 0, 0, 0, 0],
+            );
+            let t = profile::read();
+            let r = t[ref_slot];
+
+            if err == 0 {
+                crate::syscall::dispatch(
+                    current,
+                    space_id,
+                    0,
+                    num::HANDLE_CLOSE,
+                    &[dup, 0, 0, 0, 0, 0],
+                );
+            }
+
+            if r == 0 {
+                continue;
+            }
+
+            for s in 0..32 {
+                if t[s] > 0 && t[s] >= r {
+                    accum[s] += t[s] - r;
+                }
+            }
+        }
+    }
+
+    let total_ops = (PROFILE_OUTER * PROFILE_N) as u64;
+    let mut result = [0u64; 32];
+
+    for s in 0..32 {
+        result[s] = accum[s] * 1875 / total_ops;
+    }
+
+    result
+}
+
+#[cfg(feature = "profile")]
+fn stage(c: &[u64; 32], from: usize, to: usize) -> u64 {
+    c[to].saturating_sub(c[from])
+}
+
+#[cfg(feature = "profile")]
+fn run_profile(current: ThreadId) {
+    use crate::frame::profile::slot;
+
+    let space_id = crate::syscall::thread_space_id(current).ok();
+
+    crate::println!(
+        "--- cycle profile ({}x{} accumulated, 24MHz→4.5GHz) ---",
+        PROFILE_OUTER,
+        PROFILE_N,
+    );
+    // ── SVC null (EL1 slow path) ─────────────────────────────────
+    crate::println!();
+    crate::println!("  SVC null (EL1, full TrapFrame path):");
+
+    let c = accum_svc(slot::BENCH_BEFORE);
+
+    print_stage("total", stage(&c, slot::BENCH_BEFORE, slot::BENCH_AFTER));
+    print_stage(
+        "trap + GPR/FP save → asm_before_handler",
+        stage(&c, slot::BENCH_BEFORE, slot::ASM_BEFORE_HANDLER),
+    );
+    print_stage(
+        "asm → Rust handler entry",
+        stage(&c, slot::ASM_BEFORE_HANDLER, slot::HANDLER_ENTRY),
+    );
+    print_stage(
+        "percpu read (ESR decode + space lookup)",
+        stage(&c, slot::HANDLER_ENTRY, slot::HANDLER_PERCPU_DONE),
+    );
+    print_stage(
+        "dispatch (match + error return)",
+        stage(&c, slot::DISPATCH_ENTER, slot::DISPATCH_EXIT),
+    );
+    print_stage(
+        "handler cleanup + return to asm",
+        stage(&c, slot::HANDLER_EXIT, slot::ASM_AFTER_HANDLER),
+    );
+    print_stage(
+        "FP/GPR restore + msr ELR/SPSR + eret",
+        stage(&c, slot::ASM_AFTER_HANDLER, slot::BENCH_AFTER),
+    );
+
+    // ── dispatch(invalid) ────────────────────────────────────────
+    crate::println!();
+    crate::println!("  dispatch(invalid):");
+
+    let c = accum_dispatch(current, 255, [0; 6], slot::DISPATCH_ENTER);
+
+    print_stage(
+        "total",
+        stage(&c, slot::DISPATCH_ENTER, slot::DISPATCH_EXIT),
+    );
+
+    // ── clock_read ───────────────────────────────────────────────
+    crate::println!();
+    crate::println!("  clock_read:");
+
+    let c = accum_dispatch(current, num::CLOCK_READ, [0; 6], slot::DISPATCH_ENTER);
+
+    print_stage(
+        "total",
+        stage(&c, slot::DISPATCH_ENTER, slot::DISPATCH_EXIT),
+    );
+    print_stage(
+        "  work (mrs cntvct + conversion)",
+        stage(&c, slot::SYS_WORK, slot::DISPATCH_EXIT),
+    );
+
+    // ── handle_info ──────────────────────────────────────────────
+    let (_, vmo_h) = crate::syscall::dispatch(
+        current,
+        space_id,
+        0,
+        num::VMO_CREATE,
+        &[config::PAGE_SIZE as u64, 0, 0, 0, 0, 0],
+    );
+
+    crate::println!();
+    crate::println!("  handle_info:");
+
+    let c = accum_dispatch(
+        current,
+        num::HANDLE_INFO,
+        [vmo_h, 0, 0, 0, 0, 0],
+        slot::DISPATCH_ENTER,
+    );
+
+    print_stage(
+        "total",
+        stage(&c, slot::DISPATCH_ENTER, slot::DISPATCH_EXIT),
+    );
+    print_stage(
+        "  thread_space_id",
+        stage(&c, slot::DISPATCH_ENTER, slot::SYS_SPACE_ID),
+    );
+    print_stage(
+        "  lookup_handle (gen check)",
+        stage(&c, slot::SYS_SPACE_ID, slot::SYS_HANDLE_LOOKUP),
+    );
+    print_stage(
+        "  result packing + return",
+        stage(&c, slot::SYS_HANDLE_LOOKUP, slot::DISPATCH_EXIT),
+    );
+
+    // ── handle_dup ───────────────────────────────────────────────
+    crate::println!();
+    crate::println!("  handle_dup:");
+
+    let c = accum_dup_close(current, vmo_h, slot::DISPATCH_ENTER);
+
+    print_stage(
+        "total",
+        stage(&c, slot::DISPATCH_ENTER, slot::DISPATCH_EXIT),
+    );
+    print_stage(
+        "  thread_space_id",
+        stage(&c, slot::DISPATCH_ENTER, slot::SYS_SPACE_ID),
+    );
+    print_stage(
+        "  lookup_handle",
+        stage(&c, slot::SYS_SPACE_ID, slot::SYS_HANDLE_LOOKUP),
+    );
+    print_stage(
+        "  duplicate + add_ref",
+        stage(&c, slot::SYS_HANDLE_LOOKUP, slot::SYS_WORK),
+    );
+
+    // ── vmo_snapshot ─────────────────────────────────────────────
+    crate::println!();
+    crate::println!("  vmo_snapshot+close:");
+
+    let c = accum_create_close(
+        current,
+        num::VMO_SNAPSHOT,
+        [vmo_h, 0, 0, 0, 0, 0],
+        slot::DISPATCH_ENTER,
+    );
+
+    print_stage(
+        "total",
+        stage(&c, slot::DISPATCH_ENTER, slot::DISPATCH_EXIT),
+    );
+    print_stage(
+        "  thread_space_id",
+        stage(&c, slot::DISPATCH_ENTER, slot::SYS_SPACE_ID),
+    );
+    print_stage(
+        "  lookup_handle",
+        stage(&c, slot::SYS_SPACE_ID, slot::SYS_HANDLE_LOOKUP),
+    );
+    print_stage(
+        "  clone_for_snapshot",
+        stage(&c, slot::SYS_HANDLE_LOOKUP, slot::SYS_WORK),
+    );
+    print_stage("  alloc_shared", stage(&c, slot::SYS_WORK, slot::SYS_ALLOC));
+    print_stage(
+        "  handle install",
+        stage(&c, slot::SYS_ALLOC, slot::SYS_HANDLE_INSTALL),
+    );
+
+    crate::syscall::dispatch(
+        current,
+        space_id,
+        0,
+        num::HANDLE_CLOSE,
+        &[vmo_h, 0, 0, 0, 0, 0],
+    );
+
+    // ── endpoint_create ──────────────────────────────────────────
+    crate::println!();
+    crate::println!("  endpoint_create+close:");
+
+    let c = accum_create_close(current, num::ENDPOINT_CREATE, [0; 6], slot::DISPATCH_ENTER);
+
+    print_stage(
+        "total",
+        stage(&c, slot::DISPATCH_ENTER, slot::DISPATCH_EXIT),
+    );
+    print_stage(
+        "  thread_space_id",
+        stage(&c, slot::DISPATCH_ENTER, slot::SYS_SPACE_ID),
+    );
+    print_stage(
+        "  alloc_shared",
+        stage(&c, slot::SYS_SPACE_ID, slot::SYS_ALLOC),
+    );
+    print_stage(
+        "  handle install",
+        stage(&c, slot::SYS_ALLOC, slot::SYS_HANDLE_INSTALL),
+    );
+
+    // ── IPC null round-trip ──────────────────────────────────────
+    crate::println!();
+    crate::println!("  IPC null round-trip (CALL fast path):");
+
+    crate::println!("  (IPC profiling skipped — IPC_AFTER_SWITCH stamp deadlocks)");
+    crate::println!();
+    return;
+
+    let ipc_env = setup_ipc_bench(current);
+    let mut accum = [0u64; 32];
+    let ipc_ref = slot::IPC_EP_LOOKUP;
+
+    for _ in 0..10 {
+        ipc_null_iteration(&ipc_env, current);
+    }
+
+    for _ in 0..10 {
+        for _ in 0..100 {
+            crate::frame::profile::reset();
+
+            ipc_null_iteration(&ipc_env, current);
+
+            let t = crate::frame::profile::read();
+            let r = t[ipc_ref];
+
+            if r == 0 {
+                continue;
+            }
+
+            for s in 0..32 {
+                if t[s] > 0 && t[s] >= r {
+                    accum[s] += t[s] - r;
+                }
+            }
+        }
+    }
+
+    let ipc_total_ops = (10 * 100) as u64;
+    let mut c = [0u64; 32];
+
+    for s in 0..32 {
+        c[s] = accum[s] * 1875 / ipc_total_ops;
+    }
+
+    print_stage(
+        "peer check (read ep)",
+        stage(&c, slot::IPC_EP_LOOKUP, slot::IPC_PEER_CHECK),
+    );
+    print_stage(
+        "read_user_message",
+        stage(&c, slot::IPC_PEER_CHECK, slot::IPC_MSG_READ),
+    );
+    print_stage(
+        "remove_handles_atomic",
+        stage(&c, slot::IPC_MSG_READ, slot::IPC_HANDLE_STAGE),
+    );
+    print_stage(
+        "pop_recv_waiter (write ep)",
+        stage(&c, slot::IPC_HANDLE_STAGE, slot::IPC_RECV_POP),
+    );
+    print_stage(
+        "switch_to_space_of (TTBR0)",
+        stage(&c, slot::IPC_RECV_POP, slot::IPC_SPACE_SWITCH),
+    );
+    print_stage(
+        "write message to server buf",
+        stage(&c, slot::IPC_SPACE_SWITCH, slot::IPC_MSG_WRITE),
+    );
+    print_stage(
+        "install handles into server",
+        stage(&c, slot::IPC_MSG_WRITE, slot::IPC_HANDLE_INSTALL),
+    );
+    print_stage(
+        "allocate reply_cap",
+        stage(&c, slot::IPC_HANDLE_INSTALL, slot::IPC_REPLY_CAP),
+    );
+    print_stage(
+        "priority boost",
+        stage(&c, slot::IPC_REPLY_CAP, slot::IPC_PRIORITY),
+    );
+    print_stage(
+        "before_switch check",
+        stage(&c, slot::IPC_PRIORITY, slot::IPC_BEFORE_SWITCH),
+    );
+    print_stage(
+        "direct_switch (block+switch+resume)",
+        stage(&c, slot::IPC_BEFORE_SWITCH, slot::IPC_AFTER_SWITCH),
+    );
+
+    teardown_ipc_bench(&ipc_env, current);
+
+    crate::println!();
 }

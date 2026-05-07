@@ -59,13 +59,14 @@ pub struct PerCpu {
     pub current_thread: u32,
     pub kernel_ptr: usize,
     pub reschedule_pending: u32,
-    _pad0: u32,
+    pub current_space: u32,
     pub last_syscall_entry: u64,
-    _pad: [u8; 96],
+    _pad: [u8; 88],
 }
 
 impl PerCpu {
     pub const IDLE: u32 = u32::MAX;
+    pub const NO_SPACE: u32 = u32::MAX;
 
     pub const fn new(core_id: u32) -> Self {
         PerCpu {
@@ -73,9 +74,9 @@ impl PerCpu {
             current_thread: Self::IDLE,
             kernel_ptr: 0,
             reschedule_pending: 0,
-            _pad0: 0,
+            current_space: Self::NO_SPACE,
             last_syscall_entry: 0,
-            _pad: [0; 96],
+            _pad: [0; 88],
         }
     }
 
@@ -195,10 +196,17 @@ pub fn set_kernel_ptr(ptr: *mut u8) {
 /// entering userspace.
 #[cfg(target_os = "none")]
 pub fn set_current_thread(thread_id: u32) {
+    let space = crate::frame::state::threads()
+        .read(thread_id)
+        .and_then(|t| t.address_space())
+        .map_or(PerCpu::NO_SPACE, |s| s.0);
+
     // SAFETY: percpu_mut requires init_percpu to have been called.
-    // Single-threaded context during boot.
     unsafe {
-        percpu_mut().current_thread = thread_id;
+        let pc = percpu_mut();
+
+        pc.current_thread = thread_id;
+        pc.current_space = space;
     }
 }
 

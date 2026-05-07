@@ -42,7 +42,9 @@ mod tests {
     }
 
     fn call(num: u64, args: &[u64; 6]) -> (u64, u64) {
-        crate::syscall::dispatch(ThreadId(0), 0, num, args)
+        let space_id = crate::syscall::thread_space_id(ThreadId(0)).ok();
+
+        crate::syscall::dispatch(ThreadId(0), space_id, 0, num, args)
     }
 
     fn inv() {
@@ -811,9 +813,12 @@ mod tests {
         fn multicore_thread_create_distributes_load(thread_count in 2usize..=8) {
             setup_multicore(4);
 
+            let space_id = crate::syscall::thread_space_id(ThreadId(0)).ok();
+
             for _ in 0..thread_count {
                 let (err, _) = crate::syscall::dispatch(
                     ThreadId(0),
+                    space_id,
                     0,
                     num::THREAD_CREATE_IN as u64,
                     &[0; 6],
@@ -822,6 +827,7 @@ mod tests {
                 if err != 0 {
                     let (err, _) = crate::syscall::dispatch(
                         ThreadId(0),
+                        space_id,
                         0,
                         num::THREAD_CREATE,
                         &[0x1000, 0x2000, 0, 0, 0, 0],
@@ -847,6 +853,7 @@ mod tests {
             ops in proptest::collection::vec(0u8..=3, 1..=20),
         ) {
             setup_multicore(2);
+            let space_id = crate::syscall::thread_space_id(ThreadId(0)).ok();
             let page = config::PAGE_SIZE as u64;
 
             for (i, op) in ops.iter().enumerate() {
@@ -856,6 +863,7 @@ mod tests {
                     0 => {
                         crate::syscall::dispatch(
                             ThreadId(0),
+                            space_id,
                             core_id,
                             num::VMO_CREATE,
                             &[page, 0, 0, 0, 0, 0],
@@ -864,6 +872,7 @@ mod tests {
                     1 => {
                         crate::syscall::dispatch(
                             ThreadId(0),
+                            space_id,
                             core_id,
                             num::EVENT_CREATE,
                             &[0; 6],
@@ -872,6 +881,7 @@ mod tests {
                     2 => {
                         crate::syscall::dispatch(
                             ThreadId(0),
+                            space_id,
                             core_id,
                             num::ENDPOINT_CREATE,
                             &[0; 6],
@@ -880,6 +890,7 @@ mod tests {
                     _ => {
                         crate::syscall::dispatch(
                             ThreadId(0),
+                            space_id,
                             core_id,
                             num::SYSTEM_INFO,
                             &[0, 0, 0, 0, 0, 0],

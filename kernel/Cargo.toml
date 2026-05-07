@@ -20,6 +20,7 @@ fuzzing = []
 bench = []
 bench-el0 = []
 bench-smp = []
+profile = []
 
 [dependencies]
 lock_api = { version = "0.4", default-features = false }
