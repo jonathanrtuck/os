@@ -1347,10 +1347,22 @@ fn event_wait_common(
     let mut obj_ids = [0u32; config::MAX_MULTI_WAIT];
     let use_count = wait_items.len().min(config::MAX_MULTI_WAIT);
 
-    for (i, &(_, obj_id, mask)) in wait_items[..use_count].iter().enumerate() {
+    for (i, &(hid, obj_id, mask)) in wait_items[..use_count].iter().enumerate() {
         let mut event = state::events()
             .write(obj_id)
             .ok_or(SyscallError::InvalidHandle)?;
+
+        if event.check(mask).is_some() {
+            drop(event);
+
+            for &prev_id in &obj_ids[..i] {
+                if let Some(mut prev_event) = state::events().write(prev_id) {
+                    prev_event.remove_waiter(current);
+                }
+            }
+
+            return Ok(hid as u64);
+        }
 
         if let Err(e) = event.add_waiter(current, mask) {
             drop(event);

@@ -55,11 +55,12 @@ fault handling, cross-space mapping. 16 KiB pages (Apple Silicon native).
 | 11. Bare-Metal + Perf | 14 benchmarks + 3 workloads, baselines set        |
 | 12. Regression Infra  | Pre-commit + nightly gates, Makefile targets      |
 
-**Bugs found and fixed:** 24 total (20 during verification, 4 during
+**Bugs found and fixed:** 26 total (20 during verification, 4 during
 finalization — IPC reply cap delivery, thread placement, badge wiring,
-thread_exit ordering).
+thread_exit ordering, 2 post-finalization — missed-wakeup race in wake(),
+redundant TTBR0 switches).
 
-**Test suite:** 551 tests, 4 fuzz targets, 33 property tests, 16 invariant
+**Test suite:** 557 tests, 4 fuzz targets, 33 property tests, 16 invariant
 checks, 34 bare-metal integration tests, 14 per-syscall benchmarks + 3 workload
 benchmarks + 3 SMP benchmarks.
 
@@ -69,13 +70,11 @@ benchmarks + 3 SMP benchmarks.
 ### SMP benchmark results (2026-05-07, 4 cores under hypervisor)
 
 ```text
-IPC null round-trip (2-core):       3746 cyc/rtt  (was 4874 pre-opt, −23% from IPC lock batching)
-object churn (1-core):              5230 cyc/iter
-cross-core wake (event ping-pong):  4693 cyc/rtt  (~2347 one-way)
+IPC null round-trip (2-core):       3565 cyc/rtt  (was 3746, −5% from TTBR0 skip)
+object churn (1-core):              5243 cyc/iter
+object churn (multi-core wall):    27770 cyc/iter  0.7x/4 scaling
+cross-core wake (event ping-pong):  4544 cyc/rtt  (~2272 one-way)
 ```
-
-Note: multi-core churn benchmark is broken (uses spin-wait workaround for a
-deadlock — see bench-smp/src/main.rs). Root cause investigation pending.
 
 ## Kernel Finalization: Complete
 
@@ -115,6 +114,32 @@ AddressSpace slot lock. An RwSpinLock would allow parallel reads. This is an
 internal optimization with no ABI impact — it can be added when multi-threaded
 userspace workloads reveal contention. Current SMP scaling (3.3x/4) suggests the
 slot lock is not the primary bottleneck.
+
+### 5. Missed-wakeup race in wake() — FIXED
+
+`sched::wake()` silently dropped wakeups when the target thread was Running (not
+yet Blocked). This caused a deadlock in event_wait and a latent race in IPC call
+when a signal/message arrived between registering the waiter and calling
+`block_current()`:
+
+1. Thread adds itself as waiter (Running)
+2. Another core signals → `signal()` removes waiter, calls `wake()`
+3. `wake()` sees Running → no-op (old code returned here)
+4. Thread calls `block_current()` → Blocked forever
+
+Fix: `Thread.pending_wake` flag. `wake()` sets it when the target is Running.
+`block_current()` checks and consumes it under the thread slot lock (TicketLock
+serializes the two operations). If pending_wake is set, block_current returns
+immediately. Multi-core churn benchmark now runs cleanly without the spin-wait
+workaround.
+
+### 6. Redundant TTBR0 switches — FIXED
+
+`maybe_switch_page_table` (scheduler path) and `pick_and_setup` (idle path)
+unconditionally wrote TTBR0_EL1 + ISB even when already pointing at the correct
+page table. Changed both to `switch_table_if_needed` which reads TTBR0 first and
+skips the MSR+ISB if already correct. Saves ~5% on IPC round-trip and ~3% on
+cross-core wake.
 
 ## What's Next: Userspace
 

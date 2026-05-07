@@ -58,6 +58,7 @@ pub struct Thread {
     kernel_sp: usize,
     exit_code: Option<u32>,
     fp_dirty: bool,
+    pending_wake: bool,
     wait_events: [u32; crate::config::MAX_MULTI_WAIT],
     wait_count: u8,
     wakeup_error: Option<SyscallError>,
@@ -70,7 +71,7 @@ pub struct Thread {
 }
 
 const _: () = {
-    assert!(core::mem::size_of::<Thread>() <= 576);
+    assert!(core::mem::size_of::<Thread>() <= 584);
 };
 
 #[allow(clippy::new_without_default)]
@@ -98,6 +99,7 @@ impl Thread {
             kernel_sp: 0,
             exit_code: None,
             fp_dirty: false,
+            pending_wake: false,
             wait_events: [0; crate::config::MAX_MULTI_WAIT],
             wait_count: 0,
             wakeup_error: None,
@@ -244,6 +246,18 @@ impl Thread {
 
     pub fn set_fp_dirty(&mut self, dirty: bool) {
         self.fp_dirty = dirty;
+    }
+
+    pub fn set_pending_wake(&mut self) {
+        self.pending_wake = true;
+    }
+
+    pub fn take_pending_wake(&mut self) -> bool {
+        let was = self.pending_wake;
+
+        self.pending_wake = false;
+
+        was
     }
 
     pub fn set_wait_events(&mut self, ids: &[u32]) {

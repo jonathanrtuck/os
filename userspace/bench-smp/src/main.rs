@@ -184,18 +184,12 @@ fn bench_churn_multicore(num_cores: usize) -> (u64, usize) {
     isb();
 
     let start = ticks();
-    // Spin instead of event_wait to isolate deadlock
-    for _ in 0..1_000_000 {
-        core::hint::spin_loop();
-    }
+    let _ = abi::event::wait(&[(sync_event, done_mask)]);
 
     isb();
 
     let elapsed = ticks() - start;
     let _ = abi::handle::close(sync_event);
-
-    // Thread and stack VMO handles kept alive — workers may still be
-    // between signaling done and calling thread_exit.
 
     (elapsed, worker_count)
 }

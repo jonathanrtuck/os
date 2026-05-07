@@ -189,7 +189,7 @@ fn pick_and_setup(core_id: usize) -> Option<crate::types::ThreadId> {
         (space.page_table_root(), space.asid())
     };
 
-    super::page_table::switch_table(
+    super::page_table::switch_table_if_needed(
         super::page_alloc::PhysAddr(pt_root),
         super::page_table::Asid(asid),
     );

@@ -13,30 +13,51 @@ use crate::{frame::state, thread::ThreadRunState, types::ThreadId};
 /// The caller must have already placed the current thread on a wait queue
 /// before calling this. Returns after the thread is woken and context-switched
 /// back to.
+///
+/// If a pending wakeup arrived (another core called `wake()` while this
+/// thread was still Running), returns immediately without blocking. The
+/// thread slot lock serializes the pending_wake check with `wake()`'s
+/// state check, closing the missed-wakeup race window.
 pub fn block_current(current: ThreadId, core_id: usize) {
-    state::threads()
-        .write(current.0)
-        .unwrap()
-        .set_state(ThreadRunState::Blocked);
+    {
+        let mut thread = state::threads().write(current.0).unwrap();
+
+        if thread.take_pending_wake() {
+            return;
+        }
+
+        thread.set_state(ThreadRunState::Blocked);
+    }
+
     switch_away(current, core_id);
 }
 
 /// Wake a blocked thread by marking it Ready and enqueuing it.
+///
+/// If the thread is Running (hasn't called `block_current()` yet), sets
+/// a pending wake flag instead of enqueuing. `block_current()` checks
+/// this flag under the same slot lock, so the wakeup cannot be lost.
 pub fn wake(thread_id: ThreadId, core_id: usize) {
     let priority = {
         let Some(mut thread) = state::threads().write(thread_id.0) else {
             return;
         };
 
-        if thread.state() != ThreadRunState::Blocked {
-            return;
+        match thread.state() {
+            ThreadRunState::Blocked => {
+                let priority = thread.effective_priority();
+
+                thread.set_state(ThreadRunState::Ready);
+
+                priority
+            }
+            ThreadRunState::Running => {
+                thread.set_pending_wake();
+
+                return;
+            }
+            _ => return,
         }
-
-        let priority = thread.effective_priority();
-
-        thread.set_state(ThreadRunState::Ready);
-
-        priority
     };
 
     state::schedulers()
@@ -322,7 +343,8 @@ pub(crate) fn switch_to_page_table_if_needed(_pt_root: usize, _asid: u8) {
 
 /// Switch TTBR0 to the target thread's address space page table if it
 /// differs from the currently active one. Required when context-switching
-/// across address spaces (e.g., init → service).
+/// across address spaces (e.g., init → service). Reads current TTBR0
+/// first and skips the MSR+ISB if already correct.
 #[cfg(target_os = "none")]
 fn maybe_switch_page_table(target: ThreadId) {
     let (pt_root, asid) = {
@@ -343,7 +365,7 @@ fn maybe_switch_page_table(target: ThreadId) {
     };
 
     if pt_root != 0 {
-        crate::frame::arch::page_table::switch_table(
+        crate::frame::arch::page_table::switch_table_if_needed(
             crate::frame::arch::page_alloc::PhysAddr(pt_root),
             crate::frame::arch::page_table::Asid(asid),
         );
@@ -434,7 +456,7 @@ mod tests {
     }
 
     #[test]
-    fn wake_non_blocked_thread_is_noop() {
+    fn wake_running_thread_sets_pending_wake() {
         setup();
 
         let tid = add_thread(Priority::Medium);
@@ -442,6 +464,52 @@ mod tests {
         wake(tid, 0);
 
         assert_eq!(state::schedulers().core(0).lock().total_ready(), 0);
+        assert!(state::threads().write(tid.0).unwrap().take_pending_wake());
+    }
+
+    #[test]
+    fn pending_wake_prevents_blocking() {
+        setup();
+
+        let tid = add_thread(Priority::Medium);
+
+        wake(tid, 0);
+        block_current(tid, 0);
+
+        assert_eq!(
+            state::threads().read(tid.0).unwrap().state(),
+            ThreadRunState::Running,
+            "thread should stay Running when pending_wake consumed"
+        );
+    }
+
+    #[test]
+    fn pending_wake_consumed_only_once() {
+        setup();
+
+        let tid = add_thread(Priority::Medium);
+        let t2 = add_thread(Priority::Medium);
+
+        state::schedulers()
+            .core(0)
+            .lock()
+            .enqueue(t2, Priority::Medium);
+
+        wake(tid, 0);
+        block_current(tid, 0);
+
+        assert_eq!(
+            state::threads().read(tid.0).unwrap().state(),
+            ThreadRunState::Running,
+        );
+
+        block_current(tid, 0);
+
+        assert_eq!(
+            state::threads().read(tid.0).unwrap().state(),
+            ThreadRunState::Blocked,
+            "second block should succeed — pending_wake was consumed"
+        );
     }
 
     #[test]
