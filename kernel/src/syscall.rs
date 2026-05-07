@@ -1289,6 +1289,7 @@ fn sys_call(current: ThreadId, core_id: usize, args: &[u64; 6]) -> Result<u64, S
     let msg_len = args[2] as usize;
     let handles_ptr = args[3] as usize;
     let handles_count = args[4] as usize;
+    let recv_handles_ptr = args[5] as usize;
 
     if handles_count > config::MAX_IPC_HANDLES {
         return Err(SyscallError::InvalidArgument);
@@ -1349,7 +1350,7 @@ fn sys_call(current: ThreadId, core_id: usize, args: &[u64; 6]) -> Result<u64, S
                 let mut ep = state::endpoints()
                     .write(ep_obj_id)
                     .ok_or(SyscallError::InvalidHandle)?;
-                let reply_cap = ep.allocate_reply_cap(current, msg_ptr);
+                let reply_cap = ep.allocate_reply_cap(current, msg_ptr, recv_handles_ptr);
 
                 ep.set_active_server(Some(server_tid));
 
@@ -1394,7 +1395,12 @@ fn sys_call(current: ThreadId, core_id: usize, args: &[u64; 6]) -> Result<u64, S
                 return Err(err);
             }
 
-            return Ok(0);
+            let handle_count = state::threads()
+                .write(current.0)
+                .and_then(|mut t| t.take_wakeup_value())
+                .unwrap_or(0);
+
+            return Ok(handle_count);
         }
     }
 
@@ -1411,6 +1417,7 @@ fn sys_call(current: ThreadId, core_id: usize, args: &[u64; 6]) -> Result<u64, S
         handle_count: staged.count,
         badge,
         reply_buf: msg_ptr,
+        recv_handles_ptr,
     };
     let (signal_info, active_server, recv_waiters) = {
         let mut ep = state::endpoints()
@@ -1458,7 +1465,12 @@ fn sys_call(current: ThreadId, core_id: usize, args: &[u64; 6]) -> Result<u64, S
         return Err(err);
     }
 
-    Ok(0)
+    let handle_count = state::threads()
+        .write(current.0)
+        .and_then(|mut t| t.take_wakeup_value())
+        .unwrap_or(0);
+
+    Ok(handle_count)
 }
 
 #[inline(never)]
@@ -1471,6 +1483,10 @@ fn sys_recv(current: ThreadId, core_id: usize, args: &[u64; 6]) -> Result<u64, S
     let reply_cap_out = args[5] as usize;
     let space_id = thread_space_id(current)?;
     let obj_id = lookup_endpoint_id(space_id, handle_id)?;
+
+    if out_cap > 0 && out_buf == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
 
     if let Some(result) = try_dequeue_and_deliver(
         obj_id,
@@ -1502,64 +1518,69 @@ fn sys_recv(current: ThreadId, core_id: usize, args: &[u64; 6]) -> Result<u64, S
         }
     }
 
-    state::endpoints()
-        .write(obj_id)
-        .ok_or(SyscallError::InvalidHandle)?
-        .add_recv_waiter(current)?;
+    loop {
+        state::endpoints()
+            .write(obj_id)
+            .ok_or(SyscallError::InvalidHandle)?
+            .add_recv_waiter(current)?;
 
-    if let Some(mut t) = state::threads().write(current.0) {
-        t.set_recv_state(crate::thread::RecvState {
-            endpoint_id: obj_id,
+        if let Some(mut t) = state::threads().write(current.0) {
+            t.set_recv_state(crate::thread::RecvState {
+                endpoint_id: obj_id,
+                space_id,
+                out_buf,
+                out_cap,
+                handles_out,
+                handles_cap,
+                reply_cap_out,
+            });
+        }
+
+        crate::sched::block_current(current, core_id);
+
+        if let Some(mut t) = state::threads().write(current.0) {
+            t.take_recv_state();
+        }
+
+        if let Some(err) = state::threads()
+            .write(current.0)
+            .and_then(|mut t| t.take_wakeup_error())
+        {
+            return Err(err);
+        }
+        if let Some(val) = state::threads()
+            .write(current.0)
+            .and_then(|mut t| t.take_wakeup_value())
+        {
+            return Ok(val);
+        }
+
+        if let Some(result) = try_dequeue_and_deliver(
+            obj_id,
+            current,
             space_id,
             out_buf,
             out_cap,
             handles_out,
             handles_cap,
             reply_cap_out,
-        });
+        ) {
+            return result;
+        }
+
+        if state::endpoints()
+            .read(obj_id)
+            .is_some_and(|ep| ep.is_peer_closed())
+        {
+            return Err(SyscallError::PeerClosed);
+        }
+
+        // Spurious wakeup (e.g., switch_away returned with no next thread).
+        // Remove stale waiter entry before re-registering.
+        if let Some(mut ep) = state::endpoints().write(obj_id) {
+            ep.remove_recv_waiter(current);
+        }
     }
-
-    crate::sched::block_current(current, core_id);
-
-    if let Some(mut t) = state::threads().write(current.0) {
-        t.take_recv_state();
-    }
-
-    if let Some(err) = state::threads()
-        .write(current.0)
-        .and_then(|mut t| t.take_wakeup_error())
-    {
-        return Err(err);
-    }
-
-    if let Some(val) = state::threads()
-        .write(current.0)
-        .and_then(|mut t| t.take_wakeup_value())
-    {
-        return Ok(val);
-    }
-
-    if let Some(result) = try_dequeue_and_deliver(
-        obj_id,
-        current,
-        space_id,
-        out_buf,
-        out_cap,
-        handles_out,
-        handles_cap,
-        reply_cap_out,
-    ) {
-        return result;
-    }
-
-    if state::endpoints()
-        .read(obj_id)
-        .is_some_and(|ep| !ep.is_peer_closed())
-    {
-        return Err(SyscallError::TimedOut);
-    }
-
-    Err(SyscallError::PeerClosed)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1655,7 +1676,7 @@ fn sys_reply(current: ThreadId, core_id: usize, args: &[u64; 6]) -> Result<u64, 
     let space_id = thread_space_id(current)?;
     let ep_obj_id = lookup_endpoint_id(space_id, handle_id)?;
     let reply_msg = user_mem::read_user_message(msg_ptr, msg_len)?;
-    let (caller_id, caller_reply_buf) = state::endpoints()
+    let (caller_id, caller_reply_buf, caller_recv_handles_ptr) = state::endpoints()
         .write(ep_obj_id)
         .ok_or(SyscallError::InvalidHandle)?
         .consume_reply(reply_cap_id)?;
@@ -1705,6 +1726,8 @@ fn sys_reply(current: ThreadId, core_id: usize, args: &[u64; 6]) -> Result<u64, 
         return Err(e);
     }
 
+    let mut reply_handle_count = 0u64;
+
     if staged.count > 0 {
         let caller_space_id = state::threads()
             .read(caller_id.0)
@@ -1716,14 +1739,34 @@ fn sys_reply(current: ThreadId, core_id: usize, args: &[u64; 6]) -> Result<u64, 
             .write(caller_space_id.0)
             .ok_or(SyscallError::InvalidHandle)?;
         let caller_ht = caller_space.handles_mut();
+        let mut new_ids = [0u32; config::MAX_IPC_HANDLES];
+        let mut count = 0usize;
 
         for i in 0..staged.count as usize {
             if let Some(h) = staged.handles[i].take() {
-                let result = caller_ht.install(h);
-
-                debug_assert!(result.is_ok(), "handle install failed despite pre-check");
+                match caller_ht.install(h) {
+                    Ok(hid) => {
+                        new_ids[count] = hid.0;
+                        count += 1;
+                    }
+                    Err(_) => {
+                        debug_assert!(false, "handle install failed despite pre-check");
+                    }
+                }
             }
         }
+
+        drop(caller_space);
+
+        if count > 0 && caller_recv_handles_ptr != 0 {
+            let _ = user_mem::write_user_u32s(caller_recv_handles_ptr, &new_ids[..count]);
+        }
+
+        reply_handle_count = count as u64;
+    }
+
+    if let Some(mut caller) = state::threads().write(caller_id.0) {
+        caller.set_wakeup_value(reply_handle_count);
     }
 
     let reply_len = reply_msg.len() as u64;

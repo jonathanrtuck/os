@@ -11,6 +11,7 @@ pub fn endpoint_create() -> Result<Handle, SyscallError> {
 
 pub struct CallResult {
     pub reply_len: usize,
+    pub handle_count: usize,
 }
 
 pub fn call(
@@ -18,7 +19,13 @@ pub fn call(
     msg_buf: &mut [u8],
     msg_len: usize,
     handles: &[u32],
+    recv_handles: &mut [u32],
 ) -> Result<CallResult, SyscallError> {
+    let recv_ptr = if recv_handles.is_empty() {
+        0u64
+    } else {
+        recv_handles.as_mut_ptr() as u64
+    };
     let r = check(raw::syscall(
         num::CALL,
         endpoint.0 as u64,
@@ -26,11 +33,12 @@ pub fn call(
         msg_len as u64,
         handles.as_ptr() as u64,
         handles.len() as u64,
-        0,
+        recv_ptr,
     ))?;
 
     Ok(CallResult {
-        reply_len: r as usize,
+        reply_len: 0,
+        handle_count: r as usize,
     })
 }
 

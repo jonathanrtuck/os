@@ -341,10 +341,18 @@ extern "C" fn secondary_main_upper() -> ! {
     idle_loop(core_id);
 }
 
-/// Idle loop for secondary cores. Halts via WFI, then checks the local run
-/// queue after each interrupt. When a thread is available, enters userspace
-/// directly and never returns here — future idle transitions go through the
-/// scheduler's normal switch_away path.
+/// Enter the idle loop from a syscall context. Called by the scheduler when
+/// no runnable thread is available after a block/exit. Never returns — the
+/// next thread is entered via `enter_userspace_by_id` from within the loop.
+#[cfg(target_os = "none")]
+pub fn enter_idle(core_id: usize) -> ! {
+    super::sysreg::enable_irqs();
+
+    idle_loop(core_id);
+}
+
+/// Idle loop — checks the run queue, enters userspace if a thread is ready,
+/// otherwise halts until an interrupt arrives. Never returns.
 #[cfg(target_os = "none")]
 fn idle_loop(core_id: usize) -> ! {
     loop {

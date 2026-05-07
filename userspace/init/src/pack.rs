@@ -53,6 +53,22 @@ pub fn read_entry(base: *const u8, index: usize) -> PackEntry {
     }
 }
 
+const NAME_LEN: usize = 32;
+
+pub fn read_name(base: *const u8, index: usize) -> &'static [u8] {
+    let offset = HEADER_SIZE + index * ENTRY_SIZE;
+
+    // SAFETY: caller guarantees base + offset + NAME_LEN is within the mapping.
+    // The returned slice borrows from the mapped VMO which outlives init.
+    unsafe {
+        let ptr = base.add(offset);
+        let slice = core::slice::from_raw_parts(ptr, NAME_LEN);
+        let end = slice.iter().position(|&b| b == 0).unwrap_or(NAME_LEN);
+
+        &slice[..end]
+    }
+}
+
 unsafe fn read_u32(base: *const u8, offset: usize) -> u32 {
     let mut bytes = [0u8; 4];
 

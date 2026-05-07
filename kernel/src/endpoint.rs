@@ -188,6 +188,7 @@ pub struct PendingCall {
     pub handle_count: u8,
     pub badge: u32,
     pub reply_buf: usize,
+    pub recv_handles_ptr: usize,
 }
 
 /// Tracks a reply cap issued to a server, linking it to the blocked caller.
@@ -196,6 +197,7 @@ struct ActiveReply {
     cap_id: ReplyCapId,
     caller: ThreadId,
     reply_buf: usize,
+    recv_handles_ptr: usize,
 }
 
 /// A caller whose call was canceled — includes handles to recover.
@@ -400,15 +402,19 @@ impl Endpoint {
             cap_id,
             caller: call.caller,
             reply_buf: call.reply_buf,
+            recv_handles_ptr: call.recv_handles_ptr,
         });
         self.active_reply_count += 1;
 
         Some((call, cap_id))
     }
 
-    /// Consume a reply cap, returning (caller_thread_id, caller_reply_buf).
+    /// Consume a reply cap, returning (caller_thread_id, caller_reply_buf, caller_recv_handles_ptr).
     /// O(1) via the slot index encoded in the cap ID.
-    pub fn consume_reply(&mut self, cap_id: ReplyCapId) -> Result<(ThreadId, usize), SyscallError> {
+    pub fn consume_reply(
+        &mut self,
+        cap_id: ReplyCapId,
+    ) -> Result<(ThreadId, usize, usize), SyscallError> {
         let slot_idx = (cap_id.0 & SLOT_MASK) as usize;
 
         if slot_idx >= config::MAX_PENDING_PER_ENDPOINT {
@@ -426,7 +432,7 @@ impl Endpoint {
 
             self.active_reply_count -= 1;
 
-            Ok((reply.caller, reply.reply_buf))
+            Ok((reply.caller, reply.reply_buf, reply.recv_handles_ptr))
         } else {
             Err(SyscallError::InvalidHandle)
         }
@@ -470,7 +476,12 @@ impl Endpoint {
 
     /// Allocate a reply cap without dequeuing from the send queue.
     /// Used by CALL's direct-transfer fast path.
-    pub fn allocate_reply_cap(&mut self, caller: ThreadId, reply_buf: usize) -> Option<ReplyCapId> {
+    pub fn allocate_reply_cap(
+        &mut self,
+        caller: ThreadId,
+        reply_buf: usize,
+        recv_handles_ptr: usize,
+    ) -> Option<ReplyCapId> {
         let free_slot = self.active_replies.iter().position(|s| s.is_none())?;
         let cap_id = ReplyCapId((self.next_reply_id << SLOT_BITS) | (free_slot as u64));
 
@@ -479,6 +490,7 @@ impl Endpoint {
             cap_id,
             caller,
             reply_buf,
+            recv_handles_ptr,
         });
         self.active_reply_count += 1;
 
@@ -650,6 +662,7 @@ mod tests {
             handle_count: 0,
             badge,
             reply_buf: 0,
+            recv_handles_ptr: 0,
         }
     }
 
@@ -676,6 +689,7 @@ mod tests {
             handle_count: 0,
             badge: 42,
             reply_buf: 0,
+            recv_handles_ptr: 0,
         };
 
         ep.enqueue_call(call).unwrap();
@@ -686,7 +700,7 @@ mod tests {
         assert_eq!(received.badge, 42);
         assert_eq!(received.message.as_bytes(), b"request");
 
-        let (caller, _reply_buf) = ep.consume_reply(reply_cap).unwrap();
+        let (caller, _reply_buf, _recv_handles_ptr) = ep.consume_reply(reply_cap).unwrap();
 
         assert_eq!(caller, ThreadId(1));
         assert_eq!(ep.pending_reply_count(), 0);
@@ -708,6 +722,7 @@ mod tests {
             handle_count: 2,
             badge: 0,
             reply_buf: 0,
+            recv_handles_ptr: 0,
         };
 
         ep.enqueue_call(call).unwrap();
@@ -1048,9 +1063,9 @@ mod tests {
         assert_ne!(cap_a, cap_c);
 
         // Each cap resolves to the correct caller.
-        let (caller_a, _) = ep.consume_reply(cap_a).unwrap();
-        let (caller_b, _) = ep.consume_reply(cap_b).unwrap();
-        let (caller_c, _) = ep.consume_reply(cap_c).unwrap();
+        let (caller_a, _, _) = ep.consume_reply(cap_a).unwrap();
+        let (caller_b, _, _) = ep.consume_reply(cap_b).unwrap();
+        let (caller_c, _, _) = ep.consume_reply(cap_c).unwrap();
 
         assert_eq!(caller_a, ThreadId(3));
         assert_eq!(caller_b, ThreadId(2));
@@ -1210,6 +1225,7 @@ mod tests {
             handle_count: 2,
             badge: 0,
             reply_buf: 0,
+            recv_handles_ptr: 0,
         };
 
         ep.enqueue_call(call).unwrap();

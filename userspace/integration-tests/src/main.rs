@@ -313,7 +313,7 @@ extern "C" fn ipc_caller_entry(endpoint_handle: usize) -> ! {
 
     buf[..8].copy_from_slice(&payload);
 
-    let result = abi::ipc::call(ep, &mut buf, 8, &[]);
+    let result = abi::ipc::call(ep, &mut buf, 8, &[], &mut []);
 
     if result.is_err() {
         abi::thread::exit(200);
@@ -551,7 +551,7 @@ fn test_smp_ipc_stress() {
 
         buf[..8].copy_from_slice(&payload);
 
-        let result = abi::ipc::call(ep, &mut buf, 8, &[]);
+        let result = abi::ipc::call(ep, &mut buf, 8, &[], &mut []);
 
         if result.is_err() {
             fail(425);

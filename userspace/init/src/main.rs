@@ -6,8 +6,9 @@
 //!   Handle 1: code VMO
 //!   Handle 2: service pack VMO (SVPK format)
 //!
-//! Parses the service pack, creates an address space for each service,
-//! maps code and stack, and spawns a thread.
+//! Parses the service pack, creates a name service endpoint, and spawns
+//! all services. The name service gets the endpoint to recv on; other
+//! services get it for register/lookup calls.
 
 #![no_std]
 #![no_main]
@@ -28,34 +29,55 @@ const STACK_SIZE: usize = PAGE_SIZE * 4;
 const SERVICE_CODE_VA: usize = 0x0020_0000;
 const SERVICE_STACK_VA: usize = 0x4000_0000;
 
-fn spawn_from_pack(pack_base: *const u8, pack_len: usize) -> usize {
+const NAME_SVC: &[u8] = b"name";
+
+fn spawn_from_pack(pack_base: *const u8, pack_len: usize) {
     let header = pack::read_header(pack_base);
 
     if !header.is_valid() {
-        return 0;
+        return;
     }
 
-    let mut spawned = 0;
+    // Create the name service endpoint. The name service recvs on it;
+    // all other services call through it.
+    let ns_ep = match abi::ipc::endpoint_create() {
+        Ok(h) => h,
+        Err(_) => return,
+    };
 
+    // First pass: spawn the name service (entry named "name").
     for i in 0..header.count as usize {
         let entry = pack::read_entry(pack_base, i);
+        let name = pack::read_name(pack_base, i);
 
         if entry.size == 0 {
             continue;
         }
 
-        if spawn_service(pack_base, &entry, pack_len).is_ok() {
-            spawned += 1;
+        if name == NAME_SVC {
+            // Name service gets handle[2] = the endpoint to recv on.
+            let _ = spawn_service(pack_base, &entry, pack_len, ns_ep);
         }
     }
 
-    spawned
+    // Second pass: spawn all other services with handle[2] = name service ep.
+    for i in 0..header.count as usize {
+        let entry = pack::read_entry(pack_base, i);
+        let name = pack::read_name(pack_base, i);
+
+        if entry.size == 0 || name == NAME_SVC {
+            continue;
+        }
+
+        let _ = spawn_service(pack_base, &entry, pack_len, ns_ep);
+    }
 }
 
 fn spawn_service(
     pack_base: *const u8,
     entry: &pack::PackEntry,
     pack_len: usize,
+    extra_handle: Handle,
 ) -> Result<Handle, SyscallError> {
     let binary_end = entry.offset as usize + entry.size as usize;
 
@@ -64,7 +86,6 @@ fn spawn_service(
     }
 
     let code_size = (entry.size as usize).next_multiple_of(PAGE_SIZE);
-    // Create code VMO and map it writable in our space to copy binary data.
     let code_vmo = abi::vmo::create(code_size, 0)?;
     let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
     let code_local = abi::vmo::map(code_vmo, 0, rw)?;
@@ -81,29 +102,21 @@ fn spawn_service(
 
     abi::vmo::unmap(code_local)?;
 
-    // Create the service's address space.
     let space = abi::space::create()?;
-    // Map code VMO into the new space (RX).
     let rx = Rights(Rights::READ.0 | Rights::EXECUTE.0 | Rights::MAP.0);
 
     abi::vmo::map_into(code_vmo, space, SERVICE_CODE_VA, rx)?;
 
-    // Create and map stack VMO (RW).
     let stack_vmo = abi::vmo::create(STACK_SIZE, 0)?;
     let stack_rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
 
     abi::vmo::map_into(stack_vmo, space, SERVICE_STACK_VA, stack_rw)?;
 
     let stack_top = SERVICE_STACK_VA + STACK_SIZE;
-    // Pass VMO handles to the service so the VMOs stay alive after init exits.
-    // handle[0] = code VMO, handle[1] = stack VMO (service doesn't use these
-    // directly — they just keep the refcount alive).
-    let bootstrap_handles = [code_vmo.0, stack_vmo.0];
+    // handle[0] = code VMO, handle[1] = stack VMO, handle[2] = extra
+    // (name service endpoint for recv, or name service endpoint for calling)
+    let bootstrap_handles = [code_vmo.0, stack_vmo.0, extra_handle.0];
     let thread = abi::thread::create_in(space, SERVICE_CODE_VA, stack_top, 0, &bootstrap_handles)?;
-
-    // VMO and space handles stay open — the kernel frees VMOs when the last
-    // handle closes, and the service needs the backing pages alive. Init
-    // holds these handles until it exits.
 
     Ok(thread)
 }

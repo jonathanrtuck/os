@@ -97,11 +97,23 @@ struct ServiceDef {
     crate_name: &'static str,
 }
 
-const SERVICES: &[ServiceDef] = &[ServiceDef {
-    name: "hello",
-    dir: "../userspace/servers/hello",
-    crate_name: "hello",
-}];
+const SERVICES: &[ServiceDef] = &[
+    ServiceDef {
+        name: "name",
+        dir: "../userspace/servers/name",
+        crate_name: "name-service",
+    },
+    ServiceDef {
+        name: "test-a",
+        dir: "../userspace/servers/test-a",
+        crate_name: "test-a",
+    },
+    ServiceDef {
+        name: "test-b",
+        dir: "../userspace/servers/test-b",
+        crate_name: "test-b",
+    },
+];
 
 fn build_service_pack(kernel_dir: &std::path::Path, out_dir: &std::path::Path) {
     let pack_bin = out_dir.join("services.bin");

@@ -65,14 +65,14 @@ fn bench_ipc_2core() -> u64 {
     let mut buf = [0u8; MSG_SIZE];
 
     for _ in 0..WARMUP {
-        let _ = abi::ipc::call(ep, &mut buf, 8, &[]);
+        let _ = abi::ipc::call(ep, &mut buf, 8, &[], &mut []);
     }
 
     isb();
     let start = ticks();
 
     for _ in 0..BATCH_N {
-        let _ = abi::ipc::call(ep, &mut buf, 8, &[]);
+        let _ = abi::ipc::call(ep, &mut buf, 8, &[], &mut []);
     }
 
     isb();
