@@ -130,6 +130,11 @@ pub fn create_init(init_binary: &[u8], service_pack: &[u8]) -> Result<ThreadId, 
             .allocate(ObjectType::Vmo, pack_idx, Rights::ALL, pack_gen)?;
     }
 
+    // Handle 3: device manifest VMO
+    // Handle 4: UART MMIO VMO (device, PA 0x09000000)
+    // Handle 5: Virtio MMIO VMO (device, PA 0x0A000000)
+    create_device_vmos(space_idx)?;
+
     #[cfg(target_os = "none")]
     {
         use crate::frame::{
@@ -214,6 +219,132 @@ pub fn create_init(init_binary: &[u8], service_pack: &[u8]) -> Result<ThreadId, 
     Ok(ThreadId(thread_idx))
 }
 
+// ── Device manifest constants ─────────────────────────────────
+// Mirror of protocol::bootstrap manifest format. The kernel cannot depend
+// on the userspace protocol crate, so the wire format is duplicated here.
+
+const MANIFEST_MAGIC: u32 = 0x4456_4544; // "DEVD"
+const DEV_UART: u8 = 0;
+const DEV_VIRTIO: u8 = 1;
+
+const UART_MMIO_PA: usize = 0x0900_0000;
+const VIRTIO_MMIO_PA: usize = 0x0A00_0000;
+
+// Virtio device slots and their IRQ INTIDs (INTID = 48 + slot).
+const VIRTIO_SLOT_INPUT_KBD: u32 = 1;
+const VIRTIO_SLOT_INPUT_TAB: u32 = 2;
+const VIRTIO_SLOT_METAL: u32 = 3;
+const VIRTIO_SLOT_BLK: u32 = 4;
+
+fn virtio_irq(slot: u32) -> u32 {
+    48 + slot
+}
+
+/// Create device VMOs and a device manifest, install as handles 3–5 in init's space.
+fn create_device_vmos(space_idx: u32) -> Result<(), SyscallError> {
+    // Handle 3: device manifest VMO
+    let manifest_vmo = Vmo::new(VmoId(0), config::PAGE_SIZE, VmoFlags::NONE);
+    let (manifest_idx, manifest_gen) = state::vmos()
+        .alloc_shared(manifest_vmo)
+        .ok_or(SyscallError::OutOfMemory)?;
+
+    state::vmos().write(manifest_idx).unwrap().id = VmoId(manifest_idx);
+
+    // Handle 4: UART MMIO VMO (device-backed, one page)
+    let uart_vmo = Vmo::new_physical(VmoId(0), UART_MMIO_PA, config::PAGE_SIZE);
+    let (uart_idx, uart_gen) = state::vmos()
+        .alloc_shared(uart_vmo)
+        .ok_or(SyscallError::OutOfMemory)?;
+
+    state::vmos().write(uart_idx).unwrap().id = VmoId(uart_idx);
+
+    // Handle 5: Virtio MMIO VMO (device-backed, one page)
+    let virtio_vmo = Vmo::new_physical(VmoId(0), VIRTIO_MMIO_PA, config::PAGE_SIZE);
+    let (virtio_idx, virtio_gen) = state::vmos()
+        .alloc_shared(virtio_vmo)
+        .ok_or(SyscallError::OutOfMemory)?;
+
+    state::vmos().write(virtio_idx).unwrap().id = VmoId(virtio_idx);
+
+    // Install handles 3, 4, 5
+    {
+        let mut space = state::spaces()
+            .write(space_idx)
+            .ok_or(SyscallError::InvalidArgument)?;
+        let ht = space.handles_mut();
+
+        ht.allocate(ObjectType::Vmo, manifest_idx, Rights::ALL, manifest_gen)?;
+        ht.allocate(ObjectType::Vmo, uart_idx, Rights::ALL, uart_gen)?;
+        ht.allocate(ObjectType::Vmo, virtio_idx, Rights::ALL, virtio_gen)?;
+    }
+
+    // Write the device manifest into the manifest VMO's backing page.
+    // The manifest format mirrors protocol::bootstrap::{DeviceManifestHeader, DeviceEntry}.
+    #[cfg(target_os = "none")]
+    {
+        use crate::frame::{arch::page_alloc, user_mem};
+
+        let pa = page_alloc::alloc_page().ok_or(SyscallError::OutOfMemory)?;
+
+        user_mem::zero_phys(pa.0, config::PAGE_SIZE);
+
+        // Header: magic (4 bytes) + count (4 bytes)
+        let entries: &[(u8, u32, u32, u32)] = &[
+            // (type, handle_index, irq, mmio_offset)
+            (DEV_UART, 4, 0, 0),
+            (
+                DEV_VIRTIO,
+                5,
+                virtio_irq(VIRTIO_SLOT_INPUT_KBD),
+                VIRTIO_SLOT_INPUT_KBD * 0x200,
+            ),
+            (
+                DEV_VIRTIO,
+                5,
+                virtio_irq(VIRTIO_SLOT_INPUT_TAB),
+                VIRTIO_SLOT_INPUT_TAB * 0x200,
+            ),
+            (
+                DEV_VIRTIO,
+                5,
+                virtio_irq(VIRTIO_SLOT_METAL),
+                VIRTIO_SLOT_METAL * 0x200,
+            ),
+            (
+                DEV_VIRTIO,
+                5,
+                virtio_irq(VIRTIO_SLOT_BLK),
+                VIRTIO_SLOT_BLK * 0x200,
+            ),
+        ];
+        let mut header = [0u8; 8];
+
+        header[0..4].copy_from_slice(&MANIFEST_MAGIC.to_le_bytes());
+        header[4..8].copy_from_slice(&(entries.len() as u32).to_le_bytes());
+
+        user_mem::write_phys(pa.0, 0, &header);
+
+        for (i, &(dev_type, handle_idx, irq, mmio_offset)) in entries.iter().enumerate() {
+            let mut entry = [0u8; 16];
+
+            entry[0] = dev_type;
+            entry[4..8].copy_from_slice(&handle_idx.to_le_bytes());
+            entry[8..12].copy_from_slice(&irq.to_le_bytes());
+            entry[12..16].copy_from_slice(&mmio_offset.to_le_bytes());
+
+            user_mem::write_phys(pa.0, 8 + i * 16, &entry);
+        }
+
+        state::vmos()
+            .write(manifest_idx)
+            .unwrap()
+            .alloc_page_at(0, || Some(pa.0))
+            .ok();
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,12 +376,13 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_creates_code_and_stack_vmos() {
+    fn bootstrap_creates_code_stack_and_device_vmos() {
         setup();
 
         create_init(fake_init_binary(), &[]).unwrap();
 
-        assert_eq!(state::vmos().count(), 2);
+        // code + stack + device manifest + UART MMIO + virtio MMIO = 5
+        assert_eq!(state::vmos().count(), 5);
 
         crate::invariants::assert_valid();
     }
@@ -297,7 +429,8 @@ mod tests {
             .unwrap();
         let space = state::spaces().read(space_id.0).unwrap();
 
-        assert!(space.handles().count() >= 2);
+        // space(0) + code(1) + manifest(3) + uart(4) + virtio(5) = 5
+        assert!(space.handles().count() >= 5);
 
         drop(space);
 

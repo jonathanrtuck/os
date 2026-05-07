@@ -5,10 +5,13 @@
 //!   Handle 0: own address space
 //!   Handle 1: code VMO
 //!   Handle 2: service pack VMO (SVPK format)
+//!   Handle 3: device manifest VMO
+//!   Handle 4: UART MMIO VMO (device)
+//!   Handle 5: Virtio MMIO VMO (device)
 //!
 //! Parses the service pack, creates a name service endpoint, and spawns
 //! all services. The name service gets the endpoint to recv on; other
-//! services get it for register/lookup calls.
+//! services get the name service endpoint + device handles as appropriate.
 
 #![no_std]
 #![no_main]
@@ -22,6 +25,9 @@ use abi::types::{Handle, Rights, SyscallError};
 const _HANDLE_SPACE: Handle = Handle(0);
 const _HANDLE_CODE_VMO: Handle = Handle(1);
 const HANDLE_PACK_VMO: Handle = Handle(2);
+const _HANDLE_MANIFEST_VMO: Handle = Handle(3);
+const HANDLE_UART_VMO: Handle = Handle(4);
+const _HANDLE_VIRTIO_VMO: Handle = Handle(5);
 
 const PAGE_SIZE: usize = 16384;
 const STACK_SIZE: usize = PAGE_SIZE * 4;
@@ -30,6 +36,7 @@ const SERVICE_CODE_VA: usize = 0x0020_0000;
 const SERVICE_STACK_VA: usize = 0x4000_0000;
 
 const NAME_SVC: &[u8] = b"name";
+const CONSOLE_SVC: &[u8] = b"console";
 
 fn spawn_from_pack(pack_base: *const u8, pack_len: usize) {
     let header = pack::read_header(pack_base);
@@ -38,8 +45,6 @@ fn spawn_from_pack(pack_base: *const u8, pack_len: usize) {
         return;
     }
 
-    // Create the name service endpoint. The name service recvs on it;
-    // all other services call through it.
     let ns_ep = match abi::ipc::endpoint_create() {
         Ok(h) => h,
         Err(_) => return,
@@ -55,12 +60,11 @@ fn spawn_from_pack(pack_base: *const u8, pack_len: usize) {
         }
 
         if name == NAME_SVC {
-            // Name service gets handle[2] = the endpoint to recv on.
-            let _ = spawn_service(pack_base, &entry, pack_len, ns_ep);
+            let _ = spawn_service(pack_base, &entry, pack_len, &[ns_ep]);
         }
     }
 
-    // Second pass: spawn all other services with handle[2] = name service ep.
+    // Second pass: spawn all other services with appropriate handles.
     for i in 0..header.count as usize {
         let entry = pack::read_entry(pack_base, i);
         let name = pack::read_name(pack_base, i);
@@ -69,7 +73,11 @@ fn spawn_from_pack(pack_base: *const u8, pack_len: usize) {
             continue;
         }
 
-        let _ = spawn_service(pack_base, &entry, pack_len, ns_ep);
+        if name == CONSOLE_SVC {
+            let _ = spawn_service(pack_base, &entry, pack_len, &[ns_ep, HANDLE_UART_VMO]);
+        } else {
+            let _ = spawn_service(pack_base, &entry, pack_len, &[ns_ep]);
+        }
     }
 }
 
@@ -77,7 +85,7 @@ fn spawn_service(
     pack_base: *const u8,
     entry: &pack::PackEntry,
     pack_len: usize,
-    extra_handle: Handle,
+    extra_handles: &[Handle],
 ) -> Result<Handle, SyscallError> {
     let binary_end = entry.offset as usize + entry.size as usize;
 
@@ -113,10 +121,24 @@ fn spawn_service(
     abi::vmo::map_into(stack_vmo, space, SERVICE_STACK_VA, stack_rw)?;
 
     let stack_top = SERVICE_STACK_VA + STACK_SIZE;
-    // handle[0] = code VMO, handle[1] = stack VMO, handle[2] = extra
-    // (name service endpoint for recv, or name service endpoint for calling)
-    let bootstrap_handles = [code_vmo.0, stack_vmo.0, extra_handle.0];
-    let thread = abi::thread::create_in(space, SERVICE_CODE_VA, stack_top, 0, &bootstrap_handles)?;
+    // handle[0] = code VMO, handle[1] = stack VMO, handle[2..] = extra handles
+    let mut bootstrap_handles = [0u32; 8];
+
+    bootstrap_handles[0] = code_vmo.0;
+    bootstrap_handles[1] = stack_vmo.0;
+
+    for (i, h) in extra_handles.iter().enumerate() {
+        bootstrap_handles[2 + i] = h.0;
+    }
+
+    let handle_count = 2 + extra_handles.len();
+    let thread = abi::thread::create_in(
+        space,
+        SERVICE_CODE_VA,
+        stack_top,
+        0,
+        &bootstrap_handles[..handle_count],
+    )?;
 
     Ok(thread)
 }

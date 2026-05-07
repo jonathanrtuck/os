@@ -103,6 +103,11 @@ pub struct VmoFlags(pub u32);
 impl VmoFlags {
     pub const NONE: VmoFlags = VmoFlags(0);
     pub const HINT_CONTIGUOUS: VmoFlags = VmoFlags(1 << 0);
+    pub const DEVICE: VmoFlags = VmoFlags(1 << 1);
+
+    pub fn is_device(self) -> bool {
+        self.0 & Self::DEVICE.0 != 0
+    }
 }
 
 /// A Virtual Memory Object.
@@ -134,6 +139,35 @@ impl Vmo {
             pager: None,
             cow_parent: None,
             has_pages: false,
+            mapping_count: 0,
+            refcount: core::sync::atomic::AtomicUsize::new(1),
+        }
+    }
+
+    /// Create a VMO backed by a specific physical address range (for device MMIO).
+    ///
+    /// Pages are pre-populated with physical addresses starting at `phys_base`.
+    /// The kernel never allocates or frees these pages — they are fixed hardware
+    /// addresses. Device VMOs cannot be snapshot'd, sealed, or resized.
+    pub fn new_physical(id: VmoId, phys_base: usize, size: usize) -> Self {
+        let page_size = crate::config::PAGE_SIZE;
+        let page_count = size.div_ceil(page_size);
+        let mut pages = Pages::new(page_count);
+
+        for i in 0..page_count {
+            pages.set(i, phys_base + i * page_size);
+        }
+
+        Vmo {
+            id,
+            pages,
+            page_count,
+            size,
+            flags: VmoFlags::DEVICE,
+            sealed: false,
+            pager: None,
+            cow_parent: None,
+            has_pages: true,
             mapping_count: 0,
             refcount: core::sync::atomic::AtomicUsize::new(1),
         }
@@ -228,9 +262,16 @@ impl Vmo {
         self.pages.get(page_idx)
     }
 
+    pub fn is_device(&self) -> bool {
+        self.flags.is_device()
+    }
+
     /// Create a COW snapshot. Returns a new Vmo that shares all page references.
     /// The caller must increment physical page refcounts externally.
+    /// Panics if called on a device VMO — device pages are hardware addresses.
     pub fn snapshot(&self, new_id: VmoId) -> Vmo {
+        assert!(!self.is_device(), "cannot snapshot a device VMO");
+
         Vmo {
             id: new_id,
             pages: self.pages.clone_for_snapshot(self.page_count),
@@ -248,6 +289,9 @@ impl Vmo {
 
     /// Seal the VMO permanently. Irreversible.
     pub fn seal(&mut self) -> Result<(), SyscallError> {
+        if self.is_device() {
+            return Err(SyscallError::InvalidArgument);
+        }
         if self.sealed {
             return Err(SyscallError::AlreadySealed);
         }
@@ -263,6 +307,9 @@ impl Vmo {
         new_size: usize,
         free_page: impl FnMut(usize),
     ) -> Result<(), SyscallError> {
+        if self.is_device() {
+            return Err(SyscallError::InvalidArgument);
+        }
         if self.sealed {
             return Err(SyscallError::AlreadySealed);
         }

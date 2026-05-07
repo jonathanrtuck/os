@@ -104,6 +104,11 @@ const SERVICES: &[ServiceDef] = &[
         crate_name: "name-service",
     },
     ServiceDef {
+        name: "console",
+        dir: "../userspace/drivers/console",
+        crate_name: "console-driver",
+    },
+    ServiceDef {
         name: "test-a",
         dir: "../userspace/servers/test-a",
         crate_name: "test-a",

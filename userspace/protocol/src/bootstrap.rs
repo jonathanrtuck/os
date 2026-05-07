@@ -53,6 +53,77 @@ impl BootstrapConfig {
     }
 }
 
+// ── Device manifest ─────────────────────────────────────────
+//
+// Written by the kernel into init's handle 3 VMO. Init reads it to
+// discover device MMIO VMOs and IRQ bindings.
+//
+// Layout: [DeviceManifestHeader] [DeviceEntry × count]
+
+pub const MANIFEST_MAGIC: u32 = 0x4456_4544; // "DEVD"
+
+pub const DEV_UART: u8 = 0;
+pub const DEV_VIRTIO: u8 = 1;
+
+#[derive(Debug, Clone, Copy)]
+pub struct DeviceManifestHeader {
+    pub magic: u32,
+    pub count: u32,
+}
+
+impl DeviceManifestHeader {
+    pub const SIZE: usize = 8;
+
+    pub fn write_to(&self, buf: &mut [u8]) {
+        buf[0..4].copy_from_slice(&self.magic.to_le_bytes());
+        buf[4..8].copy_from_slice(&self.count.to_le_bytes());
+    }
+
+    #[must_use]
+    pub fn read_from(buf: &[u8]) -> Self {
+        Self {
+            magic: u32::from_le_bytes(buf[0..4].try_into().unwrap()),
+            count: u32::from_le_bytes(buf[4..8].try_into().unwrap()),
+        }
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.magic == MANIFEST_MAGIC
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct DeviceEntry {
+    pub device_type: u8,
+    pub _pad: [u8; 3],
+    pub handle_index: u32,
+    pub irq: u32,
+    pub mmio_offset: u32,
+}
+
+impl DeviceEntry {
+    pub const SIZE: usize = 16;
+
+    pub fn write_to(&self, buf: &mut [u8]) {
+        buf[0] = self.device_type;
+        buf[1..4].copy_from_slice(&self._pad);
+        buf[4..8].copy_from_slice(&self.handle_index.to_le_bytes());
+        buf[8..12].copy_from_slice(&self.irq.to_le_bytes());
+        buf[12..16].copy_from_slice(&self.mmio_offset.to_le_bytes());
+    }
+
+    #[must_use]
+    pub fn read_from(buf: &[u8]) -> Self {
+        Self {
+            device_type: buf[0],
+            _pad: [buf[1], buf[2], buf[3]],
+            handle_index: u32::from_le_bytes(buf[4..8].try_into().unwrap()),
+            irq: u32::from_le_bytes(buf[8..12].try_into().unwrap()),
+            mmio_offset: u32::from_le_bytes(buf[12..16].try_into().unwrap()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,5 +189,52 @@ mod tests {
     #[test]
     fn size_fits_payload() {
         assert!(BootstrapConfig::SIZE <= crate::MAX_PAYLOAD);
+    }
+
+    #[test]
+    fn manifest_header_round_trip() {
+        let header = DeviceManifestHeader {
+            magic: MANIFEST_MAGIC,
+            count: 5,
+        };
+        let mut buf = [0u8; DeviceManifestHeader::SIZE];
+
+        header.write_to(&mut buf);
+
+        let decoded = DeviceManifestHeader::read_from(&buf);
+
+        assert!(decoded.is_valid());
+        assert_eq!(decoded.count, 5);
+    }
+
+    #[test]
+    fn device_entry_round_trip() {
+        let entry = DeviceEntry {
+            device_type: DEV_VIRTIO,
+            _pad: [0; 3],
+            handle_index: 5,
+            irq: 49,
+            mmio_offset: 0x200,
+        };
+        let mut buf = [0u8; DeviceEntry::SIZE];
+
+        entry.write_to(&mut buf);
+
+        let decoded = DeviceEntry::read_from(&buf);
+
+        assert_eq!(decoded.device_type, DEV_VIRTIO);
+        assert_eq!(decoded.handle_index, 5);
+        assert_eq!(decoded.irq, 49);
+        assert_eq!(decoded.mmio_offset, 0x200);
+    }
+
+    #[test]
+    fn manifest_invalid_magic() {
+        let header = DeviceManifestHeader {
+            magic: 0xDEAD,
+            count: 0,
+        };
+
+        assert!(!header.is_valid());
     }
 }

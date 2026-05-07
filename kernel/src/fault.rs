@@ -94,13 +94,17 @@ pub fn handle_data_abort(current: ThreadId, fault_addr: usize, is_write: bool) -
     // after TLB eviction, or page committed by another space that shares
     // this VMO). Just install a PTE pointing to the existing physical page.
     if let Some(pa) = vmo.page_at(page_idx) {
+        let is_device = vmo.is_device();
+
         drop(vmo);
 
         #[cfg(target_os = "none")]
         {
             let space = state::spaces().read(space_id.0).unwrap();
             let root = crate::frame::arch::page_alloc::PhysAddr(space.page_table_root());
-            let perms = if mapping.rights.contains(crate::types::Rights::EXECUTE) {
+            let perms = if is_device {
+                crate::frame::arch::page_table::Perms::RW_DEVICE
+            } else if mapping.rights.contains(crate::types::Rights::EXECUTE) {
                 crate::frame::arch::page_table::Perms::RX
             } else if mapping.rights.contains(crate::types::Rights::WRITE) {
                 crate::frame::arch::page_table::Perms::RW

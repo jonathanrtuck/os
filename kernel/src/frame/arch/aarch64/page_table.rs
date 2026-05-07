@@ -39,6 +39,7 @@ pub struct Perms {
     pub read: bool,
     pub write: bool,
     pub execute: bool,
+    pub device: bool,
 }
 
 impl Perms {
@@ -46,16 +47,25 @@ impl Perms {
         read: true,
         write: false,
         execute: false,
+        device: false,
     };
     pub const RW: Perms = Perms {
         read: true,
         write: true,
         execute: false,
+        device: false,
     };
     pub const RX: Perms = Perms {
         read: true,
         write: false,
         execute: true,
+        device: false,
+    };
+    pub const RW_DEVICE: Perms = Perms {
+        read: true,
+        write: true,
+        execute: false,
+        device: true,
     };
 }
 
@@ -70,6 +80,7 @@ const AP_RW_ALL: u64 = 0b01 << 6; // EL1+EL0 read/write
 const AP_RO_ALL: u64 = 0b11 << 6; // EL1+EL0 read-only
 const PXN: u64 = 1 << 53;
 const UXN: u64 = 1 << 54;
+const ATTR_DEVICE: u64 = 0 << 2; // MAIR index 0 (Device-nGnRnE)
 const ATTR_NORMAL: u64 = 1 << 2; // MAIR index 1
 const SW_COW: u64 = 1 << 55; // Software-defined COW bit (available PTE bit)
 
@@ -204,14 +215,23 @@ pub fn map_page(root: PhysAddr, vaddr: VirtAddr, paddr: PhysAddr, perms: Perms) 
         // Build L3 page descriptor. NG marks the entry non-global so the TLB
         // tags it with the current ASID — without this, ARM caches the entry
         // as global (matches any ASID) and TTBR0+ASID switches don't isolate.
-        let mut attrs = ATTR_NORMAL | SH_ISH | AF | NG | PAGE | VALID;
+        //
+        // Device memory uses MAIR index 0 (Device-nGnRnE) with no shareability
+        // — ARM requires Device mappings to be Outer Shareable or Non-shareable,
+        // never Inner Shareable. Normal memory uses MAIR index 1 with ISH.
+        let mut attrs = if perms.device {
+            ATTR_DEVICE | AF | NG | PAGE | VALID
+        } else {
+            ATTR_NORMAL | SH_ISH | AF | NG | PAGE | VALID
+        };
 
         if perms.write {
             attrs |= AP_RW_ALL;
         } else {
             attrs |= AP_RO_ALL;
         }
-        if !perms.execute {
+        // Device pages are never executable.
+        if !perms.execute || perms.device {
             attrs |= UXN;
         }
 
@@ -547,6 +567,7 @@ mod tests {
             read: true,
             write: true,
             execute: true,
+            device: false,
         };
 
         assert!(bad_perms.write && bad_perms.execute); // Would panic in map_page.
