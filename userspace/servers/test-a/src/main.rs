@@ -39,7 +39,6 @@ extern "C" fn _start() -> ! {
         abi::thread::exit(11);
     }
 
-    // Serve one request on our own endpoint.
     let mut msg_buf = [0u8; MSG_SIZE];
     let mut handle_buf = [0u32; 4];
 

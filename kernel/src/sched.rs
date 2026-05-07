@@ -77,16 +77,21 @@ pub fn exit_current(current: ThreadId, core_id: usize, code: u32) {
 fn switch_away(_current: ThreadId, core_id: usize) {
     let next_id = {
         let mut pcs = state::schedulers().core(core_id).lock();
-        let Some(next_id) = pcs.pick_next() else {
-            pcs.set_current(None);
 
-            #[cfg(target_os = "none")]
-            crate::frame::arch::idle::park_and_wait(_current.0, core_id);
+        match pcs.pick_next() {
+            Some(id) => Some(id),
+            None => {
+                pcs.set_current(None);
 
-            return;
-        };
+                None
+            }
+        }
+    };
+    let Some(next_id) = next_id else {
+        #[cfg(target_os = "none")]
+        crate::frame::arch::idle::park_and_wait(_current.0, core_id);
 
-        next_id
+        return;
     };
 
     state::threads()

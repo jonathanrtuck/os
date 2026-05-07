@@ -297,6 +297,11 @@ __svc_fast:
     ldr     x9, [sp, #16]
     msr     sp_el0, x9
 
+    // Mask IRQs before writing ELR/SPSR — an interrupt between
+    // MSR ELR_EL1 and ERET would overwrite ELR with the interrupted
+    // kernel PC, causing ERET to jump to a kernel address at EL0.
+    msr     daifset, #2
+
     // Restore ELR, SPSR.
     ldp     x9, x10, [sp, #0]
     msr     elr_el1, x9

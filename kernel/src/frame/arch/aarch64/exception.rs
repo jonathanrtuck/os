@@ -620,7 +620,17 @@ fn unimplemented_el0(frame: &TrapFrame, kind: &str) -> ! {
     sysreg::disable_irqs();
 
     crate::println!();
-    crate::println!("EL0 {kind} — not yet implemented");
+
+    #[cfg(target_os = "none")]
+    {
+        // SAFETY: percpu is initialized on this core during boot.
+        let tid = unsafe { super::cpu::percpu().current_thread };
+
+        crate::println!("EL0 {kind} — thread {tid}");
+    }
+
+    #[cfg(not(target_os = "none"))]
+    crate::println!("EL0 {kind}");
     crate::println!("  ELR:  0x{:016x}", frame.elr);
     crate::println!("  ESR:  0x{:016x}", frame.esr);
     crate::println!("  FAR:  0x{:016x}", frame.far);

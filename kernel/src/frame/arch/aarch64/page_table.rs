@@ -321,6 +321,19 @@ pub fn switch_table(root: PhysAddr, asid: Asid) {
     let val = (root.as_usize() as u64) | ((asid.0 as u64) << 48);
 
     sysreg::set_ttbr0_el1(val);
+
+    // TLBI VMALLE1: invalidate all stage-1 EL0/EL1 TLB entries on this core.
+    // On real hardware, ASID tagging would prevent stale matches across address
+    // space switches. Under Apple Hypervisor.framework, the virtual TLB does not
+    // respect ASIDs, so stale entries from the previous TTBR0 incorrectly match
+    // the new address space. A local TLBI after every switch is necessary.
+    #[cfg(target_os = "none")]
+    // SAFETY: TLBI VMALLE1 invalidates this core's TLB entries. DSB ISH ensures
+    // the invalidation completes before the ISB. No memory operands.
+    unsafe {
+        core::arch::asm!("tlbi vmalle1", "dsb ish", options(nostack),);
+    }
+
     sysreg::isb();
 }
 
