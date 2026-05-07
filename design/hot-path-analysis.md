@@ -216,15 +216,78 @@ three are eliminable with a per-thread cache.
   `ESR.EC`. WFI vs WFE is collapsed into a single `exits_wfx` bucket; if finer
   detail is needed, decode the `ISS` field and add new slots.
 
-## Optimization Priorities (by impact)
+## Where the Cycles Go — Measured Profiling (2026-05-07)
 
-1. **IPC round-trip** — dominates all tool↔OS interaction. Every cycle saved
-   here multiplies across every document operation.
-2. **Event signal-to-wake** — the compositor path. Determines UI latency between
-   "content changed" and "screen updated."
-3. **Page fault resolution** — governs startup and first-access latency. Lazy
-   allocation means every mapped page faults on first touch.
-4. **Handle lookup** — appears in every syscall. Already near theoretical
-   minimum at 24 bytes per handle.
-5. **Object creation** — less frequent but governs document-open latency when
-   many VMOs are created.
+The profiling infrastructure (`feature = "profile"`) stamps CNTVCT_EL0 at each
+stage of the syscall path. Combined with HVF timing, this decomposes wall-clock
+time into kernel software stages.
+
+### Optimizations Applied
+
+Two PerCpu caching optimizations eliminated lock overhead from the syscall hot
+path:
+
+1. **`current_space` in PerCpu** — eliminated `thread_space_id()` which acquired
+   a TicketLock on the thread table to read an immutable field. Was 128 cycles
+   per syscall.
+
+2. **`handle_table_ptr` in PerCpu** — cached a raw pointer to the current
+   space's HandleTable during context switch. `lookup_handle()` now reads
+   directly from the pointer, bypassing the per-space TicketLock and
+   ConcurrentTable pointer chase (~35 cycles saved per lookup).
+
+### Results After Both Optimizations
+
+| Syscall             | Before opt | After opt | Speedup | Floor | Multiple |
+| ------------------- | ---------: | --------: | ------: | ----: | -------: |
+| handle_info         |      157.3 |      15.0 |    −90% |    15 |   **1.0×** |
+| event_signal        |      249.3 |     101.6 |    −59% |    15 |     6.7× |
+| event_wait          |        n/a |      93.7 |     n/a |    15 |     6.2× |
+| event_clear         |        n/a |     159.0 |     n/a |    15 |    10.6× |
+| handle_dup+close    |      550.0 |     327.7 |    −40% |    30 |    10.9× |
+| endpoint create     |   1,156.8  |   1,156.8 |      0% |    50 |    23.1× |
+| IPC null round-trip |   6,957.3  |   6,606.0 |     −5% |   150 |    44.0× |
+
+"Before opt" = pre-caching baseline. handle_info went from 157 cycles to its
+15-cycle theoretical floor — the TicketLock was the entire overhead.
+
+### Remaining Cost Breakdown (by profiler stages)
+
+**handle_info** (15 cyc, at floor): MRS TPIDR_EL1 → load handle_table_ptr →
+array index → clone → generation atomic load → return. No further optimization
+possible without changing the syscall ABI.
+
+**event_signal** (102 cyc): ~15 handle lookup + ~45 event read+signal+waiter
+scan + ~40 scheduler enqueue. Waiter scan is O(n) with n=max waiters.
+
+**endpoint_create** (1,157 cyc): dominated by `alloc_shared` (433 cyc) — the
+Endpoint struct is large (multiple arrays for pending calls, recv waiters, reply
+caps). Each array field touches a fresh cache line on construction.
+
+**IPC null round-trip** (6,606 cyc): the profiler stamps up to
+IPC_BEFORE_SWITCH (not through the context switch). Decomposed: endpoint lookup
++ peer check + message copy + handle staging + recv pop + space switch (TTBR0)
++ message write + handle install + reply cap alloc + priority boost. The TTBR0
+switch alone is significant (~200+ cyc for TLB invalidation under HVF).
+
+### Profiling Limitations
+
+- IPC profiling from EL1 cannot measure through `direct_switch` because the
+  context switch suspends the bench thread. Full IPC stage decomposition
+  requires a userspace bench (bench-el0).
+- Exception entry/exit overhead (save/restore ~30 GPRs + FP) is measured by
+  the assembly stamps in exception.S but not yet decomposed further.
+
+## Optimization Priorities (by impact, updated 2026-05-07)
+
+1. **IPC round-trip** (44× floor) — still the biggest gap. Next targets: reduce
+   alloc_shared cost for Endpoint (smaller struct or lazy init of arrays), and
+   investigate whether TTBR0 switch can be avoided for same-space IPC.
+2. **Endpoint create** (23× floor) — alloc_shared dominates. The Endpoint struct
+   initialization touches many cache lines.
+3. **Event signal/clear/wait** (6–11× floor) — handle lookup is now fast; the
+   remaining cost is in the event/scheduler operations (waiter scan, enqueue).
+4. **Handle dup+close** (11× floor) — the `write()` path still takes the
+   TicketLock for mutations. Consider a lock-free close path.
+5. **Fault resolution** (10× floor) — binary search over mappings + VMO table
+   read. Per-thread mapping cache would help.
