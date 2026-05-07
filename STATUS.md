@@ -155,16 +155,40 @@ or extend existing ones, never break the existing interface.
 
 ### Phase 2 — Drivers (IN PROGRESS)
 
-1. **Console driver (PL011)** — DONE. Kernel extended with device-backed VMOs
-   (`VmoFlags::DEVICE`, `Vmo::new_physical`) for mapping hardware MMIO into
-   userspace with Device-nGnRnE page table attributes. Bootstrap creates UART +
-   virtio MMIO VMOs + device manifest, passes to init as handles 3–5. PL011
-   console driver maps UART device VMO, registers with name service, prints
-   "console: ready" on boot. Fixed IPC call TOCTOU race under SMP.
-   `userspace/drivers/console/`
-2. **virtio-input** — next
+**Kernel extensions for drivers:**
+
+- **Device VMOs** (`VmoFlags::DEVICE`, `Vmo::new_physical`) — VMOs backed by
+  specific physical addresses for MMIO. Page table entries use `ATTR_DEVICE`
+  (MAIR index 0, Device-nGnRnE). Identity-mapped (VA = PA).
+- **DMA VMOs** (`VmoFlags::DMA`, `Vmo::new_contiguous`) — contiguous physical
+  pages, identity-mapped (VA = PA). Capability-gated: `vmo_create` with DMA flag
+  requires a Resource handle of kind `Dma` as `args[2]`.
+- **Resource type** (`ObjectType::Resource`) — kernel-created authority tokens
+  (Zircon model). Bootstrap installs a DMA Resource as handle 6 in init's space.
+- **Bootstrap handles for init:** 0=space, 1=code VMO, 2=pack VMO, 3=device
+  manifest VMO, 4=UART MMIO VMO, 5=virtio MMIO VMO, 6=DMA Resource.
+- **Service stack VA** moved to `0x1_0000_0000` (above physical RAM range) to
+  reserve the PA-matching VA range for identity-mapped DMA buffers.
+- **IPC TOCTOU fix** — endpoint call queue race under SMP (pre-existing bug).
+
+**Drivers:**
+
+1. **Console driver (PL011)** — DONE. Maps UART device VMO, registers with name
+   service, prints "console: ready" on boot. `userspace/drivers/console/`
+2. **virtio-input** — next. Requires: persistent init (DMA allocator), virtio
+   library, DMA VMO allocation via IPC to init.
 3. **virtio-blk** — pending
 4. **Metal render driver** — pending
+
+**Next steps for Phase 2.2:**
+
+1. Make init persistent — serve loop after spawning, handles DMA allocation
+   requests from drivers via IPC (driver sends size, init calls `vmo_create`
+   with DMA Resource handle, returns VMO handle via reply).
+2. Build virtio library crate (`userspace/drivers/virtio/`) — adapted from
+   `v0.6-pre-rewrite:libraries/virtio/lib.rs`. Device probe, virtqueue setup,
+   DMA buffer management. Uses identity-mapped VMOs (VA = PA in descriptors).
+3. Build virtio-input driver — keyboard + tablet, event ring output.
 
 ## Session Resume
 
