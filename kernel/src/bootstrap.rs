@@ -135,6 +135,9 @@ pub fn create_init(init_binary: &[u8], service_pack: &[u8]) -> Result<ThreadId, 
     // Handle 5: Virtio MMIO VMO (device, PA 0x0A000000)
     create_device_vmos(space_idx)?;
 
+    // Handle 6: DMA resource (authority token for DMA VMO creation)
+    create_dma_resource(space_idx)?;
+
     #[cfg(target_os = "none")]
     {
         use crate::frame::{
@@ -217,6 +220,24 @@ pub fn create_init(init_binary: &[u8], service_pack: &[u8]) -> Result<ThreadId, 
     state::inc_alive_threads();
 
     Ok(ThreadId(thread_idx))
+}
+
+fn create_dma_resource(space_idx: u32) -> Result<(), SyscallError> {
+    use crate::resource::{Resource, ResourceKind};
+
+    let res = Resource::new(crate::types::ResourceId(0), ResourceKind::Dma);
+    let (idx, generation) = state::resources()
+        .alloc_shared(res)
+        .ok_or(SyscallError::OutOfMemory)?;
+
+    state::resources().write(idx).unwrap().id = crate::types::ResourceId(idx);
+    state::spaces()
+        .write(space_idx)
+        .ok_or(SyscallError::InvalidArgument)?
+        .handles_mut()
+        .allocate(ObjectType::Resource, idx, Rights::ALL, generation)?;
+
+    Ok(())
 }
 
 // ── Device manifest constants ─────────────────────────────────
@@ -429,8 +450,8 @@ mod tests {
             .unwrap();
         let space = state::spaces().read(space_id.0).unwrap();
 
-        // space(0) + code(1) + manifest(3) + uart(4) + virtio(5) = 5
-        assert!(space.handles().count() >= 5);
+        // space(0) + code(1) + manifest(3) + uart(4) + virtio(5) + dma_resource(6) = 6
+        assert!(space.handles().count() >= 6);
 
         drop(space);
 

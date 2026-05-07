@@ -17,7 +17,7 @@ use super::{
 };
 use crate::{
     address_space::AddressSpace, config, endpoint::Endpoint, event::Event, irq::IrqTable,
-    table::ObjectTable, thread::PerCoreState, types::ThreadId, vmo::Vmo,
+    resource::Resource, table::ObjectTable, thread::PerCoreState, types::ThreadId, vmo::Vmo,
 };
 
 pub type VmoTable = ConcurrentTable<Vmo, { config::MAX_VMOS }, InlineSlab<Vmo>>;
@@ -30,6 +30,7 @@ pub type ThreadTable = ConcurrentTable<
 >;
 pub type SpaceTable =
     ConcurrentTable<AddressSpace, { config::MAX_ADDRESS_SPACES }, BoxStorage<AddressSpace>>;
+pub type ResourceTable = ConcurrentTable<Resource, { config::MAX_RESOURCES }, InlineSlab<Resource>>;
 
 /// Per-CPU scheduler array — each core's `PerCoreState` behind its own
 /// `SpinLock`. Independent cores never contend; cross-core wake contends
@@ -79,6 +80,7 @@ static mut EVENTS: Option<EventTable> = None;
 static mut ENDPOINTS: Option<EndpointTable> = None;
 static mut THREADS: Option<ThreadTable> = None;
 static mut SPACES: Option<SpaceTable> = None;
+static mut RESOURCES: Option<ResourceTable> = None;
 static mut SCHEDULERS: Option<Schedulers> = None;
 static mut IRQS: Option<SpinLock<IrqTable>> = None;
 static ALIVE_THREADS: AtomicU32 = AtomicU32::new(0);
@@ -96,6 +98,7 @@ pub fn init(num_cores: usize) {
         addr_of_mut!(ENDPOINTS).write(Some(ConcurrentTable::from_table(ObjectTable::new())));
         addr_of_mut!(THREADS).write(Some(ConcurrentTable::from_table(ObjectTable::new())));
         addr_of_mut!(SPACES).write(Some(ConcurrentTable::from_table(ObjectTable::new())));
+        addr_of_mut!(RESOURCES).write(Some(ConcurrentTable::from_table(ObjectTable::new())));
         addr_of_mut!(SCHEDULERS).write(Some(Schedulers::new(num_cores)));
         addr_of_mut!(IRQS).write(Some(SpinLock::new(IrqTable::new())));
         ALIVE_THREADS.store(0, Ordering::Relaxed);
@@ -123,6 +126,10 @@ pub fn threads() -> &'static ThreadTable {
 
 pub fn spaces() -> &'static SpaceTable {
     unsafe { (*addr_of_mut!(SPACES)).as_ref().unwrap_unchecked() }
+}
+
+pub fn resources() -> &'static ResourceTable {
+    unsafe { (*addr_of_mut!(RESOURCES)).as_ref().unwrap_unchecked() }
 }
 
 pub fn schedulers() -> &'static Schedulers {
@@ -182,6 +189,7 @@ pub fn handle_lookup_fast(
         crate::types::ObjectType::Event => events().generation(handle.object_id),
         crate::types::ObjectType::Thread => threads().generation(handle.object_id),
         crate::types::ObjectType::AddressSpace => spaces().generation(handle.object_id),
+        crate::types::ObjectType::Resource => resources().generation(handle.object_id),
     };
 
     if handle.generation != current_gen {

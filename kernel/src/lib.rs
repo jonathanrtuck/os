@@ -87,6 +87,7 @@ pub mod post;
 pub mod print;
 #[cfg(test)]
 mod proptests;
+pub mod resource;
 #[cfg(any(target_os = "none", test))]
 pub mod sched;
 #[cfg(any(target_os = "none", test))]

@@ -31,6 +31,7 @@ pub enum ObjectType {
     Event = 2,
     Thread = 3,
     AddressSpace = 4,
+    Resource = 5,
 }
 
 /// Handle rights bitfield.
@@ -143,6 +144,7 @@ id_newtype!(EventId);
 id_newtype!(ThreadId);
 id_newtype!(AddressSpaceId);
 id_newtype!(HandleId);
+id_newtype!(ResourceId);
 
 #[cfg(test)]
 mod tests {

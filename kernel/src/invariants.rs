@@ -83,6 +83,7 @@ fn check_handle_referential_integrity(violations: &mut Vec<Violation>) {
                     handle.object_id == space_idx
                         || state::spaces().read(handle.object_id).is_some()
                 }
+                ObjectType::Resource => state::resources().read(handle.object_id).is_some(),
             };
 
             if !obj_exists {
@@ -101,6 +102,7 @@ fn check_handle_referential_integrity(violations: &mut Vec<Violation>) {
                 ObjectType::Event => state::events().generation(handle.object_id),
                 ObjectType::Thread => state::threads().generation(handle.object_id),
                 ObjectType::AddressSpace => state::spaces().generation(handle.object_id),
+                ObjectType::Resource => state::resources().generation(handle.object_id),
             };
 
             if obj_exists && handle.generation != current_gen {
@@ -470,7 +472,7 @@ fn check_refcount_consistency(violations: &mut Vec<Violation>) {
                 ObjectType::Event => {
                     *event_handle_counts.entry(handle.object_id).or_insert(0) += 1;
                 }
-                ObjectType::Thread | ObjectType::AddressSpace => {}
+                ObjectType::Thread | ObjectType::AddressSpace | ObjectType::Resource => {}
             }
         }
     });
@@ -547,7 +549,7 @@ fn check_exact_refcounts(violations: &mut Vec<Violation>) {
                 ObjectType::Event => {
                     *event_handle_counts.entry(handle.object_id).or_insert(0) += 1;
                 }
-                ObjectType::Thread | ObjectType::AddressSpace => {}
+                ObjectType::Thread | ObjectType::AddressSpace | ObjectType::Resource => {}
             }
         }
 
@@ -712,7 +714,7 @@ fn check_object_reachability(violations: &mut Vec<Violation>) {
                 ObjectType::Event => {
                     event_refs.insert(handle.object_id);
                 }
-                ObjectType::Thread | ObjectType::AddressSpace => {}
+                ObjectType::Thread | ObjectType::AddressSpace | ObjectType::Resource => {}
             }
         }
     });

@@ -75,6 +75,7 @@ pub enum ObjectType {
     Event = 2,
     Thread = 3,
     AddressSpace = 4,
+    Resource = 5,
 }
 
 pub const MSG_SIZE: usize = 128;

@@ -207,6 +207,7 @@ fn lookup_handle(space_id: AddressSpaceId, handle_id: HandleId) -> Result<Handle
         ObjectType::Event => state::events().generation(handle.object_id),
         ObjectType::Thread => state::threads().generation(handle.object_id),
         ObjectType::AddressSpace => state::spaces().generation(handle.object_id),
+        ObjectType::Resource => state::resources().generation(handle.object_id),
     };
 
     if handle.generation != current_gen {
@@ -361,7 +362,7 @@ fn add_object_ref(object_type: ObjectType, object_id: u32) {
                 evt.add_ref();
             }
         }
-        ObjectType::Thread | ObjectType::AddressSpace => {}
+        ObjectType::Thread | ObjectType::AddressSpace | ObjectType::Resource => {}
     }
 }
 
@@ -418,7 +419,7 @@ fn release_object_ref(object_type: ObjectType, object_id: u32, core_id: usize) {
                 destroy_event(object_id);
             }
         }
-        ObjectType::Thread | ObjectType::AddressSpace => {}
+        ObjectType::Thread | ObjectType::AddressSpace | ObjectType::Resource => {}
     }
 }
 

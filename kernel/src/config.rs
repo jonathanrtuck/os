@@ -59,6 +59,7 @@ pub const MAX_ADDRESS_SPACES: usize = 128;
 pub const MAX_THREADS: usize = 512;
 pub const MAX_EVENTS: usize = 1024;
 pub const MAX_ENDPOINTS: usize = 256;
+pub const MAX_RESOURCES: usize = 4;
 pub const MAX_PAGES_INLINE: usize = 32;
 pub const MAX_MAPPINGS: usize = 128;
 pub const MAX_VA_REGIONS: usize = MAX_MAPPINGS * 2 + 1;

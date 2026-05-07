@@ -33,7 +33,7 @@ const PAGE_SIZE: usize = 16384;
 const STACK_SIZE: usize = PAGE_SIZE * 4;
 
 const SERVICE_CODE_VA: usize = 0x0020_0000;
-const SERVICE_STACK_VA: usize = 0x4000_0000;
+const SERVICE_STACK_VA: usize = 0x1_0000_0000;
 
 const NAME_SVC: &[u8] = b"name";
 const CONSOLE_SVC: &[u8] = b"console";
