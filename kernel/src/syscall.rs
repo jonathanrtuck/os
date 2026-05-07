@@ -177,33 +177,6 @@ fn unlink_thread_from_space(thread_idx: u32, space_id: AddressSpaceId) {
     }
 }
 
-// ── Switch target helper ────────────────────────────────────
-
-/// Build a SwitchTarget for the IPC fast path from a thread and its known
-/// space ID. Reads the space table once to get handle table pointer and
-/// page table info. Avoids the thread table read that set_current_thread
-/// would do (we already know the space).
-fn build_switch_target(
-    thread_id: ThreadId,
-    space_id: AddressSpaceId,
-) -> crate::sched::SwitchTarget {
-    let (ht_ptr, pt_root, pt_asid) = state::spaces().read(space_id.0).map_or((0, 0, 0), |space| {
-        (
-            space.handles() as *const _ as usize,
-            space.page_table_root(),
-            space.asid(),
-        )
-    });
-
-    crate::sched::SwitchTarget {
-        thread_id,
-        space_id: space_id.0,
-        ht_ptr,
-        pt_root,
-        pt_asid,
-    }
-}
-
 // ── Handle lookup ───────────────────────────────────────────
 
 #[inline]
@@ -1455,9 +1428,19 @@ fn sys_call(
         }
 
         if let Some(rs) = recv_state {
-            // STTR uses EL0's TTBR0. Switch to server's space by ID
-            // directly — we already know the space from RecvState.
-            crate::sched::switch_to_space_by_id(rs.space_id);
+            // Extract server space info once — used for TTBR0 switch and
+            // SwitchTarget (saves 2 separate space reads).
+            let (srv_ht_ptr, srv_pt_root, srv_pt_asid) =
+                state::spaces().read(rs.space_id.0).map_or((0, 0, 0), |s| {
+                    (
+                        s.handles() as *const _ as usize,
+                        s.page_table_root(),
+                        s.asid(),
+                    )
+                });
+
+            // Switch TTBR0 to server's space for STTR writes.
+            crate::sched::switch_to_page_table(srv_pt_root, srv_pt_asid);
 
             profile::stamp(slot::IPC_SPACE_SWITCH);
 
@@ -1501,12 +1484,9 @@ fn sys_call(
 
                 let packed = (badge as u64) << 32 | (h_count << 16) | msg_len_val;
 
-                // Read caller priority before batching server writes.
                 let caller_pri = state::threads()
                     .read(current.0)
                     .map_or(Priority::Idle, |t| t.effective_priority());
-                // Batch: set wakeup + boost + check state in one locked section
-                // (was 3 separate lock acquisitions).
                 let server_was_blocked =
                     if let Some(mut server) = state::threads().write(server_tid.0) {
                         server.set_wakeup_value(packed);
@@ -1520,8 +1500,13 @@ fn sys_call(
                 profile::stamp(slot::IPC_BEFORE_SWITCH);
 
                 if server_was_blocked {
-                    // Build SwitchTarget from the space we already switched to.
-                    let target = build_switch_target(server_tid, rs.space_id);
+                    let target = crate::sched::SwitchTarget {
+                        thread_id: server_tid,
+                        space_id: rs.space_id.0,
+                        ht_ptr: srv_ht_ptr,
+                        pt_root: srv_pt_root,
+                        pt_asid: srv_pt_asid,
+                    };
 
                     crate::sched::direct_switch_fast(current, &target, core_id);
                 } else {
@@ -1881,8 +1866,7 @@ fn sys_reply(
     let staged = remove_handles_atomic(space_id, handles_ptr, handles_count)?;
 
     // Extract caller's page table info once — reused for TTBR0 switch,
-    // restore, and SwitchTarget construction (saves 3 space table reads
-    // from switch_to_space_by_id + build_switch_target).
+    // restore, and SwitchTarget construction.
     let (caller_ht_ptr, caller_pt_root, caller_pt_asid) = state::spaces()
         .read(caller_space_id.0)
         .map_or((0, 0, 0), |s| {

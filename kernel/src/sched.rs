@@ -294,29 +294,6 @@ fn do_context_switch(old_id: ThreadId, new_id: ThreadId) {
     crate::frame::arch::context::switch_threads(old_id.0, new_id.0);
 }
 
-/// Switch TTBR0 to a known address space by ID, skipping the thread table
-/// lookup. Used when the caller already knows the space ID (e.g., from
-/// RecvState or a prior thread table read).
-pub(crate) fn switch_to_space_by_id(_space_id: crate::types::AddressSpaceId) {
-    #[cfg(target_os = "none")]
-    {
-        let Some(space) = state::spaces().read(_space_id.0) else {
-            return;
-        };
-        let pt_root = space.page_table_root();
-        let asid = space.asid();
-
-        drop(space);
-
-        if pt_root != 0 {
-            crate::frame::arch::page_table::switch_table(
-                crate::frame::arch::page_alloc::PhysAddr(pt_root),
-                crate::frame::arch::page_table::Asid(asid),
-            );
-        }
-    }
-}
-
 /// Switch TTBR0 to a known page table, skipping all table lookups.
 /// Used when the caller already has the physical root and ASID.
 #[allow(dead_code)]
