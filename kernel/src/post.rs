@@ -109,6 +109,12 @@ pub fn run() {
     // Tear down POST environment
     teardown_post_env(current);
 
+    // TLB ASID-isolation regression test. Verifies that switching TTBR0+ASID
+    // without an explicit TLBI correctly isolates address spaces — the nG bit
+    // on user pages must be set so the TLB tags entries with the writing ASID.
+    #[cfg(target_os = "none")]
+    crate::frame::arch::page_table::self_test_tlb_asid_isolation();
+
     crate::println!("POST: all checks passed");
 }
 

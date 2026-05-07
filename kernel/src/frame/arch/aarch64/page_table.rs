@@ -64,6 +64,7 @@ const VALID: u64 = 1 << 0;
 const TABLE: u64 = 1 << 1;
 const PAGE: u64 = 1 << 1;
 const AF: u64 = 1 << 10;
+const NG: u64 = 1 << 11; // Not Global — TLB entry tagged with current ASID.
 const SH_ISH: u64 = 0b11 << 8;
 const AP_RW_ALL: u64 = 0b01 << 6; // EL1+EL0 read/write
 const AP_RO_ALL: u64 = 0b11 << 6; // EL1+EL0 read-only
@@ -186,7 +187,6 @@ pub fn map_page(root: PhysAddr, vaddr: VirtAddr, paddr: PhysAddr, perms: Perms) 
     unsafe {
         let l2: *mut u64 = pa_to_ptr(root.as_usize());
         let l2_entry = core::ptr::read_volatile(l2.add(l2_idx));
-
         // Ensure L3 table exists.
         let l3_pa = if l2_entry & VALID != 0 {
             (l2_entry & PA_MASK) as usize
@@ -201,9 +201,10 @@ pub fn map_page(root: PhysAddr, vaddr: VirtAddr, paddr: PhysAddr, perms: Perms) 
 
             new_l3.as_usize()
         };
-
-        // Build L3 page descriptor.
-        let mut attrs = ATTR_NORMAL | SH_ISH | AF | PAGE | VALID;
+        // Build L3 page descriptor. NG marks the entry non-global so the TLB
+        // tags it with the current ASID — without this, ARM caches the entry
+        // as global (matches any ASID) and TTBR0+ASID switches don't isolate.
+        let mut attrs = ATTR_NORMAL | SH_ISH | AF | NG | PAGE | VALID;
 
         if perms.write {
             attrs |= AP_RW_ALL;
@@ -316,26 +317,18 @@ pub fn clear_write(root: PhysAddr, vaddr: VirtAddr) {
 }
 
 /// Load TTBR0 with a page table root + ASID for address space switching.
+///
+/// No TLBI is required: user pages set the nG bit (see `map_page`), so the
+/// TLB tags each entry with the ASID that was in TTBR0 when it was filled.
+/// A lookup under the new ASID won't match those entries — the architecture
+/// guarantees this even with cached translations from the previous space
+/// still resident. ISB orders subsequent fetches/accesses against the new
+/// TTBR0 (ARM ARM B2.2.7).
 #[cfg(target_os = "none")]
 pub fn switch_table(root: PhysAddr, asid: Asid) {
     let val = (root.as_usize() as u64) | ((asid.0 as u64) << 48);
 
     sysreg::set_ttbr0_el1(val);
-
-    // Flush this core's TLB after switching TTBR0. The ARM architecture says
-    // ASID-tagged entries from the old space won't match the new ASID, so a
-    // TLBI should not be required. In practice, omitting it causes stale TLB
-    // hits under the hypervisor (observed: thread N+1 executing thread N's
-    // code page without faulting, despite distinct ASIDs and page tables).
-    // Root cause is unconfirmed — could be a hypervisor TLB emulation gap or
-    // an undiagnosed kernel issue. The TLBI is defensive.
-    #[cfg(target_os = "none")]
-    // SAFETY: TLBI VMALLE1 invalidates this core's EL0/EL1 TLB entries.
-    // DSB ISH ensures completion before the ISB.
-    unsafe {
-        core::arch::asm!("tlbi vmalle1", "dsb ish", options(nostack),);
-    }
-
     sysreg::isb();
 }
 
@@ -384,6 +377,83 @@ pub fn invalidate_asid(asid: Asid) {
     sysreg::tlbi_aside1is(asid.0 as u64);
     sysreg::dsb_ish();
     sysreg::isb();
+}
+
+/// Verify TTBR0+ASID switches isolate address spaces (regression test for nG bit).
+///
+/// Allocates two empty page tables, maps the same VA to two distinct physical
+/// pages with distinct ASIDs, switches `TTBR0` between them with no explicit
+/// TLBI, and confirms each read returns the value seeded for the current
+/// space. If user-page descriptors omit the `nG` bit, ARM caches the first
+/// read as a global TLB entry and the second read returns the wrong value.
+///
+/// Panics on mismatch — callable from POST as a regression gate.
+#[cfg(target_os = "none")]
+pub fn self_test_tlb_asid_isolation() {
+    // 4 MiB — below RAM base, so unmapped in the boot identity map.
+    // Choosing a never-cached VA prevents false positives from boot TLB entries.
+    const TEST_VA: usize = 0x40_0000;
+    const MAGIC_A: u64 = 0xA1A1_A1A1_A1A1_A1A1;
+    const MAGIC_B: u64 = 0xB2B2_B2B2_B2B2_B2B2;
+
+    let saved_ttbr0 = sysreg::ttbr0_el1();
+    let (root_a, asid_a) = create_page_table().expect("self_test/TLB: PT_A");
+    let (root_b, asid_b) = create_page_table().expect("self_test/TLB: PT_B");
+
+    assert_ne!(asid_a.0, asid_b.0, "self_test/TLB: ASID collision");
+
+    let page_a = page_alloc::alloc_page().expect("self_test/TLB: page_a");
+    let page_b = page_alloc::alloc_page().expect("self_test/TLB: page_b");
+
+    // Seed each physical page via TTBR1 (kernel direct map).
+    // SAFETY: phys_to_virt returns the kernel's direct-map VA for a freshly
+    // allocated page; the page is owned by this test until cleanup below.
+    unsafe {
+        core::ptr::write_volatile(
+            platform::phys_to_virt(page_a.as_usize()) as *mut u64,
+            MAGIC_A,
+        );
+        core::ptr::write_volatile(
+            platform::phys_to_virt(page_b.as_usize()) as *mut u64,
+            MAGIC_B,
+        );
+    }
+
+    map_page(root_a, VirtAddr(TEST_VA), page_a, Perms::RW);
+    map_page(root_b, VirtAddr(TEST_VA), page_b, Perms::RW);
+
+    // Switch to A, prime the TLB, verify.
+    switch_table(root_a, asid_a);
+
+    // SAFETY: TEST_VA is mapped RW in A's page table; access through TTBR0
+    // resolves to page_a. Read from EL1 is permitted by AP_RW_ALL.
+    let val_a = unsafe { core::ptr::read_volatile(TEST_VA as *const u64) };
+
+    assert_eq!(
+        val_a, MAGIC_A,
+        "self_test/TLB: A read 0x{val_a:016x}, expected MAGIC_A",
+    );
+
+    // Switch to B WITHOUT a TLBI. If nG is missing, the cached A entry is
+    // global and the read below returns MAGIC_A — the bug we're guarding against.
+    switch_table(root_b, asid_b);
+
+    // SAFETY: same as above, but TEST_VA in B's table maps to page_b.
+    let val_b = unsafe { core::ptr::read_volatile(TEST_VA as *const u64) };
+
+    assert_eq!(
+        val_b, MAGIC_B,
+        "self_test/TLB: B read 0x{val_b:016x}, expected MAGIC_B (TLB ASID isolation broken)",
+    );
+
+    // Restore boot TTBR0 before destroying the per-test tables.
+    sysreg::set_ttbr0_el1(saved_ttbr0);
+    sysreg::isb();
+
+    destroy_page_table(root_a, asid_a);
+    destroy_page_table(root_b, asid_b);
+    page_alloc::release(page_a);
+    page_alloc::release(page_b);
 }
 
 /// Check if a PTE has the COW bit set (for fault handler).

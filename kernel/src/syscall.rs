@@ -1809,52 +1809,70 @@ fn sys_space_create(
 ) -> Result<u64, SyscallError> {
     let _ = args;
     let caller_space_id = thread_space_id(current)?;
-    let asid = state::alloc_asid()?;
+    // create_page_table atomically allocates the L2 root + an ASID; using its
+    // ASID for AddressSpace avoids the leak from a separate state::alloc_asid()
+    // call (each space_create would otherwise burn 2 ASIDs from a 128-slot pool).
+    #[cfg(target_os = "none")]
+    let (pt_root, asid) = {
+        let (root, asid_obj) =
+            crate::frame::arch::page_table::create_page_table().ok_or(SyscallError::OutOfMemory)?;
+
+        (root.0, asid_obj.0)
+    };
+    #[cfg(not(target_os = "none"))]
+    let (pt_root, asid) = (0usize, state::alloc_asid()?);
     let space = AddressSpace::new(AddressSpaceId(0), asid, 0);
     let Some((idx, generation)) = state::spaces().alloc_shared(space) else {
-        state::free_asid(asid);
+        teardown_new_space_pt(pt_root, asid);
         return Err(SyscallError::OutOfMemory);
     };
 
-    state::spaces().write(idx).unwrap().id = AddressSpaceId(idx);
-    #[cfg(target_os = "none")]
     {
-        state::spaces()
-            .write(idx)
-            .unwrap()
-            .set_aslr_seed(crate::frame::arch::entropy::random_u64());
+        let mut s = state::spaces().write(idx).unwrap();
 
-        let (root, asid_val) =
-            crate::frame::arch::page_table::create_page_table().ok_or_else(|| {
-                state::spaces().dealloc_shared(idx);
-                state::free_asid(asid);
-
-                SyscallError::OutOfMemory
-            })?;
-
-        state::spaces()
-            .write(idx)
-            .unwrap()
-            .set_page_table(root.0, asid_val.0);
+        s.id = AddressSpaceId(idx);
+        #[cfg(target_os = "none")]
+        {
+            s.set_aslr_seed(crate::frame::arch::entropy::random_u64());
+            s.set_page_table(pt_root, asid);
+        }
     }
 
-    let hid = state::spaces()
-        .write(caller_space_id.0)
-        .ok_or(SyscallError::InvalidArgument)?
+    let Some(mut caller) = state::spaces().write(caller_space_id.0) else {
+        state::spaces().dealloc_shared(idx);
+        teardown_new_space_pt(pt_root, asid);
+        return Err(SyscallError::InvalidArgument);
+    };
+    let hid = caller
         .handles_mut()
         .allocate(ObjectType::AddressSpace, idx, Rights::ALL, generation);
+
+    drop(caller);
 
     match hid {
         Ok(hid) => Ok(hid.0 as u64),
         Err(e) => {
-            let asid = state::spaces().read(idx).map_or(0, |s| s.asid());
-
             state::spaces().dealloc_shared(idx);
-            state::free_asid(asid);
+
+            teardown_new_space_pt(pt_root, asid);
 
             Err(e)
         }
     }
+}
+
+/// Free the page table root + ASID allocated for a space that never finished
+/// initializing. On host targets, only the ASID exists.
+#[inline]
+fn teardown_new_space_pt(_pt_root: usize, asid: u8) {
+    #[cfg(target_os = "none")]
+    crate::frame::arch::page_table::destroy_page_table(
+        crate::frame::arch::page_alloc::PhysAddr(_pt_root),
+        crate::frame::arch::page_table::Asid(asid),
+    );
+
+    #[cfg(not(target_os = "none"))]
+    state::free_asid(asid);
 }
 
 #[inline(never)]
