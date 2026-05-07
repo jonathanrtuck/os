@@ -20,12 +20,12 @@ pass() { printf "${GREEN}pass${RESET}  %s\n" "$1"; }
 fail() { printf "${RED}FAIL${RESET}  %s\n" "$1"; exit 1; }
 info() { printf "${DIM}info${RESET}  %s\n" "$1"; }
 
-# 1. Clippy — warnings as errors.
+# 1. Clippy — warnings as errors (bare-metal target for full cfg coverage).
 cargo clippy -p kernel -- -D warnings 2>&1 | tail -1
 pass "clippy clean"
 
 # 2. Host tests (single-threaded: state::init() writes static mut globals).
-TEST_OUTPUT=$(cargo test -p kernel --target aarch64-apple-darwin -- --test-threads=1 2>&1)
+TEST_OUTPUT=$(cargo t 2>&1)
 TEST_LINE=$(echo "$TEST_OUTPUT" | grep "^test result:" | head -1)
 
 if echo "$TEST_LINE" | grep -q "0 failed"; then

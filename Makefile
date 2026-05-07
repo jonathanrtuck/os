@@ -1,5 +1,5 @@
-# Host target for running tests (the workspace default is aarch64-unknown-none).
-HOST_TARGET := aarch64-apple-darwin
+# Host target for verification tools that can't run on bare metal.
+HOST := aarch64-apple-darwin
 
 .PHONY: test build check clippy fmt bench bench-el0 bench-smp clean integration-test \
         miri asan fuzz mutants coverage gate nightly \
@@ -8,7 +8,7 @@ HOST_TARGET := aarch64-apple-darwin
 # -- Core targets --
 
 test:
-	cargo test -p kernel --lib --target $(HOST_TARGET) -- --test-threads=1
+	cargo t
 
 build:
 	cargo build -p kernel
@@ -41,20 +41,20 @@ clean:
 # -- Verification targets --
 
 miri:
-	MIRIFLAGS="-Zmiri-isolation-error=warn" cargo +nightly miri test -p kernel --lib --target $(HOST_TARGET)
+	MIRIFLAGS="-Zmiri-isolation-error=warn" cargo +nightly miri test -p kernel --lib --target $(HOST)
 
 asan:
-	RUSTFLAGS="-Z sanitizer=address" cargo +nightly test -p kernel --lib --target $(HOST_TARGET)
+	RUSTFLAGS="-Z sanitizer=address" cargo +nightly test -p kernel --lib --target $(HOST)
 
 fuzz:
 	cd kernel && cargo +nightly fuzz run syscall_sequence -- -max_total_time=3600
 
 coverage:
-	RUSTFLAGS="-C instrument-coverage" cargo test -p kernel --lib --target $(HOST_TARGET)
+	RUSTFLAGS="-C instrument-coverage" cargo test -p kernel --lib --target $(HOST)
 	@echo "Run grcov or llvm-cov to generate report from .profraw files"
 
 mutants:
-	CARGO_BUILD_TARGET=$(HOST_TARGET) cargo mutants -p kernel --timeout 30
+	CARGO_BUILD_TARGET=aarch64-apple-darwin cargo mutants -p kernel --timeout 30
 
 # -- Bare-metal targets --
 

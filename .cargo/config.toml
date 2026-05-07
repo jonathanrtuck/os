@@ -1,6 +1,12 @@
 [build]
 target = "aarch64-unknown-none"
 
+[env]
+RUST_TEST_THREADS = "1"
+
+[alias]
+t = ["test", "-p", "kernel", "--lib", "--target", "aarch64-apple-darwin"]
+
 [target.aarch64-unknown-none]
 runner = ["hypervisor", "--no-gpu"]
 # M4 Pro is ARMv9.2-A. +v8.4a enables LSE atomics, FEAT_DIT, dot product,
