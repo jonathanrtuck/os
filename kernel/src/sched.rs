@@ -116,12 +116,10 @@ pub fn direct_switch(blocker: ThreadId, target: ThreadId, core_id: usize) {
         .write(blocker.0)
         .unwrap()
         .set_state(ThreadRunState::Blocked);
-
     state::threads()
         .write(target.0)
         .unwrap()
         .set_state(ThreadRunState::Running);
-
     state::schedulers()
         .core(core_id)
         .lock()
@@ -130,6 +128,7 @@ pub fn direct_switch(blocker: ThreadId, target: ThreadId, core_id: usize) {
     #[cfg(target_os = "none")]
     {
         crate::frame::arch::cpu::set_current_thread(target.0);
+
         do_context_switch(blocker, target);
     }
 }
@@ -158,7 +157,6 @@ pub fn wake_and_switch(woken: ThreadId, current: ThreadId, core_id: usize) {
         .write(woken.0)
         .unwrap()
         .set_state(ThreadRunState::Running);
-
     state::schedulers()
         .core(core_id)
         .lock()
@@ -167,6 +165,7 @@ pub fn wake_and_switch(woken: ThreadId, current: ThreadId, core_id: usize) {
     #[cfg(target_os = "none")]
     {
         crate::frame::arch::cpu::set_current_thread(woken.0);
+
         do_context_switch(current, woken);
     }
 }

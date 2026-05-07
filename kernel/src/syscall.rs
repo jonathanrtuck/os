@@ -2025,7 +2025,6 @@ fn sys_thread_create(
 ) -> Result<u64, SyscallError> {
     #[cfg(not(target_os = "none"))]
     let _ = core_id;
-
     let entry = args[0] as usize;
     let stack_top = args[1] as usize;
     let arg = args[2] as usize;
