@@ -624,18 +624,55 @@ fn sys_vmo_create(
         return Err(SyscallError::InvalidArgument);
     }
 
-    // DEVICE flag is kernel-only — reject from userspace to prevent arbitrary PA mapping.
-    let known_flags = VmoFlags::HINT_CONTIGUOUS.0;
+    // DEVICE flag is kernel-only (bootstrap creates these, never userspace).
+    if flags & VmoFlags::DEVICE.0 != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    let known_flags = VmoFlags::HINT_CONTIGUOUS.0 | VmoFlags::DMA.0;
 
     if flags & !known_flags != 0 {
         return Err(SyscallError::InvalidArgument);
     }
 
     let space_id = space_id.ok_or(SyscallError::InvalidArgument)?;
+    let is_dma = flags & VmoFlags::DMA.0 != 0;
+
+    if is_dma {
+        let resource_handle_id = HandleId(args[2] as u32);
+        let resource_handle = lookup_handle(space_id, resource_handle_id)?;
+
+        if resource_handle.object_type != ObjectType::Resource {
+            return Err(SyscallError::WrongHandleType);
+        }
+
+        let resource = state::resources()
+            .read(resource_handle.object_id)
+            .ok_or(SyscallError::InvalidHandle)?;
+
+        if resource.kind != crate::resource::ResourceKind::Dma {
+            return Err(SyscallError::InsufficientRights);
+        }
+    }
 
     profile::stamp(slot::SYS_SPACE_ID);
 
-    let vmo = Vmo::new(VmoId(0), size, VmoFlags(flags));
+    let vmo = if is_dma {
+        #[cfg(target_os = "none")]
+        {
+            Vmo::new_contiguous(VmoId(0), size, |count| {
+                crate::frame::arch::page_alloc::alloc_contiguous(count).map(|pa| pa.0)
+            })?
+        }
+        #[cfg(not(target_os = "none"))]
+        {
+            Vmo::new_contiguous(VmoId(0), size, |count| {
+                Some(0x5000_0000 + count * config::PAGE_SIZE)
+            })?
+        }
+    } else {
+        Vmo::new(VmoId(0), size, VmoFlags(flags))
+    };
     let (idx, generation) = state::vmos()
         .alloc_shared(vmo)
         .ok_or(SyscallError::OutOfMemory)?;
@@ -685,14 +722,22 @@ fn sys_vmo_map(
     }
 
     let vmo_id = handle.object_id;
-    let vmo_size = state::vmos()
+    let vmo = state::vmos()
         .read(vmo_id)
-        .ok_or(SyscallError::InvalidHandle)?
-        .size();
+        .ok_or(SyscallError::InvalidHandle)?;
+    let vmo_size = vmo.size();
+    let effective_hint = if vmo.flags().is_identity_mapped() {
+        vmo.page_at(0).ok_or(SyscallError::InvalidArgument)?
+    } else {
+        addr_hint
+    };
+
+    drop(vmo);
+
     let va = state::spaces()
         .write(space_id.0)
         .ok_or(SyscallError::InvalidArgument)?
-        .map_vmo(VmoId(vmo_id), vmo_size, perms, addr_hint)?;
+        .map_vmo(VmoId(vmo_id), vmo_size, perms, effective_hint)?;
 
     state::vmos()
         .write(vmo_id)
@@ -880,14 +925,22 @@ fn sys_vmo_map_into(
     }
 
     let vmo_id = vmo_handle.object_id;
-    let vmo_size = state::vmos()
+    let vmo = state::vmos()
         .read(vmo_id)
-        .ok_or(SyscallError::InvalidHandle)?
-        .size();
+        .ok_or(SyscallError::InvalidHandle)?;
+    let vmo_size = vmo.size();
+    let effective_hint = if vmo.flags().is_identity_mapped() {
+        vmo.page_at(0).ok_or(SyscallError::InvalidArgument)?
+    } else {
+        addr_hint
+    };
+
+    drop(vmo);
+
     let va = state::spaces()
         .write(space_handle.object_id)
         .ok_or(SyscallError::InvalidArgument)?
-        .map_vmo(VmoId(vmo_id), vmo_size, perms, addr_hint)?;
+        .map_vmo(VmoId(vmo_id), vmo_size, perms, effective_hint)?;
 
     state::vmos()
         .write(vmo_id)

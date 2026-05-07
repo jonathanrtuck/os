@@ -104,9 +104,18 @@ impl VmoFlags {
     pub const NONE: VmoFlags = VmoFlags(0);
     pub const HINT_CONTIGUOUS: VmoFlags = VmoFlags(1 << 0);
     pub const DEVICE: VmoFlags = VmoFlags(1 << 1);
+    pub const DMA: VmoFlags = VmoFlags(1 << 2);
 
     pub fn is_device(self) -> bool {
         self.0 & Self::DEVICE.0 != 0
+    }
+
+    pub fn is_dma(self) -> bool {
+        self.0 & Self::DMA.0 != 0
+    }
+
+    pub fn is_identity_mapped(self) -> bool {
+        self.is_device() || self.is_dma()
     }
 }
 
@@ -262,6 +271,40 @@ impl Vmo {
         self.pages.get(page_idx)
     }
 
+    /// Create a DMA VMO with contiguous physical pages pre-allocated.
+    ///
+    /// The kernel allocates `size` bytes of contiguous physical memory and
+    /// pre-populates the page table. When mapped, the kernel identity-maps
+    /// the VMO (VA = PA). DMA VMOs cannot be snapshot'd, sealed, or resized.
+    pub fn new_contiguous(
+        id: VmoId,
+        size: usize,
+        alloc_contiguous: impl FnOnce(usize) -> Option<usize>,
+    ) -> Result<Self, SyscallError> {
+        let page_size = crate::config::PAGE_SIZE;
+        let page_count = size.div_ceil(page_size);
+        let base_pa = alloc_contiguous(page_count).ok_or(SyscallError::OutOfMemory)?;
+        let mut pages = Pages::new(page_count);
+
+        for i in 0..page_count {
+            pages.set(i, base_pa + i * page_size);
+        }
+
+        Ok(Vmo {
+            id,
+            pages,
+            page_count,
+            size,
+            flags: VmoFlags::DMA,
+            sealed: false,
+            pager: None,
+            cow_parent: None,
+            has_pages: true,
+            mapping_count: 0,
+            refcount: core::sync::atomic::AtomicUsize::new(1),
+        })
+    }
+
     pub fn is_device(&self) -> bool {
         self.flags.is_device()
     }
@@ -270,7 +313,10 @@ impl Vmo {
     /// The caller must increment physical page refcounts externally.
     /// Panics if called on a device VMO — device pages are hardware addresses.
     pub fn snapshot(&self, new_id: VmoId) -> Vmo {
-        assert!(!self.is_device(), "cannot snapshot a device VMO");
+        assert!(
+            !self.flags.is_identity_mapped(),
+            "cannot snapshot a device or DMA VMO"
+        );
 
         Vmo {
             id: new_id,
@@ -289,7 +335,7 @@ impl Vmo {
 
     /// Seal the VMO permanently. Irreversible.
     pub fn seal(&mut self) -> Result<(), SyscallError> {
-        if self.is_device() {
+        if self.flags.is_identity_mapped() {
             return Err(SyscallError::InvalidArgument);
         }
         if self.sealed {
@@ -307,7 +353,7 @@ impl Vmo {
         new_size: usize,
         free_page: impl FnMut(usize),
     ) -> Result<(), SyscallError> {
-        if self.is_device() {
+        if self.flags.is_identity_mapped() {
             return Err(SyscallError::InvalidArgument);
         }
         if self.sealed {
