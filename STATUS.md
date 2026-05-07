@@ -69,7 +69,7 @@ benchmarks + 3 SMP benchmarks.
 ### SMP benchmark results (2026-05-07, 4 cores under hypervisor)
 
 ```text
-IPC null round-trip (2-core):       4114 cyc/rtt  (was 4874 pre-opt, −15.6% from lock batching)
+IPC null round-trip (2-core):       3746 cyc/rtt  (was 4874 pre-opt, −23% from IPC lock batching)
 object churn (1-core):              5230 cyc/iter
 cross-core wake (event ping-pong):  4693 cyc/rtt  (~2347 one-way)
 ```
