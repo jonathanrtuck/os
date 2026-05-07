@@ -83,18 +83,6 @@ pub fn resize(handle: Handle, new_size: usize) -> Result<(), SyscallError> {
     .map(|_| ())
 }
 
-pub fn get_addr(handle: Handle, offset: usize) -> Result<u64, SyscallError> {
-    check(raw::syscall(
-        num::VMO_GET_ADDR,
-        handle.0 as u64,
-        offset as u64,
-        0,
-        0,
-        0,
-        0,
-    ))
-}
-
 pub fn set_pager(vmo: Handle, endpoint: Handle) -> Result<(), SyscallError> {
     check(raw::syscall(
         num::VMO_SET_PAGER,

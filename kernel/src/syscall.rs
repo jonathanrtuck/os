@@ -51,7 +51,6 @@ pub mod num {
     pub const SYSTEM_INFO: u64 = 27;
     pub const EVENT_BIND_IRQ: u64 = 28;
     pub const ENDPOINT_BIND_EVENT: u64 = 29;
-    pub const VMO_GET_ADDR: u64 = 30;
 }
 
 struct StagedHandles {
@@ -569,7 +568,6 @@ pub fn dispatch(
         num::SYSTEM_INFO => sys_system_info(current, space_id, core_id, args),
         num::EVENT_BIND_IRQ => sys_event_bind_irq(current, space_id, core_id, args),
         num::ENDPOINT_BIND_EVENT => sys_endpoint_bind_event(current, space_id, core_id, args),
-        num::VMO_GET_ADDR => sys_vmo_get_addr(current, space_id, core_id, args),
         _ => Err(SyscallError::InvalidArgument),
     };
 
@@ -929,32 +927,6 @@ fn sys_vmo_set_pager(
         .set_pager(EndpointId(ep_handle.object_id))?;
 
     Ok(0)
-}
-
-#[inline(never)]
-fn sys_vmo_get_addr(
-    _current: ThreadId,
-    space_id: Option<AddressSpaceId>,
-    _core_id: usize,
-    args: &[u64; 6],
-) -> Result<u64, SyscallError> {
-    let handle_id = HandleId(args[0] as u32);
-    let offset = args[1] as usize;
-    let space_id = space_id.ok_or(SyscallError::InvalidArgument)?;
-    let handle = lookup_handle(space_id, handle_id)?;
-
-    if handle.object_type != ObjectType::Vmo {
-        return Err(SyscallError::WrongHandleType);
-    }
-
-    let vmo = state::vmos()
-        .read(handle.object_id)
-        .ok_or(SyscallError::InvalidHandle)?;
-    let page_idx = offset / crate::config::PAGE_SIZE;
-
-    vmo.page_at(page_idx)
-        .map(|pa| pa as u64)
-        .ok_or(SyscallError::NotFound)
 }
 
 // ── Endpoint syscalls ───────────────────────────────────────

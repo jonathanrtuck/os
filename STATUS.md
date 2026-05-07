@@ -10,7 +10,7 @@ rationale.
 
 ## Kernel
 
-31 syscalls across 5 object types. ~28K LOC Rust. Framekernel discipline: all
+30 syscalls across 5 object types. ~28K LOC Rust. Framekernel discipline: all
 `unsafe` confined to `frame/` module, enforced at compile time.
 
 **Object types:** VMO (8 syscalls), Endpoint (2 + call/recv/reply), Event (5),
@@ -127,7 +127,7 @@ build order, verification strategy).
 
 ### Completed (Layer 0)
 
-- `userspace/abi` — raw syscall wrappers for all 31 syscalls
+- `userspace/abi` — raw syscall wrappers for all 30 syscalls
 - `userspace/ipc` — SPSC ring buffers, seqlock state registers, typed messages
 - `userspace/init` — parses SVPK service pack, spawns services in separate
   address spaces
@@ -157,10 +157,9 @@ or extend existing ones, never break the existing interface.
 
 1. **Console driver (PL011)** — DONE. Kernel extended with device-backed VMOs
    (`VmoFlags::DEVICE`, `Vmo::new_physical`) for mapping hardware MMIO into
-   userspace with Device-nGnRnE page table attributes. New `VMO_GET_ADDR`
-   syscall (#30) for physical address queries. Bootstrap creates UART + virtio
-   MMIO VMOs + device manifest, passes to init as handles 3–5. PL011 console
-   driver maps UART device VMO, registers with name service, prints
+   userspace with Device-nGnRnE page table attributes. Bootstrap creates UART +
+   virtio MMIO VMOs + device manifest, passes to init as handles 3–5. PL011
+   console driver maps UART device VMO, registers with name service, prints
    "console: ready" on boot. Fixed IPC call TOCTOU race under SMP.
    `userspace/drivers/console/`
 2. **virtio-input** — next
