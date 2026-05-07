@@ -168,6 +168,15 @@ pub unsafe fn percpu() -> &'static PerCpu {
     unsafe { &*ptr }
 }
 
+/// Read this core's PerCpu data. Safe wrapper for syscall context where
+/// TPIDR_EL1 is guaranteed initialized.
+#[cfg(target_os = "none")]
+pub fn current_percpu() -> &'static PerCpu {
+    // SAFETY: This is called from syscall handlers, well after boot.
+    // TPIDR_EL1 is always initialized before any exception can fire.
+    unsafe { percpu() }
+}
+
 /// Read this core's PerCpu data mutably.
 ///
 /// # Safety

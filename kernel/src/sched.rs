@@ -174,7 +174,7 @@ pub fn direct_switch_fast(blocker: ThreadId, target: &SwitchTarget, core_id: usi
             target.pt_asid,
         );
 
-        switch_to_page_table(target.pt_root, target.pt_asid);
+        switch_to_page_table_if_needed(target.pt_root, target.pt_asid);
         crate::frame::arch::context::switch_threads_set_states(
             blocker.0,
             ThreadRunState::Blocked,
@@ -265,7 +265,7 @@ pub fn wake_and_switch_fast(
             woken.pt_asid,
         );
 
-        switch_to_page_table(woken.pt_root, woken.pt_asid);
+        switch_to_page_table_if_needed(woken.pt_root, woken.pt_asid);
         crate::frame::arch::context::switch_threads_set_states(
             current.0,
             ThreadRunState::Ready,
@@ -319,10 +319,24 @@ pub(crate) fn switch_to_space_by_id(_space_id: crate::types::AddressSpaceId) {
 
 /// Switch TTBR0 to a known page table, skipping all table lookups.
 /// Used when the caller already has the physical root and ASID.
+#[allow(dead_code)]
 pub(crate) fn switch_to_page_table(_pt_root: usize, _asid: u8) {
     #[cfg(target_os = "none")]
     if _pt_root != 0 {
         crate::frame::arch::page_table::switch_table(
+            crate::frame::arch::page_alloc::PhysAddr(_pt_root),
+            crate::frame::arch::page_table::Asid(_asid),
+        );
+    }
+}
+
+/// Conditional TTBR0 switch — reads TTBR0 first and skips MSR+ISB if
+/// already pointing at the target page table. Saves ~10-15 cycles on
+/// the IPC fast path where the STTR space switch already set TTBR0.
+pub(crate) fn switch_to_page_table_if_needed(_pt_root: usize, _asid: u8) {
+    #[cfg(target_os = "none")]
+    if _pt_root != 0 {
+        crate::frame::arch::page_table::switch_table_if_needed(
             crate::frame::arch::page_alloc::PhysAddr(_pt_root),
             crate::frame::arch::page_table::Asid(_asid),
         );

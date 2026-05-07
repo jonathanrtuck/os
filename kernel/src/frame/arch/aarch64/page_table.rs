@@ -332,6 +332,20 @@ pub fn switch_table(root: PhysAddr, asid: Asid) {
     sysreg::isb();
 }
 
+/// Switch TTBR0 only if the target differs from the current value.
+/// Avoids the ISB pipeline flush (~8-15 cycles) when the page table
+/// is already active — common on the IPC path where STTR writes
+/// already switched to the target space before the context switch.
+#[cfg(target_os = "none")]
+pub fn switch_table_if_needed(root: PhysAddr, asid: Asid) {
+    let val = (root.as_usize() as u64) | ((asid.0 as u64) << 48);
+
+    if sysreg::ttbr0_el1() != val {
+        sysreg::set_ttbr0_el1(val);
+        sysreg::isb();
+    }
+}
+
 /// Invalidate a single page's TLB entry for a given ASID.
 ///
 /// Page-aligns the VA before computing the TLBI operand — raw fault

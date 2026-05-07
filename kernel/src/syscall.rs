@@ -1878,11 +1878,30 @@ fn sys_reply(
 
     let staged = remove_handles_atomic(space_id, handles_ptr, handles_count)?;
 
-    // Switch to caller's space by ID directly — no thread table read.
-    crate::sched::switch_to_space_by_id(caller_space_id);
+    // Extract caller's page table info once — reused for TTBR0 switch,
+    // restore, and SwitchTarget construction (saves 3 space table reads
+    // from switch_to_space_by_id + build_switch_target).
+    let (caller_ht_ptr, caller_pt_root, caller_pt_asid) = state::spaces()
+        .read(caller_space_id.0)
+        .map_or((0, 0, 0), |s| {
+            (
+                s.handles() as *const _ as usize,
+                s.page_table_root(),
+                s.asid(),
+            )
+        });
+
+    // Switch to caller's space for STTR writes.
+    crate::sched::switch_to_page_table(caller_pt_root, caller_pt_asid);
 
     if let Err(e) = user_mem::write_user_bytes(caller_reply_buf, reply_msg.as_bytes()) {
-        crate::sched::switch_to_space_by_id(space_id);
+        // Restore server's TTBR0 from PerCpu cache.
+        #[cfg(target_os = "none")]
+        {
+            let pc = crate::frame::arch::cpu::current_percpu();
+
+            crate::sched::switch_to_page_table(pc.pt_root, pc.pt_asid);
+        }
 
         reinstall_handles(space_id, staged);
 
@@ -1923,11 +1942,15 @@ fn sys_reply(
         reply_handle_count = count as u64;
     }
 
-    // Restore server's TTBR0 by space ID — no thread table read.
-    crate::sched::switch_to_space_by_id(space_id);
+    // Restore server's TTBR0 from PerCpu cache (no space table read).
+    #[cfg(target_os = "none")]
+    {
+        let pc = crate::frame::arch::cpu::current_percpu();
 
-    // Batch: set wakeup value + read priority in one locked section
-    // (was 2 separate accesses).
+        crate::sched::switch_to_page_table(pc.pt_root, pc.pt_asid);
+    }
+
+    // Batch: set wakeup value + read priority in one locked section.
     let caller_pri = if let Some(mut caller) = state::threads().write(caller_id.0) {
         caller.set_wakeup_value(reply_handle_count);
         caller.effective_priority()
@@ -1941,7 +1964,13 @@ fn sys_reply(
         .map_or(Priority::Idle, |t| t.effective_priority());
 
     if caller_id != current && caller_pri >= server_pri {
-        let target = build_switch_target(caller_id, caller_space_id);
+        let target = crate::sched::SwitchTarget {
+            thread_id: caller_id,
+            space_id: caller_space_id.0,
+            ht_ptr: caller_ht_ptr,
+            pt_root: caller_pt_root,
+            pt_asid: caller_pt_asid,
+        };
 
         crate::sched::wake_and_switch_fast(&target, current, server_pri, core_id);
     } else {
