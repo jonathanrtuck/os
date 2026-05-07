@@ -104,6 +104,73 @@ fn switch_away(_current: ThreadId, core_id: usize) {
     }
 }
 
+/// Direct process switch — block the current thread and resume the target
+/// without touching the run queue. The caller must have already prepared
+/// the target's wakeup state (message delivery, wakeup value, etc.).
+///
+/// Used on the IPC call fast path: when a server is already waiting in
+/// recv, the kernel switches directly caller→server instead of
+/// enqueue→dequeue through the scheduler.
+pub fn direct_switch(blocker: ThreadId, target: ThreadId, core_id: usize) {
+    state::threads()
+        .write(blocker.0)
+        .unwrap()
+        .set_state(ThreadRunState::Blocked);
+
+    state::threads()
+        .write(target.0)
+        .unwrap()
+        .set_state(ThreadRunState::Running);
+
+    state::schedulers()
+        .core(core_id)
+        .lock()
+        .set_current(Some(target));
+
+    #[cfg(target_os = "none")]
+    {
+        crate::frame::arch::cpu::set_current_thread(target.0);
+        do_context_switch(blocker, target);
+    }
+}
+
+/// Wake a blocked thread and switch directly to it, placing the current
+/// thread on the run queue as Ready. Used on the IPC reply path when the
+/// caller should preempt the server.
+pub fn wake_and_switch(woken: ThreadId, current: ThreadId, core_id: usize) {
+    let current_pri = state::threads()
+        .read(current.0)
+        .unwrap()
+        .effective_priority();
+
+    state::threads()
+        .write(current.0)
+        .unwrap()
+        .set_state(ThreadRunState::Ready);
+
+    {
+        let mut sched = state::schedulers().core(core_id).lock();
+
+        sched.enqueue(current, current_pri);
+    }
+
+    state::threads()
+        .write(woken.0)
+        .unwrap()
+        .set_state(ThreadRunState::Running);
+
+    state::schedulers()
+        .core(core_id)
+        .lock()
+        .set_current(Some(woken));
+
+    #[cfg(target_os = "none")]
+    {
+        crate::frame::arch::cpu::set_current_thread(woken.0);
+        do_context_switch(current, woken);
+    }
+}
+
 /// Bare-metal context switch — saves current thread's RegisterState,
 /// loads next thread's, switches kernel stack.
 #[cfg(target_os = "none")]
@@ -313,5 +380,115 @@ mod tests {
             state::threads().read(t2.0).unwrap().state(),
             ThreadRunState::Running
         );
+    }
+
+    #[test]
+    fn direct_switch_blocks_caller_runs_target() {
+        setup();
+
+        let caller = add_thread(Priority::Medium);
+        let server = add_thread(Priority::Medium);
+
+        state::threads()
+            .write(server.0)
+            .unwrap()
+            .set_state(ThreadRunState::Blocked);
+        state::schedulers().core(0).lock().set_current(Some(caller));
+
+        direct_switch(caller, server, 0);
+
+        assert_eq!(
+            state::threads().read(caller.0).unwrap().state(),
+            ThreadRunState::Blocked
+        );
+        assert_eq!(
+            state::threads().read(server.0).unwrap().state(),
+            ThreadRunState::Running
+        );
+        assert_eq!(state::schedulers().core(0).lock().current(), Some(server));
+    }
+
+    #[test]
+    fn direct_switch_does_not_touch_run_queue() {
+        setup();
+
+        let caller = add_thread(Priority::Medium);
+        let server = add_thread(Priority::Medium);
+        let bystander = add_thread(Priority::High);
+
+        state::threads()
+            .write(server.0)
+            .unwrap()
+            .set_state(ThreadRunState::Blocked);
+        state::schedulers()
+            .core(0)
+            .lock()
+            .enqueue(bystander, Priority::High);
+        state::schedulers().core(0).lock().set_current(Some(caller));
+
+        let before = state::schedulers().core(0).lock().total_ready();
+
+        direct_switch(caller, server, 0);
+
+        let after = state::schedulers().core(0).lock().total_ready();
+
+        assert_eq!(before, after, "run queue should be unchanged");
+    }
+
+    #[test]
+    fn wake_and_switch_swaps_threads() {
+        setup();
+
+        let server = add_thread(Priority::Medium);
+        let caller = add_thread(Priority::Medium);
+
+        state::threads()
+            .write(caller.0)
+            .unwrap()
+            .set_state(ThreadRunState::Blocked);
+        state::schedulers().core(0).lock().set_current(Some(server));
+
+        wake_and_switch(caller, server, 0);
+
+        assert_eq!(
+            state::threads().read(caller.0).unwrap().state(),
+            ThreadRunState::Running
+        );
+        assert_eq!(
+            state::threads().read(server.0).unwrap().state(),
+            ThreadRunState::Ready
+        );
+        assert_eq!(state::schedulers().core(0).lock().current(), Some(caller));
+        assert_eq!(
+            state::schedulers().core(0).lock().total_ready(),
+            1,
+            "server should be on run queue"
+        );
+    }
+
+    #[test]
+    fn wake_and_switch_with_higher_priority_server_on_queue() {
+        setup();
+
+        let server = add_thread(Priority::High);
+        let caller = add_thread(Priority::Medium);
+
+        state::threads()
+            .write(caller.0)
+            .unwrap()
+            .set_state(ThreadRunState::Blocked);
+        state::schedulers().core(0).lock().set_current(Some(server));
+
+        wake_and_switch(caller, server, 0);
+
+        assert_eq!(
+            state::schedulers().core(0).lock().current(),
+            Some(caller),
+            "caller runs now; server on queue will preempt at next schedule point"
+        );
+
+        let next = state::schedulers().core(0).lock().pick_next();
+
+        assert_eq!(next, Some(server), "server is next in run queue");
     }
 }

@@ -190,6 +190,7 @@ impl Thread {
                     | (ThreadRunState::Running, ThreadRunState::Exited)
                     | (ThreadRunState::Running, ThreadRunState::Ready)
                     | (ThreadRunState::Blocked, ThreadRunState::Ready)
+                    | (ThreadRunState::Blocked, ThreadRunState::Running)
                     | (ThreadRunState::Blocked, ThreadRunState::Exited)
             ),
             "invalid state transition: {:?} -> {:?}",
@@ -1086,13 +1087,14 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "invalid state transition")]
-    fn state_blocked_to_running_panics() {
+    fn state_blocked_to_running_via_direct_switch() {
         let mut t = make_thread(0, Priority::Medium);
 
         t.set_state(ThreadRunState::Running);
         t.set_state(ThreadRunState::Blocked);
         t.set_state(ThreadRunState::Running);
+
+        assert_eq!(t.state(), ThreadRunState::Running);
     }
 
     // ── FixedRing edge cases ──

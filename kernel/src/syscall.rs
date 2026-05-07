@@ -1376,8 +1376,16 @@ fn sys_call(current: ThreadId, core_id: usize, args: &[u64; 6]) -> Result<u64, S
                 server.boost_priority(caller_pri);
             }
 
-            crate::sched::wake(server_tid, core_id);
-            crate::sched::block_current(current, core_id);
+            let server_was_blocked = state::threads()
+                .read(server_tid.0)
+                .is_some_and(|t| t.state() == crate::thread::ThreadRunState::Blocked);
+
+            if server_was_blocked {
+                crate::sched::direct_switch(current, server_tid, core_id);
+            } else {
+                crate::sched::wake(server_tid, core_id);
+                crate::sched::block_current(current, core_id);
+            }
 
             if let Some(err) = state::threads()
                 .write(current.0)
@@ -1718,9 +1726,21 @@ fn sys_reply(current: ThreadId, core_id: usize, args: &[u64; 6]) -> Result<u64, 
         }
     }
 
-    crate::sched::wake(caller_id, core_id);
+    let reply_len = reply_msg.len() as u64;
+    let caller_pri = state::threads()
+        .read(caller_id.0)
+        .map_or(Priority::Idle, |t| t.effective_priority());
+    let server_pri = state::threads()
+        .read(current.0)
+        .map_or(Priority::Idle, |t| t.effective_priority());
 
-    Ok(reply_msg.len() as u64)
+    if caller_id != current && caller_pri >= server_pri {
+        crate::sched::wake_and_switch(caller_id, current, core_id);
+    } else {
+        crate::sched::wake(caller_id, core_id);
+    }
+
+    Ok(reply_len)
 }
 
 // ── Space syscalls ──────────────────────────────────────────
@@ -2003,6 +2023,9 @@ fn sys_thread_create(
     core_id: usize,
     args: &[u64; 6],
 ) -> Result<u64, SyscallError> {
+    #[cfg(not(target_os = "none"))]
+    let _ = core_id;
+
     let entry = args[0] as usize;
     let stack_top = args[1] as usize;
     let arg = args[2] as usize;
