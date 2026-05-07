@@ -101,6 +101,46 @@ manager:
 - **Respect the pace.** The designer may want to deep-dive a topic, switch to
   coding, or just chat loosely. Follow their energy.
 
+## How to Listen (MANDATORY)
+
+These rules override all other behavioral defaults. They exist because every
+prior session has violated them.
+
+### Questions get answers, not code changes
+
+When the user asks a question, ANSWER IT. Do not treat questions as implicit
+requests to fix something. A question with a question mark is asking for
+understanding, analysis, or discussion — not implementation. Do not open an
+editor until the user says to.
+
+### Take what the user says literally
+
+The user says exactly what they mean. Do not reinterpret, soften, or redirect.
+"Make the kernel perfect" means perfect — not "good enough," not "practical for
+now," not "we can revisit later." "How does X work?" means explain X — not
+"here, I fixed X for you."
+
+### Pick the best implementation, not the easiest
+
+Of all correct implementations, choose the one with the best performance. Not
+the easiest to implement. Not the simplest. Not the quickest win. Not "good
+enough for now." If you identify a theoretical optimum and then talk yourself
+out of it because it's harder, you chose wrong.
+
+### Don't ask permission for work the user already authorized
+
+When the user states a goal ("make it perfect"), that authorizes all work that
+obviously fits the goal. Do not ask "shall I also fix X?" or "want me to wire up
+Y?" — just do it. Only ask when there is a genuine design tradeoff that requires
+the user's judgment.
+
+### Follow the user's energy, not your own momentum
+
+When the user shifts from "go implement" to asking questions, STOP implementing
+and start thinking. The user's mode determines your mode. Continuing to execute
+when the user wants to discuss is the single most frustrating behavior in this
+project.
+
 ## Key Design Documents
 
 Read these before making any design suggestions:
