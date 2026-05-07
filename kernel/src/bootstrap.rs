@@ -17,7 +17,7 @@ use crate::{
 
 pub const INIT_STACK_SIZE: usize = config::PAGE_SIZE * 4;
 
-pub fn create_init(init_binary: &[u8]) -> Result<ThreadId, SyscallError> {
+pub fn create_init(init_binary: &[u8], service_pack: &[u8]) -> Result<ThreadId, SyscallError> {
     if init_binary.is_empty() {
         return Err(SyscallError::InvalidArgument);
     }
@@ -80,6 +80,54 @@ pub fn create_init(init_binary: &[u8]) -> Result<ThreadId, SyscallError> {
         space
             .handles_mut()
             .allocate(ObjectType::Vmo, code_idx, Rights::ALL, code_gen)?;
+    }
+
+    // Handle 2: service pack VMO (read-only, contains packed service binaries)
+    if !service_pack.is_empty() {
+        let pack_size = service_pack.len().next_multiple_of(config::PAGE_SIZE);
+        let pack_vmo = Vmo::new(VmoId(0), pack_size, VmoFlags::NONE);
+        let (pack_idx, pack_gen) = state::vmos()
+            .alloc_shared(pack_vmo)
+            .ok_or(SyscallError::OutOfMemory)?;
+
+        state::vmos().write(pack_idx).unwrap().id = VmoId(pack_idx);
+
+        #[cfg(target_os = "none")]
+        {
+            use crate::frame::{arch::page_alloc, user_mem};
+
+            for offset in (0..pack_size).step_by(config::PAGE_SIZE) {
+                let pa = page_alloc::alloc_page().ok_or(SyscallError::OutOfMemory)?;
+                let chunk_end = (offset + config::PAGE_SIZE).min(service_pack.len());
+
+                if offset < service_pack.len() {
+                    user_mem::write_phys(pa.0, 0, &service_pack[offset..chunk_end]);
+
+                    if chunk_end - offset < config::PAGE_SIZE {
+                        user_mem::zero_phys(
+                            pa.0 + (chunk_end - offset),
+                            config::PAGE_SIZE - (chunk_end - offset),
+                        );
+                    }
+                } else {
+                    user_mem::zero_phys(pa.0, config::PAGE_SIZE);
+                }
+
+                state::vmos()
+                    .write(pack_idx)
+                    .unwrap()
+                    .alloc_page_at(offset / config::PAGE_SIZE, || Some(pa.0))
+                    .ok();
+            }
+        }
+
+        let mut space = state::spaces()
+            .write(space_idx)
+            .ok_or(SyscallError::InvalidArgument)?;
+
+        space
+            .handles_mut()
+            .allocate(ObjectType::Vmo, pack_idx, Rights::ALL, pack_gen)?;
     }
 
     #[cfg(target_os = "none")]
@@ -182,7 +230,7 @@ mod tests {
     fn bootstrap_creates_address_space() {
         setup();
 
-        let tid = create_init(fake_init_binary()).unwrap();
+        let tid = create_init(fake_init_binary(), &[]).unwrap();
         let thread = state::threads().read(tid.0).unwrap();
 
         assert!(thread.address_space().is_some());
@@ -200,7 +248,7 @@ mod tests {
     fn bootstrap_creates_code_and_stack_vmos() {
         setup();
 
-        create_init(fake_init_binary()).unwrap();
+        create_init(fake_init_binary(), &[]).unwrap();
 
         assert_eq!(state::vmos().count(), 2);
 
@@ -211,7 +259,7 @@ mod tests {
     fn bootstrap_maps_code_page_aligned() {
         setup();
 
-        let tid = create_init(fake_init_binary()).unwrap();
+        let tid = create_init(fake_init_binary(), &[]).unwrap();
         let thread = state::threads().read(tid.0).unwrap();
 
         assert!(thread.entry_point() >= config::PAGE_SIZE);
@@ -226,7 +274,7 @@ mod tests {
     fn bootstrap_maps_stack() {
         setup();
 
-        let tid = create_init(fake_init_binary()).unwrap();
+        let tid = create_init(fake_init_binary(), &[]).unwrap();
         let thread = state::threads().read(tid.0).unwrap();
 
         assert!(thread.stack_top() > config::PAGE_SIZE);
@@ -241,7 +289,7 @@ mod tests {
     fn bootstrap_installs_handles() {
         setup();
 
-        let tid = create_init(fake_init_binary()).unwrap();
+        let tid = create_init(fake_init_binary(), &[]).unwrap();
         let space_id = state::threads()
             .read(tid.0)
             .unwrap()
@@ -260,7 +308,7 @@ mod tests {
     fn bootstrap_sets_current_thread() {
         setup();
 
-        let tid = create_init(fake_init_binary()).unwrap();
+        let tid = create_init(fake_init_binary(), &[]).unwrap();
 
         assert_eq!(state::schedulers().core(0).lock().current(), Some(tid));
         assert_eq!(state::schedulers().core(0).lock().total_ready(), 0);
@@ -272,7 +320,7 @@ mod tests {
     fn bootstrap_rejects_empty_binary() {
         setup();
 
-        assert_eq!(create_init(&[]), Err(SyscallError::InvalidArgument));
+        assert_eq!(create_init(&[], &[]), Err(SyscallError::InvalidArgument));
 
         crate::invariants::assert_valid();
     }
@@ -280,7 +328,7 @@ mod tests {
     #[test]
     fn bootstrap_code_size_page_aligned() {
         setup();
-        create_init(&[0u8; 100]).unwrap();
+        create_init(&[0u8; 100], &[]).unwrap();
 
         let code_vmo = state::vmos().read(0).unwrap();
 
@@ -297,7 +345,7 @@ mod tests {
 
         assert_eq!(state::alive_thread_count(), 0);
 
-        create_init(fake_init_binary()).unwrap();
+        create_init(fake_init_binary(), &[]).unwrap();
 
         assert_eq!(state::alive_thread_count(), 1);
     }
@@ -306,7 +354,7 @@ mod tests {
     fn bootstrap_handle_rights() {
         setup();
 
-        let tid = create_init(fake_init_binary()).unwrap();
+        let tid = create_init(fake_init_binary(), &[]).unwrap();
         let space_id = state::threads()
             .read(tid.0)
             .unwrap()
@@ -328,7 +376,7 @@ mod tests {
     fn bootstrap_mapping_rights() {
         setup();
 
-        let tid = create_init(fake_init_binary()).unwrap();
+        let tid = create_init(fake_init_binary(), &[]).unwrap();
         let space_id = state::threads()
             .read(tid.0)
             .unwrap()

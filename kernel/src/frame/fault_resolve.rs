@@ -45,6 +45,20 @@ pub fn resolve_cow(
     Some(new_pa.0)
 }
 
+/// Resolve an existing-page fault: a VMO page is committed but not yet mapped
+/// in this address space's page table (cross-space mapping or TLB eviction).
+#[cfg(target_os = "none")]
+pub fn resolve_existing(
+    root: page_alloc::PhysAddr,
+    vaddr: usize,
+    pa: page_alloc::PhysAddr,
+    perms: page_table::Perms,
+) {
+    page_table::map_page(root, page_table::VirtAddr(vaddr), pa, perms);
+
+    pte_barrier();
+}
+
 /// Resolve a lazy allocation fault: allocate a zeroed page and map it.
 ///
 /// Returns the new physical address on success so the caller can update the
@@ -60,5 +74,19 @@ pub fn resolve_lazy(
     user_mem::zero_phys(pa.0, crate::config::PAGE_SIZE);
     page_table::map_page(root, page_table::VirtAddr(vaddr), pa, perms);
 
+    pte_barrier();
+
     Some(pa.0)
+}
+
+/// Ensure a newly written PTE is visible to the page table walker before
+/// the faulting instruction retries. DSB ISH orders the PTE store; ISB
+/// flushes the pipeline so the retry fetches through the updated tables.
+#[cfg(target_os = "none")]
+fn pte_barrier() {
+    // SAFETY: DSB ISH + ISB are pure barrier instructions with no side
+    // effects beyond ordering. Required by the ARM ARM after writing PTEs.
+    unsafe {
+        core::arch::asm!("dsb ish", "isb", options(nostack, nomem));
+    }
 }

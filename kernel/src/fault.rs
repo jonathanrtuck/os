@@ -90,6 +90,35 @@ pub fn handle_data_abort(current: ThreadId, fault_addr: usize, is_write: bool) -
         }
     }
 
+    // Existing page not mapped in this space (cross-space mapping, re-fault
+    // after TLB eviction, or page committed by another space that shares
+    // this VMO). Just install a PTE pointing to the existing physical page.
+    if let Some(pa) = vmo.page_at(page_idx) {
+        drop(vmo);
+
+        #[cfg(target_os = "none")]
+        {
+            let space = state::spaces().read(space_id.0).unwrap();
+            let root = crate::frame::arch::page_alloc::PhysAddr(space.page_table_root());
+            let perms = if mapping.rights.contains(crate::types::Rights::EXECUTE) {
+                crate::frame::arch::page_table::Perms::RX
+            } else if mapping.rights.contains(crate::types::Rights::WRITE) {
+                crate::frame::arch::page_table::Perms::RW
+            } else {
+                crate::frame::arch::page_table::Perms::RO
+            };
+
+            crate::frame::fault_resolve::resolve_existing(
+                root,
+                page_va,
+                crate::frame::arch::page_alloc::PhysAddr(pa),
+                perms,
+            );
+        }
+
+        return FaultAction::Resolved;
+    }
+
     // Lazy allocation: page not yet committed, no pager.
     if vmo.page_at(page_idx).is_none() && vmo.pager().is_none() {
         #[cfg(target_os = "none")]
@@ -271,7 +300,7 @@ mod tests {
     }
 
     #[test]
-    fn double_lazy_alloc_is_noop() {
+    fn double_fault_resolves_existing_page() {
         setup();
         let vmo = Vmo::new(VmoId(0), config::PAGE_SIZE, VmoFlags::NONE);
         let (idx, _) = state::vmos().alloc_shared(vmo).unwrap();
@@ -285,14 +314,14 @@ mod tests {
         handle_data_abort(ThreadId(0), va, true);
 
         let page_after_first = state::vmos().read(idx).unwrap().page_at(0).unwrap();
-        // Second fault on same page — page already exists, no COW parent,
-        // so no branch matches. Should return Kill (or be unreachable in practice).
+        // Second fault on same page — page already exists. The "existing page"
+        // handler re-maps it without allocating. This happens on TLB eviction
+        // or cross-space VMO sharing.
         let action = handle_data_abort(ThreadId(0), va, true);
-        // Page shouldn't change — the second fault doesn't re-allocate.
         let page_after_second = state::vmos().read(idx).unwrap().page_at(0).unwrap();
 
         assert_eq!(page_after_first, page_after_second);
-        assert_eq!(action, FaultAction::Kill);
+        assert_eq!(action, FaultAction::Resolved);
     }
 
     #[test]

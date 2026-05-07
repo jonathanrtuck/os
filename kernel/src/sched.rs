@@ -100,6 +100,7 @@ fn switch_away(_current: ThreadId, core_id: usize) {
     if _current != next_id {
         crate::frame::arch::cpu::set_current_thread(next_id.0);
 
+        maybe_switch_page_table(next_id);
         do_context_switch(_current, next_id);
     }
 }
@@ -129,6 +130,7 @@ pub fn direct_switch(blocker: ThreadId, target: ThreadId, core_id: usize) {
     {
         crate::frame::arch::cpu::set_current_thread(target.0);
 
+        maybe_switch_page_table(target);
         do_context_switch(blocker, target);
     }
 }
@@ -165,6 +167,7 @@ pub fn wake_and_switch(woken: ThreadId, current: ThreadId, core_id: usize) {
     #[cfg(target_os = "none")]
     {
         crate::frame::arch::cpu::set_current_thread(woken.0);
+        maybe_switch_page_table(woken);
 
         do_context_switch(current, woken);
     }
@@ -175,6 +178,36 @@ pub fn wake_and_switch(woken: ThreadId, current: ThreadId, core_id: usize) {
 #[cfg(target_os = "none")]
 fn do_context_switch(old_id: ThreadId, new_id: ThreadId) {
     crate::frame::arch::context::switch_threads(old_id.0, new_id.0);
+}
+
+/// Switch TTBR0 to the target thread's address space page table if it
+/// differs from the currently active one. Required when context-switching
+/// across address spaces (e.g., init → service).
+#[cfg(target_os = "none")]
+fn maybe_switch_page_table(target: ThreadId) {
+    let (pt_root, asid) = {
+        let Some(t) = state::threads().read(target.0) else {
+            return;
+        };
+        let Some(space_id) = t.address_space() else {
+            return;
+        };
+
+        drop(t);
+
+        let Some(space) = state::spaces().read(space_id.0) else {
+            return;
+        };
+
+        (space.page_table_root(), space.asid())
+    };
+
+    if pt_root != 0 {
+        crate::frame::arch::page_table::switch_table(
+            crate::frame::arch::page_alloc::PhysAddr(pt_root),
+            crate::frame::arch::page_table::Asid(asid),
+        );
+    }
 }
 
 #[cfg(test)]

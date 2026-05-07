@@ -286,7 +286,7 @@ mod tests {
 
         state::init(2);
 
-        let tid = bootstrap::create_init(&[0u8; 100]).unwrap();
+        let tid = bootstrap::create_init(&[0u8; 100], &[]).unwrap();
         let thread = state::threads().read(tid.0).unwrap();
 
         assert!(thread.entry_point() >= config::PAGE_SIZE);

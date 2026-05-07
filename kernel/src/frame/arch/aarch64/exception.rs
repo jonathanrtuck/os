@@ -454,7 +454,7 @@ fn el0_sync_handler(frame: &mut TrapFrame) {
         // Data abort from EL0.
         0x24 => handle_data_abort(frame),
         // Instruction abort from EL0.
-        0x20 => unimplemented_el0(frame, "instruction abort"),
+        0x20 => handle_instruction_abort(frame),
         _ => fatal_exception(frame, 8),
     }
 }
@@ -570,6 +570,28 @@ fn load_fp_state(rs: &crate::frame::arch::register_state::RegisterState) {
             tmp = out(reg) _,
             options(nostack),
         );
+    }
+}
+
+fn handle_instruction_abort(frame: &mut TrapFrame) {
+    let far = frame.far;
+    let esr = frame.esr;
+    let handler_addr = FAULT_HANDLER.load(Ordering::Acquire);
+
+    if handler_addr == 0 {
+        unimplemented_el0(frame, "instruction abort (no handler)");
+    }
+
+    // Instruction fetches are always reads.
+    let is_write = false;
+    // SAFETY: set_fault_handler stores a valid fn pointer.
+    let handler: fn(u64, bool, u64) -> FaultAction = unsafe { core::mem::transmute(handler_addr) };
+
+    match handler(far, is_write, esr) {
+        FaultAction::Resolved => {}
+        FaultAction::Kill => {
+            unimplemented_el0(frame, "instruction abort (killed)");
+        }
     }
 }
 

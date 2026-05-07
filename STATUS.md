@@ -116,22 +116,45 @@ slot lock is not the primary bottleneck.
 
 ## What's Next: Userspace
 
-Build the userspace on the verified kernel. The design docs
-(`design/userspace.md`, `design/architecture.md`) describe the target. Key
-components:
+Rebuild the userspace on the verified kernel, targeting the same UI/UX as the
+v0.6-pre-rewrite prototype. Full plan in `design/userspace-rebuild.md`.
 
-1. **Init process** — root task that spawns all services
-2. **IPC libraries** — userspace event rings and state registers built on kernel
-   endpoints/events/VMOs (started: `userspace/ipc/`)
-3. **Document pipeline** — document, layout, presenter services
-4. **Render service** — Metal GPU scene graph renderer
-5. **Store service** — COW filesystem with undo
+**Architecture:** `design/architecture.md` (pipeline, responsibilities).
+**Rebuild plan:** `design/userspace-rebuild.md` (layering, protocol design,
+build order, verification strategy).
+
+### Completed (Layer 0)
+
+- `userspace/abi` — raw syscall wrappers for all 30 syscalls
+- `userspace/ipc` — SPSC ring buffers, seqlock state registers, typed messages
+- `userspace/init` — parses SVPK service pack, spawns services in separate
+  address spaces
+- `userspace/servers/hello` — test service (Phase 1.3 verification)
+
+### Phase 1 — Protocol + Service Infrastructure
+
+1. **Protocol crate** — DONE. 7 modules, 17 message types, 56 tests. Covers all
+   IPC boundaries: name service, bootstrap, input, edit, store, view, decode.
+   `userspace/protocol/`
+2. **Service pack tool** — DONE. Host tool packs flat binaries into a
+   page-aligned archive (SVPK format). 18 tests. `tools/mkservices/`
+3. **Init completion** — DONE. Init parses SVPK pack, creates address spaces,
+   maps code/stack VMOs, spawns service threads. Verified: hello service runs a
+   syscall and exits cleanly in its own address space. Kernel fixes: page table
+   creation in `space_create`, cross-space page table switch in context switch,
+   existing-page fault resolution, instruction abort handling.
+4. Name service (register/lookup/unregister via sync IPC)
+
+**Known gap:** kernel `call` syscall installs reply-side transferred handles but
+doesn't report the new IDs to the caller (arg[5] unused). Needs a small ABI
+extension for name service Lookup. Non-breaking — adds receive-handle support to
+an unused argument slot.
 
 The kernel's ABI is frozen. Changes driven by userspace needs will add syscalls
 or extend existing ones, never break the existing interface.
 
 ## Session Resume
 
-To resume work: read this file, check `git log --oneline` for recent commits,
-read MEMORY.md for cross-session context. The next task is building the init
-process and continuing the IPC library (`userspace/ipc/`).
+To resume work: read this file, `design/userspace-rebuild.md` for the full plan,
+check `git log --oneline` for recent commits, read MEMORY.md for cross-session
+context.

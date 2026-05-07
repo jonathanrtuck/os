@@ -1762,10 +1762,25 @@ fn sys_space_create(
 
     state::spaces().write(idx).unwrap().id = AddressSpaceId(idx);
     #[cfg(target_os = "none")]
-    state::spaces()
-        .write(idx)
-        .unwrap()
-        .set_aslr_seed(crate::frame::arch::entropy::random_u64());
+    {
+        state::spaces()
+            .write(idx)
+            .unwrap()
+            .set_aslr_seed(crate::frame::arch::entropy::random_u64());
+
+        let (root, asid_val) =
+            crate::frame::arch::page_table::create_page_table().ok_or_else(|| {
+                state::spaces().dealloc_shared(idx);
+                state::free_asid(asid);
+
+                SyscallError::OutOfMemory
+            })?;
+
+        state::spaces()
+            .write(idx)
+            .unwrap()
+            .set_page_table(root.0, asid_val.0);
+    }
 
     let hid = state::spaces()
         .write(caller_space_id.0)
@@ -2315,14 +2330,18 @@ fn sys_thread_exit(
 
                 crate::frame::arch::psci::system_off();
             }
-            #[cfg(feature = "integration-tests")]
+            #[cfg(any(feature = "integration-tests", feature = "test-init"))]
             {
                 crate::println!("INTEGRATION TEST: EXIT {code}");
 
                 crate::frame::arch::psci::system_off();
             }
 
-            #[cfg(not(any(feature = "integration-tests", feature = "bench-el0",)))]
+            #[cfg(not(any(
+                feature = "integration-tests",
+                feature = "test-init",
+                feature = "bench-el0",
+            )))]
             loop {
                 crate::frame::arch::halt();
             }

@@ -77,8 +77,9 @@ extern "C" fn kernel_main_upper() -> ! {
     #[cfg(not(feature = "bench"))]
     {
         let init_binary = include_bytes!(concat!(env!("OUT_DIR"), "/init.bin"));
+        let service_pack = include_bytes!(concat!(env!("OUT_DIR"), "/services.bin"));
 
-        match kernel::bootstrap::create_init(init_binary) {
+        match kernel::bootstrap::create_init(init_binary, service_pack) {
             Ok(tid) => {
                 println!("init: bootstrapped as thread {}", tid.0);
 

@@ -336,7 +336,55 @@ extern "C" fn secondary_main_upper() -> ! {
 
     CORES_ONLINE.fetch_add(1, Ordering::Release);
 
+    super::sysreg::enable_irqs();
+
+    idle_loop(core_id);
+}
+
+/// Idle loop for secondary cores. Halts via WFI, then checks the local run
+/// queue after each interrupt. When a thread is available, enters userspace
+/// directly and never returns here — future idle transitions go through the
+/// scheduler's normal switch_away path.
+#[cfg(target_os = "none")]
+fn idle_loop(core_id: usize) -> ! {
     loop {
+        let next = {
+            let mut sched = crate::frame::state::schedulers().core(core_id).lock();
+
+            sched.pick_next()
+        };
+
+        if let Some(tid) = next {
+            crate::frame::state::threads()
+                .write(tid.0)
+                .unwrap()
+                .set_state(crate::thread::ThreadRunState::Running);
+            crate::frame::state::schedulers()
+                .core(core_id)
+                .lock()
+                .set_current(Some(tid));
+
+            set_current_thread(tid.0);
+
+            // Switch TTBR0 to the thread's address space and enter EL0.
+            let (pt_root, asid) = {
+                let space_id = crate::frame::state::threads()
+                    .read(tid.0)
+                    .unwrap()
+                    .address_space()
+                    .unwrap();
+                let space = crate::frame::state::spaces().read(space_id.0).unwrap();
+
+                (space.page_table_root(), space.asid())
+            };
+
+            super::page_table::switch_table(
+                super::page_alloc::PhysAddr(pt_root),
+                super::page_table::Asid(asid),
+            );
+            super::context::enter_userspace_by_id(tid.0);
+        }
+
         super::halt();
     }
 }
