@@ -137,6 +137,100 @@ pub fn alive_threads() -> &'static AtomicU32 {
     &ALIVE_THREADS
 }
 
+// ── Lock-free handle lookup via cached PerCpu pointer ──────
+
+/// Lock-free handle lookup for the current thread's address space.
+///
+/// Reads the HandleTable pointer cached in PerCpu (set during context
+/// switch) and performs a direct array lookup, bypassing the per-space
+/// TicketLock in ConcurrentTable. Includes generation verification
+/// against the object's ConcurrentTable.
+///
+/// Safety invariant: the PerCpu handle_table_ptr was set by
+/// `set_current_thread()` to point to the HandleTable embedded in the
+/// current space's AddressSpace. Valid because:
+/// - The space can't be destroyed while its thread runs
+/// - HandleTable address is stable (embedded in fixed-size slab storage)
+/// - During SVC, IRQs are masked on this core
+/// - Concurrent close of a different handle index touches a different
+///   array element (no aliasing)
+///
+/// Returns `None` when the fast path is unavailable (host tests, no
+/// current space). Returns `Some(Ok(handle))` or `Some(Err(e))` when
+/// the PerCpu pointer is set.
+pub fn handle_lookup_fast(
+    handle_id: crate::types::HandleId,
+) -> Option<Result<crate::handle::Handle, crate::types::SyscallError>> {
+    let ht_ptr = current_handle_table_ptr();
+
+    if ht_ptr == 0 {
+        return None;
+    }
+
+    // SAFETY: ht_ptr was set by set_current_thread during context switch.
+    // It points to a HandleTable inside the current AddressSpace which
+    // is guaranteed to exist while this thread runs. lookup() is &self
+    // (read-only array index). See safety invariant above.
+    let handle = match unsafe { &*(ht_ptr as *const crate::handle::HandleTable) }.lookup(handle_id)
+    {
+        Ok(h) => h.clone(),
+        Err(e) => return Some(Err(e)),
+    };
+    let current_gen = match handle.object_type {
+        crate::types::ObjectType::Vmo => vmos().generation(handle.object_id),
+        crate::types::ObjectType::Endpoint => endpoints().generation(handle.object_id),
+        crate::types::ObjectType::Event => events().generation(handle.object_id),
+        crate::types::ObjectType::Thread => threads().generation(handle.object_id),
+        crate::types::ObjectType::AddressSpace => spaces().generation(handle.object_id),
+    };
+
+    if handle.generation != current_gen {
+        return Some(Err(crate::types::SyscallError::GenerationMismatch));
+    }
+
+    Some(Ok(handle))
+}
+
+/// Lock-free endpoint lookup for the current thread's address space.
+/// Returns (object_id, badge) for IPC fast path.
+pub fn endpoint_lookup_fast(
+    handle_id: crate::types::HandleId,
+) -> Option<Result<(u32, u32), crate::types::SyscallError>> {
+    let ht_ptr = current_handle_table_ptr();
+
+    if ht_ptr == 0 {
+        return None;
+    }
+
+    // SAFETY: same invariant as handle_lookup_fast.
+    let handle = match unsafe { &*(ht_ptr as *const crate::handle::HandleTable) }.lookup(handle_id)
+    {
+        Ok(h) => h,
+        Err(e) => return Some(Err(e)),
+    };
+
+    if handle.object_type != crate::types::ObjectType::Endpoint {
+        return Some(Err(crate::types::SyscallError::WrongHandleType));
+    }
+    if handle.generation != endpoints().generation(handle.object_id) {
+        return Some(Err(crate::types::SyscallError::GenerationMismatch));
+    }
+
+    Some(Ok((handle.object_id, handle.badge)))
+}
+
+#[cfg(target_os = "none")]
+fn current_handle_table_ptr() -> usize {
+    // SAFETY: percpu() is valid after init_percpu, which runs during boot.
+    // SVC handlers only fire after boot completes.
+    unsafe { super::arch::cpu::percpu().handle_table_ptr }
+}
+
+#[cfg(not(target_os = "none"))]
+fn current_handle_table_ptr() -> usize {
+    0
+}
+
 pub fn inc_alive_threads() {
     ALIVE_THREADS.fetch_add(1, Ordering::Relaxed);
 }

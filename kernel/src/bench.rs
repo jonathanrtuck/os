@@ -456,6 +456,9 @@ fn setup_bench_env() -> ThreadId {
         space.set_thread_head(Some(tid_idx));
     }
 
+    #[cfg(target_os = "none")]
+    crate::frame::arch::cpu::set_current_thread(tid_idx);
+
     ThreadId(tid_idx)
 }
 
@@ -2095,96 +2098,12 @@ fn run_profile(current: ThreadId) {
         stage(&c, slot::SYS_ALLOC, slot::SYS_HANDLE_INSTALL),
     );
 
-    // ── IPC null round-trip ──────────────────────────────────────
+    // IPC profiling requires bench-el0: CALL triggers a real context switch
+    // (block_current → idle_loop → pick_next), so dispatch() never returns
+    // to the EL1 bench code. The IPC stamps in syscall.rs (IPC_EP_LOOKUP
+    // through IPC_BEFORE_SWITCH) are correct — they just need a userspace
+    // bench harness to collect them.
     crate::println!();
-    crate::println!("  IPC null round-trip (CALL fast path):");
-
-    crate::println!("  (IPC profiling skipped — IPC_AFTER_SWITCH stamp deadlocks)");
-    crate::println!();
-    return;
-
-    let ipc_env = setup_ipc_bench(current);
-    let mut accum = [0u64; 32];
-    let ipc_ref = slot::IPC_EP_LOOKUP;
-
-    for _ in 0..10 {
-        ipc_null_iteration(&ipc_env, current);
-    }
-
-    for _ in 0..10 {
-        for _ in 0..100 {
-            crate::frame::profile::reset();
-
-            ipc_null_iteration(&ipc_env, current);
-
-            let t = crate::frame::profile::read();
-            let r = t[ipc_ref];
-
-            if r == 0 {
-                continue;
-            }
-
-            for s in 0..32 {
-                if t[s] > 0 && t[s] >= r {
-                    accum[s] += t[s] - r;
-                }
-            }
-        }
-    }
-
-    let ipc_total_ops = (10 * 100) as u64;
-    let mut c = [0u64; 32];
-
-    for s in 0..32 {
-        c[s] = accum[s] * 1875 / ipc_total_ops;
-    }
-
-    print_stage(
-        "peer check (read ep)",
-        stage(&c, slot::IPC_EP_LOOKUP, slot::IPC_PEER_CHECK),
-    );
-    print_stage(
-        "read_user_message",
-        stage(&c, slot::IPC_PEER_CHECK, slot::IPC_MSG_READ),
-    );
-    print_stage(
-        "remove_handles_atomic",
-        stage(&c, slot::IPC_MSG_READ, slot::IPC_HANDLE_STAGE),
-    );
-    print_stage(
-        "pop_recv_waiter (write ep)",
-        stage(&c, slot::IPC_HANDLE_STAGE, slot::IPC_RECV_POP),
-    );
-    print_stage(
-        "switch_to_space_of (TTBR0)",
-        stage(&c, slot::IPC_RECV_POP, slot::IPC_SPACE_SWITCH),
-    );
-    print_stage(
-        "write message to server buf",
-        stage(&c, slot::IPC_SPACE_SWITCH, slot::IPC_MSG_WRITE),
-    );
-    print_stage(
-        "install handles into server",
-        stage(&c, slot::IPC_MSG_WRITE, slot::IPC_HANDLE_INSTALL),
-    );
-    print_stage(
-        "allocate reply_cap",
-        stage(&c, slot::IPC_HANDLE_INSTALL, slot::IPC_REPLY_CAP),
-    );
-    print_stage(
-        "priority boost",
-        stage(&c, slot::IPC_REPLY_CAP, slot::IPC_PRIORITY),
-    );
-    print_stage(
-        "before_switch check",
-        stage(&c, slot::IPC_PRIORITY, slot::IPC_BEFORE_SWITCH),
-    );
-    print_stage(
-        "direct_switch (block+switch+resume)",
-        stage(&c, slot::IPC_BEFORE_SWITCH, slot::IPC_AFTER_SWITCH),
-    );
-
-    teardown_ipc_bench(&ipc_env, current);
-
+    crate::println!("  IPC: skipped (CALL context-switches away from EL1 bench)");
     crate::println!();
 }

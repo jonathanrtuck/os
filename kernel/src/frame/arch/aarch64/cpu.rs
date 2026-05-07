@@ -60,8 +60,9 @@ pub struct PerCpu {
     pub kernel_ptr: usize,
     pub reschedule_pending: u32,
     pub current_space: u32,
+    pub handle_table_ptr: usize,
     pub last_syscall_entry: u64,
-    _pad: [u8; 88],
+    _pad: [u8; 80],
 }
 
 impl PerCpu {
@@ -75,8 +76,9 @@ impl PerCpu {
             kernel_ptr: 0,
             reschedule_pending: 0,
             current_space: Self::NO_SPACE,
+            handle_table_ptr: 0,
             last_syscall_entry: 0,
-            _pad: [0; 88],
+            _pad: [0; 80],
         }
     }
 
@@ -196,17 +198,31 @@ pub fn set_kernel_ptr(ptr: *mut u8) {
 /// entering userspace.
 #[cfg(target_os = "none")]
 pub fn set_current_thread(thread_id: u32) {
-    let space = crate::frame::state::threads()
+    let space_id = crate::frame::state::threads()
         .read(thread_id)
         .and_then(|t| t.address_space())
         .map_or(PerCpu::NO_SPACE, |s| s.0);
+    // SAFETY: get() on ConcurrentTable is lock-free. The space is guaranteed
+    // to exist — the thread we're switching to is in it. We extract a raw
+    // pointer to the embedded HandleTable for lock-free handle lookups in
+    // the syscall fast path.
+    let ht_ptr = if space_id == PerCpu::NO_SPACE {
+        0
+    } else {
+        unsafe {
+            crate::frame::state::spaces()
+                .get(space_id)
+                .map_or(0, |space| space.handles() as *const _ as usize)
+        }
+    };
 
     // SAFETY: percpu_mut requires init_percpu to have been called.
     unsafe {
         let pc = percpu_mut();
 
         pc.current_thread = thread_id;
-        pc.current_space = space;
+        pc.current_space = space_id;
+        pc.handle_table_ptr = ht_ptr;
     }
 }
 

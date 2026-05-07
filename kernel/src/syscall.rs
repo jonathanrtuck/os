@@ -190,6 +190,10 @@ pub fn thread_space_id(thread: ThreadId) -> Result<AddressSpaceId, SyscallError>
 
 #[inline]
 fn lookup_handle(space_id: AddressSpaceId, handle_id: HandleId) -> Result<Handle, SyscallError> {
+    if let Some(result) = state::handle_lookup_fast(handle_id) {
+        return result;
+    }
+
     let handle = state::spaces()
         .read(space_id.0)
         .ok_or(SyscallError::InvalidHandle)?
@@ -223,6 +227,10 @@ fn lookup_endpoint_id_badge(
     space_id: AddressSpaceId,
     handle_id: HandleId,
 ) -> Result<(u32, u32), SyscallError> {
+    if let Some(result) = state::endpoint_lookup_fast(handle_id) {
+        return result;
+    }
+
     let (obj_type, obj_id, handle_gen, badge) = {
         let space = state::spaces()
             .read(space_id.0)
@@ -1495,8 +1503,6 @@ fn sys_call(
                 crate::sched::wake(server_tid, core_id);
                 crate::sched::block_current(current, core_id);
             }
-
-            profile::stamp(slot::IPC_AFTER_SWITCH);
 
             if let Some(err) = state::threads()
                 .write(current.0)
