@@ -5,27 +5,37 @@
 //! thread on the CPU with stale RegisterState. Any core loading that stale
 //! state via direct_switch would run the same thread on two cores.
 
+#[cfg(target_os = "none")]
 use core::cell::UnsafeCell;
 
+#[cfg(target_os = "none")]
 use super::register_state::RegisterState;
+#[cfg(target_os = "none")]
 use crate::config;
 
+#[cfg(target_os = "none")]
 const IDLE_STACK_SIZE: usize = 4096;
 
+#[cfg(target_os = "none")]
 #[repr(C, align(16))]
 struct IdleStack(UnsafeCell<[u8; IDLE_STACK_SIZE]>);
 
 // SAFETY: Each core exclusively owns its idle slot, indexed by core_id.
 // No cross-core idle state access occurs.
+#[cfg(target_os = "none")]
 unsafe impl Sync for IdleStack {}
 
+#[cfg(target_os = "none")]
 struct IdleStates([UnsafeCell<RegisterState>; config::MAX_CORES]);
 
+#[cfg(target_os = "none")]
 unsafe impl Sync for IdleStates {}
 
+#[cfg(target_os = "none")]
 static IDLE_STATES: IdleStates =
     IdleStates([const { UnsafeCell::new(RegisterState::ZEROED) }; config::MAX_CORES]);
 
+#[cfg(target_os = "none")]
 static IDLE_STACKS: [IdleStack; config::MAX_CORES] =
     [const { IdleStack(UnsafeCell::new([0; IDLE_STACK_SIZE])) }; config::MAX_CORES];
 

@@ -116,6 +116,8 @@ pub fn handle_data_abort(current: ThreadId, fault_addr: usize, is_write: bool) -
             );
         }
 
+        let _ = pa;
+
         return FaultAction::Resolved;
     }
 
