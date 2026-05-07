@@ -828,6 +828,22 @@ fn bench_ipc_null_round_trip(env: &IpcBenchEnv, client: ThreadId) -> u64 {
 }
 
 fn ipc_null_iteration(env: &IpcBenchEnv, client: ThreadId) {
+    // The bench drives a full IPC round-trip from kernel mode by issuing
+    // CALL/RECV/REPLY directly, bypassing real thread context switches.
+    // CALL's fast path calls sched::block_current(client) → switch_away →
+    // pick_next, which removes the client from the run queue. Without
+    // re-enqueueing each iteration, the next CALL's pick_next returns None
+    // and switch_away parks into the idle loop — never returning to the
+    // bench code.
+    state::schedulers().remove(client);
+    if let Some(mut t) = state::threads().write(client.0) {
+        t.set_state(crate::thread::ThreadRunState::Ready);
+    }
+    state::schedulers()
+        .core(0)
+        .lock()
+        .enqueue(client, Priority::Medium);
+
     state::endpoints()
         .write(env.ep_obj_id)
         .unwrap()
@@ -853,9 +869,17 @@ fn ipc_null_iteration(env: &IpcBenchEnv, client: ThreadId) {
 
     force_running(env.server);
 
-    let (_, packed) =
-        crate::syscall::dispatch(env.server, 0, num::RECV, &[env.server_ep_h, 0, 0, 0, 0, 0]);
-    let reply_cap = packed >> 32;
+    let _ = crate::syscall::dispatch(env.server, 0, num::RECV, &[env.server_ep_h, 0, 0, 0, 0, 0]);
+
+    // The reply_cap is normally written into the server's recv_state.reply_cap_out
+    // userspace buffer. The bench has no userspace pointer (passes 0), so reach
+    // into the endpoint's active_replies and pull the cap out directly. Without
+    // this, REPLY would error with InvalidArgument and leak one slot per
+    // iteration — exhausting the MAX_PENDING_PER_ENDPOINT pool after 8 calls.
+    let reply_cap = state::endpoints()
+        .read(env.ep_obj_id)
+        .and_then(|ep| ep.first_active_reply_cap())
+        .map_or(0, |c| c.0);
 
     crate::syscall::dispatch(
         env.server,

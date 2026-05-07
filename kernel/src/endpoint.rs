@@ -443,6 +443,16 @@ impl Endpoint {
         self.send_queue.highest_priority()
     }
 
+    /// Return the first active reply cap, if any. Used by kernel-side IPC
+    /// benchmarks that drive CALL/RECV/REPLY without a userspace pointer for
+    /// `reply_cap_out`. In production, the cap reaches the server via user
+    /// memory; this lets the bench reach in and recover it directly.
+    pub fn first_active_reply_cap(&self) -> Option<ReplyCapId> {
+        self.active_replies
+            .iter()
+            .find_map(|slot| slot.as_ref().map(|r| r.cap_id))
+    }
+
     /// Add a server thread to the recv waiters list.
     pub fn add_recv_waiter(&mut self, thread: ThreadId) -> Result<(), SyscallError> {
         if self.peer_closed {
