@@ -260,8 +260,8 @@ ticket, spin on comparison, store for release). Savings:
    times across call + reply paths.
 
 6. **`set_current_thread_fast`** — takes pre-extracted space_id / ht_ptr /
-   pt_root / asid instead of looking them up from thread + space tables. Saves
-   2 lock acquisitions per context switch. PerCpu now also caches `pt_root` and
+   pt_root / asid instead of looking them up from thread + space tables. Saves 2
+   lock acquisitions per context switch. PerCpu now also caches `pt_root` and
    `pt_asid`.
 
 7. **`switch_threads_set_states`** — batches set_state + RegisterState pointer
@@ -277,13 +277,13 @@ Net: ~12 slot lock acquisitions eliminated per IPC round-trip.
 
 | Syscall             | Phase 1 | Phase 2 | Speedup | Floor | Multiple |
 | ------------------- | ------: | ------: | ------: | ----: | -------: |
-| handle_info         |    15.0 |    15.0 |      — |    15 | **1.0×** |
-| event_signal        |   101.6 |   103.5 |      — |    15 |     6.9× |
-| event_wait          |    93.7 |    96.0 |      — |    15 |     6.4× |
-| event_clear         |   159.0 |   161.6 |      — |    15 |    10.7× |
-| handle_dup+close    |   327.7 |   348.0 |      — |    30 |    11.6× |
-| endpoint create     | 1,156.8 | 1,168.1 |      — |    50 |    23.3× |
-| IPC null round-trip | 6,606.0 | 6,368.0 |    −4% |   150 |    42.4× |
+| handle_info         |    15.0 |    15.0 |       — |    15 | **1.0×** |
+| event_signal        |   101.6 |   103.5 |       — |    15 |     6.9× |
+| event_wait          |    93.7 |    96.0 |       — |    15 |     6.4× |
+| event_clear         |   159.0 |   161.6 |       — |    15 |    10.7× |
+| handle_dup+close    |   327.7 |   348.0 |       — |    30 |    11.6× |
+| endpoint create     | 1,156.8 | 1,168.1 |       — |    50 |    23.3× |
+| IPC null round-trip | 6,606.0 | 6,368.0 |     −4% |   150 |    42.4× |
 
 EL1 bench numbers are conservative — the EL1 IPC bench doesn't exercise full
 context switches. The EL0 SMP bench shows the real gain: 4874 → 4114 cyc/rtt
