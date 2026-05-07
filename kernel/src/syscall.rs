@@ -1331,6 +1331,10 @@ fn sys_call(current: ThreadId, core_id: usize, args: &[u64; 6]) -> Result<u64, S
         }
 
         if let Some(rs) = recv_state {
+            // STTR uses EL0's TTBR0 for translation. Switch to the
+            // server's address space before writing to its buffers.
+            crate::sched::switch_to_space_of(server_tid);
+
             let msg_bytes = message.as_bytes();
 
             if msg_bytes.len() <= rs.out_cap {
@@ -1720,7 +1724,13 @@ fn sys_reply(current: ThreadId, core_id: usize, args: &[u64; 6]) -> Result<u64, 
 
     let staged = remove_handles_atomic(space_id, handles_ptr, handles_count)?;
 
+    // STTR uses EL0's TTBR0 for translation. Switch to the caller's
+    // address space before writing to its reply buffer and handle slots.
+    crate::sched::switch_to_space_of(caller_id);
+
     if let Err(e) = user_mem::write_user_bytes(caller_reply_buf, reply_msg.as_bytes()) {
+        crate::sched::switch_to_space_of(current);
+
         reinstall_handles(space_id, staged);
 
         return Err(e);
@@ -1764,6 +1774,9 @@ fn sys_reply(current: ThreadId, core_id: usize, args: &[u64; 6]) -> Result<u64, 
 
         reply_handle_count = count as u64;
     }
+
+    // Restore the server's TTBR0 before continuing.
+    crate::sched::switch_to_space_of(current);
 
     if let Some(mut caller) = state::threads().write(caller_id.0) {
         caller.set_wakeup_value(reply_handle_count);
@@ -2350,6 +2363,22 @@ fn sys_thread_exit(
     args: &[u64; 6],
 ) -> Result<u64, SyscallError> {
     let code = args[0] as u32;
+    // Remove any event waiter entries this thread registered. Normally
+    // event_wait_common handles cleanup on return, but stale entries
+    // persist if a thread exits with pending wait registrations (e.g.,
+    // slot reuse during churn). The waiter's ThreadId would alias a
+    // new thread, corrupting event_wait/signal for that slot.
+    let (wait_evts, wait_n) = state::threads()
+        .write(current.0)
+        .unwrap()
+        .take_wait_events();
+
+    for &evt_id in &wait_evts[..wait_n as usize] {
+        if let Some(mut e) = state::events().write(evt_id) {
+            e.remove_waiter(current);
+        }
+    }
+
     // Decrement alive count and handle system shutdown BEFORE the context
     // switch. exit_current() calls switch_away() which may never return
     // (the old thread's kernel stack is frozen at the context switch point).

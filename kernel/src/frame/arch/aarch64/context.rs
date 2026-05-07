@@ -10,12 +10,14 @@ core::arch::global_asm!(include_str!("context.S"));
 unsafe extern "C" {
     fn __context_switch(old: *mut RegisterState, new: *const RegisterState);
     fn __enter_userspace(state: *const RegisterState) -> !;
+    fn __park_thread(thread_rs: *mut RegisterState, idle_sp: u64, core_id: u64);
+    fn __restore_context(rs: *const RegisterState) -> !;
 }
 
 /// Save current thread's register state to `old`, load `new`'s state, and
 /// continue execution at `new`'s saved PC.
 #[cfg(target_os = "none")]
-pub fn context_switch(old: &mut RegisterState, new: &RegisterState) {
+pub(crate) fn context_switch(old: &mut RegisterState, new: &RegisterState) {
     // SAFETY: Both pointers are valid RegisterState references. The assembly
     // saves only callee-saved registers; the caller-saved set is handled by
     // the Rust calling convention. No memory corruption possible.
@@ -29,6 +31,28 @@ pub fn enter_userspace(state: &RegisterState) -> ! {
     // SAFETY: state contains a valid ELR (entry point), SPSR (EL0 mode),
     // and SP (user stack). The assembly loads all registers and issues eret.
     unsafe { __enter_userspace(state as *const _) }
+}
+
+/// Save callee-saved registers to `thread_rs`, switch SP to the idle stack,
+/// and tail-call `park_loop`. From the caller's perspective this function
+/// "returns" when `restore_context` later reloads the saved state.
+#[cfg(target_os = "none")]
+pub(crate) fn park_thread(thread_rs: &mut RegisterState, idle_sp: u64, core_id: u64) {
+    // SAFETY: thread_rs is a valid RegisterState owned by the global thread
+    // table. idle_sp points to the top of a per-core idle stack (static, 16-byte
+    // aligned). The assembly saves callee-saved registers, switches SP, and
+    // tail-calls park_loop — execution resumes here when restore_context reloads
+    // the saved state.
+    unsafe { __park_thread(thread_rs as *mut _, idle_sp, core_id) };
+}
+
+/// Load callee-saved registers from `rs` and resume at the saved return
+/// address. Effectively "becomes" the saved context. Never returns.
+#[cfg(target_os = "none")]
+pub(crate) unsafe fn restore_context(rs: *const RegisterState) -> ! {
+    // SAFETY: rs must point to a valid RegisterState with a saved kernel_sp
+    // and x30 from a prior park_thread or context_switch call.
+    unsafe { __restore_context(rs) }
 }
 
 /// Trampoline for newly created threads entering userspace after context_switch.

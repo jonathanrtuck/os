@@ -72,6 +72,11 @@ __context_switch:
 // ---------------------------------------------------------------------------
 .global __enter_userspace
 __enter_userspace:
+    // Mask IRQs — an interrupt between MSR ELR_EL1 and ERET would
+    // overwrite ELR with the interrupted kernel PC, then ERET would
+    // send the thread to EL0 at a kernel address.
+    msr     daifset, #2
+
     // Set ELR_EL1 (return address) from RegisterState.pc.
     ldr     x9, [x0, #256]
     msr     elr_el1, x9
@@ -109,3 +114,64 @@ __enter_userspace:
     ldp     x0, x1, [x0, #0]
 
     eret
+
+// ---------------------------------------------------------------------------
+// park_thread(thread_rs: *mut RegisterState, idle_sp: u64, core_id: u64)
+//
+// Save callee-saved registers to thread_rs (for SMP safety — another core
+// can direct_switch to this thread at any time after the save), switch SP
+// to the idle stack, and tail-call park_loop(core_id). Never returns to the
+// caller directly — park_loop resumes a thread via restore_context, which
+// restores the saved callee-saved regs + kernel_sp and `ret`s to the
+// save-point return address.
+// ---------------------------------------------------------------------------
+.global __park_thread
+__park_thread:
+    // Save callee-saved GPRs to thread_rs.
+    stp     x19, x20, [x0, #(19*8)]
+    stp     x21, x22, [x0, #(21*8)]
+    stp     x23, x24, [x0, #(23*8)]
+    stp     x25, x26, [x0, #(25*8)]
+    stp     x27, x28, [x0, #(27*8)]
+    stp     x29, x30, [x0, #(29*8)]
+
+    // Save SP_EL0 and TPIDR_EL0.
+    mrs     x9, sp_el0
+    str     x9, [x0, #248]
+    mrs     x9, tpidr_el0
+    str     x9, [x0, #272]
+
+    // Save kernel SP (current thread's stack).
+    mov     x9, sp
+    str     x9, [x0, #816]
+
+    // Switch to idle stack and tail-call park_loop(core_id).
+    mov     sp, x1
+    mov     x0, x2
+    b       park_loop
+
+// ---------------------------------------------------------------------------
+// restore_context(rs: *const RegisterState) -> !
+//
+// Load callee-saved registers from rs and resume execution at the saved
+// return address (x30). Kernel SP is restored, so this effectively
+// "becomes" the saved context — like longjmp. Used by park_loop to
+// dispatch a thread without the overhead of saving idle state.
+// ---------------------------------------------------------------------------
+.global __restore_context
+__restore_context:
+    ldp     x19, x20, [x0, #(19*8)]
+    ldp     x21, x22, [x0, #(21*8)]
+    ldp     x23, x24, [x0, #(23*8)]
+    ldp     x25, x26, [x0, #(25*8)]
+    ldp     x27, x28, [x0, #(27*8)]
+    ldp     x29, x30, [x0, #(29*8)]
+
+    ldr     x9, [x0, #248]
+    msr     sp_el0, x9
+    ldr     x9, [x0, #272]
+    msr     tpidr_el0, x9
+    ldr     x9, [x0, #816]
+    mov     sp, x9
+
+    ret

@@ -69,17 +69,19 @@ pub fn exit_current(current: ThreadId, core_id: usize, code: u32) {
     switch_away(current, core_id);
 }
 
-/// Pick the next thread and switch to it.
-///
-/// On bare metal, saves current thread's registers and loads the new thread's
-/// via `frame::arch::context::context_switch()`. On host (tests), this is a
-/// state-machine-only operation — no actual register switching.
+/// Pick the next thread and switch to it. On bare metal, if no runnable
+/// thread is available, saves the current thread's RegisterState (for SMP
+/// direct_switch safety), switches to the idle stack, and enters a bounded
+/// WFE spin before falling through to the full idle loop.
 #[inline(never)]
 fn switch_away(_current: ThreadId, core_id: usize) {
     let next_id = {
         let mut pcs = state::schedulers().core(core_id).lock();
         let Some(next_id) = pcs.pick_next() else {
             pcs.set_current(None);
+
+            #[cfg(target_os = "none")]
+            crate::frame::arch::idle::park_and_wait(_current.0, core_id);
 
             return;
         };
@@ -178,6 +180,14 @@ pub fn wake_and_switch(woken: ThreadId, current: ThreadId, core_id: usize) {
 #[cfg(target_os = "none")]
 fn do_context_switch(old_id: ThreadId, new_id: ThreadId) {
     crate::frame::arch::context::switch_threads(old_id.0, new_id.0);
+}
+
+/// Switch TTBR0 to the target thread's address space. Called from
+/// syscall paths that write to a foreign address space's user buffers
+/// via STTR (which uses EL0's TTBR0 for translation).
+pub(crate) fn switch_to_space_of(_target: ThreadId) {
+    #[cfg(target_os = "none")]
+    maybe_switch_page_table(_target);
 }
 
 /// Switch TTBR0 to the target thread's address space page table if it

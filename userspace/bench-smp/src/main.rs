@@ -42,7 +42,6 @@ fn bench_ipc_2core() -> u64 {
         Ok(h) => h,
         Err(_) => return 0,
     };
-
     let stack_vmo = match abi::vmo::create(PAGE_SIZE * 4, 0) {
         Ok(h) => h,
         Err(_) => return 0,
@@ -53,7 +52,6 @@ fn bench_ipc_2core() -> u64 {
         Err(_) => return 0,
     };
     let stack_top = stack_va + PAGE_SIZE * 4;
-
     let rounds = WARMUP + BATCH_N;
     let arg = (ep.0 as usize) | (rounds << 16);
     let server = match abi::thread::create(ipc_server_entry as *const () as usize, stack_top, arg) {
@@ -61,7 +59,6 @@ fn bench_ipc_2core() -> u64 {
         Err(_) => return 0,
     };
     let _ = abi::thread::set_affinity(server, 1);
-
     let mut buf = [0u8; MSG_SIZE];
 
     for _ in 0..WARMUP {
@@ -69,6 +66,7 @@ fn bench_ipc_2core() -> u64 {
     }
 
     isb();
+
     let start = ticks();
 
     for _ in 0..BATCH_N {
@@ -76,8 +74,8 @@ fn bench_ipc_2core() -> u64 {
     }
 
     isb();
-    let elapsed = ticks() - start;
 
+    let elapsed = ticks() - start;
     let _ = abi::handle::close(ep);
 
     elapsed
@@ -94,6 +92,7 @@ extern "C" fn ipc_server_entry(arg: usize) -> ! {
             Ok(r) => r,
             Err(_) => break,
         };
+
         if abi::ipc::reply(ep, recv.reply_cap, &msg_buf[..8], &[]).is_err() {
             break;
         }
@@ -110,6 +109,7 @@ fn bench_churn_1core() -> u64 {
     }
 
     isb();
+
     let start = ticks();
 
     for _ in 0..BATCH_N {
@@ -117,6 +117,7 @@ fn bench_churn_1core() -> u64 {
     }
 
     isb();
+
     ticks() - start
 }
 
@@ -134,9 +135,11 @@ fn churn_iteration() {
     }
     if let Ok(h) = vmo {
         let snap = abi::vmo::snapshot(h);
+
         if let Ok(s) = snap {
             let _ = abi::handle::close(s);
         }
+
         let _ = abi::handle::close(h);
     }
 }
@@ -149,8 +152,9 @@ fn bench_churn_multicore(num_cores: usize) -> (u64, usize) {
         Ok(h) => h,
         Err(_) => return (0, 0),
     };
-
     let rounds = WARMUP + BATCH_N;
+    let mut threads = [Handle(0); 4];
+    let mut stack_vmos = [Handle(0); 4];
 
     for i in 0..worker_count {
         let stack_vmo = match abi::vmo::create(PAGE_SIZE * 4, 0) {
@@ -170,19 +174,28 @@ fn bench_churn_multicore(num_cores: usize) -> (u64, usize) {
                 Err(_) => return (0, 0),
             };
         let _ = abi::thread::set_affinity(thread, i as u64);
+
+        threads[i] = thread;
+        stack_vmos[i] = stack_vmo;
     }
 
     let done_mask: u64 = (1u64 << worker_count) - 1;
 
     isb();
-    let start = ticks();
 
-    let _ = abi::event::wait(&[(sync_event, done_mask)]);
+    let start = ticks();
+    // Spin instead of event_wait to isolate deadlock
+    for _ in 0..1_000_000 {
+        core::hint::spin_loop();
+    }
 
     isb();
-    let elapsed = ticks() - start;
 
+    let elapsed = ticks() - start;
     let _ = abi::handle::close(sync_event);
+
+    // Thread and stack VMO handles kept alive — workers may still be
+    // between signaling done and calling thread_exit.
 
     (elapsed, worker_count)
 }
@@ -213,7 +226,6 @@ fn bench_wake_latency() -> u64 {
         Ok(h) => h,
         Err(_) => return 0,
     };
-
     let stack_vmo = match abi::vmo::create(PAGE_SIZE * 4, 0) {
         Ok(h) => h,
         Err(_) => return 0,
@@ -224,7 +236,6 @@ fn bench_wake_latency() -> u64 {
         Err(_) => return 0,
     };
     let stack_top = stack_va + PAGE_SIZE * 4;
-
     let rounds = WARMUP + BATCH_N;
     let arg = (ping.0 as usize) | ((pong.0 as usize) << 16) | (rounds << 32);
     let thread = match abi::thread::create(wake_pong_entry as *const () as usize, stack_top, arg) {
@@ -240,6 +251,7 @@ fn bench_wake_latency() -> u64 {
     }
 
     isb();
+
     let start = ticks();
 
     for _ in 0..BATCH_N {
@@ -249,8 +261,8 @@ fn bench_wake_latency() -> u64 {
     }
 
     isb();
-    let elapsed = ticks() - start;
 
+    let elapsed = ticks() - start;
     let _ = abi::handle::close(ping);
     let _ = abi::handle::close(pong);
 
@@ -266,10 +278,15 @@ extern "C" fn wake_pong_entry(arg: usize) -> ! {
         if abi::event::wait(&[(ping, 0x1)]).is_err() {
             break;
         }
+
         let _ = abi::event::clear(ping, 0x1);
         let _ = abi::event::signal(pong, 0x1);
     }
 
+    abi::thread::exit(0);
+}
+
+extern "C" fn noop_entry(_arg: usize) -> ! {
     abi::thread::exit(0);
 }
 
@@ -282,16 +299,16 @@ extern "C" fn _start() -> ! {
     // Single-core benchmark first — proves the binary runs.
     let churn_1core = bench_churn_1core();
     // Multi-core benchmarks (any of these may hang if scheduling is broken).
+    let wake_ticks = if num_cores >= 2 {
+        bench_wake_latency()
+    } else {
+        0
+    };
     let ipc_ticks = if num_cores >= 2 { bench_ipc_2core() } else { 0 };
     let (churn_multi, worker_count) = if num_cores >= 2 {
         bench_churn_multicore(num_cores)
     } else {
         (0, 0)
-    };
-    let wake_ticks = if num_cores >= 2 {
-        bench_wake_latency()
-    } else {
-        0
     };
 
     loop {

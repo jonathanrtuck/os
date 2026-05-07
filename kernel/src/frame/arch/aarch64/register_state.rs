@@ -33,13 +33,20 @@ pub struct RegisterState {
 }
 
 impl RegisterState {
-    /// Create a zeroed RegisterState, suitable for a new thread.
-    ///
-    /// All fields are numeric types where zero is a valid value.
+    pub const ZEROED: Self = Self {
+        gprs: [0; 31],
+        sp: 0,
+        pc: 0,
+        pstate: 0,
+        tpidr: 0,
+        fp_regs: [0; 32],
+        fpcr: 0,
+        fpsr: 0,
+        kernel_sp: 0,
+    };
+
     pub fn zeroed() -> Self {
-        // SAFETY: RegisterState contains only u64, u128 arrays, and u64 scalars.
-        // All-zeros is a valid representation for every field.
-        unsafe { core::mem::zeroed() }
+        Self::ZEROED
     }
 }
 

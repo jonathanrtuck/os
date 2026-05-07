@@ -79,6 +79,8 @@ impl NameTable {
     fn unregister(&mut self, name: &[u8; NAME_LEN]) -> bool {
         for entry in &mut self.entries {
             if entry.occupied && entry.name == *name {
+                let _ = abi::handle::close(Handle(entry.endpoint_handle));
+
                 entry.occupied = false;
                 self.count -= 1;
 

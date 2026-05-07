@@ -64,7 +64,7 @@ extern "C" fn kernel_main_upper() -> ! {
     );
 
     kernel::frame::state::init(arch::platform::core_count());
-
+    arch::idle::init(0);
     #[cfg(feature = "integration-tests")]
     kernel::post::run();
 

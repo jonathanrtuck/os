@@ -331,14 +331,16 @@ extern "C" fn secondary_main_upper() -> ! {
     reinit_percpu(core_id);
 
     super::gic::init_per_core(core_id);
+    super::timer::init();
 
     crate::println!("core {}: alive", core_id);
 
     CORES_ONLINE.fetch_add(1, Ordering::Release);
 
+    super::idle::init(core_id);
     super::sysreg::enable_irqs();
 
-    idle_loop(core_id);
+    idle_loop_ctx(core_id);
 }
 
 /// Enter the idle loop from a syscall context. Called by the scheduler when
@@ -391,6 +393,59 @@ fn idle_loop(core_id: usize) -> ! {
                 super::page_table::Asid(asid),
             );
             super::context::enter_userspace_by_id(tid.0);
+        }
+
+        super::halt();
+    }
+}
+
+/// Idle loop that uses context_switch instead of enter_userspace_by_id.
+/// Properly saves idle state so that switch_to_idle can resume here.
+#[cfg(target_os = "none")]
+pub fn idle_loop_ctx(core_id: usize) -> ! {
+    loop {
+        // Re-enable IRQs on each iteration. After switch_to_idle restores
+        // this context, DAIF may have IRQs disabled (inherited from the
+        // syscall that called block_current). Pending IPIs must be taken
+        // so the GIC can deliver future ones.
+        super::sysreg::enable_irqs();
+
+        let next = {
+            let mut sched = crate::frame::state::schedulers().core(core_id).lock();
+
+            sched.pick_next()
+        };
+
+        if let Some(tid) = next {
+            crate::frame::state::threads()
+                .write(tid.0)
+                .unwrap()
+                .set_state(crate::thread::ThreadRunState::Running);
+            crate::frame::state::schedulers()
+                .core(core_id)
+                .lock()
+                .set_current(Some(tid));
+
+            set_current_thread(tid.0);
+
+            let (pt_root, asid) = {
+                let space_id = crate::frame::state::threads()
+                    .read(tid.0)
+                    .unwrap()
+                    .address_space()
+                    .unwrap();
+                let space = crate::frame::state::spaces().read(space_id.0).unwrap();
+
+                (space.page_table_root(), space.asid())
+            };
+
+            super::page_table::switch_table(
+                super::page_alloc::PhysAddr(pt_root),
+                super::page_table::Asid(asid),
+            );
+            super::idle::switch_from_idle(core_id, tid.0);
+
+            continue;
         }
 
         super::halt();
