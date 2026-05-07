@@ -66,14 +66,16 @@ benchmarks + 3 SMP benchmarks.
 **Performance gates:** Per-benchmark statistical thresholds (P99 + 3σ) in
 `kernel/bench_baselines.toml`. Regression = bug.
 
-### SMP benchmark results (2026-05-06, 4 cores under hypervisor)
+### SMP benchmark results (2026-05-07, 4 cores under hypervisor)
 
 ```text
-IPC null round-trip (2-core):       3847 cyc/rtt  (was 4444, -13% from direct switch)
-object churn (1-core):              5989 cyc/iter
-object churn (multi-core, 4 cores): 7236 cyc/iter  scaling 3.3x / 4
-cross-core wake (event ping-pong):  4788 cyc/rtt  (~2394 one-way)
+IPC null round-trip (2-core):       4114 cyc/rtt  (was 4874 pre-opt, −15.6% from lock batching)
+object churn (1-core):              5230 cyc/iter
+cross-core wake (event ping-pong):  4693 cyc/rtt  (~2347 one-way)
 ```
+
+Note: multi-core churn benchmark is broken (uses spin-wait workaround for a
+deadlock — see bench-smp/src/main.rs). Root cause investigation pending.
 
 ## Kernel Finalization: Complete
 

@@ -177,6 +177,33 @@ fn unlink_thread_from_space(thread_idx: u32, space_id: AddressSpaceId) {
     }
 }
 
+// ── Switch target helper ────────────────────────────────────
+
+/// Build a SwitchTarget for the IPC fast path from a thread and its known
+/// space ID. Reads the space table once to get handle table pointer and
+/// page table info. Avoids the thread table read that set_current_thread
+/// would do (we already know the space).
+fn build_switch_target(
+    thread_id: ThreadId,
+    space_id: AddressSpaceId,
+) -> crate::sched::SwitchTarget {
+    let (ht_ptr, pt_root, pt_asid) = state::spaces().read(space_id.0).map_or((0, 0, 0), |space| {
+        (
+            space.handles() as *const _ as usize,
+            space.page_table_root(),
+            space.asid(),
+        )
+    });
+
+    crate::sched::SwitchTarget {
+        thread_id,
+        space_id: space_id.0,
+        ht_ptr,
+        pt_root,
+        pt_asid,
+    }
+}
+
 // ── Handle lookup ───────────────────────────────────────────
 
 #[inline]
@@ -1430,9 +1457,9 @@ fn sys_call(
         }
 
         if let Some(rs) = recv_state {
-            // STTR uses EL0's TTBR0 for translation. Switch to the
-            // server's address space before writing to its buffers.
-            crate::sched::switch_to_space_of(server_tid);
+            // STTR uses EL0's TTBR0. Switch to server's space by ID
+            // directly — we already know the space from RecvState.
+            crate::sched::switch_to_space_by_id(rs.space_id);
 
             profile::stamp(slot::IPC_SPACE_SWITCH);
 
@@ -1476,47 +1503,50 @@ fn sys_call(
 
                 let packed = (badge as u64) << 32 | (h_count << 16) | msg_len_val;
 
-                if let Some(mut server) = state::threads().write(server_tid.0) {
-                    server.set_wakeup_value(packed);
+                // Read caller priority before batching server writes.
+                let caller_pri = state::threads()
+                    .read(current.0)
+                    .map_or(Priority::Idle, |t| t.effective_priority());
+                // Batch: set wakeup + boost + check state in one locked section
+                // (was 3 separate lock acquisitions).
+                let server_was_blocked =
+                    if let Some(mut server) = state::threads().write(server_tid.0) {
+                        server.set_wakeup_value(packed);
+                        server.boost_priority(caller_pri);
+                        server.state() == crate::thread::ThreadRunState::Blocked
+                    } else {
+                        false
+                    };
+
+                profile::stamp(slot::IPC_PRIORITY);
+                profile::stamp(slot::IPC_BEFORE_SWITCH);
+
+                if server_was_blocked {
+                    // Build SwitchTarget from the space we already switched to.
+                    let target = build_switch_target(server_tid, rs.space_id);
+
+                    crate::sched::direct_switch_fast(current, &target, core_id);
+                } else {
+                    crate::sched::wake(server_tid, core_id);
+                    crate::sched::block_current(current, core_id);
                 }
-            }
-
-            let caller_pri = state::threads()
-                .read(current.0)
-                .map_or(Priority::Idle, |t| t.effective_priority());
-
-            if let Some(mut server) = state::threads().write(server_tid.0) {
-                server.boost_priority(caller_pri);
-            }
-
-            profile::stamp(slot::IPC_PRIORITY);
-
-            let server_was_blocked = state::threads()
-                .read(server_tid.0)
-                .is_some_and(|t| t.state() == crate::thread::ThreadRunState::Blocked);
-
-            profile::stamp(slot::IPC_BEFORE_SWITCH);
-
-            if server_was_blocked {
-                crate::sched::direct_switch(current, server_tid, core_id);
             } else {
-                crate::sched::wake(server_tid, core_id);
                 crate::sched::block_current(current, core_id);
             }
 
-            if let Some(err) = state::threads()
+            // Batch: read wakeup error + value in one locked section
+            // (was 2 separate lock acquisitions).
+            let (wakeup_err, wakeup_val) = state::threads()
                 .write(current.0)
-                .and_then(|mut t| t.take_wakeup_error())
-            {
+                .map_or((None, None), |mut t| {
+                    (t.take_wakeup_error(), t.take_wakeup_value())
+                });
+
+            if let Some(err) = wakeup_err {
                 return Err(err);
             }
 
-            let handle_count = state::threads()
-                .write(current.0)
-                .and_then(|mut t| t.take_wakeup_value())
-                .unwrap_or(0);
-
-            return Ok(handle_count);
+            return Ok(wakeup_val.unwrap_or(0));
         }
     }
 
@@ -1818,21 +1848,23 @@ fn sys_reply(
         server.release_boost();
     }
 
-    let caller_state = state::threads()
-        .read(caller_id.0)
-        .ok_or(SyscallError::InvalidArgument)?
-        .state();
+    // Batch: read caller state + address space in one locked section
+    // (was 2 separate reads for state check and space lookup).
+    let (caller_state, caller_space_id) = {
+        let caller = state::threads()
+            .read(caller_id.0)
+            .ok_or(SyscallError::InvalidArgument)?;
+
+        (caller.state(), caller.address_space())
+    };
 
     if caller_state != crate::thread::ThreadRunState::Blocked {
         return Err(SyscallError::InvalidArgument);
     }
 
+    let caller_space_id = caller_space_id.ok_or(SyscallError::InvalidArgument)?;
+
     if handles_count > 0 {
-        let caller_space_id = state::threads()
-            .read(caller_id.0)
-            .ok_or(SyscallError::InvalidArgument)?
-            .address_space()
-            .ok_or(SyscallError::InvalidArgument)?;
         let free_slots = state::spaces()
             .read(caller_space_id.0)
             .ok_or(SyscallError::InvalidHandle)?
@@ -1846,12 +1878,11 @@ fn sys_reply(
 
     let staged = remove_handles_atomic(space_id, handles_ptr, handles_count)?;
 
-    // STTR uses EL0's TTBR0 for translation. Switch to the caller's
-    // address space before writing to its reply buffer and handle slots.
-    crate::sched::switch_to_space_of(caller_id);
+    // Switch to caller's space by ID directly — no thread table read.
+    crate::sched::switch_to_space_by_id(caller_space_id);
 
     if let Err(e) = user_mem::write_user_bytes(caller_reply_buf, reply_msg.as_bytes()) {
-        crate::sched::switch_to_space_of(current);
+        crate::sched::switch_to_space_by_id(space_id);
 
         reinstall_handles(space_id, staged);
 
@@ -1861,11 +1892,6 @@ fn sys_reply(
     let mut reply_handle_count = 0u64;
 
     if staged.count > 0 {
-        let caller_space_id = state::threads()
-            .read(caller_id.0)
-            .ok_or(SyscallError::InvalidArgument)?
-            .address_space()
-            .ok_or(SyscallError::InvalidArgument)?;
         let mut staged = staged;
         let mut caller_space = state::spaces()
             .write(caller_space_id.0)
@@ -1897,23 +1923,27 @@ fn sys_reply(
         reply_handle_count = count as u64;
     }
 
-    // Restore the server's TTBR0 before continuing.
-    crate::sched::switch_to_space_of(current);
+    // Restore server's TTBR0 by space ID — no thread table read.
+    crate::sched::switch_to_space_by_id(space_id);
 
-    if let Some(mut caller) = state::threads().write(caller_id.0) {
+    // Batch: set wakeup value + read priority in one locked section
+    // (was 2 separate accesses).
+    let caller_pri = if let Some(mut caller) = state::threads().write(caller_id.0) {
         caller.set_wakeup_value(reply_handle_count);
-    }
+        caller.effective_priority()
+    } else {
+        Priority::Idle
+    };
 
     let reply_len = reply_msg.len() as u64;
-    let caller_pri = state::threads()
-        .read(caller_id.0)
-        .map_or(Priority::Idle, |t| t.effective_priority());
     let server_pri = state::threads()
         .read(current.0)
         .map_or(Priority::Idle, |t| t.effective_priority());
 
     if caller_id != current && caller_pri >= server_pri {
-        crate::sched::wake_and_switch(caller_id, current, core_id);
+        let target = build_switch_target(caller_id, caller_space_id);
+
+        crate::sched::wake_and_switch_fast(&target, current, server_pri, core_id);
     } else {
         crate::sched::wake(caller_id, core_id);
     }

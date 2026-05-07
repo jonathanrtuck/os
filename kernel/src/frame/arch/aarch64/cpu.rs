@@ -62,7 +62,9 @@ pub struct PerCpu {
     pub current_space: u32,
     pub handle_table_ptr: usize,
     pub last_syscall_entry: u64,
-    _pad: [u8; 80],
+    pub pt_root: usize,
+    pub pt_asid: u8,
+    _pad: [u8; 71],
 }
 
 impl PerCpu {
@@ -78,7 +80,9 @@ impl PerCpu {
             current_space: Self::NO_SPACE,
             handle_table_ptr: 0,
             last_syscall_entry: 0,
-            _pad: [0; 80],
+            pt_root: 0,
+            pt_asid: 0,
+            _pad: [0; 71],
         }
     }
 
@@ -205,14 +209,20 @@ pub fn set_current_thread(thread_id: u32) {
     // SAFETY: get() on ConcurrentTable is lock-free. The space is guaranteed
     // to exist — the thread we're switching to is in it. We extract a raw
     // pointer to the embedded HandleTable for lock-free handle lookups in
-    // the syscall fast path.
-    let ht_ptr = if space_id == PerCpu::NO_SPACE {
-        0
+    // the syscall fast path, and cache page table info for fast TTBR0 checks.
+    let (ht_ptr, pt_root, pt_asid) = if space_id == PerCpu::NO_SPACE {
+        (0, 0, 0u8)
     } else {
         unsafe {
             crate::frame::state::spaces()
                 .get(space_id)
-                .map_or(0, |space| space.handles() as *const _ as usize)
+                .map_or((0, 0, 0u8), |space| {
+                    (
+                        space.handles() as *const _ as usize,
+                        space.page_table_root(),
+                        space.asid(),
+                    )
+                })
         }
     };
 
@@ -223,6 +233,30 @@ pub fn set_current_thread(thread_id: u32) {
         pc.current_thread = thread_id;
         pc.current_space = space_id;
         pc.handle_table_ptr = ht_ptr;
+        pc.pt_root = pt_root;
+        pc.pt_asid = pt_asid;
+    }
+}
+
+/// Update PerCpu fields from pre-extracted values, avoiding table lookups.
+/// Used by optimized IPC paths where the caller already holds the data.
+#[cfg(target_os = "none")]
+pub fn set_current_thread_fast(
+    thread_id: u32,
+    space_id: u32,
+    ht_ptr: usize,
+    pt_root: usize,
+    pt_asid: u8,
+) {
+    // SAFETY: percpu_mut requires init_percpu to have been called.
+    unsafe {
+        let pc = percpu_mut();
+
+        pc.current_thread = thread_id;
+        pc.current_space = space_id;
+        pc.handle_table_ptr = ht_ptr;
+        pc.pt_root = pt_root;
+        pc.pt_asid = pt_asid;
     }
 }
 

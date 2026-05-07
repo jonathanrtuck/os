@@ -224,6 +224,8 @@ time into kernel software stages.
 
 ### Optimizations Applied
 
+#### Phase 1: PerCpu caching (2026-05-07 early)
+
 Two PerCpu caching optimizations eliminated lock overhead from the syscall hot
 path:
 
@@ -236,20 +238,56 @@ path:
    directly from the pointer, bypassing the per-space TicketLock and
    ConcurrentTable pointer chase (~35 cycles saved per lookup).
 
-### Results After Both Optimizations
+#### Phase 2: IPC lock batching (2026-05-07 late)
 
-| Syscall             | Before opt | After opt | Speedup | Floor | Multiple |
-| ------------------- | ---------: | --------: | ------: | ----: | -------: |
-| handle_info         |      157.3 |      15.0 |    −90% |    15 |   **1.0×** |
-| event_signal        |      249.3 |     101.6 |    −59% |    15 |     6.7× |
-| event_wait          |        n/a |      93.7 |     n/a |    15 |     6.2× |
-| event_clear         |        n/a |     159.0 |     n/a |    15 |    10.6× |
-| handle_dup+close    |      550.0 |     327.7 |    −40% |    30 |    10.9× |
-| endpoint create     |   1,156.8  |   1,156.8 |      0% |    50 |    23.1× |
-| IPC null round-trip |   6,957.3  |   6,606.0 |     −5% |   150 |    44.0× |
+Systematic elimination of redundant slot lock acquisitions in the IPC
+call→recv→reply round-trip. The original path did ~30 ConcurrentTable slot lock
+acquire/releases per round-trip; each costs ~12-15 cycles (atomic fetch_add for
+ticket, spin on comparison, store for release). Savings:
 
-"Before opt" = pre-caching baseline. handle_info went from 157 cycles to its
-15-cycle theoretical floor — the TicketLock was the entire overhead.
+3. **Batched thread writes in `sys_call`** — combined 3 separate server-thread
+   lock acquisitions (set_wakeup_value + boost_priority + state check) into 1.
+   Also batched 2 post-switch reads (wakeup_error + wakeup_value) into 1.
+
+4. **Batched thread reads in `sys_reply`** — combined caller state check +
+   address_space extraction into 1 read. Combined wakeup_value set + priority
+   read into 1 write.
+
+5. **`switch_to_space_by_id(AddressSpaceId)`** — replaced
+   `switch_to_space_of(ThreadId)` which did thread read → space read → TTBR0
+   switch. The new function takes the space ID directly (already known from
+   RecvState or a prior thread read), skipping the thread table read. Used 4
+   times across call + reply paths.
+
+6. **`set_current_thread_fast`** — takes pre-extracted space_id / ht_ptr /
+   pt_root / asid instead of looking them up from thread + space tables. Saves
+   2 lock acquisitions per context switch. PerCpu now also caches `pt_root` and
+   `pt_asid`.
+
+7. **`switch_threads_set_states`** — batches set_state + RegisterState pointer
+   extraction into one locked section per thread. Eliminates 2 separate thread
+   table writes that the old pattern (set_state then switch_threads) required.
+
+8. **`switch_to_page_table(pt_root, asid)`** — direct TTBR0 switch from known
+   values, bypassing the 2-read lookup chain in `maybe_switch_page_table`.
+
+Net: ~12 slot lock acquisitions eliminated per IPC round-trip.
+
+### Results After All Optimizations
+
+| Syscall             | Phase 1 | Phase 2 | Speedup | Floor | Multiple |
+| ------------------- | ------: | ------: | ------: | ----: | -------: |
+| handle_info         |    15.0 |    15.0 |      — |    15 | **1.0×** |
+| event_signal        |   101.6 |   103.5 |      — |    15 |     6.9× |
+| event_wait          |    93.7 |    96.0 |      — |    15 |     6.4× |
+| event_clear         |   159.0 |   161.6 |      — |    15 |    10.7× |
+| handle_dup+close    |   327.7 |   348.0 |      — |    30 |    11.6× |
+| endpoint create     | 1,156.8 | 1,168.1 |      — |    50 |    23.3× |
+| IPC null round-trip | 6,606.0 | 6,368.0 |    −4% |   150 |    42.4× |
+
+EL1 bench numbers are conservative — the EL1 IPC bench doesn't exercise full
+context switches. The EL0 SMP bench shows the real gain: 4874 → 4114 cyc/rtt
+(−15.6%) for 2-core IPC round-trip.
 
 ### Remaining Cost Breakdown (by profiler stages)
 
@@ -257,37 +295,38 @@ path:
 array index → clone → generation atomic load → return. No further optimization
 possible without changing the syscall ABI.
 
-**event_signal** (102 cyc): ~15 handle lookup + ~45 event read+signal+waiter
+**event_signal** (104 cyc): ~15 handle lookup + ~45 event read+signal+waiter
 scan + ~40 scheduler enqueue. Waiter scan is O(n) with n=max waiters.
 
-**endpoint_create** (1,157 cyc): dominated by `alloc_shared` (433 cyc) — the
+**endpoint_create** (1,168 cyc): dominated by `alloc_shared` (433 cyc) — the
 Endpoint struct is large (multiple arrays for pending calls, recv waiters, reply
 caps). Each array field touches a fresh cache line on construction.
 
-**IPC null round-trip** (6,606 cyc): the profiler stamps up to
-IPC_BEFORE_SWITCH (not through the context switch). Decomposed: endpoint lookup
-+ peer check + message copy + handle staging + recv pop + space switch (TTBR0)
-+ message write + handle install + reply cap alloc + priority boost. The TTBR0
-switch alone is significant (~200+ cyc for TLB invalidation under HVF).
+**IPC null round-trip** (6,368 cyc EL1 / 4,114 cyc EL0): remaining cost is in
+the context switch assembly (~60 cyc × 2), TTBR0 switches (~200+ cyc × 2-3),
+endpoint table accesses (~2 locks), remaining thread table accesses (~18 locks),
+and message copy / user memory writes.
 
 ### Profiling Limitations
 
 - IPC profiling from EL1 cannot measure through `direct_switch` because the
   context switch suspends the bench thread. Full IPC stage decomposition
   requires a userspace bench (bench-el0).
-- Exception entry/exit overhead (save/restore ~30 GPRs + FP) is measured by
-  the assembly stamps in exception.S but not yet decomposed further.
+- Exception entry/exit overhead (save/restore ~30 GPRs + FP) is measured by the
+  assembly stamps in exception.S but not yet decomposed further.
 
 ## Optimization Priorities (by impact, updated 2026-05-07)
 
-1. **IPC round-trip** (44× floor) — still the biggest gap. Next targets: reduce
-   alloc_shared cost for Endpoint (smaller struct or lazy init of arrays), and
-   investigate whether TTBR0 switch can be avoided for same-space IPC.
+1. **IPC round-trip** (42× floor EL1, 27× EL0) — still the biggest gap. The
+   remaining ~18 slot lock acquisitions per round-trip cost ~200-270 cycles.
+   TTBR0 switches cost ~400-600 cycles (2-3 per round-trip). Next targets:
+   same-space TTBR0 skip, endpoint table access reduction, and evaluating
+   whether the remaining thread table accesses can be further batched or cached.
 2. **Endpoint create** (23× floor) — alloc_shared dominates. The Endpoint struct
    initialization touches many cache lines.
 3. **Event signal/clear/wait** (6–11× floor) — handle lookup is now fast; the
    remaining cost is in the event/scheduler operations (waiter scan, enqueue).
-4. **Handle dup+close** (11× floor) — the `write()` path still takes the
+4. **Handle dup+close** (12× floor) — the `write()` path still takes the
    TicketLock for mutations. Consider a lock-free close path.
 5. **Fault resolution** (10× floor) — binary search over mappings + VMO table
    read. Per-thread mapping cache would help.

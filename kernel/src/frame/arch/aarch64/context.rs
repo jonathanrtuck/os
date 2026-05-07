@@ -120,6 +120,46 @@ pub fn switch_threads(old_idx: u32, new_idx: u32) {
     }
 }
 
+/// Context switch with state changes batched into the RS-pointer extraction.
+///
+/// Combines set_state + RegisterState pointer extraction into one locked
+/// section per thread, saving 2 slot lock acquisitions vs the separate
+/// set_state + switch_threads pattern.
+#[cfg(target_os = "none")]
+pub fn switch_threads_set_states(
+    old_idx: u32,
+    old_state: crate::thread::ThreadRunState,
+    new_idx: u32,
+    new_state: crate::thread::ThreadRunState,
+) {
+    let old_rs_ptr: *mut RegisterState;
+    let new_rs_ptr: *const RegisterState;
+
+    {
+        let mut old_thread = crate::frame::state::threads()
+            .write(old_idx)
+            .expect("context switch: old thread must exist");
+
+        old_thread.set_state(old_state);
+        old_rs_ptr = old_thread.init_register_state() as *mut _;
+    }
+    {
+        let mut new_thread = crate::frame::state::threads()
+            .write(new_idx)
+            .expect("context switch: new thread must exist");
+
+        new_thread.set_state(new_state);
+        new_rs_ptr = new_thread
+            .register_state()
+            .expect("new thread has no RegisterState") as *const _;
+    }
+
+    // SAFETY: Both pointers valid — see switch_threads rationale.
+    unsafe {
+        context_switch(&mut *old_rs_ptr, &*new_rs_ptr);
+    }
+}
+
 /// Enter userspace for a thread identified by table index.
 ///
 /// Extracts the RegisterState pointer, releases the slot lock, then loads

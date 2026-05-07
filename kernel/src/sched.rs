@@ -142,6 +142,61 @@ pub fn direct_switch(blocker: ThreadId, target: ThreadId, core_id: usize) {
     }
 }
 
+/// Pre-extracted target thread data for fast IPC switching.
+pub struct SwitchTarget {
+    pub thread_id: ThreadId,
+    pub space_id: u32,
+    pub ht_ptr: usize,
+    pub pt_root: usize,
+    pub pt_asid: u8,
+}
+
+/// Direct process switch using pre-extracted target data. Avoids redundant
+/// thread/space table lookups — the caller already holds everything needed.
+///
+/// Saves 6 slot lock acquisitions vs `direct_switch`: set_current_thread
+/// (thread read + space get), maybe_switch_page_table (thread read +
+/// space read), and separate set_state writes (2 thread writes folded
+/// into switch_threads_set_states).
+pub fn direct_switch_fast(blocker: ThreadId, target: &SwitchTarget, core_id: usize) {
+    state::schedulers()
+        .core(core_id)
+        .lock()
+        .set_current(Some(target.thread_id));
+
+    #[cfg(target_os = "none")]
+    {
+        crate::frame::arch::cpu::set_current_thread_fast(
+            target.thread_id.0,
+            target.space_id,
+            target.ht_ptr,
+            target.pt_root,
+            target.pt_asid,
+        );
+
+        switch_to_page_table(target.pt_root, target.pt_asid);
+        crate::frame::arch::context::switch_threads_set_states(
+            blocker.0,
+            ThreadRunState::Blocked,
+            target.thread_id.0,
+            ThreadRunState::Running,
+        );
+    }
+
+    // Host-target fallback: still need state changes for tests.
+    #[cfg(not(target_os = "none"))]
+    {
+        state::threads()
+            .write(blocker.0)
+            .unwrap()
+            .set_state(ThreadRunState::Blocked);
+        state::threads()
+            .write(target.thread_id.0)
+            .unwrap()
+            .set_state(ThreadRunState::Running);
+    }
+}
+
 /// Wake a blocked thread and switch directly to it, placing the current
 /// thread on the run queue as Ready. Used on the IPC reply path when the
 /// caller should preempt the server.
@@ -180,6 +235,58 @@ pub fn wake_and_switch(woken: ThreadId, current: ThreadId, core_id: usize) {
     }
 }
 
+/// Wake and switch using pre-extracted target data and known current priority.
+/// Saves 6 slot lock acquisitions vs `wake_and_switch` (same as
+/// `direct_switch_fast` — see its doc comment).
+pub fn wake_and_switch_fast(
+    woken: &SwitchTarget,
+    current: ThreadId,
+    current_pri: crate::types::Priority,
+    core_id: usize,
+) {
+    {
+        let mut sched = state::schedulers().core(core_id).lock();
+
+        sched.enqueue(current, current_pri);
+    }
+
+    state::schedulers()
+        .core(core_id)
+        .lock()
+        .set_current(Some(woken.thread_id));
+
+    #[cfg(target_os = "none")]
+    {
+        crate::frame::arch::cpu::set_current_thread_fast(
+            woken.thread_id.0,
+            woken.space_id,
+            woken.ht_ptr,
+            woken.pt_root,
+            woken.pt_asid,
+        );
+
+        switch_to_page_table(woken.pt_root, woken.pt_asid);
+        crate::frame::arch::context::switch_threads_set_states(
+            current.0,
+            ThreadRunState::Ready,
+            woken.thread_id.0,
+            ThreadRunState::Running,
+        );
+    }
+
+    #[cfg(not(target_os = "none"))]
+    {
+        state::threads()
+            .write(current.0)
+            .unwrap()
+            .set_state(ThreadRunState::Ready);
+        state::threads()
+            .write(woken.thread_id.0)
+            .unwrap()
+            .set_state(ThreadRunState::Running);
+    }
+}
+
 /// Bare-metal context switch — saves current thread's RegisterState,
 /// loads next thread's, switches kernel stack.
 #[cfg(target_os = "none")]
@@ -187,12 +294,39 @@ fn do_context_switch(old_id: ThreadId, new_id: ThreadId) {
     crate::frame::arch::context::switch_threads(old_id.0, new_id.0);
 }
 
-/// Switch TTBR0 to the target thread's address space. Called from
-/// syscall paths that write to a foreign address space's user buffers
-/// via STTR (which uses EL0's TTBR0 for translation).
-pub(crate) fn switch_to_space_of(_target: ThreadId) {
+/// Switch TTBR0 to a known address space by ID, skipping the thread table
+/// lookup. Used when the caller already knows the space ID (e.g., from
+/// RecvState or a prior thread table read).
+pub(crate) fn switch_to_space_by_id(_space_id: crate::types::AddressSpaceId) {
     #[cfg(target_os = "none")]
-    maybe_switch_page_table(_target);
+    {
+        let Some(space) = state::spaces().read(_space_id.0) else {
+            return;
+        };
+        let pt_root = space.page_table_root();
+        let asid = space.asid();
+
+        drop(space);
+
+        if pt_root != 0 {
+            crate::frame::arch::page_table::switch_table(
+                crate::frame::arch::page_alloc::PhysAddr(pt_root),
+                crate::frame::arch::page_table::Asid(asid),
+            );
+        }
+    }
+}
+
+/// Switch TTBR0 to a known page table, skipping all table lookups.
+/// Used when the caller already has the physical root and ASID.
+pub(crate) fn switch_to_page_table(_pt_root: usize, _asid: u8) {
+    #[cfg(target_os = "none")]
+    if _pt_root != 0 {
+        crate::frame::arch::page_table::switch_table(
+            crate::frame::arch::page_alloc::PhysAddr(_pt_root),
+            crate::frame::arch::page_table::Asid(_asid),
+        );
+    }
 }
 
 /// Switch TTBR0 to the target thread's address space page table if it
