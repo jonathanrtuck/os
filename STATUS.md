@@ -1,10 +1,12 @@
 # Project Status
 
-## Current State: Kernel Complete, Userspace Next
+## Current State: Kernel Finalization In Progress
 
-The kernel is complete and verified. The userspace has not yet been built.
+The kernel is functionally complete and verified. A finalization pass is in
+progress to bring IPC performance to the theoretical optimum before moving to
+userspace.
 
-**Branch:** `kernel-verification` (ready to merge to `main`)
+**Branch:** `main`
 
 ## Kernel
 
@@ -16,7 +18,8 @@ Thread (5), Address Space (2), plus handle_dup/close/info, clock_read,
 system_info.
 
 **Scheduler:** Multi-core fixed-priority preemptive, 256 levels, per-CPU
-`SpinLock<PerCoreState>` (no global lock). SMP up to 8 cores.
+`SpinLock<PerCoreState>` (no global lock). SMP up to 8 cores. Thread creation
+load-balanced via `least_loaded_core()` with IPI to wake remote cores.
 
 **SMP concurrency:** Per-object locking via ConcurrentTable (per-slot
 TicketLock + atomic generations). Per-CPU scheduler locks. IPI infrastructure
@@ -26,7 +29,8 @@ global ConcurrentTable state — no global kernel lock. Atomic refcounts
 ordering verification).
 
 **IPC:** Synchronous call/recv/reply via endpoints. Priority inheritance. Up to
-128 bytes data + 4 handle transfers per message. One-shot reply caps.
+128 bytes data + 4 handle transfers per message. One-shot reply caps. Badge
+passed from caller's handle.
 
 **Memory:** VMOs with COW snapshots, sealing, lazy allocation, pager-backed
 fault handling, cross-space mapping. 16 KiB pages (Apple Silicon native).
@@ -51,39 +55,70 @@ fault handling, cross-space mapping. 16 KiB pages (Apple Silicon native).
 | 11. Bare-Metal + Perf | 14 benchmarks + 3 workloads, baselines set        |
 | 12. Regression Infra  | Pre-commit + nightly gates, Makefile targets      |
 
-**Bugs found and fixed:** 20. Discovery curve flattened to zero.
+**Bugs found and fixed:** 24 total (20 during verification, 4 during
+finalization — IPC reply cap delivery, thread placement, badge wiring,
+thread_exit ordering).
 
 **Test suite:** 551 tests, 4 fuzz targets, 33 property tests, 16 invariant
 checks, 34 bare-metal integration tests, 14 per-syscall benchmarks + 3 workload
-benchmarks.
+benchmarks + 3 SMP benchmarks.
 
 **Performance gates:** Per-benchmark statistical thresholds (P99 + 3σ) in
 `kernel/bench_baselines.toml`. Regression = bug.
 
-## SMP Remaining
+### SMP benchmark results (2026-05-06, 4 cores under hypervisor)
 
-Per-object locking is structurally complete. Multi-core benchmark harness is
-built (`make bench-smp`), awaiting first bare-metal run. One item deferred:
+```text
+IPC null round-trip (2-core):       4444 cyc/rtt
+object churn (1-core):              5979 cyc/iter
+object churn (multi-core, 4 cores): 7227 cyc/iter  scaling 3.3x / 4
+cross-core wake (event ping-pong):  4795 cyc/rtt  (~2398 one-way)
+```
 
-- **HandleTable RwSpinLock** — concurrent handle lookups within the same address
-  space. Currently serialized via AddressSpace slot lock; benefits only
-  multi-threaded services. Decision: run `bench-smp` first; if handle lookup
-  shows < 1.5x scaling at 2 cores, implement RwSpinLock.
+## Kernel Finalization: Remaining Work
 
-### Performance optimization completed
+The goal is a kernel that never needs revisiting. These items must be completed
+before starting userspace.
 
-- **Endpoint struct: 2432 -> 352 bytes** — PrioritySendQueue boxed to reduce
-  slab placement memcpy from 19 to 3 cache lines. Expected:
-  endpoint_create_close drops from 4 ticks to ~2 ticks.
+### 1. Direct process switch for IPC (next)
 
-### Benchmarks awaiting bare-metal run
+When a client calls and a server is waiting, the kernel currently enqueues the
+server on the run queue, blocks the client, picks the next thread from the
+queue, and context-switches. This round-trips through the scheduler when the
+kernel already knows it wants to switch to the server.
 
-- `make bench-smp`: IPC 2-core round-trip, object churn scaling (1 vs N cores),
-  cross-core wake latency (event ping-pong). Run with hypervisor (2+ cores).
-- `make bench-check`: verify single-core baselines reflect Endpoint
-  optimization.
+Direct process switch skips the scheduler entirely: save client registers, load
+server registers, done. This is the highest-performance correct implementation
+for synchronous IPC. seL4 does this. The current IPC round-trip is ~4444 cycles;
+direct switch should significantly reduce it.
 
-## What's Next
+The reply path has a similar opportunity: if the server will immediately recv
+again, the kernel could switch directly back to the caller instead of going
+through the scheduler.
+
+### 2. Topology hints
+
+`set_affinity` stores Performance/Efficiency/Any hints but nothing reads them.
+On M4 Pro bare metal these map to P-core and E-core clusters. Under the
+hypervisor (4 identical vCPUs) they have no effect, making this unverifiable
+without real hardware. This may be deferred with an explicit rationale per the
+"unverifiable work does not ship" rule.
+
+### 3. Benchmark baselines
+
+Single-core baselines in `bench_baselines.toml` need re-running after the
+Endpoint struct optimization (2432→352 bytes) and thread load balancing. Run
+`make bench-check` and update the baselines. Add SMP benchmark baselines from
+`make bench-smp`.
+
+### 4. HandleTable RwSpinLock decision
+
+Concurrent handle lookups within the same address space are serialized by the
+AddressSpace slot lock. A dedicated RwSpinLock would allow parallel lookups. The
+bench-smp data doesn't isolate this — a targeted benchmark measuring handle
+lookup scaling would inform the decision.
+
+## What's After Finalization
 
 Build the userspace on the verified kernel. The design docs
 (`design/userspace.md`, `design/architecture.md`) describe the target. Key
@@ -102,4 +137,5 @@ or extend existing ones, never break the existing interface.
 ## Session Resume
 
 To resume work: read this file, check `git log --oneline` for recent commits,
-read MEMORY.md for cross-session context.
+read MEMORY.md for cross-session context. The next task is item 1 above: direct
+process switch for IPC.
