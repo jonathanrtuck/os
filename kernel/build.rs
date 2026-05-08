@@ -92,6 +92,13 @@ fn build_init(kernel_dir: &std::path::Path) {
     println!("cargo:rerun-if-changed=../userspace/servers/test-presenter/src/main.rs");
     println!("cargo:rerun-if-changed=../userspace/servers/test-presenter/link.ld");
     println!("cargo:rerun-if-changed=../userspace/servers/test-presenter/Cargo.toml");
+    println!("cargo:rerun-if-changed=../userspace/editors/text/src/main.rs");
+    println!("cargo:rerun-if-changed=../userspace/editors/text/src/lib.rs");
+    println!("cargo:rerun-if-changed=../userspace/editors/text/link.ld");
+    println!("cargo:rerun-if-changed=../userspace/editors/text/Cargo.toml");
+    println!("cargo:rerun-if-changed=../userspace/servers/test-editor/src/main.rs");
+    println!("cargo:rerun-if-changed=../userspace/servers/test-editor/link.ld");
+    println!("cargo:rerun-if-changed=../userspace/servers/test-editor/Cargo.toml");
 }
 
 fn build_userspace_crate(crate_dir: &std::path::Path, crate_name: &str, output: &std::path::Path) {
@@ -260,6 +267,16 @@ const SERVICES: &[ServiceDef] = &[
         name: "test-presenter",
         dir: "../userspace/servers/test-presenter",
         crate_name: "test-presenter",
+    },
+    ServiceDef {
+        name: "editor.text",
+        dir: "../userspace/editors/text",
+        crate_name: "text-editor",
+    },
+    ServiceDef {
+        name: "test-editor",
+        dir: "../userspace/servers/test-editor",
+        crate_name: "test-editor",
     },
 ];
 

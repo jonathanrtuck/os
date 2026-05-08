@@ -1,0 +1,362 @@
+//! Text editor — content-type-specific input-to-write translator.
+//!
+//! Receives key events from the presenter via sync call/reply and
+//! translates them into document edit operations. Navigation (arrow
+//! keys, Home/End) stays in the presenter because cursor movement
+//! requires layout knowledge. The editor handles only content
+//! mutations:
+//!
+//! - Printable character insertion
+//! - Backspace (delete before cursor)
+//! - Delete (delete after cursor)
+//! - Return (insert newline)
+//! - Tab (insert 4 spaces)
+//! - Shift+Tab (dedent — remove up to 4 leading spaces)
+//!
+//! The editor holds a read-only shared memory mapping of the document
+//! buffer (hardware-enforced via page table attributes). All writes go
+//! through sync IPC to the document service.
+//!
+//! Bootstrap handles:
+//!   Handle 2: name service endpoint
+
+#![no_std]
+#![no_main]
+
+use core::{
+    panic::PanicInfo,
+    sync::atomic::{AtomicU32, Ordering},
+};
+
+use abi::types::{Handle, Rights};
+use ipc::server::{Dispatch, Incoming};
+
+const HANDLE_NS_EP: Handle = Handle(2);
+
+const EXIT_CONSOLE_NOT_FOUND: u32 = 0xE301;
+const EXIT_DOC_NOT_FOUND: u32 = 0xE302;
+const EXIT_DOC_SETUP: u32 = 0xE303;
+const EXIT_DOC_MAP: u32 = 0xE304;
+const EXIT_ENDPOINT_CREATE: u32 = 0xE305;
+
+// ── Document buffer access ───────────────────────────────────────
+
+fn read_doc_header(doc_va: usize) -> (usize, usize) {
+    loop {
+        // SAFETY: doc_va + DOC_OFFSET_GENERATION points to an AtomicU32
+        // within the 64-byte document header. The document service
+        // stores with Release ordering; we Acquire-load to see all
+        // prior writes (content_len, cursor_pos, content bytes).
+        let generation = unsafe {
+            let ptr = (doc_va + document_service::DOC_OFFSET_GENERATION) as *const AtomicU32;
+
+            (*ptr).load(Ordering::Acquire)
+        };
+        // SAFETY: doc_va is a valid RO mapping of the document buffer.
+        // Offsets 0..8 = content_len, 8..16 = cursor_pos.
+        let content_len = unsafe { core::ptr::read_volatile(doc_va as *const u64) as usize };
+        let cursor_pos = unsafe { core::ptr::read_volatile((doc_va + 8) as *const u64) as usize };
+        let generation2 = unsafe {
+            let ptr = (doc_va + document_service::DOC_OFFSET_GENERATION) as *const AtomicU32;
+
+            (*ptr).load(Ordering::Acquire)
+        };
+
+        if generation == generation2 {
+            return (content_len, cursor_pos);
+        }
+
+        core::hint::spin_loop();
+    }
+}
+
+fn doc_content(doc_va: usize, len: usize) -> &'static [u8] {
+    // SAFETY: doc_va + DOC_HEADER_SIZE is the start of content bytes.
+    // The document service maintains len as the valid content length.
+    unsafe {
+        core::slice::from_raw_parts(
+            (doc_va + document_service::DOC_HEADER_SIZE) as *const u8,
+            len,
+        )
+    }
+}
+
+fn line_start(text: &[u8], pos: usize) -> usize {
+    let mut i = pos;
+
+    while i > 0 && text[i - 1] != b'\n' {
+        i -= 1;
+    }
+
+    i
+}
+
+// ── Document service IPC helpers ─────────────────────────────────
+
+fn doc_insert(doc_ep: Handle, offset: u64, data: &[u8]) -> Option<document_service::EditReply> {
+    let header = document_service::InsertHeader { offset };
+    let mut payload = [0u8; ipc::MAX_PAYLOAD];
+
+    header.write_to(&mut payload);
+
+    let copy_len = data.len().min(document_service::InsertHeader::MAX_INLINE);
+
+    payload[document_service::InsertHeader::SIZE..document_service::InsertHeader::SIZE + copy_len]
+        .copy_from_slice(&data[..copy_len]);
+
+    let total = document_service::InsertHeader::SIZE + copy_len;
+
+    match ipc::client::call_simple(doc_ep, document_service::INSERT, &payload[..total]) {
+        Ok((0, reply_data)) => Some(document_service::EditReply::read_from(&reply_data)),
+        _ => None,
+    }
+}
+
+fn doc_delete(doc_ep: Handle, offset: u64, len: u64) -> Option<document_service::EditReply> {
+    let req = document_service::DeleteRequest { offset, len };
+    let mut data = [0u8; document_service::DeleteRequest::SIZE];
+
+    req.write_to(&mut data);
+
+    match ipc::client::call_simple(doc_ep, document_service::DELETE, &data) {
+        Ok((0, reply_data)) => Some(document_service::EditReply::read_from(&reply_data)),
+        _ => None,
+    }
+}
+
+// ── Editor server ────────────────────────────────────────────────
+
+struct TextEditor {
+    doc_ep: Handle,
+    doc_va: usize,
+
+    #[allow(dead_code)]
+    console_ep: Handle,
+}
+
+impl TextEditor {
+    fn handle_key(&mut self, dispatch: text_editor::KeyDispatch) -> text_editor::KeyReply {
+        let (content_len, cursor_pos) = read_doc_header(self.doc_va);
+
+        match dispatch.key_code {
+            text_editor::HID_KEY_BACKSPACE => {
+                if cursor_pos > 0
+                    && let Some(reply) = doc_delete(self.doc_ep, (cursor_pos - 1) as u64, 1)
+                {
+                    return text_editor::KeyReply {
+                        action: text_editor::ACTION_DELETED,
+                        _pad: 0,
+                        content_len: reply.content_len,
+                        cursor_pos: reply.cursor_pos,
+                    };
+                }
+
+                self.no_op(content_len, cursor_pos)
+            }
+            text_editor::HID_KEY_DELETE => {
+                if cursor_pos < content_len
+                    && let Some(reply) = doc_delete(self.doc_ep, cursor_pos as u64, 1)
+                {
+                    return text_editor::KeyReply {
+                        action: text_editor::ACTION_DELETED,
+                        _pad: 0,
+                        content_len: reply.content_len,
+                        cursor_pos: reply.cursor_pos,
+                    };
+                }
+
+                self.no_op(content_len, cursor_pos)
+            }
+            text_editor::HID_KEY_RETURN => {
+                if let Some(reply) = doc_insert(self.doc_ep, cursor_pos as u64, b"\n") {
+                    text_editor::KeyReply {
+                        action: text_editor::ACTION_INSERTED,
+                        _pad: 0,
+                        content_len: reply.content_len,
+                        cursor_pos: reply.cursor_pos,
+                    }
+                } else {
+                    self.no_op(content_len, cursor_pos)
+                }
+            }
+            text_editor::HID_KEY_TAB => {
+                if dispatch.modifiers & text_editor::MOD_SHIFT != 0 {
+                    self.handle_dedent(content_len, cursor_pos)
+                } else {
+                    self.handle_tab(content_len, cursor_pos)
+                }
+            }
+            _ => {
+                if dispatch.character != 0
+                    && dispatch.character != 0x08
+                    && let Some(reply) =
+                        doc_insert(self.doc_ep, cursor_pos as u64, &[dispatch.character])
+                {
+                    return text_editor::KeyReply {
+                        action: text_editor::ACTION_INSERTED,
+                        _pad: 0,
+                        content_len: reply.content_len,
+                        cursor_pos: reply.cursor_pos,
+                    };
+                }
+
+                self.no_op(content_len, cursor_pos)
+            }
+        }
+    }
+
+    fn handle_tab(&mut self, content_len: usize, cursor_pos: usize) -> text_editor::KeyReply {
+        if let Some(reply) = doc_insert(self.doc_ep, cursor_pos as u64, b"    ") {
+            text_editor::KeyReply {
+                action: text_editor::ACTION_INSERTED,
+                _pad: 0,
+                content_len: reply.content_len,
+                cursor_pos: reply.cursor_pos,
+            }
+        } else {
+            self.no_op(content_len, cursor_pos)
+        }
+    }
+
+    fn handle_dedent(&mut self, content_len: usize, cursor_pos: usize) -> text_editor::KeyReply {
+        if content_len == 0 {
+            return self.no_op(content_len, cursor_pos);
+        }
+
+        let text = doc_content(self.doc_va, content_len);
+        let ls = line_start(text, cursor_pos);
+        let mut spaces = 0usize;
+
+        while spaces < 4 && ls + spaces < content_len && text[ls + spaces] == b' ' {
+            spaces += 1;
+        }
+
+        if spaces > 0
+            && let Some(reply) = doc_delete(self.doc_ep, ls as u64, spaces as u64)
+        {
+            return text_editor::KeyReply {
+                action: text_editor::ACTION_DELETED,
+                _pad: 0,
+                content_len: reply.content_len,
+                cursor_pos: reply.cursor_pos,
+            };
+        }
+
+        self.no_op(content_len, cursor_pos)
+    }
+
+    fn no_op(&self, content_len: usize, cursor_pos: usize) -> text_editor::KeyReply {
+        text_editor::KeyReply {
+            action: text_editor::ACTION_NONE,
+            _pad: 0,
+            content_len: content_len as u64,
+            cursor_pos: cursor_pos as u64,
+        }
+    }
+}
+
+// ── Dispatch ─────────────────────────────────────────────────────
+
+impl Dispatch for TextEditor {
+    fn dispatch(&mut self, msg: Incoming<'_>) {
+        match msg.method {
+            text_editor::DISPATCH_KEY => {
+                if msg.payload.len() < text_editor::KeyDispatch::SIZE {
+                    let _ = msg.reply_error(ipc::STATUS_INVALID);
+
+                    return;
+                }
+
+                let dispatch = text_editor::KeyDispatch::read_from(msg.payload);
+                let reply = self.handle_key(dispatch);
+                let mut data = [0u8; text_editor::KeyReply::SIZE];
+
+                reply.write_to(&mut data);
+
+                let _ = msg.reply_ok(&data, &[]);
+            }
+            _ => {
+                let _ = msg.reply_error(ipc::STATUS_UNSUPPORTED);
+            }
+        }
+    }
+}
+
+// ── Entry point ──────────────────────────────────────────────────
+
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text.boot")]
+extern "C" fn _start() -> ! {
+    let console_ep = match name::watch(HANDLE_NS_EP, b"console") {
+        Ok(h) => h,
+        Err(_) => abi::thread::exit(EXIT_CONSOLE_NOT_FOUND),
+    };
+
+    console::write(console_ep, b"text-editor: starting\n");
+
+    let doc_ep = match name::watch(HANDLE_NS_EP, b"document") {
+        Ok(h) => h,
+        Err(_) => {
+            console::write(console_ep, b"text-editor: doc not found\n");
+
+            abi::thread::exit(EXIT_DOC_NOT_FOUND);
+        }
+    };
+    // Call SETUP on document service to get the doc buffer VMO.
+    let doc_va = {
+        let mut buf = [0u8; ipc::message::MSG_SIZE];
+
+        ipc::message::write_request(&mut buf, document_service::SETUP, &[]);
+
+        let mut recv_handles = [0u32; 4];
+        let result = match abi::ipc::call(
+            doc_ep,
+            &mut buf,
+            ipc::message::HEADER_SIZE,
+            &[],
+            &mut recv_handles,
+        ) {
+            Ok(r) => r,
+            Err(_) => abi::thread::exit(EXIT_DOC_SETUP),
+        };
+        let header = ipc::message::Header::read_from(&buf);
+
+        if header.is_error() || result.handle_count == 0 {
+            abi::thread::exit(EXIT_DOC_SETUP);
+        }
+
+        let vmo = Handle(recv_handles[0]);
+        let ro = Rights(Rights::READ.0 | Rights::MAP.0);
+
+        match abi::vmo::map(vmo, 0, ro) {
+            Ok(va) => va,
+            Err(_) => abi::thread::exit(EXIT_DOC_MAP),
+        }
+    };
+
+    console::write(console_ep, b"text-editor: doc connected\n");
+
+    let own_ep = match abi::ipc::endpoint_create() {
+        Ok(h) => h,
+        Err(_) => abi::thread::exit(EXIT_ENDPOINT_CREATE),
+    };
+
+    name::register(HANDLE_NS_EP, b"editor.text", own_ep);
+
+    console::write(console_ep, b"text-editor: ready\n");
+
+    let mut server = TextEditor {
+        doc_ep,
+        doc_va,
+        console_ep,
+    };
+
+    ipc::server::serve(own_ep, &mut server);
+
+    abi::thread::exit(0);
+}
+
+#[panic_handler]
+fn panic(_info: &PanicInfo) -> ! {
+    abi::thread::exit(0xDEAD);
+}

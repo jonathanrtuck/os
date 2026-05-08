@@ -5,124 +5,91 @@
 //!   Handle 1: stack VMO (refcount anchor)
 //!   Handle 2: endpoint to recv on (created by init)
 //!
-//! Protocol: Register, Lookup, Unregister (see name::lib).
+//! Protocol: Register, Lookup, Unregister, Watch (see name::lib).
 
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+extern crate heap;
+
+use alloc::vec::Vec;
 use core::panic::PanicInfo;
 
 use abi::types::Handle;
 use ipc::server::{self, Dispatch, Incoming};
 
 const HANDLE_ENDPOINT: Handle = Handle(2);
-const MAX_ENTRIES: usize = 16;
-const MAX_WATCHERS: usize = 8;
 const NAME_LEN: usize = 32;
 
 struct Entry {
     name: [u8; NAME_LEN],
     endpoint_handle: u32,
-    occupied: bool,
 }
 
 struct Watcher {
     name: [u8; NAME_LEN],
     reply_cap: u32,
-    occupied: bool,
 }
 
 struct NameTable {
-    entries: [Entry; MAX_ENTRIES],
-    count: usize,
-    watchers: [Watcher; MAX_WATCHERS],
+    entries: Vec<Entry>,
+    watchers: Vec<Watcher>,
 }
 
 impl NameTable {
-    const fn new() -> Self {
-        const EMPTY_ENTRY: Entry = Entry {
-            name: [0; NAME_LEN],
-            endpoint_handle: 0,
-            occupied: false,
-        };
-        const EMPTY_WATCHER: Watcher = Watcher {
-            name: [0; NAME_LEN],
-            reply_cap: 0,
-            occupied: false,
-        };
-
+    fn new() -> Self {
         Self {
-            entries: [EMPTY_ENTRY; MAX_ENTRIES],
-            count: 0,
-            watchers: [EMPTY_WATCHER; MAX_WATCHERS],
+            entries: Vec::new(),
+            watchers: Vec::new(),
         }
     }
 
     fn register(&mut self, name: &[u8; NAME_LEN], ep_handle: u32) -> Result<(), u16> {
-        for entry in &self.entries {
-            if entry.occupied && entry.name == *name {
-                return Err(ipc::STATUS_ALREADY_EXISTS);
-            }
+        if self.entries.iter().any(|e| e.name == *name) {
+            return Err(ipc::STATUS_ALREADY_EXISTS);
         }
 
-        for entry in &mut self.entries {
-            if !entry.occupied {
-                entry.name = *name;
-                entry.endpoint_handle = ep_handle;
-                entry.occupied = true;
+        self.entries.push(Entry {
+            name: *name,
+            endpoint_handle: ep_handle,
+        });
 
-                self.count += 1;
-
-                return Ok(());
-            }
-        }
-
-        Err(ipc::STATUS_NO_SPACE)
+        Ok(())
     }
 
     fn lookup(&self, name: &[u8; NAME_LEN]) -> Option<u32> {
-        for entry in &self.entries {
-            if entry.occupied && entry.name == *name {
-                return Some(entry.endpoint_handle);
-            }
-        }
-
-        None
+        self.entries
+            .iter()
+            .find(|e| e.name == *name)
+            .map(|e| e.endpoint_handle)
     }
 
     fn unregister(&mut self, name: &[u8; NAME_LEN]) -> bool {
-        for entry in &mut self.entries {
-            if entry.occupied && entry.name == *name {
-                let _ = abi::handle::close(Handle(entry.endpoint_handle));
+        if let Some(pos) = self.entries.iter().position(|e| e.name == *name) {
+            let entry = self.entries.swap_remove(pos);
 
-                entry.occupied = false;
+            let _ = abi::handle::close(Handle(entry.endpoint_handle));
 
-                self.count -= 1;
-
-                return true;
-            }
+            true
+        } else {
+            false
         }
-
-        false
     }
 
-    fn add_watcher(&mut self, name: &[u8; NAME_LEN], reply_cap: u32) -> bool {
-        for w in &mut self.watchers {
-            if !w.occupied {
-                w.name = *name;
-                w.reply_cap = reply_cap;
-                w.occupied = true;
-
-                return true;
-            }
-        }
-
-        false
+    fn add_watcher(&mut self, name: &[u8; NAME_LEN], reply_cap: u32) {
+        self.watchers.push(Watcher {
+            name: *name,
+            reply_cap,
+        });
     }
 
     fn notify_watchers(&mut self, name: &[u8; NAME_LEN], ep_handle: u32) {
-        for w in &mut self.watchers {
-            if w.occupied && w.name == *name {
+        let mut i = 0;
+
+        while i < self.watchers.len() {
+            if self.watchers[i].name == *name {
+                let w = self.watchers.swap_remove(i);
                 let dup = abi::handle::dup(Handle(ep_handle), abi::types::Rights::ALL);
 
                 if let Ok(h) = dup {
@@ -137,8 +104,8 @@ impl NameTable {
                         &[h.0],
                     );
                 }
-
-                w.occupied = false;
+            } else {
+                i += 1;
             }
         }
     }
@@ -235,9 +202,7 @@ impl Dispatch for NameTable {
                     None => {
                         let deferred = msg.defer();
 
-                        if !self.add_watcher(&req.name, deferred.reply_cap) {
-                            let _ = deferred.reply_error(ipc::STATUS_NO_SPACE);
-                        }
+                        self.add_watcher(&req.name, deferred.reply_cap);
                     }
                 }
             }

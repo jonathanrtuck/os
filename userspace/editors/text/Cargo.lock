@@ -7,6 +7,18 @@ name = "abi"
 version = "0.1.0"
 
 [[package]]
+name = "blk"
+version = "0.1.0"
+dependencies = [
+ "abi",
+ "console",
+ "init",
+ "ipc",
+ "name",
+ "virtio",
+]
+
+[[package]]
 name = "console"
 version = "0.1.0"
 dependencies = [
@@ -14,6 +26,22 @@ dependencies = [
  "ipc",
  "name",
 ]
+
+[[package]]
+name = "document-service"
+version = "0.1.0"
+dependencies = [
+ "abi",
+ "console",
+ "heap",
+ "ipc",
+ "name",
+ "store-service",
+]
+
+[[package]]
+name = "fs"
+version = "0.1.0"
 
 [[package]]
 name = "heap"
@@ -46,15 +74,36 @@ dependencies = [
 ]
 
 [[package]]
-name = "render"
+name = "store"
+version = "0.1.0"
+dependencies = [
+ "fs",
+]
+
+[[package]]
+name = "store-service"
+version = "0.1.0"
+dependencies = [
+ "abi",
+ "blk",
+ "console",
+ "fs",
+ "heap",
+ "init",
+ "ipc",
+ "name",
+ "store",
+]
+
+[[package]]
+name = "text-editor"
 version = "0.1.0"
 dependencies = [
  "abi",
  "console",
- "init",
+ "document-service",
  "ipc",
  "name",
- "virtio",
 ]
 
 [[package]]

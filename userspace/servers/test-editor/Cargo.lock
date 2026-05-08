@@ -96,5 +96,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "test-editor"
+version = "0.1.0"
+dependencies = [
+ "abi",
+ "console",
+ "document-service",
+ "ipc",
+ "name",
+ "text-editor",
+]
+
+[[package]]
+name = "text-editor"
+version = "0.1.0"
+dependencies = [
+ "abi",
+ "console",
+ "document-service",
+ "ipc",
+ "name",
+]
+
+[[package]]
 name = "virtio"
 version = "0.1.0"

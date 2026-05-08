@@ -288,7 +288,6 @@ pub enum FaultAction {
 pub fn register_handlers() {
     set_fault_handler(fault_dispatch);
     set_device_irq_handler(device_irq_dispatch);
-
     #[cfg(target_os = "none")]
     set_syscall_handler(syscall_slow_dispatch);
 }

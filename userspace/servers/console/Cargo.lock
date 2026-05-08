@@ -16,6 +16,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "heap"
+version = "0.1.0"
+dependencies = [
+ "abi",
+]
+
+[[package]]
 name = "ipc"
 version = "0.1.0"
 dependencies = [
@@ -27,5 +34,6 @@ name = "name"
 version = "0.1.0"
 dependencies = [
  "abi",
+ "heap",
  "ipc",
 ]

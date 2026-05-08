@@ -331,10 +331,11 @@ new library tests (1,045 total workspace tests).
    `userspace/servers/layout/`
 
 4. **Presenter** — DONE. Compiles document state + layout results into a scene
-   graph. Reads document buffer (RO VMO), writes viewport state (seqlock) to
-   the layout service, reads layout results (seqlock), builds a scene graph tree:
-   root (background) → viewport (clips children, margin offset) → per-line Glyphs
-   nodes (monospace ShapedGlyph arrays) + cursor node (ROLE_CARET rectangle).
+   graph. Reads document buffer (RO VMO), writes viewport state (seqlock) to the
+   layout service, reads layout results (seqlock), builds a scene graph tree:
+   root (background) → viewport (clips children, margin offset) → per-line
+   Glyphs nodes (monospace ShapedGlyph arrays) + cursor node (ROLE_CARET
+   rectangle).
 
    Protocol: SETUP (returns scene graph VMO handle), BUILD (triggers full
    rebuild, replies with stats), GET_INFO (current state). Scene graph VMO uses
@@ -346,9 +347,35 @@ new library tests (1,045 total workspace tests).
    cursor node (ROLE_CARET with background color), GET_INFO metadata.
    `userspace/servers/presenter/`
 
-**What's next:**
+5. **Text editor** — DONE. Content-type leaf node: receives key events from the
+   presenter via sync call/reply, translates into document edit operations.
+   Handles printable characters, backspace, delete, return, tab (4 spaces),
+   shift+tab (dedent). Multi-hop RPC: presenter → editor → document → store.
+   Reads cursor position from the shared document buffer (RO mapping).
 
-5. Text editor (editing key events → document write requests)
+   Protocol: DISPATCH_KEY (KeyDispatch: key_code, modifiers, character →
+   KeyReply: action, content_len, cursor_pos). USB HID key codes for special
+   keys (0x28=Return, 0x2A=Backspace, 0x2B=Tab, 0x4C=Delete).
+
+   Integration test (test-editor): 7 test cases — character insert, backspace,
+   multi-character sequence, return/newline, tab, shift+tab dedent, forward
+   delete with cursor positioning. All verified via shared memory document
+   buffer reads. `userspace/editors/text/`
+
+**Infrastructure improvements (Phase 4.5):**
+
+- **Name service** — eliminated fixed-size limits. `MAX_ENTRIES` (16) and
+  `MAX_WATCHERS` (8) replaced with `Vec`-backed dynamic storage via heap
+  allocator. The old limits were a latent boot deadlock: with 15+ services all
+  starting concurrently, >8 would simultaneously WATCH for names that hadn't
+  registered yet, silently failing and hanging the dependency chain.
+
+**What's next: Phase 5 — Integration**
+
+1. Full boot (all services start, presenter builds initial scene graph,
+   compositor renders)
+2. Visual baseline (screenshot comparison against old prototype)
+3. Input-to-pixels (type text → see it rendered, full pipeline exercised)
 
 ## Session Resume
 

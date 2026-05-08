@@ -1,0 +1,24 @@
+[package]
+name = "text-editor"
+version = "0.1.0"
+edition = "2024"
+license = "Unlicense"
+
+[features]
+default = ["service"]
+service = [
+    "dep:abi",
+    "dep:console",
+    "dep:document-service",
+    "dep:ipc",
+    "dep:name",
+]
+
+[dependencies]
+abi = { path = "../../abi", optional = true }
+console = { path = "../../servers/console", optional = true }
+document-service = { path = "../../servers/document", optional = true }
+ipc = { path = "../../ipc", optional = true }
+name = { path = "../../servers/name", optional = true }
+
+[workspace]
