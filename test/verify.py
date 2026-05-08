@@ -145,12 +145,44 @@ def assert_pixel_at(img: Image.Image, args: str, tolerance: int) -> bool:
         return False
 
 
+def assert_region_variance(img: Image.Image, args: str, tolerance: int) -> bool:
+    """Check that a rectangular region has many distinct pixel values.
+
+    Proves anti-aliased glyph rendering (many shades) vs solid-color
+    rectangles (1-2 colors). Args: X,Y,W,H,MIN_COLORS
+    """
+    parts = args.split(",")
+    if len(parts) != 5:
+        print(f"FAIL: region_variance expects X,Y,W,H,MIN_COLORS, got '{args}'")
+        return False
+
+    x, y, w, h, min_colors = (int(p) for p in parts)
+    colors = set()
+
+    for py in range(y, min(y + h, img.height)):
+        for px in range(x, min(x + w, img.width)):
+            r, g, b = img.getpixel((px, py))[:3]
+            colors.add((r, g, b))
+
+    if len(colors) >= min_colors:
+        print(f"PASS: region ({x},{y},{w},{h}) has {len(colors)} distinct colors "
+              f"(>= {min_colors})")
+        return True
+    else:
+        print(f"FAIL: region ({x},{y},{w},{h}) has only {len(colors)} distinct colors "
+              f"(expected >= {min_colors})")
+        for c in sorted(colors)[:10]:
+            print(f"  {c}")
+        return False
+
+
 ASSERTIONS = {
     "solid_color": assert_solid_color,
     "uniform": assert_uniform,
     "not_black": assert_not_black,
     "dimensions": assert_dimensions,
     "pixel_at": assert_pixel_at,
+    "region_variance": assert_region_variance,
 }
 
 

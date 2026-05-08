@@ -25,6 +25,7 @@ pub const HEADER_SIZE: usize = 8;
 pub const CMD_COMPILE_LIBRARY: u16 = 0x0001;
 pub const CMD_GET_FUNCTION: u16 = 0x0002;
 pub const CMD_CREATE_RENDER_PIPELINE: u16 = 0x0010;
+pub const CMD_CREATE_SAMPLER: u16 = 0x0013;
 pub const CMD_CREATE_TEXTURE: u16 = 0x0020;
 pub const CMD_UPLOAD_TEXTURE: u16 = 0x0021;
 pub const CMD_DESTROY_OBJECT: u16 = 0x00FF;
@@ -48,7 +49,12 @@ pub const DRAWABLE_HANDLE: u32 = 0xFFFF_FFFF;
 
 // ── Pixel formats ───────────────────────────────────────────────────
 
+pub const PIXEL_FORMAT_R8_UNORM: u8 = 3;
 pub const PIXEL_FORMAT_BGRA8_SRGB: u8 = 6;
+
+// ── Texture usage flags ────────────────────────────────────────────
+
+pub const TEX_USAGE_SHADER_READ: u8 = 0x01;
 
 // ── Load/store actions ──────────────────────────────────────────────
 
@@ -246,6 +252,70 @@ impl<'a> CommandWriter<'a> {
     pub fn present_and_commit(&mut self, frame_id: u32) {
         self.header(CMD_PRESENT_AND_COMMIT, 4);
         self.put_u32(frame_id);
+    }
+
+    pub fn create_texture(
+        &mut self,
+        handle: u32,
+        width: u16,
+        height: u16,
+        pixel_format: u8,
+        texture_type: u8,
+        sample_count: u8,
+        usage: u8,
+    ) {
+        self.header(CMD_CREATE_TEXTURE, 12);
+        self.put_u32(handle);
+        self.put_u16(width);
+        self.put_u16(height);
+        self.put_u8(pixel_format);
+        self.put_u8(texture_type);
+        self.put_u8(sample_count);
+        self.put_u8(usage);
+    }
+
+    pub fn upload_texture_region(
+        &mut self,
+        handle: u32,
+        x: u16,
+        y: u16,
+        width: u16,
+        height: u16,
+        bytes_per_row: u32,
+        data: &[u8],
+    ) {
+        self.header(CMD_UPLOAD_TEXTURE, 16 + data.len() as u32);
+        self.put_u32(handle);
+        self.put_u16(x);
+        self.put_u16(y);
+        self.put_u16(width);
+        self.put_u16(height);
+        self.put_u32(bytes_per_row);
+        self.put_bytes(data);
+    }
+
+    pub fn create_sampler(&mut self, handle: u32, min_filter: u8, mag_filter: u8) {
+        self.header(CMD_CREATE_SAMPLER, 8);
+        self.put_u32(handle);
+        self.put_u8(min_filter);
+        self.put_u8(mag_filter);
+        self.put_u16(0);
+    }
+
+    pub fn set_fragment_texture(&mut self, handle: u32, index: u8) {
+        self.header(CMD_SET_FRAGMENT_TEXTURE, 8);
+        self.put_u32(handle);
+        self.put_u8(index);
+        self.put_u8(0);
+        self.put_u16(0);
+    }
+
+    pub fn set_fragment_sampler(&mut self, handle: u32, index: u8) {
+        self.header(CMD_SET_FRAGMENT_SAMPLER, 8);
+        self.put_u32(handle);
+        self.put_u8(index);
+        self.put_u8(0);
+        self.put_u16(0);
     }
 
     pub fn set_scissor(&mut self, x: u32, y: u32, w: u32, h: u32) {

@@ -17,12 +17,18 @@
 extern crate alloc;
 extern crate heap;
 
+mod atlas;
+
 use core::panic::PanicInfo;
 
 use abi::types::{Handle, Rights};
+use atlas::GlyphAtlas;
+use fonts::rasterize::{RasterBuffer, RasterScratch};
 use ipc::server::{Dispatch, Incoming};
 use render::CommandWriter;
 use scene::{Content, NULL, NodeId, SCENE_SIZE, SceneReader};
+
+static FONT_DATA: &[u8] = include_bytes!("../../../../../assets/jetbrains-mono.ttf");
 
 const HANDLE_NS_EP: Handle = Handle(2);
 const HANDLE_VIRTIO_VMO: Handle = Handle(3);
@@ -32,7 +38,7 @@ const PAGE_SIZE: usize = virtio::PAGE_SIZE;
 
 // ── MSL shader source ───────────────────────────────────────────────
 
-const MSL_SOLID_COLOR: &[u8] = b"
+const MSL_SOURCE: &[u8] = b"
 #include <metal_stdlib>
 using namespace metal;
 
@@ -44,26 +50,54 @@ struct VertexIn {
 
 struct VertexOut {
     float4 position [[position]];
+    float2 texCoord;
     float4 color;
 };
 
 vertex VertexOut vertex_main(VertexIn in [[stage_in]]) {
     VertexOut out;
     out.position = float4(in.position, 0.0, 1.0);
+    out.texCoord = in.texCoord;
     out.color = in.color;
     return out;
 }
 
-fragment float4 fragment_main(VertexOut in [[stage_in]]) {
-    return in.color;
+float3 srgb_to_linear(float3 s) {
+    return select(
+        pow((s + 0.055) / 1.055, float3(2.4)),
+        s / 12.92,
+        s <= 0.04045
+    );
+}
+
+fragment float4 fragment_solid(VertexOut in [[stage_in]]) {
+    return float4(srgb_to_linear(in.color.rgb), in.color.a);
+}
+
+fragment float4 fragment_glyph(
+    VertexOut in [[stage_in]],
+    texture2d<float> tex [[texture(0)]],
+    sampler s [[sampler(0)]]
+) {
+    float alpha = tex.sample(s, in.texCoord).r;
+    return float4(srgb_to_linear(in.color.rgb), in.color.a * alpha);
 }
 ";
 
 const COLOR_WRITE_ALL: u8 = 0xF;
 const H_LIBRARY: u32 = 1;
 const H_VERTEX_FN: u32 = 2;
-const H_FRAGMENT_FN: u32 = 3;
-const H_PIPELINE: u32 = 10;
+const H_FRAG_SOLID: u32 = 3;
+const H_FRAG_GLYPH: u32 = 4;
+const PIPE_SOLID: u32 = 10;
+const PIPE_GLYPH: u32 = 11;
+const TEX_ATLAS: u32 = 20;
+const SAMPLER_NEAREST: u32 = 30;
+
+const FILTER_NEAREST: u8 = 0;
+
+const ATLAS_WIDTH: u16 = 2048;
+const ATLAS_HEIGHT: u16 = 2048;
 
 const SETUP_BUF_PAGES: usize = 2;
 const RENDER_BUF_PAGES: usize = 4;
@@ -81,7 +115,8 @@ struct Vertex {
 const VERTEX_SIZE: usize = core::mem::size_of::<Vertex>();
 
 struct FrameBuilder {
-    verts: alloc::vec::Vec<u8>,
+    solid_verts: alloc::vec::Vec<u8>,
+    glyph_verts: alloc::vec::Vec<u8>,
     display_w: f32,
     display_h: f32,
 }
@@ -89,13 +124,57 @@ struct FrameBuilder {
 impl FrameBuilder {
     fn new(display_w: f32, display_h: f32) -> Self {
         Self {
-            verts: alloc::vec::Vec::with_capacity(256 * 6 * VERTEX_SIZE),
+            solid_verts: alloc::vec::Vec::with_capacity(256 * 6 * VERTEX_SIZE),
+            glyph_verts: alloc::vec::Vec::with_capacity(512 * 6 * VERTEX_SIZE),
             display_w,
             display_h,
         }
     }
 
+    fn push_solid_quad(&mut self, quad: &[Vertex; 6]) {
+        // SAFETY: Vertex is repr(C) with known layout.
+        let bytes =
+            unsafe { core::slice::from_raw_parts(quad.as_ptr() as *const u8, 6 * VERTEX_SIZE) };
+
+        self.solid_verts.extend_from_slice(bytes);
+    }
+
     fn push_rect(&mut self, px: f32, py: f32, pw: f32, ph: f32, color: scene::Color) {
+        let quad = self.make_quad(px, py, pw, ph, color, [0.0; 2], [0.0; 2]);
+
+        self.push_solid_quad(&quad);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn push_glyph_quad(
+        &mut self,
+        px: f32,
+        py: f32,
+        pw: f32,
+        ph: f32,
+        color: scene::Color,
+        uv0: [f32; 2],
+        uv1: [f32; 2],
+    ) {
+        let quad = self.make_quad(px, py, pw, ph, color, uv0, uv1);
+        // SAFETY: Vertex is repr(C) with known layout.
+        let bytes =
+            unsafe { core::slice::from_raw_parts(quad.as_ptr() as *const u8, 6 * VERTEX_SIZE) };
+
+        self.glyph_verts.extend_from_slice(bytes);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn make_quad(
+        &self,
+        px: f32,
+        py: f32,
+        pw: f32,
+        ph: f32,
+        color: scene::Color,
+        uv0: [f32; 2],
+        uv1: [f32; 2],
+    ) -> [Vertex; 6] {
         let x0 = px / self.display_w * 2.0 - 1.0;
         let y0 = 1.0 - py / self.display_h * 2.0;
         let x1 = (px + pw) / self.display_w * 2.0 - 1.0;
@@ -106,48 +185,47 @@ impl FrameBuilder {
             color.b as f32 / 255.0,
             color.a as f32 / 255.0,
         ];
-        let zero = [0.0f32; 2];
-        let quad = [
+
+        [
             Vertex {
                 position: [x0, y0],
-                tex_coord: zero,
+                tex_coord: [uv0[0], uv0[1]],
                 color: c,
             },
             Vertex {
                 position: [x0, y1],
-                tex_coord: zero,
+                tex_coord: [uv0[0], uv1[1]],
                 color: c,
             },
             Vertex {
                 position: [x1, y1],
-                tex_coord: zero,
+                tex_coord: [uv1[0], uv1[1]],
                 color: c,
             },
             Vertex {
                 position: [x0, y0],
-                tex_coord: zero,
+                tex_coord: [uv0[0], uv0[1]],
                 color: c,
             },
             Vertex {
                 position: [x1, y1],
-                tex_coord: zero,
+                tex_coord: [uv1[0], uv1[1]],
                 color: c,
             },
             Vertex {
                 position: [x1, y0],
-                tex_coord: zero,
+                tex_coord: [uv1[0], uv0[1]],
                 color: c,
             },
-        ];
-        // SAFETY: Vertex is repr(C) with known layout.
-        let bytes =
-            unsafe { core::slice::from_raw_parts(quad.as_ptr() as *const u8, 6 * VERTEX_SIZE) };
-
-        self.verts.extend_from_slice(bytes);
+        ]
     }
 
-    fn vertex_count(&self) -> usize {
-        self.verts.len() / VERTEX_SIZE
+    fn solid_count(&self) -> usize {
+        self.solid_verts.len() / VERTEX_SIZE
+    }
+
+    fn glyph_count(&self) -> usize {
+        self.glyph_verts.len() / VERTEX_SIZE
     }
 }
 
@@ -182,22 +260,47 @@ fn setup_pipeline(
 ) {
     // SAFETY: setup_dma.va is a valid DMA allocation of buf_size bytes.
     let dma_buf = unsafe { core::slice::from_raw_parts_mut(setup_dma.va as *mut u8, buf_size) };
+
+    // Batch 1: compile shaders, get functions, create both pipelines.
     let len = {
         let mut w = CommandWriter::new(dma_buf);
 
-        w.compile_library(H_LIBRARY, MSL_SOLID_COLOR);
+        w.compile_library(H_LIBRARY, MSL_SOURCE);
         w.get_function(H_VERTEX_FN, H_LIBRARY, b"vertex_main");
-        w.get_function(H_FRAGMENT_FN, H_LIBRARY, b"fragment_main");
+        w.get_function(H_FRAG_SOLID, H_LIBRARY, b"fragment_solid");
+        w.get_function(H_FRAG_GLYPH, H_LIBRARY, b"fragment_glyph");
+
         w.create_render_pipeline(
-            H_PIPELINE,
+            PIPE_SOLID,
             H_VERTEX_FN,
-            H_FRAGMENT_FN,
+            H_FRAG_SOLID,
             false,
             COLOR_WRITE_ALL,
             false,
             1,
             render::PIXEL_FORMAT_BGRA8_SRGB,
         );
+        w.create_render_pipeline(
+            PIPE_GLYPH,
+            H_VERTEX_FN,
+            H_FRAG_GLYPH,
+            true,
+            COLOR_WRITE_ALL,
+            false,
+            1,
+            render::PIXEL_FORMAT_BGRA8_SRGB,
+        );
+
+        w.create_texture(
+            TEX_ATLAS,
+            ATLAS_WIDTH,
+            ATLAS_HEIGHT,
+            render::PIXEL_FORMAT_R8_UNORM,
+            0,
+            1,
+            render::TEX_USAGE_SHADER_READ,
+        );
+        w.create_sampler(SAMPLER_NEAREST, FILTER_NEAREST, FILTER_NEAREST);
 
         w.len()
     };
@@ -214,12 +317,25 @@ fn setup_pipeline(
 
 // ── Scene graph → vertex data ───────────────────────────────────────
 
+const RASTER_BUF_SIZE: usize = 100 * 100;
+const ATLAS_W_F: f32 = atlas::ATLAS_WIDTH as f32;
+const ATLAS_H_F: f32 = atlas::ATLAS_HEIGHT as f32;
+
+struct WalkContext {
+    atlas: alloc::boxed::Box<GlyphAtlas>,
+    scratch: alloc::boxed::Box<RasterScratch>,
+    raster_buf: alloc::vec::Vec<u8>,
+    ascent_px: f32,
+    atlas_dirty: bool,
+}
+
 fn walk_node(
     reader: &SceneReader<'_>,
     node_id: NodeId,
     parent_x: f32,
     parent_y: f32,
     frame: &mut FrameBuilder,
+    ctx: &mut WalkContext,
     is_root: bool,
 ) {
     let node = reader.node(node_id);
@@ -236,17 +352,32 @@ fn walk_node(
         color,
         glyphs,
         glyph_count,
-        ..
+        font_size,
+        style_id,
     } = node.content
     {
         let glyph_data = reader.shaped_glyphs(glyphs, glyph_count);
+        let baseline_y = y + ctx.ascent_px;
         let mut gx = x;
 
         for glyph in glyph_data {
             let advance = glyph.x_advance as f32 / 65536.0;
 
-            if advance > 0.0 {
-                frame.push_rect(gx + 1.0, y + 3.0, advance - 2.0, h - 6.0, color);
+            if glyph.glyph_id > 0 {
+                let entry = lookup_or_rasterize(ctx, glyph.glyph_id, font_size, style_id);
+
+                if let Some(e) = entry.filter(|e| e.width > 0 && e.height > 0) {
+                    let px = gx + e.bearing_x as f32;
+                    let py = baseline_y - e.bearing_y as f32;
+                    let pw = e.width as f32;
+                    let ph = e.height as f32;
+                    let u0 = e.u as f32 / ATLAS_W_F;
+                    let v0 = e.v as f32 / ATLAS_H_F;
+                    let u1 = (e.u + e.width) as f32 / ATLAS_W_F;
+                    let v1 = (e.v + e.height) as f32 / ATLAS_H_F;
+
+                    frame.push_glyph_quad(px, py, pw, ph, color, [u0, v0], [u1, v1]);
+                }
             }
 
             gx += advance;
@@ -256,9 +387,79 @@ fn walk_node(
     let mut child = node.first_child;
 
     while child != NULL {
-        walk_node(reader, child, x, y, frame, false);
+        walk_node(reader, child, x, y, frame, ctx, false);
 
         child = reader.node(child).next_sibling;
+    }
+}
+
+fn lookup_or_rasterize(
+    ctx: &mut WalkContext,
+    glyph_id: u16,
+    font_size: u16,
+    style_id: u32,
+) -> Option<atlas::AtlasEntry> {
+    if let Some(entry) = ctx.atlas.lookup(glyph_id, font_size, style_id) {
+        return Some(*entry);
+    }
+
+    let mut buf = RasterBuffer {
+        data: &mut ctx.raster_buf,
+        width: 100,
+        height: 100,
+    };
+
+    let metrics = fonts::rasterize::rasterize(
+        FONT_DATA,
+        glyph_id,
+        font_size,
+        &mut buf,
+        &mut ctx.scratch,
+        1,
+    )?;
+
+    if metrics.width == 0 || metrics.height == 0 {
+        ctx.atlas.insert(
+            glyph_id,
+            font_size,
+            style_id,
+            atlas::AtlasEntry {
+                u: 0,
+                v: 0,
+                width: 0,
+                height: 0,
+                bearing_x: 0,
+                bearing_y: 0,
+            },
+        );
+
+        return Some(atlas::AtlasEntry {
+            u: 0,
+            v: 0,
+            width: 0,
+            height: 0,
+            bearing_x: metrics.bearing_x as i16,
+            bearing_y: metrics.bearing_y as i16,
+        });
+    }
+
+    let ok = ctx.atlas.pack(
+        glyph_id,
+        font_size,
+        style_id,
+        metrics.width as u16,
+        metrics.height as u16,
+        metrics.bearing_x as i16,
+        metrics.bearing_y as i16,
+        &ctx.raster_buf[..metrics.width as usize * metrics.height as usize],
+    );
+
+    if ok {
+        ctx.atlas_dirty = true;
+
+        ctx.atlas.lookup(glyph_id, font_size, style_id).copied()
+    } else {
+        None
     }
 }
 
@@ -266,15 +467,12 @@ fn walk_node(
 
 struct Compositor {
     device: virtio::Device,
-    #[allow(dead_code)]
     setup_vq: virtio::Virtqueue,
     render_vq: virtio::Virtqueue,
     irq_event: Handle,
 
-    #[allow(dead_code)]
     setup_dma: init::DmaBuf,
     render_dma: init::DmaBuf,
-    #[allow(dead_code)]
     setup_buf_size: usize,
     render_buf_size: usize,
 
@@ -284,9 +482,82 @@ struct Compositor {
 
     scene_va: usize,
     frame_count: u32,
+    walk_ctx: WalkContext,
+    atlas_upload_y: u16,
 }
 
 impl Compositor {
+    fn upload_atlas_dirty(&mut self) {
+        if !self.walk_ctx.atlas_dirty {
+            return;
+        }
+
+        let atlas = &self.walk_ctx.atlas;
+        let max_y = atlas.row_y + atlas.row_h;
+
+        if max_y == 0 {
+            return;
+        }
+
+        let start_y = self.atlas_upload_y;
+        let height = max_y - start_y;
+
+        if height == 0 {
+            self.walk_ctx.atlas_dirty = false;
+
+            return;
+        }
+
+        // SAFETY: setup_dma.va is a valid DMA allocation of setup_buf_size bytes.
+        let dma_buf = unsafe {
+            core::slice::from_raw_parts_mut(self.setup_dma.va as *mut u8, self.setup_buf_size)
+        };
+
+        let row_bytes = atlas::ATLAS_WIDTH as usize;
+        let cmd_overhead = render::HEADER_SIZE + 16;
+        let max_data_per_submit = self.setup_buf_size - cmd_overhead;
+        let max_rows_per_submit = max_data_per_submit / row_bytes;
+
+        let mut y = start_y;
+
+        while y < max_y {
+            let rows = ((max_y - y) as usize).min(max_rows_per_submit) as u16;
+            let src_offset = y as usize * row_bytes;
+            let pixel_count = rows as usize * row_bytes;
+            let pixel_data = &atlas.pixels[src_offset..src_offset + pixel_count];
+
+            let len = {
+                let mut w = CommandWriter::new(dma_buf);
+
+                w.upload_texture_region(
+                    TEX_ATLAS,
+                    0,
+                    y,
+                    atlas::ATLAS_WIDTH as u16,
+                    rows,
+                    row_bytes as u32,
+                    pixel_data,
+                );
+
+                w.len()
+            };
+
+            submit_and_wait(
+                &self.device,
+                &mut self.setup_vq,
+                self.irq_event,
+                render::VIRTQ_SETUP,
+                self.setup_dma.pa,
+                len,
+            );
+
+            y += rows;
+        }
+
+        self.atlas_upload_y = atlas.row_y;
+        self.walk_ctx.atlas_dirty = false;
+    }
+
     fn render_frame(&mut self) {
         if self.scene_va == 0 {
             return;
@@ -306,7 +577,17 @@ impl Compositor {
         let bg = root_node.background;
         let mut frame = FrameBuilder::new(self.display_w as f32, self.display_h as f32);
 
-        walk_node(&reader, root, 0.0, 0.0, &mut frame, true);
+        walk_node(
+            &reader,
+            root,
+            0.0,
+            0.0,
+            &mut frame,
+            &mut self.walk_ctx,
+            true,
+        );
+
+        self.upload_atlas_dirty();
 
         // SAFETY: render_dma.va is a valid DMA allocation of render_buf_size bytes.
         let dma_buf = unsafe {
@@ -328,13 +609,23 @@ impl Compositor {
                 bg.b as f32 / 255.0,
                 1.0,
             );
-            w.set_render_pipeline(H_PIPELINE);
 
-            let vc = frame.vertex_count();
+            let sc = frame.solid_count();
 
-            if vc > 0 {
-                w.set_vertex_bytes(0, &frame.verts);
-                w.draw_primitives(render::PRIM_TRIANGLE, 0, vc as u32);
+            if sc > 0 {
+                w.set_render_pipeline(PIPE_SOLID);
+                w.set_vertex_bytes(0, &frame.solid_verts);
+                w.draw_primitives(render::PRIM_TRIANGLE, 0, sc as u32);
+            }
+
+            let gc = frame.glyph_count();
+
+            if gc > 0 {
+                w.set_render_pipeline(PIPE_GLYPH);
+                w.set_fragment_texture(TEX_ATLAS, 0);
+                w.set_fragment_sampler(SAMPLER_NEAREST, 0);
+                w.set_vertex_bytes(0, &frame.glyph_verts);
+                w.draw_primitives(render::PRIM_TRIANGLE, 0, gc as u32);
             }
 
             w.end_render_pass();
@@ -521,6 +812,22 @@ extern "C" fn _start() -> ! {
 
     console::write(console_ep, b"render: pipeline ready\n");
 
+    let fm = fonts::metrics::font_metrics(FONT_DATA);
+    let ascent_px = match fm {
+        Some(ref m) => m.ascent as f32 * 14.0 / m.units_per_em as f32,
+        None => 11.0,
+    };
+
+    let walk_ctx = WalkContext {
+        atlas: GlyphAtlas::new_boxed(),
+        scratch: alloc::boxed::Box::new(RasterScratch::zeroed()),
+        raster_buf: alloc::vec![0u8; RASTER_BUF_SIZE],
+        ascent_px,
+        atlas_dirty: false,
+    };
+
+    console::write(console_ep, b"render: atlas ready\n");
+
     let own_ep = match abi::ipc::endpoint_create() {
         Ok(h) => h,
         Err(_) => abi::thread::exit(11),
@@ -543,6 +850,8 @@ extern "C" fn _start() -> ! {
         display_h,
         scene_va: 0,
         frame_count: 0,
+        walk_ctx,
+        atlas_upload_y: 0,
     };
 
     ipc::server::serve(own_ep, &mut compositor);

@@ -39,6 +39,31 @@ const EXIT_EDITOR_NOT_FOUND: u32 = 0xE20F;
 
 const MAX_GLYPHS_PER_LINE: usize = 256;
 
+static FONT_DATA: &[u8] = include_bytes!("../../../../assets/jetbrains-mono.ttf");
+
+fn build_cmap_table() -> [u16; 128] {
+    let mut table = [0u16; 128];
+
+    for ch in 0u8..128 {
+        table[ch as usize] = fonts::metrics::glyph_id_for_char(FONT_DATA, ch as char).unwrap_or(0);
+    }
+
+    table
+}
+
+fn compute_char_advance() -> f32 {
+    let gid = fonts::metrics::glyph_id_for_char(FONT_DATA, 'M').unwrap_or(0);
+
+    if let (Some((advance_fu, _)), Some(fm)) = (
+        fonts::metrics::glyph_h_metrics(FONT_DATA, gid),
+        fonts::metrics::font_metrics(FONT_DATA),
+    ) {
+        return advance_fu as f32 * presenter_service::FONT_SIZE as f32 / fm.units_per_em as f32;
+    }
+
+    presenter_service::CHAR_WIDTH_F32
+}
+
 // ── Layout results parsing (from seqlock-read buffer) ────────────
 
 fn parse_layout_header(buf: &[u8]) -> layout_service::LayoutHeader {
@@ -69,6 +94,8 @@ struct Presenter {
     display_height: u32,
 
     glyphs: [ShapedGlyph; MAX_GLYPHS_PER_LINE],
+    cmap: [u16; 128],
+    char_width: f32,
 
     last_line_count: u32,
     last_cursor_line: u32,
@@ -92,9 +119,7 @@ impl Presenter {
             viewport_height: self
                 .display_height
                 .saturating_sub(presenter_service::MARGIN_TOP as u32 * 2),
-            char_width_fp: layout_service::ViewportState::encode_char_width(
-                presenter_service::CHAR_WIDTH_F32,
-            ),
+            char_width_fp: layout_service::ViewportState::encode_char_width(self.char_width),
             line_height: presenter_service::LINE_HEIGHT,
         };
         let mut buf = [0u8; layout_service::ViewportState::SIZE];
@@ -184,7 +209,7 @@ impl Presenter {
         // Per-line glyph nodes.
         let mut cursor_line: u32 = 0;
         let mut cursor_col: u32 = 0;
-        let char_advance = (presenter_service::CHAR_WIDTH_F32 * 65536.0) as i32;
+        let char_advance = (self.char_width * 65536.0) as i32;
 
         for i in 0..line_count.min(scene::MAX_NODES - 4) {
             let line_info = parse_line_at(&self.results_buf, i);
@@ -208,8 +233,14 @@ impl Presenter {
             let glyph_count = line_len.min(MAX_GLYPHS_PER_LINE);
 
             for (j, &byte) in line_bytes.iter().enumerate().take(glyph_count) {
+                let gid = if byte < 128 {
+                    self.cmap[byte as usize]
+                } else {
+                    0
+                };
+
                 self.glyphs[j] = ShapedGlyph {
-                    glyph_id: byte as u16,
+                    glyph_id: gid,
                     _pad: 0,
                     x_advance: char_advance,
                     x_offset: 0,
@@ -520,6 +551,8 @@ extern "C" fn _start() -> ! {
             x_offset: 0,
             y_offset: 0,
         }; MAX_GLYPHS_PER_LINE],
+        cmap: build_cmap_table(),
+        char_width: compute_char_advance(),
         last_line_count: 0,
         last_cursor_line: 0,
         last_cursor_col: 0,
