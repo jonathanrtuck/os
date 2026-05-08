@@ -107,6 +107,71 @@ fn build_userspace_crate(crate_dir: &std::path::Path, crate_name: &str, output: 
     assert!(status.success(), "rust-objcopy failed on {crate_name}");
 }
 
+struct ElfMeta {
+    data_offset: u32,
+    mem_size: u32,
+}
+
+fn read_elf_meta(elf_path: &std::path::Path) -> ElfMeta {
+    let data = std::fs::read(elf_path)
+        .unwrap_or_else(|e| panic!("failed to read ELF {}: {e}", elf_path.display()));
+
+    assert!(data.len() >= 64, "ELF too small");
+    assert!(&data[0..4] == b"\x7fELF", "not an ELF file");
+
+    let e_phoff = u64::from_le_bytes(data[32..40].try_into().unwrap()) as usize;
+    let e_phentsize = u16::from_le_bytes(data[54..56].try_into().unwrap()) as usize;
+    let e_phnum = u16::from_le_bytes(data[56..58].try_into().unwrap()) as usize;
+
+    let mut rx_end: u64 = 0;
+    let mut rw_vaddr: u64 = 0;
+    let mut rw_memsz: u64 = 0;
+    let mut has_rw = false;
+
+    for i in 0..e_phnum {
+        let off = e_phoff + i * e_phentsize;
+        let p_type = u32::from_le_bytes(data[off..off + 4].try_into().unwrap());
+
+        if p_type != 1 {
+            continue; // PT_LOAD = 1
+        }
+
+        let p_flags = u32::from_le_bytes(data[off + 4..off + 8].try_into().unwrap());
+        let p_vaddr = u64::from_le_bytes(data[off + 16..off + 24].try_into().unwrap());
+        let p_memsz = u64::from_le_bytes(data[off + 40..off + 48].try_into().unwrap());
+
+        if p_flags & 2 != 0 {
+            // PF_W — writable segment
+            rw_vaddr = p_vaddr;
+            rw_memsz = p_memsz;
+            has_rw = true;
+        } else {
+            rx_end = p_vaddr + p_memsz;
+        }
+    }
+
+    if !has_rw || rw_memsz == 0 {
+        return ElfMeta {
+            data_offset: 0,
+            mem_size: 0,
+        };
+    }
+
+    let code_va = 0x0020_0000u64;
+    let data_offset = (rw_vaddr - code_va) as u32;
+    let mem_size = (rw_vaddr + rw_memsz - code_va) as u32;
+
+    assert!(
+        data_offset.is_multiple_of(SVPK_PAGE_SIZE as u32),
+        "RW segment not page-aligned: {data_offset:#x} (rodata ends at {rx_end:#x})"
+    );
+
+    ElfMeta {
+        data_offset,
+        mem_size,
+    }
+}
+
 struct ServiceDef {
     name: &'static str,
     dir: &'static str,
@@ -148,7 +213,7 @@ const SERVICES: &[ServiceDef] = &[
 
 fn build_service_pack(kernel_dir: &std::path::Path, out_dir: &std::path::Path) {
     let pack_bin = out_dir.join("services.bin");
-    let mut binaries: Vec<(&str, Vec<u8>)> = Vec::new();
+    let mut entries: Vec<(&str, Vec<u8>, ElfMeta)> = Vec::new();
 
     for svc in SERVICES {
         let svc_dir = kernel_dir.join(svc.dir);
@@ -156,13 +221,19 @@ fn build_service_pack(kernel_dir: &std::path::Path, out_dir: &std::path::Path) {
 
         build_userspace_crate(&svc_dir, svc.crate_name, &svc_bin);
 
+        let elf_path = svc_dir.join(format!(
+            "target/aarch64-unknown-none/release/{}",
+            svc.crate_name
+        ));
+        let meta = read_elf_meta(&elf_path);
+
         let data = std::fs::read(&svc_bin)
             .unwrap_or_else(|e| panic!("failed to read {}: {e}", svc_bin.display()));
 
-        binaries.push((svc.name, data));
+        entries.push((svc.name, data, meta));
     }
 
-    let pack = build_svpk_pack(&binaries);
+    let pack = build_svpk_pack(&entries);
 
     std::fs::write(&pack_bin, &pack)
         .unwrap_or_else(|e| panic!("failed to write {}: {e}", pack_bin.display()));
@@ -182,13 +253,13 @@ const SVPK_PAGE_SIZE: usize = 16384;
 const SVPK_HEADER_SIZE: usize = 16;
 const SVPK_ENTRY_SIZE: usize = 48;
 
-fn build_svpk_pack(services: &[(&str, Vec<u8>)]) -> Vec<u8> {
+fn build_svpk_pack(services: &[(&str, Vec<u8>, ElfMeta)]) -> Vec<u8> {
     let entry_table_size = services.len() * SVPK_ENTRY_SIZE;
     let first_binary_offset = align_up(SVPK_HEADER_SIZE + entry_table_size, SVPK_PAGE_SIZE);
     let mut offsets = Vec::with_capacity(services.len());
     let mut current = first_binary_offset;
 
-    for (_, binary) in services {
+    for (_, binary, _) in services {
         offsets.push(current);
         current = align_up(current + binary.len(), SVPK_PAGE_SIZE);
     }
@@ -196,28 +267,25 @@ fn build_svpk_pack(services: &[(&str, Vec<u8>)]) -> Vec<u8> {
     let total_size = current;
     let mut pack = vec![0u8; total_size];
 
-    // Header
     pack[0..4].copy_from_slice(SVPK_MAGIC);
     pack[4..8].copy_from_slice(&SVPK_VERSION.to_le_bytes());
     pack[8..12].copy_from_slice(&(services.len() as u32).to_le_bytes());
     pack[12..16].copy_from_slice(&(total_size as u32).to_le_bytes());
 
-    // Entries + binary data
-    for (i, (name, binary)) in services.iter().enumerate() {
+    for (i, (name, binary, meta)) in services.iter().enumerate() {
         let entry_offset = SVPK_HEADER_SIZE + i * SVPK_ENTRY_SIZE;
-        // Name (32 bytes, null-padded)
         let name_bytes = name.as_bytes();
         let name_len = name_bytes.len().min(32);
 
         pack[entry_offset..entry_offset + name_len].copy_from_slice(&name_bytes[..name_len]);
-        // offset, size, entry_point, flags
+        // offset, size, data_offset, mem_size
         pack[entry_offset + 32..entry_offset + 36]
             .copy_from_slice(&(offsets[i] as u32).to_le_bytes());
         pack[entry_offset + 36..entry_offset + 40]
             .copy_from_slice(&(binary.len() as u32).to_le_bytes());
-        // entry_point = 0, flags = 0 (already zeroed)
+        pack[entry_offset + 40..entry_offset + 44].copy_from_slice(&meta.data_offset.to_le_bytes());
+        pack[entry_offset + 44..entry_offset + 48].copy_from_slice(&meta.mem_size.to_le_bytes());
 
-        // Binary data
         pack[offsets[i]..offsets[i] + binary.len()].copy_from_slice(binary);
     }
 

@@ -24,6 +24,8 @@ impl PackHeader {
 pub struct PackEntry {
     pub offset: u32,
     pub size: u32,
+    pub data_offset: u32,
+    pub mem_size: u32,
 }
 
 fn read_u32_le(data: &[u8], offset: usize) -> u32 {
@@ -63,6 +65,8 @@ pub fn read_entry(data: &[u8], index: usize) -> PackEntry {
     PackEntry {
         offset: read_u32_le(data, offset + 32),
         size: read_u32_le(data, offset + 36),
+        data_offset: read_u32_le(data, offset + 40),
+        mem_size: read_u32_le(data, offset + 44),
     }
 }
 

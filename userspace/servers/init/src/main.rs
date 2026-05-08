@@ -93,20 +93,58 @@ fn spawn_service(
         return Err(SyscallError::InvalidArgument);
     }
 
-    let code_size = (entry.size as usize + PAGE_SIZE).next_multiple_of(PAGE_SIZE);
-    let code_vmo = abi::vmo::create(code_size, 0)?;
     let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
-    let mut code_mapping = abi::vmo::map_region(code_vmo, code_size, rw)?;
-
-    code_mapping[..entry.size as usize]
-        .copy_from_slice(&pack_data[entry.offset as usize..binary_end]);
-
-    drop(code_mapping);
-
+    let rx = Rights(Rights::READ.0 | Rights::EXECUTE.0 | Rights::MAP.0);
     let space = abi::space::create()?;
-    let rwx = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::EXECUTE.0 | Rights::MAP.0);
 
-    abi::vmo::map_into(code_vmo, space, SERVICE_CODE_VA, rwx)?;
+    let code_vmo = if entry.data_offset > 0 {
+        let text_size = (entry.data_offset as usize).next_multiple_of(PAGE_SIZE);
+        let text_vmo = abi::vmo::create(text_size, 0)?;
+        let mut text_mapping = abi::vmo::map_region(text_vmo, text_size, rw)?;
+        let copy_len = (entry.size as usize).min(text_size);
+
+        text_mapping[..copy_len]
+            .copy_from_slice(&pack_data[entry.offset as usize..entry.offset as usize + copy_len]);
+
+        drop(text_mapping);
+        abi::vmo::map_into(text_vmo, space, SERVICE_CODE_VA, rx)?;
+
+        let data_va = SERVICE_CODE_VA + entry.data_offset as usize;
+        let data_size =
+            (entry.mem_size as usize - entry.data_offset as usize).next_multiple_of(PAGE_SIZE);
+
+        if data_size > 0 {
+            let data_vmo = abi::vmo::create(data_size, 0)?;
+
+            if entry.size as usize > entry.data_offset as usize {
+                let data_file_len = entry.size as usize - entry.data_offset as usize;
+                let mut data_mapping = abi::vmo::map_region(data_vmo, data_size, rw)?;
+
+                data_mapping[..data_file_len].copy_from_slice(
+                    &pack_data[entry.offset as usize + entry.data_offset as usize
+                        ..entry.offset as usize + entry.size as usize],
+                );
+
+                drop(data_mapping);
+            }
+
+            abi::vmo::map_into(data_vmo, space, data_va, rw)?;
+        }
+
+        text_vmo
+    } else {
+        let code_size = (entry.size as usize).next_multiple_of(PAGE_SIZE);
+        let code_vmo = abi::vmo::create(code_size, 0)?;
+        let mut code_mapping = abi::vmo::map_region(code_vmo, code_size, rw)?;
+
+        code_mapping[..entry.size as usize]
+            .copy_from_slice(&pack_data[entry.offset as usize..binary_end]);
+
+        drop(code_mapping);
+        abi::vmo::map_into(code_vmo, space, SERVICE_CODE_VA, rx)?;
+
+        code_vmo
+    };
 
     let stack_vmo = abi::vmo::create(STACK_SIZE, 0)?;
 
