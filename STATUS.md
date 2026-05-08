@@ -308,9 +308,30 @@ new library tests (1,045 total workspace tests).
    snapshot chain), redo verified, cursor move + GET_INFO verified.
    `userspace/servers/document/`
 
+3. **Layout service** — DONE. Pure function: (document content + viewport
+   state - font metrics) → positioned text runs. Reads the document buffer (RO
+   shared VMO via SETUP to document service). Receives viewport state via
+   seqlock register in a shared VMO (from presenter). Computes line breaks using
+   the `layout` library (`layout_paragraph` with `WordBreaker`). Writes results
+   to a seqlock-protected layout results VMO.
+
+   Protocol: SETUP (presenter sends viewport VMO, receives layout results VMO),
+   RECOMPUTE (trigger relayout, replies when done), GET_INFO (current stats).
+   Results VMO: seqlock generation (8 bytes) + LayoutHeader (16 bytes) +
+   LineInfo array (20 bytes/line, max 512 lines). ViewportState: scroll_y,
+   viewport_width, viewport_height, char_width (fixed-point 16.16), line_height.
+
+   Protocol tests (10 host-target tests): round-trip serialization for all wire
+   types, size constraints, page-fit verification.
+
+   Integration test (test-layout): waits for test-document to finish, clears
+   document, inserts multi-line text ("Hello world\nSecond line\nThird"),
+   verifies 3-line layout (byte offsets, positions, widths). Appends text,
+   re-layouts, verifies 4-line layout. Verifies GET_INFO metadata.
+   `userspace/servers/layout/`
+
 **What's next:**
 
-3. Layout service (document + viewport → positioned text runs)
 4. Presenter (event loop, input routing, scene graph builder)
 5. Text editor (editing key events → document write requests)
 

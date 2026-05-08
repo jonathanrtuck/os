@@ -1,0 +1,28 @@
+[package]
+name = "layout-service"
+version = "0.1.0"
+edition = "2024"
+license = "Unlicense"
+
+[features]
+default = ["service"]
+service = [
+    "dep:abi",
+    "dep:console",
+    "dep:document-service",
+    "dep:heap",
+    "dep:ipc",
+    "dep:layout",
+    "dep:name",
+]
+
+[dependencies]
+abi = { path = "../../abi", optional = true }
+console = { path = "../console", optional = true }
+document-service = { path = "../document", optional = true }
+heap = { path = "../../heap", optional = true }
+ipc = { path = "../../ipc", optional = true }
+layout = { path = "../../../libraries/layout", optional = true }
+name = { path = "../name", optional = true }
+
+[workspace]

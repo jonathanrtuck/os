@@ -1,0 +1,15 @@
+[package]
+name = "test-layout"
+version = "0.1.0"
+edition = "2024"
+license = "Unlicense"
+
+[dependencies]
+abi = { path = "../../abi" }
+console = { path = "../console" }
+document-service = { path = "../document" }
+ipc = { path = "../../ipc" }
+layout-service = { path = "../layout" }
+name = { path = "../name" }
+
+[workspace]

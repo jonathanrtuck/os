@@ -78,6 +78,13 @@ fn build_init(kernel_dir: &std::path::Path) {
     println!("cargo:rerun-if-changed=../userspace/servers/document/src/lib.rs");
     println!("cargo:rerun-if-changed=../userspace/servers/document/link.ld");
     println!("cargo:rerun-if-changed=../userspace/servers/document/Cargo.toml");
+    println!("cargo:rerun-if-changed=../userspace/servers/layout/src/main.rs");
+    println!("cargo:rerun-if-changed=../userspace/servers/layout/src/lib.rs");
+    println!("cargo:rerun-if-changed=../userspace/servers/layout/link.ld");
+    println!("cargo:rerun-if-changed=../userspace/servers/layout/Cargo.toml");
+    println!("cargo:rerun-if-changed=../userspace/servers/test-layout/src/main.rs");
+    println!("cargo:rerun-if-changed=../userspace/servers/test-layout/link.ld");
+    println!("cargo:rerun-if-changed=../userspace/servers/test-layout/Cargo.toml");
 }
 
 fn build_userspace_crate(crate_dir: &std::path::Path, crate_name: &str, output: &std::path::Path) {
@@ -226,6 +233,16 @@ const SERVICES: &[ServiceDef] = &[
         name: "test-document",
         dir: "../userspace/servers/test-document",
         crate_name: "test-document",
+    },
+    ServiceDef {
+        name: "layout",
+        dir: "../userspace/servers/layout",
+        crate_name: "layout-service",
+    },
+    ServiceDef {
+        name: "test-layout",
+        dir: "../userspace/servers/test-layout",
+        crate_name: "test-layout",
     },
 ];
 
