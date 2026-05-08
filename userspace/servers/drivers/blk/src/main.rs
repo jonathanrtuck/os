@@ -416,7 +416,7 @@ extern "C" fn _start() -> ! {
         has_flush,
     };
 
-    let console_ep = match name::lookup_wait(HANDLE_NS_EP, b"console", 1000) {
+    let console_ep = match name::watch(HANDLE_NS_EP, b"console") {
         Ok(h) => h,
         Err(_) => abi::thread::exit(8),
     };

@@ -23,6 +23,7 @@ pub const STATUS_INVALID: u16 = 3;
 pub const STATUS_NO_SPACE: u16 = 4;
 pub const STATUS_IO_ERROR: u16 = 5;
 pub const STATUS_UNSUPPORTED: u16 = 6;
+pub const STATUS_CORRUPT: u16 = 7;
 
 pub mod message;
 pub mod register;

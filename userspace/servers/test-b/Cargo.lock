@@ -14,8 +14,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "protocol"
+name = "name"
 version = "0.1.0"
+dependencies = [
+ "abi",
+ "ipc",
+]
 
 [[package]]
 name = "test-b"
@@ -23,5 +27,5 @@ version = "0.1.0"
 dependencies = [
  "abi",
  "ipc",
- "protocol",
+ "name",
 ]

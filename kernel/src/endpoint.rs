@@ -2,24 +2,24 @@
 //!
 //! Endpoints implement synchronous RPC: a client calls (blocks), the server
 //! recvs the highest-priority call, processes it, and replies via a one-shot
-//! reply cap. Handle transfer is staged in the PendingCall and installed by
-//! the syscall layer.
+//! reply cap.
 //!
-//! The send queue uses per-priority ring buffers — 4 levels × 2 slots = 8
-//! total. O(1) enqueue, O(4) dequeue (check each level). The send queue is
-//! heap-allocated (Box) to keep the Endpoint struct small for slab placement.
-
-use alloc::boxed::Box;
+//! The send queue stores only caller ThreadIds — message data and handles
+//! live in the caller's Thread struct (IpcCallState). This eliminates the
+//! fixed send-queue depth limit (each entry is 4 bytes, not ~200) and the
+//! TOCTOU window (message is copied into kernel memory at syscall entry).
+//!
+//! The queue uses per-priority ring buffers — 4 levels × 16 slots = 64
+//! total. O(1) enqueue, O(4) dequeue (check each level).
 
 use crate::{
     config,
     frame::ring::FixedRing,
-    handle::Handle,
     types::{EndpointId, EventId, Priority, SyscallError, ThreadId},
 };
 
 const IPC_BUCKETS: usize = 4;
-const SLOTS_PER_BUCKET: usize = config::MAX_PENDING_PER_ENDPOINT / IPC_BUCKETS;
+const SLOTS_PER_BUCKET: usize = 16;
 
 const IPC_BUCKET_REPRESENTATIVE: [Priority; IPC_BUCKETS] = [
     Priority::IDLE,
@@ -29,7 +29,7 @@ const IPC_BUCKET_REPRESENTATIVE: [Priority; IPC_BUCKETS] = [
 ];
 
 struct PrioritySendQueue {
-    rings: [FixedRing<PendingCall, SLOTS_PER_BUCKET>; IPC_BUCKETS],
+    rings: [FixedRing<ThreadId, SLOTS_PER_BUCKET>; IPC_BUCKETS],
     total: u16,
 }
 
@@ -41,10 +41,10 @@ impl PrioritySendQueue {
         }
     }
 
-    fn enqueue(&mut self, call: PendingCall) -> Result<(), SyscallError> {
-        let bucket = call.priority.ipc_bucket();
+    fn enqueue(&mut self, caller: ThreadId, priority: Priority) -> Result<(), SyscallError> {
+        let bucket = priority.ipc_bucket();
 
-        if !self.rings[bucket].push(call) {
+        if !self.rings[bucket].push(caller) {
             return Err(SyscallError::BufferFull);
         }
 
@@ -53,12 +53,12 @@ impl PrioritySendQueue {
         Ok(())
     }
 
-    fn dequeue_highest(&mut self) -> Option<PendingCall> {
+    fn dequeue_highest(&mut self) -> Option<ThreadId> {
         for bucket in (0..IPC_BUCKETS).rev() {
-            if let Some(call) = self.rings[bucket].pop() {
+            if let Some(tid) = self.rings[bucket].pop() {
                 self.total -= 1;
 
-                return Some(call);
+                return Some(tid);
             }
         }
 
@@ -175,45 +175,23 @@ const SLOT_BITS: u32 = 4;
 const SLOT_MASK: u64 = (1 << SLOT_BITS) - 1;
 
 const _: () = {
-    assert!(config::MAX_PENDING_PER_ENDPOINT <= (1 << SLOT_BITS));
+    assert!(config::MAX_ACTIVE_REPLIES <= (1 << SLOT_BITS));
 };
 
-/// A pending call waiting in the send queue.
-#[derive(Debug)]
-pub struct PendingCall {
-    pub caller: ThreadId,
-    pub priority: Priority,
-    pub message: Message,
-    pub handles: [Option<Handle>; config::MAX_IPC_HANDLES],
-    pub handle_count: u8,
-    pub badge: u32,
-    pub reply_buf: usize,
-    pub recv_handles_ptr: usize,
-}
-
 /// Tracks a reply cap issued to a server, linking it to the blocked caller.
+/// Message data and reply addresses are in the caller's Thread (IpcCallState).
 #[derive(Clone, Copy)]
 struct ActiveReply {
     cap_id: ReplyCapId,
     caller: ThreadId,
-    reply_buf: usize,
-    recv_handles_ptr: usize,
 }
 
-/// A caller whose call was canceled — includes handles to recover.
-pub struct CanceledCaller {
-    pub thread_id: ThreadId,
-    pub handles: [Option<Handle>; config::MAX_IPC_HANDLES],
-    pub handle_count: u8,
-}
-
-/// Result of closing an endpoint's peer end. Separates callers with recoverable
-/// handles (from the send queue) from callers awaiting reply and recv waiters
-/// (which don't have handles to recover).
+/// Result of closing an endpoint's peer end. Lists all threads that were
+/// blocked on this endpoint and must be woken with PeerClosed.
 pub struct CloseResult {
-    canceled: [Option<CanceledCaller>; config::MAX_PENDING_PER_ENDPOINT],
-    canceled_len: usize,
-    reply_callers: [ThreadId; config::MAX_PENDING_PER_ENDPOINT],
+    send_callers: [ThreadId; SLOTS_PER_BUCKET * IPC_BUCKETS],
+    send_caller_len: usize,
+    reply_callers: [ThreadId; config::MAX_ACTIVE_REPLIES],
     reply_caller_len: usize,
     recv_waiters: [ThreadId; config::MAX_RECV_WAITERS],
     recv_waiter_len: usize,
@@ -222,21 +200,17 @@ pub struct CloseResult {
 impl CloseResult {
     fn new() -> Self {
         CloseResult {
-            canceled: [const { None }; config::MAX_PENDING_PER_ENDPOINT],
-            canceled_len: 0,
-            reply_callers: [ThreadId(0); config::MAX_PENDING_PER_ENDPOINT],
+            send_callers: [ThreadId(0); SLOTS_PER_BUCKET * IPC_BUCKETS],
+            send_caller_len: 0,
+            reply_callers: [ThreadId(0); config::MAX_ACTIVE_REPLIES],
             reply_caller_len: 0,
             recv_waiters: [ThreadId(0); config::MAX_RECV_WAITERS],
             recv_waiter_len: 0,
         }
     }
 
-    pub fn canceled_callers(&self) -> &[Option<CanceledCaller>] {
-        &self.canceled[..self.canceled_len]
-    }
-
-    pub fn canceled_callers_mut(&mut self) -> &mut [Option<CanceledCaller>] {
-        &mut self.canceled[..self.canceled_len]
+    pub fn send_callers(&self) -> &[ThreadId] {
+        &self.send_callers[..self.send_caller_len]
     }
 
     pub fn reply_callers(&self) -> &[ThreadId] {
@@ -248,9 +222,9 @@ impl CloseResult {
     }
 
     pub fn all_thread_ids(&self) -> impl Iterator<Item = ThreadId> + '_ {
-        self.canceled[..self.canceled_len]
+        self.send_callers[..self.send_caller_len]
             .iter()
-            .filter_map(|c| c.as_ref().map(|c| c.thread_id))
+            .copied()
             .chain(self.reply_callers[..self.reply_caller_len].iter().copied())
             .chain(self.recv_waiters[..self.recv_waiter_len].iter().copied())
     }
@@ -263,8 +237,8 @@ impl CloseResult {
 /// for calls). Thread blocking/waking is the syscall layer's concern.
 pub struct Endpoint {
     pub id: EndpointId,
-    send_queue: Box<PrioritySendQueue>,
-    active_replies: [Option<ActiveReply>; config::MAX_PENDING_PER_ENDPOINT],
+    send_queue: PrioritySendQueue,
+    active_replies: [Option<ActiveReply>; config::MAX_ACTIVE_REPLIES],
     active_reply_count: u8,
     recv_waiters: [Option<ThreadId>; config::MAX_RECV_WAITERS],
     recv_waiter_count: usize,
@@ -276,17 +250,13 @@ pub struct Endpoint {
     refcount: core::sync::atomic::AtomicUsize,
 }
 
-const _: () = {
-    assert!(core::mem::size_of::<Endpoint>() <= 768);
-};
-
 #[allow(clippy::new_without_default)]
 impl Endpoint {
     pub fn new(id: EndpointId) -> Self {
         Endpoint {
             id,
-            send_queue: Box::new(PrioritySendQueue::new()),
-            active_replies: [None; config::MAX_PENDING_PER_ENDPOINT],
+            send_queue: PrioritySendQueue::new(),
+            active_replies: [None; config::MAX_ACTIVE_REPLIES],
             active_reply_count: 0,
             recv_waiters: [None; config::MAX_RECV_WAITERS],
             recv_waiter_count: 0,
@@ -337,7 +307,7 @@ impl Endpoint {
     }
 
     pub fn is_full(&self) -> bool {
-        self.send_queue.len() >= config::MAX_PENDING_PER_ENDPOINT
+        self.send_queue.len() >= SLOTS_PER_BUCKET * IPC_BUCKETS
     }
 
     pub fn pending_reply_count(&self) -> usize {
@@ -371,53 +341,47 @@ impl Endpoint {
 
     pub const ENDPOINT_READABLE_BIT: u64 = 1;
 
-    /// Enqueue a call into the send queue.
+    /// Enqueue a caller into the send queue.
+    /// The caller's message and handles are in its Thread (IpcCallState).
     /// Returns `Ok(Some((event_id, bits)))` if a bound event should be signaled.
     pub fn enqueue_call(
         &mut self,
-        call: PendingCall,
+        caller: ThreadId,
+        priority: Priority,
     ) -> Result<Option<(EventId, u64)>, SyscallError> {
         if self.peer_closed {
             return Err(SyscallError::PeerClosed);
         }
 
-        self.send_queue.enqueue(call)?;
+        self.send_queue.enqueue(caller, priority)?;
 
         Ok(self
             .bound_event
             .map(|eid| (eid, Self::ENDPOINT_READABLE_BIT)))
     }
 
-    /// Dequeue the highest-priority pending call and issue a reply cap.
+    /// Dequeue the highest-priority pending caller and issue a reply cap.
     ///
     /// Returns `None` if the send queue is empty OR all reply slots are
     /// occupied (backpressure — the server must reply before receiving more).
-    pub fn dequeue_call(&mut self) -> Option<(PendingCall, ReplyCapId)> {
+    pub fn dequeue_caller(&mut self) -> Option<(ThreadId, ReplyCapId)> {
         let free_slot = self.active_replies.iter().position(|s| s.is_none())?;
-        let call = self.send_queue.dequeue_highest()?;
+        let caller = self.send_queue.dequeue_highest()?;
         let cap_id = ReplyCapId((self.next_reply_id << SLOT_BITS) | (free_slot as u64));
 
         self.next_reply_id = self.next_reply_id.wrapping_add(1);
-        self.active_replies[free_slot] = Some(ActiveReply {
-            cap_id,
-            caller: call.caller,
-            reply_buf: call.reply_buf,
-            recv_handles_ptr: call.recv_handles_ptr,
-        });
+        self.active_replies[free_slot] = Some(ActiveReply { cap_id, caller });
         self.active_reply_count += 1;
 
-        Some((call, cap_id))
+        Some((caller, cap_id))
     }
 
-    /// Consume a reply cap, returning (caller_thread_id, caller_reply_buf, caller_recv_handles_ptr).
+    /// Consume a reply cap, returning the blocked caller's ThreadId.
     /// O(1) via the slot index encoded in the cap ID.
-    pub fn consume_reply(
-        &mut self,
-        cap_id: ReplyCapId,
-    ) -> Result<(ThreadId, usize, usize), SyscallError> {
+    pub fn consume_reply(&mut self, cap_id: ReplyCapId) -> Result<ThreadId, SyscallError> {
         let slot_idx = (cap_id.0 & SLOT_MASK) as usize;
 
-        if slot_idx >= config::MAX_PENDING_PER_ENDPOINT {
+        if slot_idx >= config::MAX_ACTIVE_REPLIES {
             return Err(SyscallError::InvalidHandle);
         }
 
@@ -426,13 +390,13 @@ impl Endpoint {
         if let Some(r) = slot
             && r.cap_id == cap_id
         {
-            let reply = *r;
+            let caller = r.caller;
 
             *slot = None;
 
             self.active_reply_count -= 1;
 
-            Ok((reply.caller, reply.reply_buf, reply.recv_handles_ptr))
+            Ok(caller)
         } else {
             Err(SyscallError::InvalidHandle)
         }
@@ -486,22 +450,12 @@ impl Endpoint {
 
     /// Allocate a reply cap without dequeuing from the send queue.
     /// Used by CALL's direct-transfer fast path.
-    pub fn allocate_reply_cap(
-        &mut self,
-        caller: ThreadId,
-        reply_buf: usize,
-        recv_handles_ptr: usize,
-    ) -> Option<ReplyCapId> {
+    pub fn allocate_reply_cap(&mut self, caller: ThreadId) -> Option<ReplyCapId> {
         let free_slot = self.active_replies.iter().position(|s| s.is_none())?;
         let cap_id = ReplyCapId((self.next_reply_id << SLOT_BITS) | (free_slot as u64));
 
         self.next_reply_id = self.next_reply_id.wrapping_add(1);
-        self.active_replies[free_slot] = Some(ActiveReply {
-            cap_id,
-            caller,
-            reply_buf,
-            recv_handles_ptr,
-        });
+        self.active_replies[free_slot] = Some(ActiveReply { cap_id, caller });
         self.active_reply_count += 1;
 
         Some(cap_id)
@@ -540,8 +494,9 @@ impl Endpoint {
         list
     }
 
-    /// Close the peer end. Returns structured close result preserving handles
-    /// from pending calls so they can be recovered by the caller.
+    /// Close the peer end. Returns all blocked thread IDs grouped by category.
+    /// Handle recovery from send callers is the syscall layer's concern —
+    /// handles are in each thread's IpcCallState.
     pub fn close_peer(&mut self) -> Option<CloseResult> {
         self.peer_closed = true;
 
@@ -553,14 +508,10 @@ impl Endpoint {
         let mut result = CloseResult::new();
 
         for level in 0..IPC_BUCKETS {
-            while let Some(call) = self.send_queue.rings[level].pop() {
-                if result.canceled_len < config::MAX_PENDING_PER_ENDPOINT {
-                    result.canceled[result.canceled_len] = Some(CanceledCaller {
-                        thread_id: call.caller,
-                        handles: call.handles,
-                        handle_count: call.handle_count,
-                    });
-                    result.canceled_len += 1;
+            while let Some(tid) = self.send_queue.rings[level].pop() {
+                if result.send_caller_len < result.send_callers.len() {
+                    result.send_callers[result.send_caller_len] = tid;
+                    result.send_caller_len += 1;
                 }
             }
         }
@@ -569,7 +520,7 @@ impl Endpoint {
 
         for slot in &mut self.active_replies {
             if let Some(reply) = slot.take()
-                && result.reply_caller_len < config::MAX_PENDING_PER_ENDPOINT
+                && result.reply_caller_len < config::MAX_ACTIVE_REPLIES
             {
                 result.reply_callers[result.reply_caller_len] = reply.caller;
                 result.reply_caller_len += 1;
@@ -636,8 +587,8 @@ impl Endpoint {
         let mut ids = alloc::vec::Vec::new();
 
         for ring in &self.send_queue.rings {
-            for call in ring.iter() {
-                ids.push(call.caller);
+            for &tid in ring.iter() {
+                ids.push(tid);
             }
         }
 
@@ -657,33 +608,13 @@ impl Endpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ObjectType, Rights};
 
     fn make_endpoint(id: u32) -> Endpoint {
         Endpoint::new(EndpointId(id))
     }
 
-    fn make_call(caller: u32, priority: Priority, badge: u32) -> PendingCall {
-        PendingCall {
-            caller: ThreadId(caller),
-            priority,
-            message: Message::from_bytes(b"hello").unwrap(),
-            handles: [const { None }; config::MAX_IPC_HANDLES],
-            handle_count: 0,
-            badge,
-            reply_buf: 0,
-            recv_handles_ptr: 0,
-        }
-    }
-
-    fn make_handle(obj_id: u32) -> Handle {
-        Handle {
-            object_type: ObjectType::Vmo,
-            object_id: obj_id,
-            rights: Rights::READ,
-            generation: 0,
-            badge: 0,
-        }
+    fn enqueue(ep: &mut Endpoint, caller: u32, priority: Priority) {
+        ep.enqueue_call(ThreadId(caller), priority).unwrap();
     }
 
     // -- Protocol roundtrip --
@@ -691,57 +622,17 @@ mod tests {
     #[test]
     fn call_recv_reply_roundtrip() {
         let mut ep = make_endpoint(0);
-        let call = PendingCall {
-            caller: ThreadId(1),
-            priority: Priority::Medium,
-            message: Message::from_bytes(b"request").unwrap(),
-            handles: [const { None }; config::MAX_IPC_HANDLES],
-            handle_count: 0,
-            badge: 42,
-            reply_buf: 0,
-            recv_handles_ptr: 0,
-        };
 
-        ep.enqueue_call(call).unwrap();
+        enqueue(&mut ep, 1, Priority::Medium);
 
-        let (received, reply_cap) = ep.dequeue_call().unwrap();
-
-        assert_eq!(received.caller, ThreadId(1));
-        assert_eq!(received.badge, 42);
-        assert_eq!(received.message.as_bytes(), b"request");
-
-        let (caller, _reply_buf, _recv_handles_ptr) = ep.consume_reply(reply_cap).unwrap();
+        let (caller, reply_cap) = ep.dequeue_caller().unwrap();
 
         assert_eq!(caller, ThreadId(1));
+
+        let resolved = ep.consume_reply(reply_cap).unwrap();
+
+        assert_eq!(resolved, ThreadId(1));
         assert_eq!(ep.pending_reply_count(), 0);
-    }
-
-    #[test]
-    fn handle_transfer_staged_in_call() {
-        let mut ep = make_endpoint(0);
-        let mut handles = [const { None }; config::MAX_IPC_HANDLES];
-
-        handles[0] = Some(make_handle(99));
-        handles[1] = Some(make_handle(100));
-
-        let call = PendingCall {
-            caller: ThreadId(1),
-            priority: Priority::Medium,
-            message: Message::empty(),
-            handles,
-            handle_count: 2,
-            badge: 0,
-            reply_buf: 0,
-            recv_handles_ptr: 0,
-        };
-
-        ep.enqueue_call(call).unwrap();
-
-        let (received, _) = ep.dequeue_call().unwrap();
-
-        assert_eq!(received.handle_count, 2);
-        assert_eq!(received.handles[0].as_ref().unwrap().object_id, 99);
-        assert_eq!(received.handles[1].as_ref().unwrap().object_id, 100);
     }
 
     // -- Priority ordering --
@@ -750,21 +641,21 @@ mod tests {
     fn many_to_one_priority_ordering() {
         let mut ep = make_endpoint(0);
 
-        ep.enqueue_call(make_call(1, Priority::Low, 10)).unwrap();
-        ep.enqueue_call(make_call(2, Priority::High, 20)).unwrap();
-        ep.enqueue_call(make_call(3, Priority::Medium, 30)).unwrap();
+        enqueue(&mut ep, 1, Priority::Low);
+        enqueue(&mut ep, 2, Priority::High);
+        enqueue(&mut ep, 3, Priority::Medium);
 
-        let (first, _) = ep.dequeue_call().unwrap();
+        let (first, _) = ep.dequeue_caller().unwrap();
 
-        assert_eq!(first.caller, ThreadId(2));
+        assert_eq!(first, ThreadId(2));
 
-        let (second, _) = ep.dequeue_call().unwrap();
+        let (second, _) = ep.dequeue_caller().unwrap();
 
-        assert_eq!(second.caller, ThreadId(3));
+        assert_eq!(second, ThreadId(3));
 
-        let (third, _) = ep.dequeue_call().unwrap();
+        let (third, _) = ep.dequeue_caller().unwrap();
 
-        assert_eq!(third.caller, ThreadId(1));
+        assert_eq!(third, ThreadId(1));
     }
 
     #[test]
@@ -773,11 +664,11 @@ mod tests {
 
         assert!(ep.highest_caller_priority().is_none());
 
-        ep.enqueue_call(make_call(1, Priority::Low, 0)).unwrap();
+        enqueue(&mut ep, 1, Priority::Low);
 
         assert_eq!(ep.highest_caller_priority(), Some(Priority::Low));
 
-        ep.enqueue_call(make_call(2, Priority::High, 0)).unwrap();
+        enqueue(&mut ep, 2, Priority::High);
 
         assert_eq!(ep.highest_caller_priority(), Some(Priority::High));
     }
@@ -788,9 +679,9 @@ mod tests {
     fn reply_cap_consumed_once() {
         let mut ep = make_endpoint(0);
 
-        ep.enqueue_call(make_call(1, Priority::Medium, 0)).unwrap();
+        enqueue(&mut ep, 1, Priority::Medium);
 
-        let (_, cap) = ep.dequeue_call().unwrap();
+        let (_, cap) = ep.dequeue_caller().unwrap();
 
         assert!(ep.consume_reply(cap).is_ok());
         assert_eq!(ep.consume_reply(cap), Err(SyscallError::InvalidHandle));
@@ -802,10 +693,11 @@ mod tests {
     fn peer_closed_unblocks_all() {
         let mut ep = make_endpoint(0);
 
-        ep.enqueue_call(make_call(1, Priority::Medium, 0)).unwrap();
-        ep.enqueue_call(make_call(2, Priority::Low, 0)).unwrap();
-        ep.enqueue_call(make_call(3, Priority::High, 0)).unwrap();
-        ep.dequeue_call().unwrap(); // one call moves to active_replies
+        enqueue(&mut ep, 1, Priority::Medium);
+        enqueue(&mut ep, 2, Priority::Low);
+        enqueue(&mut ep, 3, Priority::High);
+
+        ep.dequeue_caller().unwrap();
         ep.add_recv_waiter(ThreadId(10)).unwrap();
 
         let result = ep.close_peer().unwrap();
@@ -824,7 +716,7 @@ mod tests {
         ep.close_peer();
 
         assert_eq!(
-            ep.enqueue_call(make_call(1, Priority::Medium, 0)),
+            ep.enqueue_call(ThreadId(1), Priority::Medium),
             Err(SyscallError::PeerClosed)
         );
     }
@@ -847,7 +739,7 @@ mod tests {
     fn dequeue_empty_returns_none() {
         let mut ep = make_endpoint(0);
 
-        assert!(ep.dequeue_call().is_none());
+        assert!(ep.dequeue_caller().is_none());
     }
 
     #[test]
@@ -859,13 +751,14 @@ mod tests {
             Priority::Medium,
             Priority::High,
         ];
+        let total = SLOTS_PER_BUCKET * IPC_BUCKETS;
 
-        for (i, &pri) in (0..config::MAX_PENDING_PER_ENDPOINT).zip(priorities.iter().cycle()) {
-            ep.enqueue_call(make_call(i as u32, pri, 0)).unwrap();
+        for (i, &pri) in (0..total).zip(priorities.iter().cycle()) {
+            enqueue(&mut ep, i as u32, pri);
         }
 
         assert_eq!(
-            ep.enqueue_call(make_call(999, Priority::Medium, 0)),
+            ep.enqueue_call(ThreadId(999), Priority::Medium),
             Err(SyscallError::BufferFull)
         );
     }
@@ -875,16 +768,15 @@ mod tests {
         let mut ep = make_endpoint(0);
 
         for i in 0..SLOTS_PER_BUCKET {
-            ep.enqueue_call(make_call(i as u32, Priority::Medium, 0))
-                .unwrap();
+            enqueue(&mut ep, i as u32, Priority::Medium);
         }
 
         assert_eq!(
-            ep.enqueue_call(make_call(999, Priority::Medium, 0)),
+            ep.enqueue_call(ThreadId(999), Priority::Medium),
             Err(SyscallError::BufferFull)
         );
 
-        ep.enqueue_call(make_call(100, Priority::High, 0)).unwrap();
+        enqueue(&mut ep, 100, Priority::High);
 
         assert_eq!(ep.pending_call_count(), SLOTS_PER_BUCKET + 1);
     }
@@ -990,7 +882,7 @@ mod tests {
     // -- Adversarial / boundary tests --
 
     #[test]
-    fn dequeue_call_blocked_by_full_active_replies() {
+    fn dequeue_blocked_by_full_active_replies() {
         let mut ep = make_endpoint(0);
         let priorities = [
             Priority::Idle,
@@ -999,33 +891,26 @@ mod tests {
             Priority::High,
         ];
 
-        // Fill all reply slots: enqueue MAX_PENDING_PER_ENDPOINT calls spread
-        // across priority levels, then dequeue each one (moves it to
-        // active_replies) without replying.
-        for (i, &pri) in (0..config::MAX_PENDING_PER_ENDPOINT).zip(priorities.iter().cycle()) {
-            ep.enqueue_call(make_call(i as u32, pri, 0)).unwrap();
+        for (i, &pri) in (0..config::MAX_ACTIVE_REPLIES).zip(priorities.iter().cycle()) {
+            enqueue(&mut ep, i as u32, pri);
         }
 
-        for _ in 0..config::MAX_PENDING_PER_ENDPOINT {
-            assert!(ep.dequeue_call().is_some());
+        for _ in 0..config::MAX_ACTIVE_REPLIES {
+            assert!(ep.dequeue_caller().is_some());
         }
 
-        assert_eq!(ep.pending_reply_count(), config::MAX_PENDING_PER_ENDPOINT);
+        assert_eq!(ep.pending_reply_count(), config::MAX_ACTIVE_REPLIES);
 
-        // Enqueue one more call — it enters the send queue fine.
-        ep.enqueue_call(make_call(100, Priority::Medium, 0))
-            .unwrap();
+        enqueue(&mut ep, 100, Priority::Medium);
 
         assert!(ep.has_pending_calls());
-        // But dequeue must return None: no free reply slot (backpressure).
-        assert!(ep.dequeue_call().is_none());
+        assert!(ep.dequeue_caller().is_none());
     }
 
     #[test]
     fn consume_reply_invalid_cap_id() {
         let mut ep = make_endpoint(0);
 
-        // No active replies at all — any cap_id is invalid.
         assert_eq!(
             ep.consume_reply(ReplyCapId(0)),
             Err(SyscallError::InvalidHandle)
@@ -1035,17 +920,15 @@ mod tests {
             Err(SyscallError::InvalidHandle)
         );
 
-        // Issue a real reply cap, then try a different cap_id.
-        ep.enqueue_call(make_call(1, Priority::Medium, 0)).unwrap();
+        enqueue(&mut ep, 1, Priority::Medium);
 
-        let (_, valid_cap) = ep.dequeue_call().unwrap();
+        let (_, valid_cap) = ep.dequeue_caller().unwrap();
         let bogus_cap = ReplyCapId(valid_cap.0.wrapping_add(1));
 
         assert_eq!(
             ep.consume_reply(bogus_cap),
             Err(SyscallError::InvalidHandle)
         );
-        // The valid cap still works.
         assert!(ep.consume_reply(valid_cap).is_ok());
     }
 
@@ -1053,33 +936,23 @@ mod tests {
     fn next_reply_id_wraparound() {
         let mut ep = make_endpoint(0);
 
-        // Advance the internal counter to just before u32::MAX.
         ep.next_reply_id = u64::MAX - 1;
 
-        // Issue three reply caps that straddle the wraparound boundary.
-        // Use different priorities to fit within 2 slots per level.
-        // Dequeue is highest-first: High(3), Medium(2), Low(1).
-        ep.enqueue_call(make_call(1, Priority::Low, 0)).unwrap();
-        ep.enqueue_call(make_call(2, Priority::Medium, 0)).unwrap();
-        ep.enqueue_call(make_call(3, Priority::High, 0)).unwrap();
+        enqueue(&mut ep, 1, Priority::Low);
+        enqueue(&mut ep, 2, Priority::Medium);
+        enqueue(&mut ep, 3, Priority::High);
 
-        let (_, cap_a) = ep.dequeue_call().unwrap();
-        let (_, cap_b) = ep.dequeue_call().unwrap();
-        let (_, cap_c) = ep.dequeue_call().unwrap();
+        let (_, cap_a) = ep.dequeue_caller().unwrap();
+        let (_, cap_b) = ep.dequeue_caller().unwrap();
+        let (_, cap_c) = ep.dequeue_caller().unwrap();
 
-        // All three cap IDs are distinct.
         assert_ne!(cap_a, cap_b);
         assert_ne!(cap_b, cap_c);
         assert_ne!(cap_a, cap_c);
 
-        // Each cap resolves to the correct caller.
-        let (caller_a, _, _) = ep.consume_reply(cap_a).unwrap();
-        let (caller_b, _, _) = ep.consume_reply(cap_b).unwrap();
-        let (caller_c, _, _) = ep.consume_reply(cap_c).unwrap();
-
-        assert_eq!(caller_a, ThreadId(3));
-        assert_eq!(caller_b, ThreadId(2));
-        assert_eq!(caller_c, ThreadId(1));
+        assert_eq!(ep.consume_reply(cap_a).unwrap(), ThreadId(3));
+        assert_eq!(ep.consume_reply(cap_b).unwrap(), ThreadId(2));
+        assert_eq!(ep.consume_reply(cap_c).unwrap(), ThreadId(1));
     }
 
     #[test]
@@ -1111,7 +984,7 @@ mod tests {
         ep.close_peer();
 
         assert_eq!(
-            ep.enqueue_call(make_call(1, Priority::High, 0)),
+            ep.enqueue_call(ThreadId(1), Priority::High),
             Err(SyscallError::PeerClosed)
         );
     }
@@ -1120,56 +993,42 @@ mod tests {
     fn send_queue_full_single_priority() {
         let mut ep = make_endpoint(0);
 
-        // Fill all slots at Priority::High (only SLOTS_PER_BUCKET available).
         for i in 0..SLOTS_PER_BUCKET {
-            ep.enqueue_call(make_call(i as u32, Priority::High, 0))
-                .unwrap();
+            enqueue(&mut ep, i as u32, Priority::High);
         }
 
-        // The next call at the same priority must fail with BufferFull.
         assert_eq!(
-            ep.enqueue_call(make_call(99, Priority::High, 0)),
+            ep.enqueue_call(ThreadId(99), Priority::High),
             Err(SyscallError::BufferFull)
         );
 
-        // Other priorities still have room.
-        ep.enqueue_call(make_call(100, Priority::Low, 0)).unwrap();
+        enqueue(&mut ep, 100, Priority::Low);
     }
 
     #[test]
     fn close_peer_returns_all_blocked_ids() {
         let mut ep = make_endpoint(0);
 
-        // Enqueue callers in the send queue.
-        ep.enqueue_call(make_call(1, Priority::Low, 0)).unwrap();
-        ep.enqueue_call(make_call(2, Priority::High, 0)).unwrap();
+        enqueue(&mut ep, 1, Priority::Low);
+        enqueue(&mut ep, 2, Priority::High);
 
-        // Move one call to active_replies (caller 2, highest priority).
-        let _ = ep.dequeue_call().unwrap();
+        let _ = ep.dequeue_caller().unwrap();
 
-        // Enqueue another caller after the dequeue.
-        ep.enqueue_call(make_call(3, Priority::Medium, 0)).unwrap();
+        enqueue(&mut ep, 3, Priority::Medium);
 
-        // Add recv waiters.
         ep.add_recv_waiter(ThreadId(10)).unwrap();
         ep.add_recv_waiter(ThreadId(11)).unwrap();
 
         let result = ep.close_peer().unwrap();
         let all_ids: alloc::vec::Vec<_> = result.all_thread_ids().collect();
 
-        // Expected blocked threads:
-        //   send queue: 1, 3
-        //   active replies: 2 (dequeued but not replied)
-        //   recv waiters: 10, 11
         assert_eq!(all_ids.len(), 5);
         assert!(all_ids.contains(&ThreadId(1)));
         assert!(all_ids.contains(&ThreadId(2)));
         assert!(all_ids.contains(&ThreadId(3)));
         assert!(all_ids.contains(&ThreadId(10)));
         assert!(all_ids.contains(&ThreadId(11)));
-        // Canceled callers (from send queue) must have their handles preserved.
-        assert_eq!(result.canceled_callers().len(), 2);
-        // Reply callers (already in-flight) have no handles to recover.
+        assert_eq!(result.send_callers().len(), 2);
         assert_eq!(result.reply_callers().len(), 1);
         assert_eq!(result.reply_callers()[0], ThreadId(2));
         assert_eq!(result.recv_waiters().len(), 2);
@@ -1184,71 +1043,38 @@ mod tests {
         let priorities = [Priority::Low, Priority::Medium, Priority::High];
 
         for (i, &pri) in (0..3u32).zip(priorities.iter()) {
-            ep.enqueue_call(make_call(i, pri, 0)).unwrap();
+            enqueue(&mut ep, i, pri);
         }
 
-        // Dequeues highest priority first: High(2), Medium(1), Low(0).
-        let (_, cap0) = ep.dequeue_call().unwrap();
-        let (_, cap1) = ep.dequeue_call().unwrap();
-        let (_, cap2) = ep.dequeue_call().unwrap();
+        let (_, cap0) = ep.dequeue_caller().unwrap();
+        let (_, cap1) = ep.dequeue_caller().unwrap();
+        let (_, cap2) = ep.dequeue_caller().unwrap();
 
         assert_ne!(cap0, cap1);
         assert_ne!(cap1, cap2);
         assert_ne!(cap0, cap2);
-        assert_eq!(ep.consume_reply(cap0).unwrap().0, ThreadId(2));
-        assert_eq!(ep.consume_reply(cap1).unwrap().0, ThreadId(1));
-        assert_eq!(ep.consume_reply(cap2).unwrap().0, ThreadId(0));
+        assert_eq!(ep.consume_reply(cap0).unwrap(), ThreadId(2));
+        assert_eq!(ep.consume_reply(cap1).unwrap(), ThreadId(1));
+        assert_eq!(ep.consume_reply(cap2).unwrap(), ThreadId(0));
     }
 
     #[test]
     fn all_caller_thread_ids_after_wraparound() {
         let mut ep = make_endpoint(0);
 
-        ep.enqueue_call(make_call(1, Priority::Medium, 0)).unwrap();
-        ep.enqueue_call(make_call(2, Priority::Medium, 0)).unwrap();
-        ep.dequeue_call().unwrap();
-        ep.dequeue_call().unwrap();
+        enqueue(&mut ep, 1, Priority::Medium);
+        enqueue(&mut ep, 2, Priority::Medium);
 
-        ep.enqueue_call(make_call(3, Priority::Medium, 0)).unwrap();
-        ep.enqueue_call(make_call(4, Priority::Medium, 0)).unwrap();
+        ep.dequeue_caller().unwrap();
+        ep.dequeue_caller().unwrap();
+
+        enqueue(&mut ep, 3, Priority::Medium);
+        enqueue(&mut ep, 4, Priority::Medium);
 
         let ids = ep.all_caller_thread_ids();
 
         assert_eq!(ids.len(), 4);
         assert!(ids.contains(&ThreadId(3)));
         assert!(ids.contains(&ThreadId(4)));
-    }
-
-    #[test]
-    fn close_peer_preserves_handles_for_recovery() {
-        let mut ep = make_endpoint(0);
-        let mut handles = [const { None }; config::MAX_IPC_HANDLES];
-
-        handles[0] = Some(make_handle(42));
-        handles[1] = Some(make_handle(43));
-
-        let call = PendingCall {
-            caller: ThreadId(1),
-            priority: Priority::Medium,
-            message: Message::empty(),
-            handles,
-            handle_count: 2,
-            badge: 0,
-            reply_buf: 0,
-            recv_handles_ptr: 0,
-        };
-
-        ep.enqueue_call(call).unwrap();
-
-        let mut result = ep.close_peer().unwrap();
-
-        assert_eq!(result.canceled_callers().len(), 1);
-
-        let canceled = result.canceled_callers_mut()[0].take().unwrap();
-
-        assert_eq!(canceled.thread_id, ThreadId(1));
-        assert_eq!(canceled.handle_count, 2);
-        assert_eq!(canceled.handles[0].as_ref().unwrap().object_id, 42);
-        assert_eq!(canceled.handles[1].as_ref().unwrap().object_id, 43);
     }
 }

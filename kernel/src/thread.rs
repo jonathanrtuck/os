@@ -42,6 +42,29 @@ pub struct RecvState {
     pub reply_cap_out: usize,
 }
 
+/// Per-thread IPC call state — stored in the caller's thread while blocked.
+///
+/// When a caller sends `call()` and no server is waiting (slow path), the
+/// kernel copies the message and handles into this struct rather than into
+/// the endpoint's send queue. The endpoint stores only the caller's ThreadId.
+/// This eliminates the fixed send-queue depth limit and the TOCTOU window
+/// (message is in kernel memory the instant the syscall enters).
+///
+/// The state persists from call() through recv() delivery through reply().
+/// - At call(): message + handles + metadata stored here.
+/// - At recv(): message + handles read and delivered to server. Handles are
+///   consumed (zeroed). Message and reply addresses remain.
+/// - At reply(): reply_buf + recv_handles_ptr read for reply delivery.
+///   State cleared.
+pub struct IpcCallState {
+    pub message: crate::endpoint::Message,
+    pub handles: [Option<crate::handle::Handle>; crate::config::MAX_IPC_HANDLES],
+    pub handle_count: u8,
+    pub badge: u32,
+    pub reply_buf: usize,
+    pub recv_handles_ptr: usize,
+}
+
 /// A thread — schedulable execution context.
 pub struct Thread {
     pub id: ThreadId,
@@ -66,6 +89,7 @@ pub struct Thread {
     recv_state: Option<RecvState>,
     repeat_fault_va: usize,
     repeat_fault_count: u8,
+    ipc_call: Option<IpcCallState>,
     space_next: Option<u32>,
     space_prev: Option<u32>,
     #[cfg(any(target_os = "none", test))]
@@ -73,7 +97,7 @@ pub struct Thread {
 }
 
 const _: () = {
-    assert!(core::mem::size_of::<Thread>() <= 600);
+    assert!(core::mem::size_of::<Thread>() <= 800);
 };
 
 #[allow(clippy::new_without_default)]
@@ -109,6 +133,7 @@ impl Thread {
             recv_state: None,
             repeat_fault_va: 0,
             repeat_fault_count: 0,
+            ipc_call: None,
             space_next: None,
             space_prev: None,
             #[cfg(any(target_os = "none", test))]
@@ -318,6 +343,22 @@ impl Thread {
 
     pub fn take_recv_state(&mut self) -> Option<RecvState> {
         self.recv_state.take()
+    }
+
+    pub fn set_ipc_call(&mut self, state: IpcCallState) {
+        self.ipc_call = Some(state);
+    }
+
+    pub fn ipc_call(&self) -> Option<&IpcCallState> {
+        self.ipc_call.as_ref()
+    }
+
+    pub fn ipc_call_mut(&mut self) -> Option<&mut IpcCallState> {
+        self.ipc_call.as_mut()
+    }
+
+    pub fn take_ipc_call(&mut self) -> Option<IpcCallState> {
+        self.ipc_call.take()
     }
 
     /// Terminate the thread with an exit code.

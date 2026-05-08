@@ -48,9 +48,11 @@ pub const BITMAP_WORDS: usize = MAX_PHYS_PAGES / 64;
 //   worst case (50 docs + undo snapshots + scene graph + stacks).
 // MAX_WAITERS_PER_EVENT (16): concurrent waiters on one event.
 //   Typical: 1 (compositor on scene-ready). 16 = generous headroom.
-// MAX_PENDING_PER_ENDPOINT (12): concurrent callers blocked on one
-//   endpoint. At boot, 6+ services call the name service concurrently.
-//   Typical steady-state: 1-3 callers. 12 = 2x boot peak.
+// MAX_ACTIVE_REPLIES (12): concurrent outstanding reply caps on one
+//   endpoint. The send queue is unbounded (bounded by thread count);
+//   this limits how many callers the server can defer replying to.
+//   Normal: 1 (one active request). Deferred replies (e.g., name
+//   service WATCH) may hold several. 12 = generous headroom.
 // MAX_IPC_HANDLES (4): handles transferred per IPC call. Typical
 //   calls transfer 0-2 handles (VMO + maybe event). 4 = headroom.
 // MAX_BOOTSTRAP_HANDLES (8): handles passed via thread_create_in.
@@ -68,7 +70,7 @@ pub const MAX_PAGES_INLINE: usize = 32;
 pub const MAX_MAPPINGS: usize = 128;
 pub const MAX_VA_REGIONS: usize = MAX_MAPPINGS * 2 + 1;
 pub const MAX_WAITERS_PER_EVENT: usize = 16;
-pub const MAX_PENDING_PER_ENDPOINT: usize = 12;
+pub const MAX_ACTIVE_REPLIES: usize = 12;
 pub const MAX_RECV_WAITERS: usize = 4;
 pub const MAX_MULTI_WAIT: usize = 32;
 pub const MAX_IPC_HANDLES: usize = 4;

@@ -7,7 +7,7 @@
 use crate::{
     address_space::AddressSpace,
     config,
-    endpoint::{Endpoint, PendingCall, ReplyCapId},
+    endpoint::{Endpoint, ReplyCapId},
     event::Event,
     frame::{state, user_mem},
     handle::Handle,
@@ -424,7 +424,7 @@ fn release_object_ref(object_type: ObjectType, object_id: u32, core_id: usize) {
 }
 
 fn close_endpoint_peer(ep_id: u32, core_id: usize) {
-    let mut close_result = {
+    let close_result = {
         let Some(mut ep) = state::endpoints().write(ep_id) else {
             return;
         };
@@ -435,39 +435,35 @@ fn close_endpoint_peer(ep_id: u32, core_id: usize) {
         }
     };
 
-    for canceled in close_result.canceled_callers_mut() {
-        if let Some(caller) = canceled.take() {
-            if caller.handle_count > 0 {
-                let caller_space = state::threads()
-                    .read(caller.thread_id.0)
-                    .and_then(|t| t.address_space());
-
-                if let Some(sid) = caller_space {
-                    reinstall_handles(
-                        sid,
-                        StagedHandles {
-                            handles: caller.handles,
-                            count: caller.handle_count,
-                        },
-                    );
-                }
+    for &tid in close_result.send_callers() {
+        if let Some(mut t) = state::threads().write(tid.0) {
+            if let Some(call) = t.take_ipc_call()
+                && call.handle_count > 0
+                && let Some(sid) = t.address_space()
+            {
+                reinstall_handles(
+                    sid,
+                    StagedHandles {
+                        handles: call.handles,
+                        count: call.handle_count,
+                    },
+                );
             }
 
-            if let Some(mut t) = state::threads().write(caller.thread_id.0) {
-                t.set_wakeup_error(SyscallError::PeerClosed);
+            t.set_wakeup_error(SyscallError::PeerClosed);
 
-                #[cfg(any(target_os = "none", test))]
-                if let Some(rs) = t.register_state_mut() {
-                    rs.gprs[0] = SyscallError::PeerClosed as u64;
-                }
+            #[cfg(any(target_os = "none", test))]
+            if let Some(rs) = t.register_state_mut() {
+                rs.gprs[0] = SyscallError::PeerClosed as u64;
             }
-
-            crate::sched::wake(caller.thread_id, core_id);
         }
+
+        crate::sched::wake(tid, core_id);
     }
 
     for &tid in close_result.reply_callers() {
         if let Some(mut t) = state::threads().write(tid.0) {
+            t.take_ipc_call();
             t.set_wakeup_error(SyscallError::PeerClosed);
 
             #[cfg(any(target_os = "none", test))]
@@ -1487,6 +1483,17 @@ fn sys_call(
     profile::stamp(slot::IPC_RECV_POP);
 
     if let Some(server_tid) = server_tid {
+        if let Some(mut t) = state::threads().write(current.0) {
+            t.set_ipc_call(crate::thread::IpcCallState {
+                message: crate::endpoint::Message::empty(),
+                handles: [const { None }; config::MAX_IPC_HANDLES],
+                handle_count: 0,
+                badge: 0,
+                reply_buf: msg_ptr,
+                recv_handles_ptr,
+            });
+        }
+
         let recv_state = state::threads()
             .write(server_tid.0)
             .and_then(|mut t| t.take_recv_state());
@@ -1538,7 +1545,7 @@ fn sys_call(
                 let mut ep = state::endpoints()
                     .write(ep_obj_id)
                     .ok_or(SyscallError::InvalidHandle)?;
-                let reply_cap = ep.allocate_reply_cap(current, msg_ptr, recv_handles_ptr);
+                let reply_cap = ep.allocate_reply_cap(current);
 
                 ep.set_active_server(Some(server_tid));
 
@@ -1603,28 +1610,28 @@ fn sys_call(
         }
     }
 
-    // ── Slow path: enqueue into priority send queue ──────────
+    // ── Slow path: store call state in thread, enqueue ThreadId ──
     let priority = state::threads()
         .read(current.0)
         .ok_or(SyscallError::InvalidArgument)?
         .effective_priority();
-    let call = PendingCall {
-        caller: current,
-        priority,
-        message,
-        handles: staged.handles,
-        handle_count: staged.count,
-        badge,
-        reply_buf: msg_ptr,
-        recv_handles_ptr,
-    };
+
+    if let Some(mut t) = state::threads().write(current.0) {
+        t.set_ipc_call(crate::thread::IpcCallState {
+            message,
+            handles: staged.handles,
+            handle_count: staged.count,
+            badge,
+            reply_buf: msg_ptr,
+            recv_handles_ptr,
+        });
+    }
+
     let (signal_info, active_server, recv_waiters) = {
         let mut ep = state::endpoints()
             .write(ep_obj_id)
             .ok_or(SyscallError::InvalidHandle)?;
-        // TOCTOU: another core may have filled the queue between the
-        // is_full pre-check and this enqueue. The ? propagates BufferFull.
-        let signal_info = ep.enqueue_call(call)?;
+        let signal_info = ep.enqueue_call(current, priority)?;
         let active_server = ep.active_server();
         let recv_waiters = ep.drain_recv_waiters();
 
@@ -1798,15 +1805,15 @@ fn try_dequeue_and_deliver(
     handles_cap: usize,
     reply_cap_out: usize,
 ) -> Option<Result<u64, SyscallError>> {
-    let (call, reply_cap, clear_info) = {
+    let (caller_tid, reply_cap, clear_info) = {
         let mut ep = state::endpoints().write(ep_obj_id)?;
-        let (call, reply_cap) = ep.dequeue_call()?;
+        let (caller_tid, reply_cap) = ep.dequeue_caller()?;
 
         ep.set_active_server(Some(server));
 
         let clear_info = check_clear_readable(&ep);
 
-        (call, reply_cap, clear_info)
+        (caller_tid, reply_cap, clear_info)
     };
 
     if let Some((eid, bits)) = clear_info
@@ -1815,9 +1822,9 @@ fn try_dequeue_and_deliver(
         e.clear(bits);
     }
 
-    Some(recv_deliver(
+    Some(recv_deliver_from_thread(
+        caller_tid,
         space_id,
-        call,
         reply_cap,
         out_buf,
         out_cap,
@@ -1828,9 +1835,9 @@ fn try_dequeue_and_deliver(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn recv_deliver(
+fn recv_deliver_from_thread(
+    caller_tid: ThreadId,
     space_id: AddressSpaceId,
-    mut call: PendingCall,
     reply_cap: ReplyCapId,
     out_buf: usize,
     out_cap: usize,
@@ -1838,6 +1845,10 @@ fn recv_deliver(
     handles_cap: usize,
     reply_cap_out: usize,
 ) -> Result<u64, SyscallError> {
+    let mut caller = state::threads()
+        .write(caller_tid.0)
+        .ok_or(SyscallError::InvalidHandle)?;
+    let call = caller.ipc_call_mut().ok_or(SyscallError::InvalidHandle)?;
     let msg_bytes = call.message.as_bytes();
 
     if msg_bytes.len() > out_cap {
@@ -1851,17 +1862,23 @@ fn recv_deliver(
     }
 
     let msg_len = msg_bytes.len() as u64;
+    let badge = call.badge;
     let mut staged = StagedHandles {
         handles: core::mem::replace(&mut call.handles, [const { None }; config::MAX_IPC_HANDLES]),
         count: call.handle_count,
     };
+
+    call.handle_count = 0;
+
+    drop(caller);
+
     let h_count = if staged.count > 0 {
         install_handles(space_id, &mut staged, handles_out, handles_cap)? as u64
     } else {
         0
     };
 
-    Ok((call.badge as u64) << 32 | (h_count << 16) | msg_len)
+    Ok((badge as u64) << 32 | (h_count << 16) | msg_len)
 }
 
 #[inline(never)]
@@ -1885,16 +1902,14 @@ fn sys_reply(
     let space_id = space_id.ok_or(SyscallError::InvalidArgument)?;
     let ep_obj_id = lookup_endpoint_id(space_id, handle_id)?;
     let reply_msg = user_mem::read_user_message(msg_ptr, msg_len)?;
-    // Batch: consume_reply + highest_caller_priority in one locked section
-    // (was 2 separate endpoint accesses).
-    let (caller_id, caller_reply_buf, caller_recv_handles_ptr, next_highest) = {
+    let (caller_id, next_highest) = {
         let mut ep = state::endpoints()
             .write(ep_obj_id)
             .ok_or(SyscallError::InvalidHandle)?;
-        let (cid, buf, hptr) = ep.consume_reply(reply_cap_id)?;
+        let cid = ep.consume_reply(reply_cap_id)?;
         let pri = ep.highest_caller_priority();
 
-        (cid, buf, hptr, pri)
+        (cid, pri)
     };
 
     if let Some(mut server) = state::threads().write(current.0) {
@@ -1905,14 +1920,18 @@ fn sys_reply(
         }
     }
 
-    // Batch: read caller state + address space in one locked section
-    // (was 2 separate reads for state check and space lookup).
-    let (caller_state, caller_space_id) = {
+    let (caller_state, caller_space_id, caller_reply_buf, caller_recv_handles_ptr) = {
         let caller = state::threads()
             .read(caller_id.0)
             .ok_or(SyscallError::InvalidArgument)?;
+        let call = caller.ipc_call().ok_or(SyscallError::InvalidArgument)?;
 
-        (caller.state(), caller.address_space())
+        (
+            caller.state(),
+            caller.address_space(),
+            call.reply_buf,
+            call.recv_handles_ptr,
+        )
     };
 
     if caller_state != crate::thread::ThreadRunState::Blocked {
@@ -2006,9 +2025,9 @@ fn sys_reply(
         crate::sched::switch_to_page_table(pc.pt_root, pc.pt_asid);
     }
 
-    // Batch: set wakeup value + read priority in one locked section.
     let caller_pri = if let Some(mut caller) = state::threads().write(caller_id.0) {
         caller.set_wakeup_value(reply_handle_count);
+        caller.take_ipc_call();
         caller.effective_priority()
     } else {
         Priority::Idle

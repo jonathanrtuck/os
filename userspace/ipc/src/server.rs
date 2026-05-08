@@ -29,6 +29,7 @@ impl<'a> Incoming<'a> {
         let mut buf = [0u8; MSG_SIZE];
 
         message::write_error(&mut buf, self.method, status);
+
         abi::ipc::reply(
             self.endpoint,
             self.reply_cap,
@@ -39,6 +40,47 @@ impl<'a> Incoming<'a> {
 
     pub fn reply_empty(self) -> Result<(), SyscallError> {
         self.reply_ok(&[], &[])
+    }
+}
+
+impl<'a> Incoming<'a> {
+    pub fn defer(self) -> DeferredReply {
+        DeferredReply {
+            endpoint: self.endpoint,
+            reply_cap: self.reply_cap,
+            method: self.method,
+        }
+    }
+}
+
+pub struct DeferredReply {
+    pub endpoint: Handle,
+    pub reply_cap: u32,
+    pub method: u32,
+}
+
+impl DeferredReply {
+    pub fn reply_ok(&self, data: &[u8], handles: &[u32]) -> Result<(), SyscallError> {
+        let mut buf = [0u8; MSG_SIZE];
+
+        message::write_reply(&mut buf, self.method, data);
+
+        let len = message::HEADER_SIZE + data.len().min(MAX_PAYLOAD);
+
+        abi::ipc::reply(self.endpoint, self.reply_cap, &buf[..len], handles)
+    }
+
+    pub fn reply_error(&self, status: u16) -> Result<(), SyscallError> {
+        let mut buf = [0u8; MSG_SIZE];
+
+        message::write_error(&mut buf, self.method, status);
+
+        abi::ipc::reply(
+            self.endpoint,
+            self.reply_cap,
+            &buf[..message::HEADER_SIZE],
+            &[],
+        )
     }
 }
 

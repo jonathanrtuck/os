@@ -16,6 +16,7 @@
 pub const REGISTER: u32 = 1;
 pub const LOOKUP: u32 = 2;
 pub const UNREGISTER: u32 = 3;
+pub const WATCH: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NameRequest {
@@ -80,26 +81,24 @@ pub fn lookup(
     Ok(abi::types::Handle(recv_handles[0]))
 }
 
-/// Look up a service by name, retrying until it appears or the attempt
-/// limit is reached. Between retries, spins briefly to avoid monopolizing
-/// the name service endpoint via direct switch.
-pub fn lookup_wait(
+/// Look up a service by name, blocking until it registers if not yet
+/// available. Uses the WATCH protocol: the name service holds the reply
+/// until the name is registered, so no polling or CPU waste.
+pub fn watch(
     ns_ep: abi::types::Handle,
     name: &[u8],
-    max_attempts: u32,
 ) -> Result<abi::types::Handle, abi::types::SyscallError> {
-    for _ in 0..max_attempts {
-        match lookup(ns_ep, name) {
-            Ok(h) => return Ok(h),
-            Err(_) => {
-                for _ in 0..100_000 {
-                    core::hint::spin_loop();
-                }
-            }
-        }
+    let req = NameRequest::new(name);
+    let mut buf = [0u8; ipc::message::MSG_SIZE];
+    let total = ipc::message::write_request(&mut buf, WATCH, &req.name);
+    let mut recv_handles = [0u32; 4];
+    let result = abi::ipc::call(ns_ep, &mut buf, total, &[], &mut recv_handles)?;
+
+    if result.handle_count == 0 {
+        return Err(abi::types::SyscallError::NotFound);
     }
 
-    Err(abi::types::SyscallError::NotFound)
+    Ok(abi::types::Handle(recv_handles[0]))
 }
 
 /// Register a service endpoint under the given name.

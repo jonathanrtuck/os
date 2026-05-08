@@ -29,6 +29,17 @@ const BLOCK_SIZE: usize = fs::BLOCK_SIZE as usize;
 
 const SHARED_VMO_SIZE: usize = BLOCK_SIZE * 4;
 
+const EXIT_CONSOLE_NOT_FOUND: u32 = 0xE001;
+const EXIT_BLK_NOT_FOUND: u32 = 0xE002;
+const EXIT_MOUNT_FAILED: u32 = 0xE003;
+const EXIT_FORMAT_FAILED: u32 = 0xE004;
+const EXIT_STORE_INIT_FAILED: u32 = 0xE005;
+const EXIT_STORE_OPEN_FAILED: u32 = 0xE006;
+const EXIT_ENDPOINT_CREATE_FAILED: u32 = 0xE007;
+const EXIT_SHARED_VMO_CREATE_FAILED: u32 = 0xE010;
+const EXIT_SHARED_VMO_MAP_FAILED: u32 = 0xE011;
+const EXIT_SHARED_VMO_DUP_FAILED: u32 = 0xE012;
+
 // ── IPC block device ────────────────────────────────────────────────
 
 struct IpcBlockDevice {
@@ -41,14 +52,14 @@ struct IpcBlockDevice {
 impl IpcBlockDevice {
     fn connect(blk_ep: Handle) -> Self {
         let vmo = abi::vmo::create(SHARED_VMO_SIZE, 0).unwrap_or_else(|_| {
-            abi::thread::exit(0xE010);
+            abi::thread::exit(EXIT_SHARED_VMO_CREATE_FAILED);
         });
         let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
         let shared_va = abi::vmo::map(vmo, 0, rw).unwrap_or_else(|_| {
-            abi::thread::exit(0xE011);
+            abi::thread::exit(EXIT_SHARED_VMO_MAP_FAILED);
         });
         let dup = abi::handle::dup(vmo, Rights::ALL).unwrap_or_else(|_| {
-            abi::thread::exit(0xE012);
+            abi::thread::exit(EXIT_SHARED_VMO_DUP_FAILED);
         });
         let mut buf = [0u8; ipc::message::MSG_SIZE];
 
@@ -157,6 +168,22 @@ impl fs::BlockDevice for IpcBlockDevice {
     }
 }
 
+fn store_error_status(e: &store::StoreError) -> u16 {
+    match e {
+        store::StoreError::NotFound(_) => ipc::STATUS_NOT_FOUND,
+        store::StoreError::NotInitialized => ipc::STATUS_NOT_FOUND,
+        store::StoreError::AlreadyInitialized => ipc::STATUS_ALREADY_EXISTS,
+        store::StoreError::Corrupt(_) => ipc::STATUS_CORRUPT,
+        store::StoreError::Fs(fs_err) => match fs_err {
+            fs::FsError::NotFound(_) => ipc::STATUS_NOT_FOUND,
+            fs::FsError::NoSpace => ipc::STATUS_NO_SPACE,
+            fs::FsError::BadMagic | fs::FsError::ChecksumMismatch { .. } => ipc::STATUS_CORRUPT,
+            fs::FsError::Corrupt(_) => ipc::STATUS_CORRUPT,
+            _ => ipc::STATUS_IO_ERROR,
+        },
+    }
+}
+
 // ── Store server ────────────────────────────────────────────────────
 
 struct StoreServer {
@@ -216,8 +243,8 @@ impl Dispatch for StoreServer {
 
                         let _ = msg.reply_ok(&data, &[]);
                     }
-                    Err(_) => {
-                        let _ = msg.reply_error(ipc::STATUS_IO_ERROR);
+                    Err(ref e) => {
+                        let _ = msg.reply_error(store_error_status(e));
                     }
                 }
             }
@@ -257,8 +284,8 @@ impl Dispatch for StoreServer {
                     Ok(()) => {
                         let _ = msg.reply_empty();
                     }
-                    Err(_) => {
-                        let _ = msg.reply_error(ipc::STATUS_IO_ERROR);
+                    Err(ref e) => {
+                        let _ = msg.reply_error(store_error_status(e));
                     }
                 }
             }
@@ -307,8 +334,8 @@ impl Dispatch for StoreServer {
 
                         let _ = msg.reply_ok(&data, &[]);
                     }
-                    Err(_) => {
-                        let _ = msg.reply_error(ipc::STATUS_IO_ERROR);
+                    Err(ref e) => {
+                        let _ = msg.reply_error(store_error_status(e));
                     }
                 }
             }
@@ -327,8 +354,8 @@ impl Dispatch for StoreServer {
                     Ok(()) => {
                         let _ = msg.reply_empty();
                     }
-                    Err(_) => {
-                        let _ = msg.reply_error(ipc::STATUS_IO_ERROR);
+                    Err(ref e) => {
+                        let _ = msg.reply_error(store_error_status(e));
                     }
                 }
             }
@@ -337,8 +364,8 @@ impl Dispatch for StoreServer {
                 Ok(()) => {
                     let _ = msg.reply_empty();
                 }
-                Err(_) => {
-                    let _ = msg.reply_error(ipc::STATUS_IO_ERROR);
+                Err(ref e) => {
+                    let _ = msg.reply_error(store_error_status(e));
                 }
             },
 
@@ -363,8 +390,8 @@ impl Dispatch for StoreServer {
 
                         let _ = msg.reply_ok(&data, &[]);
                     }
-                    Err(_) => {
-                        let _ = msg.reply_error(ipc::STATUS_IO_ERROR);
+                    Err(ref e) => {
+                        let _ = msg.reply_error(store_error_status(e));
                     }
                 }
             }
@@ -382,8 +409,8 @@ impl Dispatch for StoreServer {
                     Ok(()) => {
                         let _ = msg.reply_empty();
                     }
-                    Err(_) => {
-                        let _ = msg.reply_error(ipc::STATUS_IO_ERROR);
+                    Err(ref e) => {
+                        let _ = msg.reply_error(store_error_status(e));
                     }
                 }
             }
@@ -441,18 +468,19 @@ impl Dispatch for StoreServer {
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.boot")]
 extern "C" fn _start() -> ! {
-    let console_ep = match name::lookup_wait(HANDLE_NS_EP, b"console", 1000) {
+    let console_ep = match name::watch(HANDLE_NS_EP, b"console") {
         Ok(h) => h,
-        Err(_) => abi::thread::exit(0xE001),
+        Err(_) => abi::thread::exit(EXIT_CONSOLE_NOT_FOUND),
     };
 
     console::write(console_ep, b"store: starting\n");
 
-    let blk_ep = match name::lookup_wait(HANDLE_NS_EP, b"blk", 5000) {
+    let blk_ep = match name::watch(HANDLE_NS_EP, b"blk") {
         Ok(h) => h,
         Err(_) => {
             console::write(console_ep, b"store: blk not found\n");
-            abi::thread::exit(0xE002);
+
+            abi::thread::exit(EXIT_BLK_NOT_FOUND);
         }
     };
 
@@ -486,7 +514,8 @@ extern "C" fn _start() -> ! {
             Ok(f) => f,
             Err(_) => {
                 console::write(console_ep, b"store: mount FAIL\n");
-                abi::thread::exit(0xE003);
+
+                abi::thread::exit(EXIT_MOUNT_FAILED);
             }
         }
     } else {
@@ -496,7 +525,8 @@ extern "C" fn _start() -> ! {
             Ok(f) => f,
             Err(_) => {
                 console::write(console_ep, b"store: format FAIL\n");
-                abi::thread::exit(0xE004);
+
+                abi::thread::exit(EXIT_FORMAT_FAILED);
             }
         }
     };
@@ -515,7 +545,7 @@ extern "C" fn _start() -> ! {
             Err(_) => {
                 console::write(console_ep, b"store: init failed\n");
 
-                abi::thread::exit(0xE005);
+                abi::thread::exit(EXIT_STORE_INIT_FAILED);
             }
         }
     } else {
@@ -526,14 +556,14 @@ extern "C" fn _start() -> ! {
             Err(_) => {
                 console::write(console_ep, b"store: open failed\n");
 
-                abi::thread::exit(0xE006);
+                abi::thread::exit(EXIT_STORE_OPEN_FAILED);
             }
         }
     };
 
     let own_ep = match abi::ipc::endpoint_create() {
         Ok(h) => h,
-        Err(_) => abi::thread::exit(0xE007),
+        Err(_) => abi::thread::exit(EXIT_ENDPOINT_CREATE_FAILED),
     };
 
     name::register(HANDLE_NS_EP, b"store", own_ep);

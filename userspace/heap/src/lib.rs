@@ -1,12 +1,13 @@
 //! Userspace slab allocator — O(1) alloc/free for common sizes.
 //!
-//! Ported from the v0.6 prototype's `libraries/sys/heap.rs`.
-//!
 //! Two-tier design:
 //! - **Small** (<=2048 bytes): slab with 8 power-of-two size classes.
 //!   Free lists carved from dedicated 16 KiB slab pages.
 //! - **Large** (>2048 bytes): page-granular VMO allocation from kernel,
-//!   with a fixed-capacity cache to avoid kernel round-trips.
+//!   tracked by VA→handle mapping for proper cleanup.
+//!
+//! Large allocations are cached on free for reuse. When the cache is full,
+//! overflow entries are unmapped and their VMO handles closed — no leaks.
 //!
 //! Link this crate into any `no_std` userspace binary that needs `alloc`.
 //! It provides `#[global_allocator]` automatically.
@@ -18,7 +19,7 @@ use core::{
     cell::UnsafeCell,
 };
 
-use abi::types::Rights;
+use abi::types::{Handle, Rights};
 
 const PAGE_SIZE: usize = 16384;
 const NUM_CLASSES: usize = 8;
@@ -36,24 +37,85 @@ fn class_index(size: usize) -> Option<usize> {
     }
 }
 
-fn alloc_pages(pages: usize) -> Option<usize> {
+fn alloc_pages(pages: usize) -> Option<(usize, Handle)> {
     let size = pages * PAGE_SIZE;
     let vmo = abi::vmo::create(size, 0).ok()?;
     let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
     let va = abi::vmo::map(vmo, 0, rw).ok()?;
 
-    Some(va)
+    Some((va, vmo))
+}
+
+fn free_pages(va: usize, vmo: Handle) {
+    let _ = abi::vmo::unmap(va);
+    let _ = abi::handle::close(vmo);
 }
 
 struct FreeSlot {
     next: *mut FreeSlot,
 }
 
-const LARGE_CACHE_CAPACITY: usize = 16;
+// ── Large allocation tracker ───────────────────────────────────────
+
+const LARGE_CACHE_CAPACITY: usize = 32;
+const VMO_TRACKER_CAPACITY: usize = 64;
+
+struct VmoEntry {
+    va: usize,
+    handle: u32,
+}
+
+struct VmoTracker {
+    entries: [VmoEntry; VMO_TRACKER_CAPACITY],
+    len: usize,
+}
+
+impl VmoTracker {
+    const fn new() -> Self {
+        const EMPTY: VmoEntry = VmoEntry { va: 0, handle: 0 };
+
+        Self {
+            entries: [EMPTY; VMO_TRACKER_CAPACITY],
+            len: 0,
+        }
+    }
+
+    fn insert(&mut self, va: usize, handle: Handle) {
+        if self.len < VMO_TRACKER_CAPACITY {
+            self.entries[self.len] = VmoEntry {
+                va,
+                handle: handle.0,
+            };
+            self.len += 1;
+        }
+    }
+
+    fn remove(&mut self, va: usize) -> Option<Handle> {
+        for i in 0..self.len {
+            if self.entries[i].va == va {
+                let handle = Handle(self.entries[i].handle);
+
+                self.len -= 1;
+
+                if i < self.len {
+                    self.entries[i] = VmoEntry {
+                        va: self.entries[self.len].va,
+                        handle: self.entries[self.len].handle,
+                    };
+                }
+
+                return Some(handle);
+            }
+        }
+
+        None
+    }
+}
 
 struct LargeCacheEntry {
     va: usize,
     pages: usize,
+    vmo_handle: u32,
 }
 
 struct LargeCache {
@@ -63,7 +125,11 @@ struct LargeCache {
 
 impl LargeCache {
     const fn new() -> Self {
-        const EMPTY: LargeCacheEntry = LargeCacheEntry { va: 0, pages: 0 };
+        const EMPTY: LargeCacheEntry = LargeCacheEntry {
+            va: 0,
+            pages: 0,
+            vmo_handle: 0,
+        };
 
         Self {
             entries: [EMPTY; LARGE_CACHE_CAPACITY],
@@ -71,10 +137,11 @@ impl LargeCache {
         }
     }
 
-    fn take(&mut self, pages: usize) -> Option<usize> {
+    fn take(&mut self, pages: usize) -> Option<(usize, Handle)> {
         for i in 0..self.len {
             if self.entries[i].pages == pages {
                 let va = self.entries[i].va;
+                let handle = Handle(self.entries[i].vmo_handle);
 
                 self.len -= 1;
 
@@ -82,27 +149,37 @@ impl LargeCache {
                     self.entries[i] = LargeCacheEntry {
                         va: self.entries[self.len].va,
                         pages: self.entries[self.len].pages,
+                        vmo_handle: self.entries[self.len].vmo_handle,
                     };
                 }
 
-                return Some(va);
+                return Some((va, handle));
             }
         }
 
         None
     }
 
-    fn put(&mut self, va: usize, pages: usize) {
+    fn put(&mut self, va: usize, pages: usize, vmo: Handle) {
         if self.len < LARGE_CACHE_CAPACITY {
-            self.entries[self.len] = LargeCacheEntry { va, pages };
+            self.entries[self.len] = LargeCacheEntry {
+                va,
+                pages,
+                vmo_handle: vmo.0,
+            };
             self.len += 1;
+        } else {
+            free_pages(va, vmo);
         }
     }
 }
 
+// ── Global allocator ───────────────────────────────────────────────
+
 pub struct UserHeap {
     classes: [UnsafeCell<*mut FreeSlot>; NUM_CLASSES],
     large_cache: UnsafeCell<LargeCache>,
+    vmo_tracker: UnsafeCell<VmoTracker>,
 }
 
 impl UserHeap {
@@ -112,6 +189,7 @@ impl UserHeap {
         Self {
             classes: [NULL; NUM_CLASSES],
             large_cache: UnsafeCell::new(LargeCache::new()),
+            vmo_tracker: UnsafeCell::new(VmoTracker::new()),
         }
     }
 
@@ -155,8 +233,8 @@ unsafe impl GlobalAlloc for UserHeap {
                 let head = unsafe { &mut *self.classes[ci].get() };
 
                 if (*head).is_null() {
-                    let va = match alloc_pages(1) {
-                        Some(va) => va,
+                    let (va, _vmo) = match alloc_pages(1) {
+                        Some(r) => r,
                         None => {
                             self.release();
 
@@ -185,7 +263,11 @@ unsafe impl GlobalAlloc for UserHeap {
                 // SAFETY: Lock is held; UnsafeCell access is exclusive.
                 let cache = unsafe { &mut *self.large_cache.get() };
 
-                if let Some(va) = cache.take(pages) {
+                if let Some((va, handle)) = cache.take(pages) {
+                    let tracker = unsafe { &mut *self.vmo_tracker.get() };
+
+                    tracker.insert(va, handle);
+
                     self.release();
 
                     return va as *mut u8;
@@ -193,10 +275,20 @@ unsafe impl GlobalAlloc for UserHeap {
 
                 self.release();
 
-                match alloc_pages(pages) {
-                    Some(va) => va as *mut u8,
-                    None => core::ptr::null_mut(),
-                }
+                let (va, vmo) = match alloc_pages(pages) {
+                    Some(r) => r,
+                    None => return core::ptr::null_mut(),
+                };
+
+                self.acquire();
+
+                let tracker = unsafe { &mut *self.vmo_tracker.get() };
+
+                tracker.insert(va, vmo);
+
+                self.release();
+
+                va as *mut u8
             }
         }
     }
@@ -224,10 +316,17 @@ unsafe impl GlobalAlloc for UserHeap {
 
                 self.acquire();
 
+                let tracker = unsafe { &mut *self.vmo_tracker.get() };
+                let handle = tracker.remove(ptr as usize);
                 // SAFETY: Lock is held; UnsafeCell access is exclusive.
                 let cache = unsafe { &mut *self.large_cache.get() };
 
-                cache.put(ptr as usize, pages);
+                match handle {
+                    Some(h) => cache.put(ptr as usize, pages, h),
+                    None => {
+                        let _ = abi::vmo::unmap(ptr as usize);
+                    }
+                }
 
                 self.release();
             }
@@ -240,7 +339,7 @@ static HEAP: UserHeap = UserHeap::new();
 
 pub fn test_alloc(size: usize) -> usize {
     match alloc_pages((size + PAGE_SIZE - 1) / PAGE_SIZE) {
-        Some(va) => va,
+        Some((va, _)) => va,
         None => 0,
     }
 }

@@ -208,6 +208,11 @@ const SERVICES: &[ServiceDef] = &[
         dir: "../userspace/servers/store",
         crate_name: "store-service",
     },
+    ServiceDef {
+        name: "test-store",
+        dir: "../userspace/servers/test-store",
+        crate_name: "test-store",
+    },
 ];
 
 fn build_service_pack(kernel_dir: &std::path::Path, out_dir: &std::path::Path) {

@@ -17,6 +17,7 @@ use ipc::server::{self, Dispatch, Incoming};
 
 const HANDLE_ENDPOINT: Handle = Handle(2);
 const MAX_ENTRIES: usize = 16;
+const MAX_WATCHERS: usize = 8;
 const NAME_LEN: usize = 32;
 
 struct Entry {
@@ -25,22 +26,35 @@ struct Entry {
     occupied: bool,
 }
 
+struct Watcher {
+    name: [u8; NAME_LEN],
+    reply_cap: u32,
+    occupied: bool,
+}
+
 struct NameTable {
     entries: [Entry; MAX_ENTRIES],
     count: usize,
+    watchers: [Watcher; MAX_WATCHERS],
 }
 
 impl NameTable {
     const fn new() -> Self {
-        const EMPTY: Entry = Entry {
+        const EMPTY_ENTRY: Entry = Entry {
             name: [0; NAME_LEN],
             endpoint_handle: 0,
             occupied: false,
         };
+        const EMPTY_WATCHER: Watcher = Watcher {
+            name: [0; NAME_LEN],
+            reply_cap: 0,
+            occupied: false,
+        };
 
         Self {
-            entries: [EMPTY; MAX_ENTRIES],
+            entries: [EMPTY_ENTRY; MAX_ENTRIES],
             count: 0,
+            watchers: [EMPTY_WATCHER; MAX_WATCHERS],
         }
     }
 
@@ -91,6 +105,43 @@ impl NameTable {
 
         false
     }
+
+    fn add_watcher(&mut self, name: &[u8; NAME_LEN], reply_cap: u32) -> bool {
+        for w in &mut self.watchers {
+            if !w.occupied {
+                w.name = *name;
+                w.reply_cap = reply_cap;
+                w.occupied = true;
+
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn notify_watchers(&mut self, name: &[u8; NAME_LEN], ep_handle: u32) {
+        for w in &mut self.watchers {
+            if w.occupied && w.name == *name {
+                let dup = abi::handle::dup(Handle(ep_handle), abi::types::Rights::ALL);
+
+                if let Ok(h) = dup {
+                    let mut buf = [0u8; ipc::message::MSG_SIZE];
+
+                    ipc::message::write_reply(&mut buf, name::WATCH, &[]);
+
+                    let _ = abi::ipc::reply(
+                        HANDLE_ENDPOINT,
+                        w.reply_cap,
+                        &buf[..ipc::message::HEADER_SIZE],
+                        &[h.0],
+                    );
+                }
+
+                w.occupied = false;
+            }
+        }
+    }
 }
 
 impl Dispatch for NameTable {
@@ -108,6 +159,8 @@ impl Dispatch for NameTable {
 
                 match self.register(&req.name, ep_handle) {
                     Ok(()) => {
+                        self.notify_watchers(&req.name, ep_handle);
+
                         let _ = msg.reply_empty();
                     }
                     Err(status) => {
@@ -126,7 +179,6 @@ impl Dispatch for NameTable {
 
                 match self.lookup(&req.name) {
                     Some(ep_handle) => {
-                        // Dup the stored handle so we keep our copy.
                         let dup = abi::handle::dup(Handle(ep_handle), abi::types::Rights::ALL);
 
                         match dup {
@@ -156,6 +208,37 @@ impl Dispatch for NameTable {
                     let _ = msg.reply_empty();
                 } else {
                     let _ = msg.reply_error(ipc::STATUS_NOT_FOUND);
+                }
+            }
+            name::WATCH => {
+                if msg.payload.len() < name::NameRequest::SIZE {
+                    let _ = msg.reply_error(ipc::STATUS_INVALID);
+
+                    return;
+                }
+
+                let req = name::NameRequest::read_from(msg.payload);
+
+                match self.lookup(&req.name) {
+                    Some(ep_handle) => {
+                        let dup = abi::handle::dup(Handle(ep_handle), abi::types::Rights::ALL);
+
+                        match dup {
+                            Ok(h) => {
+                                let _ = msg.reply_ok(&[], &[h.0]);
+                            }
+                            Err(_) => {
+                                let _ = msg.reply_error(ipc::STATUS_NOT_FOUND);
+                            }
+                        }
+                    }
+                    None => {
+                        let deferred = msg.defer();
+
+                        if !self.add_watcher(&req.name, deferred.reply_cap) {
+                            let _ = deferred.reply_error(ipc::STATUS_NO_SPACE);
+                        }
+                    }
                 }
             }
             _ => {

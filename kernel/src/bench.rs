@@ -984,7 +984,7 @@ fn ipc_storm_iteration(current: ThreadId, ep: u64) {
         drop(space);
 
         if let Some(mut endpoint) = state::endpoints().write(ep_id) {
-            while endpoint.dequeue_call().is_some() {}
+            while endpoint.dequeue_caller().is_some() {}
         }
     }
 }
