@@ -1,0 +1,11 @@
+# Phase 5.3 — input-to-pixels verification.
+# Type "hello", capture the result, exit.
+# Frame 0 = initial empty document render (boot).
+# Each key fires when the previous frame is presented.
+0 key h
+1 key e
+2 key l
+3 key l
+4 key o
+5 capture /tmp/os-phase5-hello.png
+5 exit

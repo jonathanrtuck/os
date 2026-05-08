@@ -33,6 +33,9 @@ const EXIT_LAYOUT_SETUP: u32 = 0xE208;
 const EXIT_SCENE_CREATE: u32 = 0xE20A;
 const EXIT_SCENE_MAP: u32 = 0xE20B;
 const EXIT_ENDPOINT_CREATE: u32 = 0xE20C;
+const EXIT_RENDER_NOT_FOUND: u32 = 0xE20D;
+const EXIT_RENDER_SETUP: u32 = 0xE20E;
+const EXIT_EDITOR_NOT_FOUND: u32 = 0xE20F;
 
 const MAX_GLYPHS_PER_LINE: usize = 256;
 
@@ -71,6 +74,9 @@ struct Presenter {
     last_cursor_line: u32,
     last_cursor_col: u32,
     last_content_len: u32,
+
+    render_ep: Handle,
+    editor_ep: Handle,
 
     #[allow(dead_code)]
     console_ep: Handle,
@@ -273,6 +279,10 @@ impl Presenter {
         self.last_content_len = content_len as u32;
     }
 
+    fn request_render(&self) {
+        let _ = ipc::client::call_simple(self.render_ep, render::comp::RENDER, &[]);
+    }
+
     fn make_info_reply(&self) -> presenter_service::InfoReply {
         let scene = SceneWriter::from_existing(unsafe {
             core::slice::from_raw_parts_mut(self.scene_buf.as_ptr() as *mut u8, SCENE_SIZE)
@@ -312,6 +322,7 @@ impl Dispatch for Presenter {
             },
             presenter_service::BUILD => {
                 self.build_scene();
+                self.request_render();
 
                 let reply = self.make_info_reply();
                 let mut data = [0u8; presenter_service::InfoReply::SIZE];
@@ -327,6 +338,23 @@ impl Dispatch for Presenter {
                 reply.write_to(&mut data);
 
                 let _ = msg.reply_ok(&data, &[]);
+            }
+
+            presenter_service::KEY_EVENT => {
+                if msg.payload.len() >= text_editor::KeyDispatch::SIZE {
+                    let dispatch = text_editor::KeyDispatch::read_from(msg.payload);
+                    let mut data = [0u8; text_editor::KeyDispatch::SIZE];
+
+                    dispatch.write_to(&mut data);
+
+                    let _ =
+                        ipc::client::call_simple(self.editor_ep, text_editor::DISPATCH_KEY, &data);
+
+                    self.build_scene();
+                    self.request_render();
+                }
+
+                let _ = msg.reply_empty();
             }
 
             _ => {
@@ -420,14 +448,60 @@ extern "C" fn _start() -> ! {
     // bytes. The presenter is the sole writer.
     let scene_buf = unsafe { core::slice::from_raw_parts_mut(scene_va as *mut u8, SCENE_SIZE) };
     let _ = SceneWriter::new(scene_buf);
+
+    // Connect to compositor — send scene graph VMO so it can read our output.
+    let render_ep = match name::watch(HANDLE_NS_EP, b"render") {
+        Ok(h) => h,
+        Err(_) => {
+            console::write(console_ep, b"presenter: render not found\n");
+
+            abi::thread::exit(EXIT_RENDER_NOT_FOUND);
+        }
+    };
+    let scene_dup = match abi::handle::dup(scene_vmo, Rights::READ_MAP) {
+        Ok(h) => h,
+        Err(_) => abi::thread::exit(EXIT_RENDER_SETUP),
+    };
+    let mut reply_buf = [0u8; ipc::message::MSG_SIZE];
+    let mut recv_handles = [0u32; 4];
+    let (display_width, display_height) = match ipc::client::call(
+        render_ep,
+        render::comp::SETUP,
+        &[],
+        &[scene_dup.0],
+        &mut recv_handles,
+        &mut reply_buf,
+    ) {
+        Ok(reply) if !reply.is_error() && reply.payload.len() >= render::comp::SetupReply::SIZE => {
+            let sr = render::comp::SetupReply::read_from(reply.payload);
+
+            (sr.display_width, sr.display_height)
+        }
+        _ => (
+            presenter_service::DEFAULT_WIDTH,
+            presenter_service::DEFAULT_HEIGHT,
+        ),
+    };
+
+    console::write(console_ep, b"presenter: render connected\n");
+
+    let editor_ep = match name::watch(HANDLE_NS_EP, b"editor.text") {
+        Ok(h) => h,
+        Err(_) => {
+            console::write(console_ep, b"presenter: editor not found\n");
+
+            abi::thread::exit(EXIT_EDITOR_NOT_FOUND);
+        }
+    };
+
+    console::write(console_ep, b"presenter: editor connected\n");
+
     let own_ep = match abi::ipc::endpoint_create() {
         Ok(h) => h,
         Err(_) => abi::thread::exit(EXIT_ENDPOINT_CREATE),
     };
 
     name::register(HANDLE_NS_EP, b"presenter", own_ep);
-
-    console::write(console_ep, b"presenter: ready\n");
 
     let mut server = Presenter {
         doc_va,
@@ -437,8 +511,8 @@ extern "C" fn _start() -> ! {
         scene_buf,
         scene_vmo,
         viewport_va,
-        display_width: presenter_service::DEFAULT_WIDTH,
-        display_height: presenter_service::DEFAULT_HEIGHT,
+        display_width,
+        display_height,
         glyphs: [ShapedGlyph {
             glyph_id: 0,
             _pad: 0,
@@ -450,10 +524,17 @@ extern "C" fn _start() -> ! {
         last_cursor_line: 0,
         last_cursor_col: 0,
         last_content_len: 0,
+        render_ep,
+        editor_ep,
         console_ep,
     };
 
+    // Initial render: write viewport, build scene graph, tell compositor.
     server.write_viewport();
+    server.build_scene();
+    server.request_render();
+
+    console::write(console_ep, b"presenter: ready\n");
 
     ipc::server::serve(own_ep, &mut server);
 

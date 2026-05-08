@@ -23,6 +23,10 @@ pub const BUILD: u32 = 2;
 /// Returns current presenter statistics.
 pub const GET_INFO: u32 = 3;
 
+/// Key event from input driver. Payload: KeyDispatch (4 bytes).
+/// Presenter forwards to the active editor, rebuilds scene, re-renders.
+pub const KEY_EVENT: u32 = 4;
+
 // ── Visual constants ────────────────────────────────────────────
 
 pub const DEFAULT_WIDTH: u32 = 1440;

@@ -13,7 +13,9 @@ service = [
     "dep:heap",
     "dep:layout-service",
     "dep:name",
+    "dep:render",
     "dep:scene",
+    "dep:text-editor",
     "ipc/kernel",
 ]
 
@@ -26,6 +28,8 @@ document-service = { path = "../document", optional = true }
 heap = { path = "../../heap", optional = true }
 layout-service = { path = "../layout", optional = true }
 name = { path = "../name", optional = true }
+render = { path = "../drivers/render", optional = true }
 scene = { path = "../../../libraries/scene", optional = true }
+text-editor = { path = "../../editors/text", optional = true }
 
 [workspace]

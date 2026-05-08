@@ -7,6 +7,43 @@ name = "abi"
 version = "0.1.0"
 
 [[package]]
+name = "blk"
+version = "0.1.0"
+dependencies = [
+ "abi",
+ "console",
+ "init",
+ "ipc",
+ "name",
+ "virtio",
+]
+
+[[package]]
+name = "console"
+version = "0.1.0"
+dependencies = [
+ "abi",
+ "ipc",
+ "name",
+]
+
+[[package]]
+name = "document-service"
+version = "0.1.0"
+dependencies = [
+ "abi",
+ "console",
+ "heap",
+ "ipc",
+ "name",
+ "store-service",
+]
+
+[[package]]
+name = "fs"
+version = "0.1.0"
+
+[[package]]
 name = "heap"
 version = "0.1.0"
 dependencies = [
@@ -25,8 +62,11 @@ name = "input"
 version = "0.1.0"
 dependencies = [
  "abi",
+ "console",
  "init",
+ "ipc",
  "name",
+ "presenter-service",
  "virtio",
 ]
 
@@ -38,12 +78,96 @@ dependencies = [
 ]
 
 [[package]]
+name = "layout"
+version = "0.1.0"
+
+[[package]]
+name = "layout-service"
+version = "0.1.0"
+dependencies = [
+ "abi",
+ "console",
+ "document-service",
+ "heap",
+ "ipc",
+ "layout",
+ "name",
+]
+
+[[package]]
 name = "name"
 version = "0.1.0"
 dependencies = [
  "abi",
  "heap",
  "ipc",
+]
+
+[[package]]
+name = "presenter-service"
+version = "0.1.0"
+dependencies = [
+ "abi",
+ "console",
+ "document-service",
+ "heap",
+ "ipc",
+ "layout-service",
+ "name",
+ "render",
+ "scene",
+ "text-editor",
+]
+
+[[package]]
+name = "render"
+version = "0.1.0"
+dependencies = [
+ "abi",
+ "console",
+ "heap",
+ "init",
+ "ipc",
+ "name",
+ "scene",
+ "virtio",
+]
+
+[[package]]
+name = "scene"
+version = "0.1.0"
+
+[[package]]
+name = "store"
+version = "0.1.0"
+dependencies = [
+ "fs",
+]
+
+[[package]]
+name = "store-service"
+version = "0.1.0"
+dependencies = [
+ "abi",
+ "blk",
+ "console",
+ "fs",
+ "heap",
+ "init",
+ "ipc",
+ "name",
+ "store",
+]
+
+[[package]]
+name = "text-editor"
+version = "0.1.0"
+dependencies = [
+ "abi",
+ "console",
+ "document-service",
+ "ipc",
+ "name",
 ]
 
 [[package]]

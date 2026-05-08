@@ -7,7 +7,8 @@
 //!
 //! Probes the virtio MMIO region for input devices (device ID 18).
 //! Requests DMA VMOs from init for virtqueue and event buffers.
-//! Reads virtio-input events and registers with the name service.
+//! On key press, translates evdev codes to characters and forwards
+//! to the presenter via sync IPC.
 
 #![no_std]
 #![no_main]
@@ -60,6 +61,91 @@ fn modifier_bit(code: u16) -> u8 {
         _ => 0,
     }
 }
+
+// ── Evdev → character keymap (US QWERTY) ────────────────────────────
+
+const HID_RETURN: u16 = 0x28;
+const HID_BACKSPACE: u16 = 0x2A;
+const HID_TAB: u16 = 0x2B;
+const HID_DELETE: u16 = 0x4C;
+
+fn evdev_to_key(code: u16, shift: bool) -> (u16, u8) {
+    // (hid_key_code, ascii_char) — for printable: hid=0, char=ascii
+    match code {
+        // Row 1: digits
+        2 => (0, if shift { b'!' } else { b'1' }),
+        3 => (0, if shift { b'@' } else { b'2' }),
+        4 => (0, if shift { b'#' } else { b'3' }),
+        5 => (0, if shift { b'$' } else { b'4' }),
+        6 => (0, if shift { b'%' } else { b'5' }),
+        7 => (0, if shift { b'^' } else { b'6' }),
+        8 => (0, if shift { b'&' } else { b'7' }),
+        9 => (0, if shift { b'*' } else { b'8' }),
+        10 => (0, if shift { b'(' } else { b'9' }),
+        11 => (0, if shift { b')' } else { b'0' }),
+        12 => (0, if shift { b'_' } else { b'-' }),
+        13 => (0, if shift { b'+' } else { b'=' }),
+        // Row 2: qwertyuiop
+        16 => (0, if shift { b'Q' } else { b'q' }),
+        17 => (0, if shift { b'W' } else { b'w' }),
+        18 => (0, if shift { b'E' } else { b'e' }),
+        19 => (0, if shift { b'R' } else { b'r' }),
+        20 => (0, if shift { b'T' } else { b't' }),
+        21 => (0, if shift { b'Y' } else { b'y' }),
+        22 => (0, if shift { b'U' } else { b'u' }),
+        23 => (0, if shift { b'I' } else { b'i' }),
+        24 => (0, if shift { b'O' } else { b'o' }),
+        25 => (0, if shift { b'P' } else { b'p' }),
+        26 => (0, if shift { b'{' } else { b'[' }),
+        27 => (0, if shift { b'}' } else { b']' }),
+        // Row 3: asdfghjkl
+        30 => (0, if shift { b'A' } else { b'a' }),
+        31 => (0, if shift { b'S' } else { b's' }),
+        32 => (0, if shift { b'D' } else { b'd' }),
+        33 => (0, if shift { b'F' } else { b'f' }),
+        34 => (0, if shift { b'G' } else { b'g' }),
+        35 => (0, if shift { b'H' } else { b'h' }),
+        36 => (0, if shift { b'J' } else { b'j' }),
+        37 => (0, if shift { b'K' } else { b'k' }),
+        38 => (0, if shift { b'L' } else { b'l' }),
+        39 => (0, if shift { b':' } else { b';' }),
+        40 => (0, if shift { b'"' } else { b'\'' }),
+        41 => (0, if shift { b'~' } else { b'`' }),
+        43 => (0, if shift { b'|' } else { b'\\' }),
+        // Row 4: zxcvbnm
+        44 => (0, if shift { b'Z' } else { b'z' }),
+        45 => (0, if shift { b'X' } else { b'x' }),
+        46 => (0, if shift { b'C' } else { b'c' }),
+        47 => (0, if shift { b'V' } else { b'v' }),
+        48 => (0, if shift { b'B' } else { b'b' }),
+        49 => (0, if shift { b'N' } else { b'n' }),
+        50 => (0, if shift { b'M' } else { b'm' }),
+        51 => (0, if shift { b'<' } else { b',' }),
+        52 => (0, if shift { b'>' } else { b'.' }),
+        53 => (0, if shift { b'?' } else { b'/' }),
+        // Special keys
+        14 => (HID_BACKSPACE, 0),
+        15 => (HID_TAB, 0),
+        28 => (HID_RETURN, 0),
+        57 => (0, b' '),
+        111 => (HID_DELETE, 0),
+        _ => (0, 0),
+    }
+}
+
+// ── Forward key event to presenter ──────────────────────────────────
+
+fn forward_key(presenter_ep: Handle, hid_code: u16, modifiers: u8, character: u8) {
+    let mut payload = [0u8; 4];
+
+    payload[0..2].copy_from_slice(&hid_code.to_le_bytes());
+    payload[2] = modifiers;
+    payload[3] = character;
+
+    let _ = ipc::client::call_simple(presenter_ep, presenter_service::KEY_EVENT, &payload);
+}
+
+// ── Entry point ─────────────────────────────────────────────────────
 
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.boot")]
@@ -141,7 +227,9 @@ extern "C" fn _start() -> ! {
 
     name::register(HANDLE_NS_EP, b"input", own_ep);
 
-    let mut _modifiers: u8 = 0;
+    let console_ep = name::lookup(HANDLE_NS_EP, b"console").ok();
+    let mut presenter_ep: Option<Handle> = None;
+    let mut modifiers: u8 = 0;
 
     loop {
         let _ = abi::event::wait(&[(irq_event, 0x1)]);
@@ -169,27 +257,40 @@ extern "C" fn _start() -> ! {
                 let pressed = event.value == 1;
 
                 if event.code == BTN_LEFT || event.code == BTN_RIGHT {
-                    let _button = if event.code == BTN_LEFT {
-                        input::BUTTON_LEFT
-                    } else {
-                        input::BUTTON_RIGHT
-                    };
+                    // Pointer buttons — not forwarded yet.
                 } else {
                     let mod_bit = modifier_bit(event.code);
 
                     if mod_bit != 0 {
                         if pressed {
-                            _modifiers |= mod_bit;
+                            modifiers |= mod_bit;
                         } else {
-                            _modifiers &= !mod_bit;
+                            modifiers &= !mod_bit;
                         }
                     }
 
-                    if event.code == KEY_CAPSLOCK {
-                        if pressed {
-                            _modifiers |= input::MOD_CAPS_LOCK;
-                        } else {
-                            _modifiers &= !input::MOD_CAPS_LOCK;
+                    if event.code == KEY_CAPSLOCK && pressed {
+                        modifiers ^= input::MOD_CAPS_LOCK;
+                    }
+
+                    if pressed && mod_bit == 0 {
+                        let shift = modifiers & input::MOD_SHIFT != 0;
+                        let (hid, ch) = evdev_to_key(event.code, shift);
+
+                        if hid != 0 || ch != 0 {
+                            if presenter_ep.is_none() {
+                                presenter_ep = name::lookup(HANDLE_NS_EP, b"presenter").ok();
+
+                                if let (Some(ep), Some(con)) = (presenter_ep, console_ep) {
+                                    let _ = ep;
+
+                                    console::write(con, b"input: presenter connected\n");
+                                }
+                            }
+
+                            if let Some(ep) = presenter_ep {
+                                forward_key(ep, hid, modifiers, ch);
+                            }
                         }
                     }
                 }

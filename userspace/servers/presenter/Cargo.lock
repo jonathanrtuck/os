@@ -101,7 +101,23 @@ dependencies = [
  "ipc",
  "layout-service",
  "name",
+ "render",
  "scene",
+ "text-editor",
+]
+
+[[package]]
+name = "render"
+version = "0.1.0"
+dependencies = [
+ "abi",
+ "console",
+ "heap",
+ "init",
+ "ipc",
+ "name",
+ "scene",
+ "virtio",
 ]
 
 [[package]]
@@ -128,6 +144,17 @@ dependencies = [
  "ipc",
  "name",
  "store",
+]
+
+[[package]]
+name = "text-editor"
+version = "0.1.0"
+dependencies = [
+ "abi",
+ "console",
+ "document-service",
+ "ipc",
+ "name",
 ]
 
 [[package]]

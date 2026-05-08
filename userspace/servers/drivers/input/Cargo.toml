@@ -6,8 +6,11 @@ license = "Unlicense"
 
 [dependencies]
 abi = { path = "../../../abi" }
+console = { path = "../../console" }
 init = { path = "../../init" }
+ipc = { path = "../../../ipc" }
 name = { path = "../../name" }
+presenter-service = { path = "../../presenter" }
 virtio = { path = "../../../virtio" }
 
 [workspace]

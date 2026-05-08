@@ -6,9 +6,10 @@ RUST_TEST_THREADS = "1"
 
 [alias]
 t = ["test", "-p", "kernel", "--lib", "--target", "aarch64-apple-darwin"]
+r = ["run", "-p", "kernel", "--release"]
 
 [target.aarch64-unknown-none]
-runner = ["hypervisor", "--no-gpu"]
+runner = ["hypervisor", "--drive", "disk.img"]
 # M4 Pro is ARMv9.2-A. +v8.4a enables LSE atomics, FEAT_DIT, dot product,
 # and flag manipulation. Individual features for safety rather than +v9.2a
 # which would pull in SVE/SME that we don't use.

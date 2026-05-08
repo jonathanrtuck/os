@@ -51,11 +51,17 @@ version = "0.1.0"
 dependencies = [
  "abi",
  "console",
+ "heap",
  "init",
  "ipc",
  "name",
+ "scene",
  "virtio",
 ]
+
+[[package]]
+name = "scene"
+version = "0.1.0"
 
 [[package]]
 name = "virtio"

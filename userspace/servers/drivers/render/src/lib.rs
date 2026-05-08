@@ -247,6 +247,127 @@ impl<'a> CommandWriter<'a> {
         self.header(CMD_PRESENT_AND_COMMIT, 4);
         self.put_u32(frame_id);
     }
+
+    pub fn set_scissor(&mut self, x: u32, y: u32, w: u32, h: u32) {
+        self.header(CMD_SET_SCISSOR, 16);
+        self.put_u32(x);
+        self.put_u32(y);
+        self.put_u32(w);
+        self.put_u32(h);
+    }
+}
+
+// ── Compositor IPC protocol ────────────────────────────────────────
+//
+// Sync call/reply between the presenter and the render driver (compositor).
+// The Metal command protocol above is between the compositor and the GPU.
+
+pub mod comp {
+    pub use ipc::MAX_PAYLOAD;
+
+    /// Presenter sends scene graph VMO handle → compositor maps it RO.
+    /// Reply includes display dimensions.
+    pub const SETUP: u32 = 1;
+
+    /// Trigger scene graph read + GPU frame render.
+    pub const RENDER: u32 = 2;
+
+    /// Query display dimensions and frame count.
+    pub const GET_INFO: u32 = 3;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct SetupReply {
+        pub display_width: u32,
+        pub display_height: u32,
+    }
+
+    impl SetupReply {
+        pub const SIZE: usize = 8;
+
+        pub fn write_to(&self, buf: &mut [u8]) {
+            buf[0..4].copy_from_slice(&self.display_width.to_le_bytes());
+            buf[4..8].copy_from_slice(&self.display_height.to_le_bytes());
+        }
+
+        #[must_use]
+        pub fn read_from(buf: &[u8]) -> Self {
+            Self {
+                display_width: u32::from_le_bytes(buf[0..4].try_into().unwrap()),
+                display_height: u32::from_le_bytes(buf[4..8].try_into().unwrap()),
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct InfoReply {
+        pub display_width: u32,
+        pub display_height: u32,
+        pub frame_count: u32,
+    }
+
+    impl InfoReply {
+        pub const SIZE: usize = 12;
+
+        pub fn write_to(&self, buf: &mut [u8]) {
+            buf[0..4].copy_from_slice(&self.display_width.to_le_bytes());
+            buf[4..8].copy_from_slice(&self.display_height.to_le_bytes());
+            buf[8..12].copy_from_slice(&self.frame_count.to_le_bytes());
+        }
+
+        #[must_use]
+        pub fn read_from(buf: &[u8]) -> Self {
+            Self {
+                display_width: u32::from_le_bytes(buf[0..4].try_into().unwrap()),
+                display_height: u32::from_le_bytes(buf[4..8].try_into().unwrap()),
+                frame_count: u32::from_le_bytes(buf[8..12].try_into().unwrap()),
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn setup_reply_round_trip() {
+            let reply = SetupReply {
+                display_width: 1440,
+                display_height: 900,
+            };
+            let mut buf = [0u8; SetupReply::SIZE];
+
+            reply.write_to(&mut buf);
+
+            assert_eq!(SetupReply::read_from(&buf), reply);
+        }
+
+        #[test]
+        fn info_reply_round_trip() {
+            let reply = InfoReply {
+                display_width: 1440,
+                display_height: 900,
+                frame_count: 42,
+            };
+            let mut buf = [0u8; InfoReply::SIZE];
+
+            reply.write_to(&mut buf);
+
+            assert_eq!(InfoReply::read_from(&buf), reply);
+        }
+
+        #[test]
+        fn method_ids_distinct() {
+            assert_ne!(SETUP, RENDER);
+            assert_ne!(SETUP, GET_INFO);
+            assert_ne!(RENDER, GET_INFO);
+        }
+
+        #[test]
+        fn sizes_fit_payload() {
+            assert!(SetupReply::SIZE <= MAX_PAYLOAD);
+            assert!(InfoReply::SIZE <= MAX_PAYLOAD);
+        }
+    }
 }
 
 #[cfg(test)]

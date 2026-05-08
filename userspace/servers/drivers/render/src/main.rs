@@ -7,19 +7,22 @@
 //!
 //! Probes the virtio MMIO region for a Metal GPU device (device ID 22).
 //! Sets up two virtqueues (setup + render), compiles shaders, creates
-//! a render pipeline, and renders frames. Registers with the name
-//! service as "render".
-//!
-//! Phase 2.4 scope: solid-color frame rendering verified via hypervisor
-//! screenshot capture. Full scene graph rendering comes in Phase 3-4.
+//! a render pipeline, and enters a serve loop. The presenter connects
+//! via `comp::SETUP` (passing the scene graph VMO) and triggers frame
+//! renders via `comp::RENDER`.
 
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+extern crate heap;
+
 use core::panic::PanicInfo;
 
 use abi::types::{Handle, Rights};
+use ipc::server::{Dispatch, Incoming};
 use render::CommandWriter;
+use scene::{Content, NULL, NodeId, SCENE_SIZE, SceneReader};
 
 const HANDLE_NS_EP: Handle = Handle(2);
 const HANDLE_VIRTIO_VMO: Handle = Handle(3);
@@ -56,18 +59,97 @@ fragment float4 fragment_main(VertexOut in [[stage_in]]) {
 }
 ";
 
-// Guest-assigned Metal object handle IDs.
 const COLOR_WRITE_ALL: u8 = 0xF;
-
 const H_LIBRARY: u32 = 1;
 const H_VERTEX_FN: u32 = 2;
 const H_FRAGMENT_FN: u32 = 3;
 const H_PIPELINE: u32 = 10;
 
-// ── DMA buffer layout ───────────────────────────────────────────────
-
 const SETUP_BUF_PAGES: usize = 2;
-const RENDER_BUF_PAGES: usize = 1;
+const RENDER_BUF_PAGES: usize = 4;
+
+// ── Vertex data ─────────────────────────────────────────────────────
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Vertex {
+    position: [f32; 2],
+    tex_coord: [f32; 2],
+    color: [f32; 4],
+}
+
+const VERTEX_SIZE: usize = core::mem::size_of::<Vertex>();
+
+struct FrameBuilder {
+    verts: alloc::vec::Vec<u8>,
+    display_w: f32,
+    display_h: f32,
+}
+
+impl FrameBuilder {
+    fn new(display_w: f32, display_h: f32) -> Self {
+        Self {
+            verts: alloc::vec::Vec::with_capacity(256 * 6 * VERTEX_SIZE),
+            display_w,
+            display_h,
+        }
+    }
+
+    fn push_rect(&mut self, px: f32, py: f32, pw: f32, ph: f32, color: scene::Color) {
+        let x0 = px / self.display_w * 2.0 - 1.0;
+        let y0 = 1.0 - py / self.display_h * 2.0;
+        let x1 = (px + pw) / self.display_w * 2.0 - 1.0;
+        let y1 = 1.0 - (py + ph) / self.display_h * 2.0;
+        let c = [
+            color.r as f32 / 255.0,
+            color.g as f32 / 255.0,
+            color.b as f32 / 255.0,
+            color.a as f32 / 255.0,
+        ];
+        let zero = [0.0f32; 2];
+        let quad = [
+            Vertex {
+                position: [x0, y0],
+                tex_coord: zero,
+                color: c,
+            },
+            Vertex {
+                position: [x0, y1],
+                tex_coord: zero,
+                color: c,
+            },
+            Vertex {
+                position: [x1, y1],
+                tex_coord: zero,
+                color: c,
+            },
+            Vertex {
+                position: [x0, y0],
+                tex_coord: zero,
+                color: c,
+            },
+            Vertex {
+                position: [x1, y1],
+                tex_coord: zero,
+                color: c,
+            },
+            Vertex {
+                position: [x1, y0],
+                tex_coord: zero,
+                color: c,
+            },
+        ];
+        // SAFETY: Vertex is repr(C) with known layout.
+        let bytes =
+            unsafe { core::slice::from_raw_parts(quad.as_ptr() as *const u8, 6 * VERTEX_SIZE) };
+
+        self.verts.extend_from_slice(bytes);
+    }
+
+    fn vertex_count(&self) -> usize {
+        self.verts.len() / VERTEX_SIZE
+    }
+}
 
 // ── Virtqueue submission ────────────────────────────────────────────
 
@@ -130,112 +212,205 @@ fn setup_pipeline(
     );
 }
 
-// ── Vertex data for a fullscreen quad ───────────────────────────────
+// ── Scene graph → vertex data ───────────────────────────────────────
 
-#[repr(C)]
-struct Vertex {
-    position: [f32; 2],
-    tex_coord: [f32; 2],
-    color: [f32; 4],
-}
+fn walk_node(
+    reader: &SceneReader<'_>,
+    node_id: NodeId,
+    parent_x: f32,
+    parent_y: f32,
+    frame: &mut FrameBuilder,
+    is_root: bool,
+) {
+    let node = reader.node(node_id);
+    let x = parent_x + scene::mpt_to_f32(node.x);
+    let y = parent_y + scene::mpt_to_f32(node.y);
+    let w = scene::umpt_to_f32(node.width);
+    let h = scene::umpt_to_f32(node.height);
 
-const VERTEX_SIZE: usize = core::mem::size_of::<Vertex>();
-
-fn fullscreen_vertices(r: f32, g: f32, b: f32, a: f32, buf: &mut [u8]) -> usize {
-    let verts = [
-        // Triangle 1: top-left, bottom-left, bottom-right
-        Vertex {
-            position: [-1.0, 1.0],
-            tex_coord: [0.0, 0.0],
-            color: [r, g, b, a],
-        },
-        Vertex {
-            position: [-1.0, -1.0],
-            tex_coord: [0.0, 1.0],
-            color: [r, g, b, a],
-        },
-        Vertex {
-            position: [1.0, -1.0],
-            tex_coord: [1.0, 1.0],
-            color: [r, g, b, a],
-        },
-        // Triangle 2: top-left, bottom-right, top-right
-        Vertex {
-            position: [-1.0, 1.0],
-            tex_coord: [0.0, 0.0],
-            color: [r, g, b, a],
-        },
-        Vertex {
-            position: [1.0, -1.0],
-            tex_coord: [1.0, 1.0],
-            color: [r, g, b, a],
-        },
-        Vertex {
-            position: [1.0, 1.0],
-            tex_coord: [1.0, 0.0],
-            color: [r, g, b, a],
-        },
-    ];
-    let total = 6 * VERTEX_SIZE;
-
-    // SAFETY: Vertex is #[repr(C)] with known size; total fits in buf.
-    unsafe {
-        let src = verts.as_ptr() as *const u8;
-        core::ptr::copy_nonoverlapping(src, buf.as_mut_ptr(), total);
+    if !is_root && node.background.a > 0 {
+        frame.push_rect(x, y, w, h, node.background);
     }
 
-    total
+    if let Content::Glyphs {
+        color,
+        glyphs,
+        glyph_count,
+        ..
+    } = node.content
+    {
+        let glyph_data = reader.shaped_glyphs(glyphs, glyph_count);
+        let mut gx = x;
+
+        for glyph in glyph_data {
+            let advance = glyph.x_advance as f32 / 65536.0;
+
+            if advance > 0.0 {
+                frame.push_rect(gx + 1.0, y + 3.0, advance - 2.0, h - 6.0, color);
+            }
+
+            gx += advance;
+        }
+    }
+
+    let mut child = node.first_child;
+
+    while child != NULL {
+        walk_node(reader, child, x, y, frame, false);
+
+        child = reader.node(child).next_sibling;
+    }
 }
 
-// ── Render a single frame ───────────────────────────────────────────
+// ── Compositor ──────────────────────────────────────────────────────
 
-fn render_frame(
-    device: &virtio::Device,
-    render_vq: &mut virtio::Virtqueue,
+struct Compositor {
+    device: virtio::Device,
+    #[allow(dead_code)]
+    setup_vq: virtio::Virtqueue,
+    render_vq: virtio::Virtqueue,
     irq_event: Handle,
-    render_dma: &init::DmaBuf,
-    buf_size: usize,
-    frame_id: u32,
-) {
-    // SAFETY: render_dma.va is a valid DMA allocation of buf_size bytes.
-    let dma_buf = unsafe { core::slice::from_raw_parts_mut(render_dma.va as *mut u8, buf_size) };
-    let len = {
-        let mut w = CommandWriter::new(dma_buf);
 
-        w.begin_render_pass(
-            render::DRAWABLE_HANDLE,
-            0,
-            0,
-            render::LOAD_CLEAR,
-            render::STORE_STORE,
-            0,
-            0,
-            0.13,
-            0.13,
-            0.14,
-            1.0,
+    #[allow(dead_code)]
+    setup_dma: init::DmaBuf,
+    render_dma: init::DmaBuf,
+    #[allow(dead_code)]
+    setup_buf_size: usize,
+    render_buf_size: usize,
+
+    console_ep: Handle,
+    display_w: u32,
+    display_h: u32,
+
+    scene_va: usize,
+    frame_count: u32,
+}
+
+impl Compositor {
+    fn render_frame(&mut self) {
+        if self.scene_va == 0 {
+            return;
+        }
+
+        // SAFETY: scene_va is a valid RO mapping of at least SCENE_SIZE bytes.
+        let scene_buf =
+            unsafe { core::slice::from_raw_parts(self.scene_va as *const u8, SCENE_SIZE) };
+        let reader = SceneReader::new(scene_buf);
+        let root = reader.root();
+
+        if reader.node_count() == 0 || root == NULL {
+            return;
+        }
+
+        let root_node = reader.node(root);
+        let bg = root_node.background;
+        let mut frame = FrameBuilder::new(self.display_w as f32, self.display_h as f32);
+
+        walk_node(&reader, root, 0.0, 0.0, &mut frame, true);
+
+        // SAFETY: render_dma.va is a valid DMA allocation of render_buf_size bytes.
+        let dma_buf = unsafe {
+            core::slice::from_raw_parts_mut(self.render_dma.va as *mut u8, self.render_buf_size)
+        };
+        let len = {
+            let mut w = CommandWriter::new(dma_buf);
+
+            w.begin_render_pass(
+                render::DRAWABLE_HANDLE,
+                0,
+                0,
+                render::LOAD_CLEAR,
+                render::STORE_STORE,
+                0,
+                0,
+                bg.r as f32 / 255.0,
+                bg.g as f32 / 255.0,
+                bg.b as f32 / 255.0,
+                1.0,
+            );
+            w.set_render_pipeline(H_PIPELINE);
+
+            let vc = frame.vertex_count();
+
+            if vc > 0 {
+                w.set_vertex_bytes(0, &frame.verts);
+                w.draw_primitives(render::PRIM_TRIANGLE, 0, vc as u32);
+            }
+
+            w.end_render_pass();
+            w.present_and_commit(self.frame_count);
+
+            w.len()
+        };
+
+        submit_and_wait(
+            &self.device,
+            &mut self.render_vq,
+            self.irq_event,
+            render::VIRTQ_RENDER,
+            self.render_dma.pa,
+            len,
         );
-        w.set_render_pipeline(H_PIPELINE);
 
-        let mut verts = [0u8; 6 * VERTEX_SIZE];
-        let vert_len = fullscreen_vertices(0.13, 0.13, 0.14, 1.0, &mut verts);
+        self.frame_count += 1;
+    }
+}
 
-        w.set_vertex_bytes(0, &verts[..vert_len]);
-        w.draw_primitives(render::PRIM_TRIANGLE, 0, 6);
-        w.end_render_pass();
-        w.present_and_commit(frame_id);
+impl Dispatch for Compositor {
+    fn dispatch(&mut self, msg: Incoming<'_>) {
+        match msg.method {
+            render::comp::SETUP => {
+                if msg.handles.is_empty() {
+                    let _ = msg.reply_error(ipc::STATUS_INVALID);
 
-        w.len()
-    };
+                    return;
+                }
 
-    submit_and_wait(
-        device,
-        render_vq,
-        irq_event,
-        render::VIRTQ_RENDER,
-        render_dma.pa,
-        len,
-    );
+                let vmo = Handle(msg.handles[0]);
+
+                match abi::vmo::map(vmo, 0, Rights::READ_MAP) {
+                    Ok(va) => {
+                        self.scene_va = va;
+
+                        console::write(self.console_ep, b"render: scene connected\n");
+
+                        let reply = render::comp::SetupReply {
+                            display_width: self.display_w,
+                            display_height: self.display_h,
+                        };
+                        let mut data = [0u8; render::comp::SetupReply::SIZE];
+
+                        reply.write_to(&mut data);
+
+                        let _ = msg.reply_ok(&data, &[]);
+                    }
+                    Err(_) => {
+                        let _ = msg.reply_error(ipc::STATUS_INVALID);
+                    }
+                }
+            }
+            render::comp::RENDER => {
+                self.render_frame();
+
+                let _ = msg.reply_empty();
+            }
+            render::comp::GET_INFO => {
+                let reply = render::comp::InfoReply {
+                    display_width: self.display_w,
+                    display_height: self.display_h,
+                    frame_count: self.frame_count,
+                };
+                let mut data = [0u8; render::comp::InfoReply::SIZE];
+
+                reply.write_to(&mut data);
+
+                let _ = msg.reply_ok(&data, &[]);
+            }
+            _ => {
+                let _ = msg.reply_error(ipc::STATUS_UNSUPPORTED);
+            }
+        }
+    }
 }
 
 // ── Entry point ─────────────────────────────────────────────────────
@@ -259,7 +434,6 @@ extern "C" fn _start() -> ! {
 
     let display_w = device.config_read32(0x00);
     let display_h = device.config_read32(0x04);
-    // Set up two virtqueues: setup (0) and render (1).
     let setup_qsize = device
         .queue_max_size(render::VIRTQ_SETUP)
         .min(virtio::DEFAULT_QUEUE_SIZE);
@@ -296,7 +470,7 @@ extern "C" fn _start() -> ! {
     // SAFETY: render_vq_dma.va is a valid DMA allocation; zeroing before virtqueue init.
     unsafe { core::ptr::write_bytes(render_vq_dma.va as *mut u8, 0, render_vq_alloc) };
 
-    let mut render_vq = virtio::Virtqueue::new(render_qsize, render_vq_dma.va, render_vq_dma.pa);
+    let render_vq = virtio::Virtqueue::new(render_qsize, render_vq_dma.va, render_vq_dma.pa);
 
     device.setup_queue(
         render::VIRTQ_RENDER,
@@ -306,7 +480,6 @@ extern "C" fn _start() -> ! {
         render_vq.used_pa(),
     );
 
-    // DMA buffers for command data.
     let setup_buf_size = PAGE_SIZE * SETUP_BUF_PAGES;
     let setup_dma = match init::request_dma(HANDLE_INIT_EP, setup_buf_size) {
         Ok(d) => d,
@@ -320,7 +493,6 @@ extern "C" fn _start() -> ! {
 
     device.driver_ok();
 
-    // Bind IRQ.
     let irq_event = match abi::event::create() {
         Ok(h) => h,
         Err(_) => abi::thread::exit(8),
@@ -331,16 +503,14 @@ extern "C" fn _start() -> ! {
         abi::thread::exit(9);
     }
 
-    // Look up the console for status output.
     let console_ep = match name::lookup(HANDLE_NS_EP, b"console") {
         Ok(h) => h,
         Err(_) => abi::thread::exit(10),
     };
 
-    console::write_u32(console_ep, b"render: display ", display_w);
+    console::write_u32(console_ep, b"render: display w=", display_w);
     console::write_u32(console_ep, b"render: display h=", display_h);
 
-    // Compile shaders and create the render pipeline.
     setup_pipeline(
         &device,
         &mut setup_vq,
@@ -351,19 +521,6 @@ extern "C" fn _start() -> ! {
 
     console::write(console_ep, b"render: pipeline ready\n");
 
-    // Render verification frame — solid dark background.
-    render_frame(
-        &device,
-        &mut render_vq,
-        irq_event,
-        &render_dma,
-        render_buf_size,
-        0,
-    );
-
-    console::write(console_ep, b"render: frame 0 presented\n");
-
-    // Register with name service.
     let own_ep = match abi::ipc::endpoint_create() {
         Ok(h) => h,
         Err(_) => abi::thread::exit(11),
@@ -371,17 +528,26 @@ extern "C" fn _start() -> ! {
 
     name::register(HANDLE_NS_EP, b"render", own_ep);
     console::write(console_ep, b"render: ready\n");
-    // Idle serve loop — Phase 3-4 will add scene graph update handling.
-    ipc::server::serve(own_ep, &mut StubServer);
+
+    let mut compositor = Compositor {
+        device,
+        setup_vq,
+        render_vq,
+        irq_event,
+        setup_dma,
+        render_dma,
+        setup_buf_size,
+        render_buf_size,
+        console_ep,
+        display_w,
+        display_h,
+        scene_va: 0,
+        frame_count: 0,
+    };
+
+    ipc::server::serve(own_ep, &mut compositor);
+
     abi::thread::exit(0);
-}
-
-struct StubServer;
-
-impl ipc::server::Dispatch for StubServer {
-    fn dispatch(&mut self, msg: ipc::server::Incoming<'_>) {
-        let _ = msg.reply_error(ipc::STATUS_UNSUPPORTED);
-    }
 }
 
 #[panic_handler]

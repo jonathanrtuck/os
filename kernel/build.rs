@@ -239,24 +239,9 @@ const SERVICES: &[ServiceDef] = &[
         crate_name: "document-service",
     },
     ServiceDef {
-        name: "test-store",
-        dir: "../userspace/servers/test-store",
-        crate_name: "test-store",
-    },
-    ServiceDef {
-        name: "test-document",
-        dir: "../userspace/servers/test-document",
-        crate_name: "test-document",
-    },
-    ServiceDef {
         name: "layout",
         dir: "../userspace/servers/layout",
         crate_name: "layout-service",
-    },
-    ServiceDef {
-        name: "test-layout",
-        dir: "../userspace/servers/test-layout",
-        crate_name: "test-layout",
     },
     ServiceDef {
         name: "presenter",
@@ -264,19 +249,9 @@ const SERVICES: &[ServiceDef] = &[
         crate_name: "presenter-service",
     },
     ServiceDef {
-        name: "test-presenter",
-        dir: "../userspace/servers/test-presenter",
-        crate_name: "test-presenter",
-    },
-    ServiceDef {
         name: "editor.text",
         dir: "../userspace/editors/text",
         crate_name: "text-editor",
-    },
-    ServiceDef {
-        name: "test-editor",
-        dir: "../userspace/servers/test-editor",
-        crate_name: "test-editor",
     },
 ];
 

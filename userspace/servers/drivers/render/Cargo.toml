@@ -7,9 +7,11 @@ license = "Unlicense"
 [dependencies]
 abi = { path = "../../../abi" }
 console = { path = "../../console" }
+heap = { path = "../../../heap" }
 init = { path = "../../init" }
 ipc = { path = "../../../ipc" }
 name = { path = "../../name" }
+scene = { path = "../../../../libraries/scene" }
 virtio = { path = "../../../virtio" }
 
 [workspace]
