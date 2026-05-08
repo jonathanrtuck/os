@@ -256,11 +256,43 @@ or extend existing ones, never break the existing interface.
   regression testing via hypervisor `--capture`.
 - **virtio constant** — `DEVICE_METAL = 22` in virtio library.
 
-**What's next — Phase 3: Core Libraries**
+### Phase 3 — Core Libraries (COMPLETE)
 
-1. Scene graph crate (shared-memory node tree, double-buffered).
-2. Fonts, drawing, render, layout, piece table, animation, filesystem, icons.
-3. Adapt from v0.6 prototype, port tests to new infrastructure.
+10 libraries adapted from v0.6 prototype, all compiling for both host
+(`aarch64-apple-darwin`) and bare-metal (`aarch64-unknown-none`) targets.
+488 new library tests (1,045 total workspace tests).
+
+| Library | Lines | Dependencies | Tests |
+| ----------- | ----- | ----------------------- | ----- |
+| scene | 4,232 | none | 70 |
+| drawing | 3,835 | none | 77 |
+| animation | 1,513 | none | 76 |
+| fs | 2,426 | none | 63 |
+| piecetable | 1,363 | none | 60 |
+| layout | 543 | none | 45 |
+| icons | 1,080 | none | 37 |
+| fonts | 3,403 | harfrust, read-fonts | 32 |
+| store | 438 | fs | 28 |
+| render | 4,958 | drawing, scene, fonts | 0 |
+
+**Bugs found and fixed during port:**
+
+- **fonts: `isqrt_i64` convergence** — Newton's method initial guess could
+  start below the root, causing premature termination. `isqrt(100)` returned
+  8 instead of 10. Fixed initial guess to always overshoot.
+- **fonts: embolden test expectation** — test expected half the per-edge
+  offset at corners, but the FreeType algorithm applies the full per-edge
+  offset (strength is per-edge, not total).
+- **render: `protocol` dependency** — `DirtyRect` and `ContentRegion` types
+  inlined into the render crate to remove the old protocol dependency.
+
+**What's next — Phase 4: Core Services + Leaf Nodes**
+
+1. Store service (COW filesystem over block device)
+2. Document service (edit requests, undo/redo via COW snapshots)
+3. Layout service (document + viewport → positioned text runs)
+4. Presenter (event loop, input routing, scene graph builder)
+5. Text editor (editing key events → document write requests)
 
 ## Session Resume
 

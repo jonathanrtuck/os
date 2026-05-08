@@ -1,5 +1,17 @@
 [workspace]
-members = ["kernel"]
+members = [
+    "kernel",
+    "libraries/scene",
+    "libraries/drawing",
+    "libraries/piecetable",
+    "libraries/animation",
+    "libraries/layout",
+    "libraries/fs",
+    "libraries/icons",
+    "libraries/store",
+    "libraries/fonts",
+    "libraries/render",
+]
 exclude = ["kernel/fuzz", "userspace/init", "userspace/abi"]
 resolver = "3"
 
