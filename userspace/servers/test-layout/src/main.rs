@@ -46,36 +46,6 @@ const EXIT_RECOMPUTE_2: u32 = 31;
 const EXIT_LINE_COUNT_2: u32 = 32;
 const EXIT_INFO_CHECK: u32 = 40;
 
-fn wait_for_idle(doc_ep: Handle) {
-    let mut prev_gen: u32 = 0;
-    let mut stable = 0u32;
-
-    loop {
-        match ipc::client::call_simple(doc_ep, document_service::GET_INFO, &[]) {
-            Ok((0, reply_data)) => {
-                let info = document_service::InfoReply::read_from(&reply_data);
-                let cur_gen = info.snapshot_count;
-
-                if cur_gen == prev_gen {
-                    stable += 1;
-
-                    if stable >= 50 {
-                        return;
-                    }
-                } else {
-                    prev_gen = cur_gen;
-                    stable = 0;
-                }
-            }
-            _ => return,
-        }
-
-        for _ in 0..10_000 {
-            core::hint::spin_loop();
-        }
-    }
-}
-
 fn delete_all(doc_ep: Handle) {
     let (status, reply_data) =
         match ipc::client::call_simple(doc_ep, document_service::GET_INFO, &[]) {
@@ -318,9 +288,9 @@ extern "C" fn _start() -> ! {
 
     console::write(console_ep, b"test-layout: setup OK\n");
 
-    // Wait for test-document to finish its sequence, then clear the
-    // document so our test starts with known empty state.
-    wait_for_idle(doc_ep);
+    // Wait for test-document to signal completion, then clear.
+    let _ = name::watch(HANDLE_NS_EP, b"test-doc-done");
+
     delete_all(doc_ep);
 
     console::write(console_ep, b"test-layout: doc cleared\n");
@@ -456,6 +426,13 @@ extern "C" fn _start() -> ! {
 
     console::write(console_ep, b"test-layout: info OK\n");
     console::write(console_ep, b"test-layout: PASS\n");
+
+    let done_ep = match abi::ipc::endpoint_create() {
+        Ok(h) => h,
+        Err(_) => abi::thread::exit(0),
+    };
+
+    name::register(HANDLE_NS_EP, b"test-layout-done", done_ep);
 
     abi::thread::exit(0);
 }

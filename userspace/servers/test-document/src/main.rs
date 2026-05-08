@@ -290,6 +290,14 @@ extern "C" fn _start() -> ! {
     console::write(console_ep, b"test-doc: cursor+info OK\n");
     console::write(console_ep, b"test-doc: PASS\n");
 
+    // Signal completion so downstream tests can serialize.
+    let done_ep = match abi::ipc::endpoint_create() {
+        Ok(h) => h,
+        Err(_) => abi::thread::exit(0),
+    };
+
+    name::register(HANDLE_NS_EP, b"test-doc-done", done_ep);
+
     abi::thread::exit(0);
 }
 

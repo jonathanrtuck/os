@@ -86,6 +86,7 @@ pub enum Alignment {
 
 /// A single laid-out line within a paragraph.
 #[derive(Debug, Clone, Copy)]
+#[repr(C)]
 pub struct LayoutLine {
     /// Start byte offset in source text.
     pub byte_offset: u32,
@@ -586,11 +587,7 @@ mod tests {
     struct ProportionalMetrics;
     impl FontMetrics for ProportionalMetrics {
         fn char_width(&self, ch: char) -> f32 {
-            if ch == ' ' {
-                5.0
-            } else {
-                10.0
-            }
+            if ch == ' ' { 5.0 } else { 10.0 }
         }
 
         fn line_height(&self) -> f32 {

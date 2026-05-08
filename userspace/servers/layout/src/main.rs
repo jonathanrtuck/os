@@ -17,7 +17,7 @@ extern crate heap;
 
 use core::{
     panic::PanicInfo,
-    sync::atomic::{AtomicU32, AtomicU64, Ordering},
+    sync::atomic::{AtomicU32, Ordering},
 };
 
 use abi::types::{Handle, Rights};
@@ -59,7 +59,6 @@ struct LayoutServer {
     doc_va: usize,
     results_va: usize,
     results_vmo: Handle,
-    results_gen: u64,
 
     viewport_va: usize,
     viewport_ready: bool,
@@ -160,7 +159,11 @@ impl LayoutServer {
         );
         let line_count = result.lines.len().min(layout_service::MAX_LINES);
 
-        self.write_results(&result.lines[..line_count], result.total_height, content_len);
+        self.write_results(
+            &result.lines[..line_count],
+            result.total_height,
+            content_len,
+        );
 
         self.last_doc_gen = doc_gen;
         self.last_line_count = line_count as u32;
@@ -170,7 +173,7 @@ impl LayoutServer {
         self.last_line_height = viewport.line_height;
     }
 
-    // ── Results writing (seqlock protocol) ────────────────────────
+    // ── Results writing (via ipc::register::Writer) ──────────────
 
     fn write_results(
         &mut self,
@@ -178,82 +181,40 @@ impl LayoutServer {
         total_height: i32,
         content_len: usize,
     ) {
-        let gen_ptr =
-            unsafe { &*(self.results_va as *const AtomicU64) };
+        let mut buf = [0u8; layout_service::RESULTS_VALUE_SIZE];
+        let header = layout_service::LayoutHeader {
+            line_count: lines.len() as u32,
+            total_height,
+            content_len: content_len as u32,
+            _reserved: 0,
+        };
 
-        // Odd generation: write in progress.
-        self.results_gen += 1;
-
-        gen_ptr.store(self.results_gen, Ordering::Release);
-
-        // Write header.
-        let header_base = self.results_va + ipc::register::HEADER_SIZE;
-
-        // SAFETY: results_va is a valid RW mapping of RESULTS_VMO_SIZE
-        // bytes. header_base..+16 is within the first page.
-        unsafe {
-            let p = header_base as *mut u8;
-
-            core::ptr::copy_nonoverlapping(
-                (lines.len() as u32).to_le_bytes().as_ptr(),
-                p,
-                4,
-            );
-            core::ptr::copy_nonoverlapping(
-                total_height.to_le_bytes().as_ptr(),
-                p.add(4),
-                4,
-            );
-            core::ptr::copy_nonoverlapping(
-                (content_len as u32).to_le_bytes().as_ptr(),
-                p.add(8),
-                4,
-            );
-            core::ptr::write_bytes(p.add(12), 0, 4);
-        }
-
-        // Write line entries.
-        let lines_base =
-            self.results_va + ipc::register::HEADER_SIZE + layout_service::LayoutHeader::SIZE;
+        header.write_to(&mut buf);
 
         for (i, line) in lines.iter().enumerate() {
-            // SAFETY: i < MAX_LINES, so lines_base + i*20 is within
-            // the results VMO.
-            unsafe {
-                let p = (lines_base + i * layout_service::LineInfo::SIZE) as *mut u8;
+            let off = layout_service::LayoutHeader::SIZE + i * layout_service::LineInfo::SIZE;
+            let info = layout_service::LineInfo {
+                byte_offset: line.byte_offset,
+                byte_length: line.byte_length,
+                x: line.x,
+                y: line.y,
+                width: line.width,
+            };
 
-                core::ptr::copy_nonoverlapping(
-                    line.byte_offset.to_le_bytes().as_ptr(),
-                    p,
-                    4,
-                );
-                core::ptr::copy_nonoverlapping(
-                    line.byte_length.to_le_bytes().as_ptr(),
-                    p.add(4),
-                    4,
-                );
-                core::ptr::copy_nonoverlapping(
-                    line.x.to_le_bytes().as_ptr(),
-                    p.add(8),
-                    4,
-                );
-                core::ptr::copy_nonoverlapping(
-                    line.y.to_le_bytes().as_ptr(),
-                    p.add(12),
-                    4,
-                );
-                core::ptr::copy_nonoverlapping(
-                    line.width.to_le_bytes().as_ptr(),
-                    p.add(16),
-                    4,
-                );
-            }
+            info.write_to(&mut buf[off..]);
         }
 
-        // Even generation: write complete.
-        self.results_gen += 1;
+        // SAFETY: results_va is a valid RW mapping, 8-byte aligned,
+        // of at least RESULTS_VMO_SIZE bytes. This service is the
+        // sole writer.
+        let mut writer = unsafe {
+            ipc::register::Writer::new(
+                self.results_va as *mut u8,
+                layout_service::RESULTS_VALUE_SIZE,
+            )
+        };
 
-        gen_ptr.store(self.results_gen, Ordering::Release);
+        writer.write(&buf);
     }
 }
 
@@ -428,7 +389,6 @@ extern "C" fn _start() -> ! {
         doc_va,
         results_va,
         results_vmo,
-        results_gen: 0,
         viewport_va: 0,
         viewport_ready: false,
         last_doc_gen: 0,
