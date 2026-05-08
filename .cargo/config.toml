@@ -12,4 +12,9 @@ runner = ["hypervisor", "--no-gpu"]
 # M4 Pro is ARMv9.2-A. +v8.4a enables LSE atomics, FEAT_DIT, dot product,
 # and flag manipulation. Individual features for safety rather than +v9.2a
 # which would pull in SVE/SME that we don't use.
+#
+# -neon,-fp-armv8: kernel must not use FP/NEON. The SVC fast path does not
+# save FP registers — if the kernel touches them, userspace FP state is
+# corrupted on syscall return. Userspace services are built separately
+# (kernel/build.rs) with their own RUSTFLAGS that do NOT disable FP.
 rustflags = ["-C", "target-feature=+lse,+rcpc"]

@@ -93,6 +93,13 @@ __vectors:
     lsr     x0, x0, #26            // EC field [31:26]
     cmp     x0, #0x15              // SVC from AArch64?
     b.ne    __el0_sync_slow_from_fast
+    // If FP/NEON is live (CPACR.FPEN != 0), use the full save path
+    // to preserve FP registers. The kernel may use NEON instructions
+    // (auto-vectorized memcpy, etc.) which would corrupt user FP state
+    // if we took the fast path without saving.
+    mrs     x0, cpacr_el1
+    ubfx    x0, x0, #20, #2        // Extract FPEN [21:20]
+    cbnz    x0, __el0_sync_slow_from_fast
     b       __svc_fast
 
     VECTOR_ENTRY 9      // IRQ

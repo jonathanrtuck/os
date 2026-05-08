@@ -288,6 +288,39 @@ pub enum FaultAction {
 pub fn register_handlers() {
     set_fault_handler(fault_dispatch);
     set_device_irq_handler(device_irq_dispatch);
+
+    #[cfg(target_os = "none")]
+    set_syscall_handler(syscall_slow_dispatch);
+}
+
+#[cfg(target_os = "none")]
+fn syscall_slow_dispatch(syscall_num: u64, args: &[u64; 6]) -> (u64, u64) {
+    // SAFETY: percpu_mut() valid — syscalls only arrive after boot.
+    let (current_thread, space_id, core_id) = unsafe {
+        let pc = super::cpu::percpu_mut();
+
+        pc.mark_syscall_entry();
+
+        let space = if pc.current_space == super::cpu::PerCpu::NO_SPACE {
+            None
+        } else {
+            Some(crate::types::AddressSpaceId(pc.current_space))
+        };
+
+        (
+            crate::types::ThreadId(pc.current_thread),
+            space,
+            pc.core_id as usize,
+        )
+    };
+    let result = crate::syscall::dispatch(current_thread, space_id, core_id, syscall_num, args);
+
+    // SAFETY: percpu_mut() valid — same lifetime as above.
+    unsafe {
+        super::cpu::percpu_mut().clear_syscall_entry();
+    }
+
+    result
 }
 
 fn device_irq_dispatch(intid: u32) {
