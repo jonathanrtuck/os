@@ -64,6 +64,9 @@ fn build_init(kernel_dir: &std::path::Path) {
     println!("cargo:rerun-if-changed=../userspace/drivers/blk/src/main.rs");
     println!("cargo:rerun-if-changed=../userspace/drivers/blk/link.ld");
     println!("cargo:rerun-if-changed=../userspace/drivers/blk/Cargo.toml");
+    println!("cargo:rerun-if-changed=../userspace/drivers/metal-render/src/main.rs");
+    println!("cargo:rerun-if-changed=../userspace/drivers/metal-render/link.ld");
+    println!("cargo:rerun-if-changed=../userspace/drivers/metal-render/Cargo.toml");
 }
 
 fn build_userspace_crate(crate_dir: &std::path::Path, crate_name: &str, output: &std::path::Path) {
@@ -123,6 +126,11 @@ const SERVICES: &[ServiceDef] = &[
         name: "blk",
         dir: "../userspace/drivers/blk",
         crate_name: "blk-driver",
+    },
+    ServiceDef {
+        name: "render",
+        dir: "../userspace/drivers/metal-render",
+        crate_name: "metal-render-driver",
     },
 ];
 

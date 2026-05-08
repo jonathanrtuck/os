@@ -207,11 +207,18 @@ or extend existing ones, never break the existing interface.
 3. **virtio-blk** — DONE. Probes MMIO for block device (ID 2), negotiates FLUSH
    feature, reads capacity, allocates DMA for virtqueue + data buffer, runs
    self-test (write/read/verify 16 KiB block + flush), registers with name
-   service as "blk", enters IPC serve loop. Protocol: shared data VMO for
-   bulk transfer, read_block/write_block/flush/get_info methods. Verified
-   end-to-end: hypervisor provides file-backed block device, driver reports
-   capacity, write+read 16K: OK, flush: OK. `userspace/drivers/blk/`
-4. **Metal render driver** — pending
+   service as "blk", enters IPC serve loop. Protocol: shared data VMO for bulk
+   transfer, read_block/write_block/flush/get_info methods. Verified end-to-end:
+   hypervisor provides file-backed block device, driver reports capacity,
+   write+read 16K: OK, flush: OK. `userspace/drivers/blk/`
+4. **Metal render driver** — DONE. Probes MMIO for Metal GPU (device ID 22),
+   negotiates features, sets up 2 virtqueues (setup + render), reads display
+   config from device config space (width/height/refresh). Compiles MSL shaders,
+   creates render pipeline, renders fullscreen solid-color frame via
+   DRAWABLE_HANDLE. Registers with name service as "render", enters IPC serve
+   loop. Wire format: `protocol::metal::CommandWriter` (no_std, no alloc).
+   Verified: hypervisor `--capture 0` produces uniform (101,101,105) screenshot
+   across all ~11M pixels. `userspace/drivers/metal-render/`
 
 **Phase 2.2 infrastructure (DONE):**
 
@@ -231,17 +238,29 @@ or extend existing ones, never break the existing interface.
   VMO, init ep). Added separate `MAX_BOOTSTRAP_HANDLES = 8`.
 - **Device IRQ dispatch** — `DEVICE_IRQ_HANDLER` was never registered.
   `device_irq_dispatch` now looks up `IrqTable` bindings and signals events.
-- **SPI unmask on bind** — `event_bind_irq` recorded bindings but didn't
-  unmask the SPI at the GIC. Added `unmask_spi(intid)` to the bind path.
+- **SPI unmask on bind** — `event_bind_irq` recorded bindings but didn't unmask
+  the SPI at the GIC. Added `unmask_spi(intid)` to the bind path.
 - **Console dup-before-register** — IPC handle transfer is a move, not copy.
   Console (and blk) now dup their endpoint before passing to name service.
-- **Input IRQ from slot** — IRQ number computed from discovered MMIO slot
-  index (48 + slot), not hardcoded.
+- **Input IRQ from slot** — IRQ number computed from discovered MMIO slot index
+  (48 + slot), not hardcoded.
 
-**Next steps for Phase 2.4:**
+**Phase 2.4 additions:**
 
-1. Metal render driver (compositor).
-2. End-to-end input verification (hypervisor event script → input driver).
+- **Metal protocol** (`protocol::metal`) — wire format constants and
+  `CommandWriter` for Metal-over-virtio command buffers. 8-byte command headers,
+  setup commands (compile, get_function, create_pipeline), render commands
+  (begin/end render pass, set pipeline, vertex bytes, draw, present). 7 tests.
+- **Visual verification** (`test/verify.py`) — pixel-level screenshot assertions
+  (solid_color, uniform, not_black, dimensions, pixel_at) for automated visual
+  regression testing via hypervisor `--capture`.
+- **virtio constant** — `DEVICE_METAL = 22` in virtio library.
+
+**What's next — Phase 3: Core Libraries**
+
+1. Scene graph crate (shared-memory node tree, double-buffered).
+2. Fonts, drawing, render, layout, piece table, animation, filesystem, icons.
+3. Adapt from v0.6 prototype, port tests to new infrastructure.
 
 ## Session Resume
 

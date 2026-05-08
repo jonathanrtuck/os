@@ -42,6 +42,7 @@ const NAME_SVC: &[u8] = b"name";
 const CONSOLE_SVC: &[u8] = b"console";
 const INPUT_SVC: &[u8] = b"input";
 const BLK_SVC: &[u8] = b"blk";
+const RENDER_SVC: &[u8] = b"render";
 
 fn spawn_from_pack(pack_data: &[u8], ns_ep: Handle, init_ep: Handle) {
     let header = pack::read_header(pack_data);
@@ -73,7 +74,7 @@ fn spawn_from_pack(pack_data: &[u8], ns_ep: Handle, init_ep: Handle) {
 
         if name == CONSOLE_SVC {
             let _ = spawn_service(pack_data, &entry, &[ns_ep, HANDLE_UART_VMO]);
-        } else if name == INPUT_SVC || name == BLK_SVC {
+        } else if name == INPUT_SVC || name == BLK_SVC || name == RENDER_SVC {
             let _ = spawn_service(pack_data, &entry, &[ns_ep, HANDLE_VIRTIO_VMO, init_ep]);
         } else {
             let _ = spawn_service(pack_data, &entry, &[ns_ep]);

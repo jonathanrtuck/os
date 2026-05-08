@@ -24,6 +24,7 @@ pub mod bootstrap;
 pub mod decode;
 pub mod edit;
 pub mod input;
+pub mod metal;
 pub mod name_service;
 pub mod store;
 pub mod view;
