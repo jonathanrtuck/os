@@ -1220,6 +1220,9 @@ fn sys_event_bind_irq(
 
     state::irqs().lock().bind(intid, event_id, signal_bits)?;
 
+    #[cfg(target_os = "none")]
+    crate::frame::arch::gic::unmask_spi(intid);
+
     Ok(0)
 }
 
@@ -2470,7 +2473,7 @@ fn sys_thread_create_in(
     let handles_ptr = args[4] as usize;
     let handles_count = args[5] as usize;
 
-    if handles_count > config::MAX_IPC_HANDLES {
+    if handles_count > config::MAX_BOOTSTRAP_HANDLES {
         return Err(SyscallError::InvalidArgument);
     }
 
@@ -2485,7 +2488,7 @@ fn sys_thread_create_in(
     }
 
     let target_space = AddressSpaceId(space_handle.object_id);
-    let mut handle_ids = [0u32; config::MAX_IPC_HANDLES];
+    let mut handle_ids = [0u32; config::MAX_BOOTSTRAP_HANDLES];
 
     if handles_count > 0 {
         user_mem::read_user_u32s(handles_ptr, handles_count, &mut handle_ids)?;
@@ -2530,7 +2533,7 @@ fn sys_thread_create_in(
     link_thread_to_space(idx, target_space);
 
     if handles_count > 0 {
-        let mut cloned = [const { None }; config::MAX_IPC_HANDLES];
+        let mut cloned = [const { None }; config::MAX_BOOTSTRAP_HANDLES];
         let clone_result: Result<(), SyscallError> = (|| {
             let caller_space = state::spaces()
                 .read(caller_space_id.0)
@@ -2553,7 +2556,7 @@ fn sys_thread_create_in(
             return Err(e);
         }
 
-        let mut installed_refs = [(ObjectType::Vmo, 0u32); config::MAX_IPC_HANDLES];
+        let mut installed_refs = [(ObjectType::Vmo, 0u32); config::MAX_BOOTSTRAP_HANDLES];
         let mut installed_count = 0;
         let install_result: Result<(), SyscallError> = (|| {
             let mut target = state::spaces()

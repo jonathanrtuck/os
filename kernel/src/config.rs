@@ -52,6 +52,9 @@ pub const BITMAP_WORDS: usize = MAX_PHYS_PAGES / 64;
 //   endpoint. Typical: 1-3 editors calling OS service. 8 = headroom.
 // MAX_IPC_HANDLES (4): handles transferred per IPC call. Typical
 //   calls transfer 0-2 handles (VMO + maybe event). 4 = headroom.
+// MAX_BOOTSTRAP_HANDLES (8): handles passed via thread_create_in.
+//   Includes code VMO, stack VMO, and service-specific caps. Drivers
+//   need up to 5 (code, stack, name svc, device VMO, init ep).
 
 pub const MAX_VMOS: usize = 4096;
 pub const MAX_HANDLES: usize = 512;
@@ -68,6 +71,7 @@ pub const MAX_PENDING_PER_ENDPOINT: usize = 8;
 pub const MAX_RECV_WAITERS: usize = 4;
 pub const MAX_MULTI_WAIT: usize = 32;
 pub const MAX_IPC_HANDLES: usize = 4;
+pub const MAX_BOOTSTRAP_HANDLES: usize = 8;
 pub const KERNEL_STACK_PAGES: usize = 2;
 
 /// Kernel stack size per thread (2 pages = 32 KiB).

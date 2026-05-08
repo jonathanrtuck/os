@@ -58,6 +58,12 @@ fn build_init(kernel_dir: &std::path::Path) {
     println!("cargo:rerun-if-changed=../userspace/servers/hello/src/main.rs");
     println!("cargo:rerun-if-changed=../userspace/servers/hello/link.ld");
     println!("cargo:rerun-if-changed=../userspace/servers/hello/Cargo.toml");
+    println!("cargo:rerun-if-changed=../userspace/drivers/input/src/main.rs");
+    println!("cargo:rerun-if-changed=../userspace/drivers/input/link.ld");
+    println!("cargo:rerun-if-changed=../userspace/drivers/input/Cargo.toml");
+    println!("cargo:rerun-if-changed=../userspace/drivers/blk/src/main.rs");
+    println!("cargo:rerun-if-changed=../userspace/drivers/blk/link.ld");
+    println!("cargo:rerun-if-changed=../userspace/drivers/blk/Cargo.toml");
 }
 
 fn build_userspace_crate(crate_dir: &std::path::Path, crate_name: &str, output: &std::path::Path) {
@@ -109,14 +115,14 @@ const SERVICES: &[ServiceDef] = &[
         crate_name: "console-driver",
     },
     ServiceDef {
-        name: "test-a",
-        dir: "../userspace/servers/test-a",
-        crate_name: "test-a",
+        name: "input",
+        dir: "../userspace/drivers/input",
+        crate_name: "input-driver",
     },
     ServiceDef {
-        name: "test-b",
-        dir: "../userspace/servers/test-b",
-        crate_name: "test-b",
+        name: "blk",
+        dir: "../userspace/drivers/blk",
+        crate_name: "blk-driver",
     },
 ];
 

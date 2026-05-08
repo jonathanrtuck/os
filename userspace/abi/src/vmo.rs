@@ -149,7 +149,9 @@ impl Mapping {
     /// Consume the mapping without unmapping. Returns the base address.
     pub fn leak(self) -> usize {
         let addr = self.addr;
+
         core::mem::forget(self);
+
         addr
     }
 }
@@ -182,6 +184,7 @@ impl Drop for Mapping {
 /// provides safe slice access and unmaps on drop.
 pub fn map_region(handle: Handle, size: usize, perms: Rights) -> Result<Mapping, SyscallError> {
     let addr = map(handle, 0, perms)?;
+
     // SAFETY: the kernel just mapped `size` bytes at `addr`.
     Ok(unsafe { Mapping::from_raw_parts(addr, size) })
 }

@@ -110,6 +110,7 @@ extern "C" fn _start() -> ! {
     };
 
     let mut input_base: usize = 0;
+    let mut input_slot: u32 = 0;
 
     for i in 0..MAX_VIRTIO_DEVICES {
         let base = virtio_va + i * VIRTIO_MMIO_STRIDE;
@@ -117,6 +118,7 @@ extern "C" fn _start() -> ! {
 
         if dev.is_valid() && dev.device_id() == virtio::DEVICE_INPUT {
             input_base = base;
+            input_slot = i as u32;
 
             break;
         }
@@ -136,7 +138,7 @@ extern "C" fn _start() -> ! {
         .queue_max_size(EVENT_VIRTQ)
         .min(virtio::DEFAULT_QUEUE_SIZE);
     let vq_bytes = virtio::Virtqueue::total_bytes(queue_size);
-    let vq_alloc = ((vq_bytes + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE;
+    let vq_alloc = vq_bytes.next_multiple_of(PAGE_SIZE);
     let (_vq_vmo, vq_va) = match request_dma(HANDLE_INIT_EP, vq_alloc) {
         Ok(r) => r,
         Err(_) => abi::thread::exit(4),
@@ -181,13 +183,15 @@ extern "C" fn _start() -> ! {
         Err(_) => abi::thread::exit(6),
     };
 
-    if abi::event::bind_irq(irq_event, 48, 0x1).is_err() {
+    let irq_num = 48 + input_slot;
+
+    if abi::event::bind_irq(irq_event, irq_num, 0x1).is_err() {
         abi::thread::exit(7);
     }
 
     register_with_name_service(HANDLE_NS_EP, b"input");
 
-    let mut modifiers: u8 = 0;
+    let mut _modifiers: u8 = 0;
 
     loop {
         let _ = abi::event::wait(&[(irq_event, 0x1)]);
@@ -224,17 +228,17 @@ extern "C" fn _start() -> ! {
                     let mod_bit = modifier_bit(event.code);
                     if mod_bit != 0 {
                         if pressed {
-                            modifiers |= mod_bit;
+                            _modifiers |= mod_bit;
                         } else {
-                            modifiers &= !mod_bit;
+                            _modifiers &= !mod_bit;
                         }
                     }
 
                     if event.code == KEY_CAPSLOCK {
                         if pressed {
-                            modifiers |= protocol::input::MOD_CAPS_LOCK;
+                            _modifiers |= protocol::input::MOD_CAPS_LOCK;
                         } else {
-                            modifiers &= !protocol::input::MOD_CAPS_LOCK;
+                            _modifiers &= !protocol::input::MOD_CAPS_LOCK;
                         }
                     }
                 }

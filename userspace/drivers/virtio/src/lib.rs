@@ -112,6 +112,13 @@ impl Device {
         read32(self.base + REG_CONFIG + offset)
     }
 
+    pub fn config_read64(&self, offset: usize) -> u64 {
+        let lo = self.config_read32(offset) as u64;
+        let hi = self.config_read32(offset + 4) as u64;
+
+        lo | (hi << 32)
+    }
+
     pub fn driver_ok(&self) {
         let status = self.read(REG_STATUS);
 

@@ -74,10 +74,14 @@ impl Dispatch for Console {
 }
 
 fn register_with_name_service(ns_ep: Handle, own_ep: Handle) {
+    let dup = match abi::handle::dup(own_ep, abi::types::Rights::ALL) {
+        Ok(h) => h,
+        Err(_) => return,
+    };
     let req = protocol::name_service::NameRequest::new(b"console");
     let mut buf = [0u8; MSG_SIZE];
     let total = message::write_request(&mut buf, protocol::name_service::REGISTER, &req.name);
-    let _ = abi::ipc::call(ns_ep, &mut buf, total, &[own_ep.0], &mut []);
+    let _ = abi::ipc::call(ns_ep, &mut buf, total, &[dup.0], &mut []);
 }
 
 #[unsafe(no_mangle)]

@@ -104,6 +104,7 @@ impl Producer {
 
         self.write_ptr()
             .store(write.wrapping_add(1), Ordering::Release);
+
         true
     }
 

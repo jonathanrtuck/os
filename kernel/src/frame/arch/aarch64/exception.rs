@@ -287,6 +287,33 @@ pub enum FaultAction {
 #[cfg(target_os = "none")]
 pub fn register_handlers() {
     set_fault_handler(fault_dispatch);
+    set_device_irq_handler(device_irq_dispatch);
+}
+
+fn device_irq_dispatch(intid: u32) {
+    let signal = crate::frame::state::irqs().lock().handle_irq(intid);
+
+    if let Some(sig) = signal {
+        let core_id = {
+            #[cfg(target_os = "none")]
+            // SAFETY: percpu() valid — IRQ handlers fire after boot.
+            unsafe {
+                super::cpu::percpu().core_id as usize
+            }
+            #[cfg(not(target_os = "none"))]
+            0
+        };
+
+        let woken = crate::frame::state::events()
+            .write(sig.event_id.0)
+            .map(|mut evt| evt.signal(sig.signal_bits));
+
+        if let Some(woken) = woken {
+            for info in woken.as_slice() {
+                crate::sched::wake(info.thread_id, core_id);
+            }
+        }
+    }
 }
 
 #[cfg(target_os = "none")]

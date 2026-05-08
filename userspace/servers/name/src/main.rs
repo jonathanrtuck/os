@@ -57,6 +57,7 @@ impl NameTable {
                 entry.name = *name;
                 entry.endpoint_handle = ep_handle;
                 entry.occupied = true;
+
                 self.count += 1;
 
                 return Ok(());
@@ -82,6 +83,7 @@ impl NameTable {
                 let _ = abi::handle::close(Handle(entry.endpoint_handle));
 
                 entry.occupied = false;
+
                 self.count -= 1;
 
                 return true;

@@ -55,7 +55,6 @@ pub fn recv(
     handles_buf: &mut [u32],
 ) -> Result<RecvResult, SyscallError> {
     let mut reply_cap_val: u64 = 0;
-
     let packed = check(raw::syscall(
         num::RECV,
         endpoint.0 as u64,

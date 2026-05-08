@@ -19,6 +19,7 @@
 #![no_std]
 #![allow(clippy::missing_panics_doc)]
 
+pub mod blk;
 pub mod bootstrap;
 pub mod decode;
 pub mod edit;
