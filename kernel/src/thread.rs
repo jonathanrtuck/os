@@ -64,6 +64,8 @@ pub struct Thread {
     wakeup_error: Option<SyscallError>,
     wakeup_value: Option<u64>,
     recv_state: Option<RecvState>,
+    repeat_fault_va: usize,
+    repeat_fault_count: u8,
     space_next: Option<u32>,
     space_prev: Option<u32>,
     #[cfg(any(target_os = "none", test))]
@@ -71,7 +73,7 @@ pub struct Thread {
 }
 
 const _: () = {
-    assert!(core::mem::size_of::<Thread>() <= 584);
+    assert!(core::mem::size_of::<Thread>() <= 600);
 };
 
 #[allow(clippy::new_without_default)]
@@ -105,6 +107,8 @@ impl Thread {
             wakeup_error: None,
             wakeup_value: None,
             recv_state: None,
+            repeat_fault_va: 0,
+            repeat_fault_count: 0,
             space_next: None,
             space_prev: None,
             #[cfg(any(target_os = "none", test))]
@@ -258,6 +262,21 @@ impl Thread {
         self.pending_wake = false;
 
         was
+    }
+
+    pub fn check_repeat_fault(&mut self, page_va: usize) -> bool {
+        if self.repeat_fault_va == page_va {
+            self.repeat_fault_count = self.repeat_fault_count.saturating_add(1);
+            self.repeat_fault_count > 4
+        } else {
+            self.repeat_fault_va = page_va;
+            self.repeat_fault_count = 1;
+            false
+        }
+    }
+
+    pub fn clear_fault_counter(&mut self) {
+        self.repeat_fault_count = 0;
     }
 
     pub fn set_wait_events(&mut self, ids: &[u32]) {

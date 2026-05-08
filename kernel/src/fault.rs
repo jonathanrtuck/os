@@ -33,6 +33,17 @@ fn mock_alloc_page() -> Option<usize> {
 /// Looks up the faulting address in the current thread's address space,
 /// determines the fault type, and resolves or kills.
 pub fn handle_data_abort(current: ThreadId, fault_addr: usize, is_write: bool) -> FaultAction {
+    let page_va = fault_addr & !(crate::config::PAGE_SIZE - 1);
+    let Some(mut thread) = state::threads().write(current.0) else {
+        return FaultAction::Kill;
+    };
+
+    if thread.check_repeat_fault(page_va) {
+        return FaultAction::Kill;
+    }
+
+    drop(thread);
+
     let Ok(space_id) = crate::syscall::thread_space_id(current) else {
         return FaultAction::Kill;
     };
@@ -56,7 +67,6 @@ pub fn handle_data_abort(current: ThreadId, fault_addr: usize, is_write: bool) -
         return FaultAction::Kill;
     }
 
-    let page_va = fault_addr & !(crate::config::PAGE_SIZE - 1);
     let _ = page_va;
 
     // COW write fault: page exists but is shared with parent.
@@ -402,5 +412,57 @@ mod tests {
         let action = handle_data_abort(ThreadId(0), va, false);
 
         assert_eq!(action, FaultAction::Kill);
+    }
+
+    #[test]
+    fn repeat_fault_kills_after_threshold() {
+        setup();
+        let vmo = Vmo::new(VmoId(0), config::PAGE_SIZE * 2, VmoFlags::NONE);
+        let (idx, _) = state::vmos().alloc_shared(vmo).unwrap();
+        let va = state::spaces()
+            .write(0)
+            .unwrap()
+            .map_vmo(
+                VmoId(idx),
+                config::PAGE_SIZE * 2,
+                Rights(Rights::READ.0 | Rights::WRITE.0),
+                0,
+            )
+            .unwrap();
+
+        for _ in 0..4 {
+            let action = handle_data_abort(ThreadId(0), va, true);
+
+            assert_eq!(action, FaultAction::Resolved);
+        }
+
+        let action = handle_data_abort(ThreadId(0), va, true);
+
+        assert_eq!(action, FaultAction::Kill);
+    }
+
+    #[test]
+    fn fault_counter_resets_on_different_page() {
+        setup();
+        let vmo = Vmo::new(VmoId(0), config::PAGE_SIZE * 2, VmoFlags::NONE);
+        let (idx, _) = state::vmos().alloc_shared(vmo).unwrap();
+        let va = state::spaces()
+            .write(0)
+            .unwrap()
+            .map_vmo(
+                VmoId(idx),
+                config::PAGE_SIZE * 2,
+                Rights(Rights::READ.0 | Rights::WRITE.0),
+                0,
+            )
+            .unwrap();
+
+        for _ in 0..3 {
+            handle_data_abort(ThreadId(0), va, true);
+        }
+
+        let action = handle_data_abort(ThreadId(0), va + config::PAGE_SIZE, true);
+
+        assert_eq!(action, FaultAction::Resolved);
     }
 }
