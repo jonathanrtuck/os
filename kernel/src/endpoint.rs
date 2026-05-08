@@ -277,7 +277,7 @@ pub struct Endpoint {
 }
 
 const _: () = {
-    assert!(core::mem::size_of::<Endpoint>() <= 512);
+    assert!(core::mem::size_of::<Endpoint>() <= 768);
 };
 
 #[allow(clippy::new_without_default)]

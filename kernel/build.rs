@@ -70,6 +70,10 @@ fn build_init(kernel_dir: &std::path::Path) {
     println!("cargo:rerun-if-changed=../userspace/servers/drivers/render/src/main.rs");
     println!("cargo:rerun-if-changed=../userspace/servers/drivers/render/link.ld");
     println!("cargo:rerun-if-changed=../userspace/servers/drivers/render/Cargo.toml");
+    println!("cargo:rerun-if-changed=../userspace/servers/store/src/main.rs");
+    println!("cargo:rerun-if-changed=../userspace/servers/store/src/lib.rs");
+    println!("cargo:rerun-if-changed=../userspace/servers/store/link.ld");
+    println!("cargo:rerun-if-changed=../userspace/servers/store/Cargo.toml");
 }
 
 fn build_userspace_crate(crate_dir: &std::path::Path, crate_name: &str, output: &std::path::Path) {
@@ -134,6 +138,11 @@ const SERVICES: &[ServiceDef] = &[
         name: "render",
         dir: "../userspace/servers/drivers/render",
         crate_name: "render",
+    },
+    ServiceDef {
+        name: "store",
+        dir: "../userspace/servers/store",
+        crate_name: "store-service",
     },
 ];
 

@@ -80,6 +80,28 @@ pub fn lookup(
     Ok(abi::types::Handle(recv_handles[0]))
 }
 
+/// Look up a service by name, retrying until it appears or the attempt
+/// limit is reached. Between retries, spins briefly to avoid monopolizing
+/// the name service endpoint via direct switch.
+pub fn lookup_wait(
+    ns_ep: abi::types::Handle,
+    name: &[u8],
+    max_attempts: u32,
+) -> Result<abi::types::Handle, abi::types::SyscallError> {
+    for _ in 0..max_attempts {
+        match lookup(ns_ep, name) {
+            Ok(h) => return Ok(h),
+            Err(_) => {
+                for _ in 0..100_000 {
+                    core::hint::spin_loop();
+                }
+            }
+        }
+    }
+
+    Err(abi::types::SyscallError::NotFound)
+}
+
 /// Register a service endpoint under the given name.
 pub fn register(ns_ep: abi::types::Handle, service_name: &[u8], own_ep: abi::types::Handle) {
     let dup = match abi::handle::dup(own_ep, abi::types::Rights::ALL) {

@@ -12,7 +12,7 @@ members = [
     "libraries/fonts",
     "libraries/render",
 ]
-exclude = ["kernel/fuzz", "userspace/init", "userspace/abi"]
+exclude = ["kernel/fuzz", "userspace/init", "userspace/abi", "tools/mkdisk"]
 resolver = "3"
 
 [profile.dev]

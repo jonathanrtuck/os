@@ -32,7 +32,7 @@ const HANDLE_VIRTIO_VMO: Handle = Handle(5);
 const HANDLE_DMA_RESOURCE: Handle = Handle(6);
 
 const PAGE_SIZE: usize = 16384;
-const STACK_SIZE: usize = PAGE_SIZE * 4;
+const STACK_SIZE: usize = PAGE_SIZE * 8;
 const MSG_SIZE: usize = 128;
 
 const SERVICE_CODE_VA: usize = 0x0020_0000;
@@ -93,7 +93,7 @@ fn spawn_service(
         return Err(SyscallError::InvalidArgument);
     }
 
-    let code_size = (entry.size as usize).next_multiple_of(PAGE_SIZE);
+    let code_size = (entry.size as usize + PAGE_SIZE).next_multiple_of(PAGE_SIZE);
     let code_vmo = abi::vmo::create(code_size, 0)?;
     let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
     let mut code_mapping = abi::vmo::map_region(code_vmo, code_size, rw)?;
@@ -104,9 +104,9 @@ fn spawn_service(
     drop(code_mapping);
 
     let space = abi::space::create()?;
-    let rx = Rights(Rights::READ.0 | Rights::EXECUTE.0 | Rights::MAP.0);
+    let rwx = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::EXECUTE.0 | Rights::MAP.0);
 
-    abi::vmo::map_into(code_vmo, space, SERVICE_CODE_VA, rx)?;
+    abi::vmo::map_into(code_vmo, space, SERVICE_CODE_VA, rwx)?;
 
     let stack_vmo = abi::vmo::create(STACK_SIZE, 0)?;
 

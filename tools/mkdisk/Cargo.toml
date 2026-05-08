@@ -1,0 +1,11 @@
+[package]
+name = "mkdisk"
+version = "0.1.0"
+edition = "2024"
+license = "Unlicense"
+
+[dependencies]
+fs = { path = "../../libraries/fs" }
+store = { path = "../../libraries/store" }
+
+[workspace]

@@ -15,7 +15,6 @@
 
 pub mod decode;
 pub mod edit;
-pub mod store;
 pub mod view;
 
 /// IPC payload capacity (128-byte message minus 8-byte header).
