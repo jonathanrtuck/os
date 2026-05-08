@@ -74,6 +74,10 @@ fn build_init(kernel_dir: &std::path::Path) {
     println!("cargo:rerun-if-changed=../userspace/servers/store/src/lib.rs");
     println!("cargo:rerun-if-changed=../userspace/servers/store/link.ld");
     println!("cargo:rerun-if-changed=../userspace/servers/store/Cargo.toml");
+    println!("cargo:rerun-if-changed=../userspace/servers/document/src/main.rs");
+    println!("cargo:rerun-if-changed=../userspace/servers/document/src/lib.rs");
+    println!("cargo:rerun-if-changed=../userspace/servers/document/link.ld");
+    println!("cargo:rerun-if-changed=../userspace/servers/document/Cargo.toml");
 }
 
 fn build_userspace_crate(crate_dir: &std::path::Path, crate_name: &str, output: &std::path::Path) {
@@ -209,9 +213,19 @@ const SERVICES: &[ServiceDef] = &[
         crate_name: "store-service",
     },
     ServiceDef {
+        name: "document",
+        dir: "../userspace/servers/document",
+        crate_name: "document-service",
+    },
+    ServiceDef {
         name: "test-store",
         dir: "../userspace/servers/test-store",
         crate_name: "test-store",
+    },
+    ServiceDef {
+        name: "test-document",
+        dir: "../userspace/servers/test-document",
+        crate_name: "test-document",
     },
 ];
 

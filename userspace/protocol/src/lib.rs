@@ -9,13 +9,13 @@
 //! - blk → servers/drivers/blk
 //! - input → servers/drivers/input
 //! - metal → servers/drivers/render
+//! - store → servers/store
+//! - edit, view → servers/document
 
 #![no_std]
 #![allow(clippy::missing_panics_doc)]
 
 pub mod decode;
-pub mod edit;
-pub mod view;
 
 /// IPC payload capacity (128-byte message minus 8-byte header).
 pub const MAX_PAYLOAD: usize = 120;

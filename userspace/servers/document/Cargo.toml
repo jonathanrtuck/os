@@ -1,0 +1,15 @@
+[package]
+name = "document-service"
+version = "0.1.0"
+edition = "2024"
+license = "Unlicense"
+
+[dependencies]
+abi = { path = "../../abi" }
+heap = { path = "../../heap" }
+console = { path = "../console" }
+ipc = { path = "../../ipc" }
+name = { path = "../name" }
+store-service = { path = "../store" }
+
+[workspace]

@@ -259,37 +259,57 @@ or extend existing ones, never break the existing interface.
 ### Phase 3 — Core Libraries (COMPLETE)
 
 10 libraries adapted from v0.6 prototype, all compiling for both host
-(`aarch64-apple-darwin`) and bare-metal (`aarch64-unknown-none`) targets.
-488 new library tests (1,045 total workspace tests).
+(`aarch64-apple-darwin`) and bare-metal (`aarch64-unknown-none`) targets. 488
+new library tests (1,045 total workspace tests).
 
-| Library | Lines | Dependencies | Tests |
-| ----------- | ----- | ----------------------- | ----- |
-| scene | 4,232 | none | 70 |
-| drawing | 3,835 | none | 77 |
-| animation | 1,513 | none | 76 |
-| fs | 2,426 | none | 63 |
-| piecetable | 1,363 | none | 60 |
-| layout | 543 | none | 45 |
-| icons | 1,080 | none | 37 |
-| fonts | 3,403 | harfrust, read-fonts | 32 |
-| store | 438 | fs | 28 |
-| render | 4,958 | drawing, scene, fonts | 0 |
+| Library    | Lines | Dependencies          | Tests |
+| ---------- | ----- | --------------------- | ----- |
+| scene      | 4,232 | none                  | 70    |
+| drawing    | 3,835 | none                  | 77    |
+| animation  | 1,513 | none                  | 76    |
+| fs         | 2,426 | none                  | 63    |
+| piecetable | 1,363 | none                  | 60    |
+| layout     | 543   | none                  | 45    |
+| icons      | 1,080 | none                  | 37    |
+| fonts      | 3,403 | harfrust, read-fonts  | 32    |
+| store      | 438   | fs                    | 28    |
+| render     | 4,958 | drawing, scene, fonts | 0     |
 
 **Bugs found and fixed during port:**
 
-- **fonts: `isqrt_i64` convergence** — Newton's method initial guess could
-  start below the root, causing premature termination. `isqrt(100)` returned
-  8 instead of 10. Fixed initial guess to always overshoot.
-- **fonts: embolden test expectation** — test expected half the per-edge
-  offset at corners, but the FreeType algorithm applies the full per-edge
-  offset (strength is per-edge, not total).
+- **fonts: `isqrt_i64` convergence** — Newton's method initial guess could start
+  below the root, causing premature termination. `isqrt(100)` returned 8 instead
+  of 10. Fixed initial guess to always overshoot.
+- **fonts: embolden test expectation** — test expected half the per-edge offset
+  at corners, but the FreeType algorithm applies the full per-edge offset
+  (strength is per-edge, not total).
 - **render: `protocol` dependency** — `DirtyRect` and `ContentRegion` types
   inlined into the render crate to remove the old protocol dependency.
 
-**What's next — Phase 4: Core Services + Leaf Nodes**
+### Phase 4 — Core Services + Leaf Nodes (IN PROGRESS)
 
-1. Store service (COW filesystem over block device)
-2. Document service (edit requests, undo/redo via COW snapshots)
+1. **Store service** — DONE. COW filesystem over block device. Mounts or
+   formats, opens the document store, registers as "store", enters IPC serve
+   loop. Handles CREATE, READ, WRITE, TRUNCATE, COMMIT, SNAPSHOT, RESTORE,
+   DELETE_SNAPSHOT, GET_INFO. Shared VMO for bulk data transfer. Integration
+   test (test-store): write/read round-trip, snapshot/restore, commit.
+   `userspace/servers/store/`
+
+2. **Document service** — DONE. Sole writer to the document buffer. Receives
+   edit requests (INSERT, DELETE, CURSOR_MOVE, SELECT, UNDO, REDO) from editors
+   via sync IPC. Manages undo ring (64-entry snapshot ring) via COW snapshots
+   through the store service. Document buffer is a shared VMO (64-byte header +
+   content bytes) with generation counter (Release/Acquire) for lock-free
+   cross-process reads. Clients call SETUP to receive an RO handle. Per-edit
+   snapshots for per-operation undo granularity.
+
+   Integration test (test-document): SETUP + VMO mapping, two inserts verified
+   via shared memory, delete verified, undo×2 verified (restores through
+   snapshot chain), redo verified, cursor move + GET_INFO verified.
+   `userspace/servers/document/`
+
+**What's next:**
+
 3. Layout service (document + viewport → positioned text runs)
 4. Presenter (event loop, input routing, scene graph builder)
 5. Text editor (editing key events → document write requests)

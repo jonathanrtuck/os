@@ -5,15 +5,19 @@ source of truth for message layouts.
 
 ## Structure
 
-One module per protocol boundary:
+Remaining module (for services that don't exist yet):
 
-- `name_service` -- Register/Lookup/Unregister for service discovery
-- `bootstrap` -- One-shot config delivery from init to services
-- `input` -- Keyboard and pointer events (16-byte ring buffer slots)
-- `edit` -- Editor-to-document editing operations
-- `store` -- Document-to-store persistence operations
-- `view` -- Document-to-presenter notifications
 - `decode` -- Content decoding requests/replies (e.g., PNG)
+
+Protocols that have moved to their server crate's lib.rs:
+
+- `name_service` -> `servers/name`
+- `bootstrap` -> `servers/init`
+- `blk` -> `servers/drivers/blk`
+- `input` -> `servers/drivers/input`
+- `metal` -> `servers/drivers/render`
+- `store` -> `servers/store`
+- `edit`, `view` -> `servers/document`
 
 ## Conventions
 
