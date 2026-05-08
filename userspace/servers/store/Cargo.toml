@@ -7,6 +7,7 @@ license = "Unlicense"
 [dependencies]
 abi = { path = "../../abi" }
 blk = { path = "../drivers/blk" }
+heap = { path = "../../heap" }
 console = { path = "../console" }
 fs = { path = "../../../libraries/fs" }
 init = { path = "../init" }

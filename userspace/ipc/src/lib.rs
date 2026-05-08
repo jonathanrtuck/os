@@ -14,8 +14,7 @@
 
 #![no_std]
 
-/// IPC payload capacity (128-byte message minus 8-byte header).
-pub const MAX_PAYLOAD: usize = 120;
+pub use message::MAX_PAYLOAD;
 
 pub const STATUS_OK: u16 = 0;
 pub const STATUS_NOT_FOUND: u16 = 1;

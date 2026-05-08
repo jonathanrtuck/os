@@ -32,6 +32,13 @@ name = "fs"
 version = "0.1.0"
 
 [[package]]
+name = "heap"
+version = "0.1.0"
+dependencies = [
+ "abi",
+]
+
+[[package]]
 name = "init"
 version = "0.1.0"
 dependencies = [
@@ -68,6 +75,7 @@ dependencies = [
  "blk",
  "console",
  "fs",
+ "heap",
  "init",
  "ipc",
  "name",

@@ -13,36 +13,12 @@
 #![no_main]
 
 extern crate alloc;
+extern crate heap;
 
 use alloc::boxed::Box;
 use core::panic::PanicInfo;
 
 use abi::types::{Handle, Rights};
-
-struct BumpAlloc;
-
-unsafe impl core::alloc::GlobalAlloc for BumpAlloc {
-    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        let size = layout.size().max(layout.align());
-        let pages = size.div_ceil(16384);
-        let total = pages * 16384;
-        let vmo = match abi::vmo::create(total, 0) {
-            Ok(h) => h,
-            Err(_) => return core::ptr::null_mut(),
-        };
-        let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
-
-        match abi::vmo::map(vmo, 0, rw) {
-            Ok(va) => va as *mut u8,
-            Err(_) => core::ptr::null_mut(),
-        }
-    }
-
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: core::alloc::Layout) {}
-}
-
-#[global_allocator]
-static ALLOC: BumpAlloc = BumpAlloc;
 use fs::BlockDevice;
 use ipc::server::{Dispatch, Incoming};
 

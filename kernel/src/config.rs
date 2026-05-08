@@ -48,8 +48,9 @@ pub const BITMAP_WORDS: usize = MAX_PHYS_PAGES / 64;
 //   worst case (50 docs + undo snapshots + scene graph + stacks).
 // MAX_WAITERS_PER_EVENT (16): concurrent waiters on one event.
 //   Typical: 1 (compositor on scene-ready). 16 = generous headroom.
-// MAX_PENDING_PER_ENDPOINT (8): concurrent callers blocked on one
-//   endpoint. Typical: 1-3 editors calling OS service. 8 = headroom.
+// MAX_PENDING_PER_ENDPOINT (12): concurrent callers blocked on one
+//   endpoint. At boot, 6+ services call the name service concurrently.
+//   Typical steady-state: 1-3 callers. 12 = 2x boot peak.
 // MAX_IPC_HANDLES (4): handles transferred per IPC call. Typical
 //   calls transfer 0-2 handles (VMO + maybe event). 4 = headroom.
 // MAX_BOOTSTRAP_HANDLES (8): handles passed via thread_create_in.

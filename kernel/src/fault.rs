@@ -92,7 +92,8 @@ pub fn handle_data_abort(current: ThreadId, fault_addr: usize, is_write: bool) -
 
     // Existing page not mapped in this space (cross-space mapping, re-fault
     // after TLB eviction, or page committed by another space that shares
-    // this VMO). Just install a PTE pointing to the existing physical page.
+    // this VMO), OR permission upgrade (page mapped RX but write fault on
+    // a mapping with WRITE rights — e.g. BSS pages on an RWX code VMO).
     if let Some(pa) = vmo.page_at(page_idx) {
         let is_device = vmo.is_device();
 
@@ -102,22 +103,40 @@ pub fn handle_data_abort(current: ThreadId, fault_addr: usize, is_write: bool) -
         {
             let space = state::spaces().read(space_id.0).unwrap();
             let root = crate::frame::arch::page_alloc::PhysAddr(space.page_table_root());
+            let asid = crate::frame::arch::page_table::Asid(space.asid());
+            let has_write = mapping.rights.contains(crate::types::Rights::WRITE);
+            let has_exec = mapping.rights.contains(crate::types::Rights::EXECUTE);
             let perms = if is_device {
                 crate::frame::arch::page_table::Perms::RW_DEVICE
-            } else if mapping.rights.contains(crate::types::Rights::EXECUTE) {
+            } else if is_write && has_write {
+                crate::frame::arch::page_table::Perms::RW
+            } else if has_exec {
                 crate::frame::arch::page_table::Perms::RX
-            } else if mapping.rights.contains(crate::types::Rights::WRITE) {
+            } else if has_write {
                 crate::frame::arch::page_table::Perms::RW
             } else {
                 crate::frame::arch::page_table::Perms::RO
             };
 
-            crate::frame::fault_resolve::resolve_existing(
-                root,
-                page_va,
-                crate::frame::arch::page_alloc::PhysAddr(pa),
-                perms,
-            );
+            if is_write && has_write && has_exec {
+                // Permission upgrade: page was mapped RX (first accessed by
+                // read/exec), now needs RW for a write. Use break-before-make
+                // to safely transition the valid-to-valid PTE.
+                crate::frame::arch::page_table::replace_page(
+                    root,
+                    asid,
+                    crate::frame::arch::page_table::VirtAddr(page_va),
+                    crate::frame::arch::page_alloc::PhysAddr(pa),
+                    perms,
+                );
+            } else {
+                crate::frame::fault_resolve::resolve_existing(
+                    root,
+                    page_va,
+                    crate::frame::arch::page_alloc::PhysAddr(pa),
+                    perms,
+                );
+            }
         }
 
         let _ = pa;
