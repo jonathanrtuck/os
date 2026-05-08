@@ -330,9 +330,24 @@ new library tests (1,045 total workspace tests).
    re-layouts, verifies 4-line layout. Verifies GET_INFO metadata.
    `userspace/servers/layout/`
 
+4. **Presenter** — DONE. Compiles document state + layout results into a scene
+   graph. Reads document buffer (RO VMO), writes viewport state (seqlock) to
+   the layout service, reads layout results (seqlock), builds a scene graph tree:
+   root (background) → viewport (clips children, margin offset) → per-line Glyphs
+   nodes (monospace ShapedGlyph arrays) + cursor node (ROLE_CARET rectangle).
+
+   Protocol: SETUP (returns scene graph VMO handle), BUILD (triggers full
+   rebuild, replies with stats), GET_INFO (current state). Scene graph VMO uses
+   the `scene` library's SceneWriter/SceneReader with generation counter.
+
+   Integration test (test-presenter): waits for test-layout to finish, clears
+   document, inserts 3-line text, calls BUILD, verifies: root node (background),
+   viewport node (clips_children), 3 Glyphs nodes with non-zero glyph counts,
+   cursor node (ROLE_CARET with background color), GET_INFO metadata.
+   `userspace/servers/presenter/`
+
 **What's next:**
 
-4. Presenter (event loop, input routing, scene graph builder)
 5. Text editor (editing key events → document write requests)
 
 ## Session Resume

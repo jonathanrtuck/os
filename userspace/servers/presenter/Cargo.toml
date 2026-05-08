@@ -1,0 +1,30 @@
+[package]
+name = "presenter-service"
+version = "0.1.0"
+edition = "2024"
+license = "Unlicense"
+
+[features]
+default = ["service"]
+service = [
+    "dep:abi",
+    "dep:console",
+    "dep:document-service",
+    "dep:heap",
+    "dep:ipc",
+    "dep:layout-service",
+    "dep:name",
+    "dep:scene",
+]
+
+[dependencies]
+abi = { path = "../../abi", optional = true }
+console = { path = "../console", optional = true }
+document-service = { path = "../document", optional = true }
+heap = { path = "../../heap", optional = true }
+ipc = { path = "../../ipc", optional = true }
+layout-service = { path = "../layout", optional = true }
+name = { path = "../name", optional = true }
+scene = { path = "../../../libraries/scene", optional = true }
+
+[workspace]

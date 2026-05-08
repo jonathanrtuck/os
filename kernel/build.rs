@@ -85,6 +85,13 @@ fn build_init(kernel_dir: &std::path::Path) {
     println!("cargo:rerun-if-changed=../userspace/servers/test-layout/src/main.rs");
     println!("cargo:rerun-if-changed=../userspace/servers/test-layout/link.ld");
     println!("cargo:rerun-if-changed=../userspace/servers/test-layout/Cargo.toml");
+    println!("cargo:rerun-if-changed=../userspace/servers/presenter/src/main.rs");
+    println!("cargo:rerun-if-changed=../userspace/servers/presenter/src/lib.rs");
+    println!("cargo:rerun-if-changed=../userspace/servers/presenter/link.ld");
+    println!("cargo:rerun-if-changed=../userspace/servers/presenter/Cargo.toml");
+    println!("cargo:rerun-if-changed=../userspace/servers/test-presenter/src/main.rs");
+    println!("cargo:rerun-if-changed=../userspace/servers/test-presenter/link.ld");
+    println!("cargo:rerun-if-changed=../userspace/servers/test-presenter/Cargo.toml");
 }
 
 fn build_userspace_crate(crate_dir: &std::path::Path, crate_name: &str, output: &std::path::Path) {
@@ -243,6 +250,16 @@ const SERVICES: &[ServiceDef] = &[
         name: "test-layout",
         dir: "../userspace/servers/test-layout",
         crate_name: "test-layout",
+    },
+    ServiceDef {
+        name: "presenter",
+        dir: "../userspace/servers/presenter",
+        crate_name: "presenter-service",
+    },
+    ServiceDef {
+        name: "test-presenter",
+        dir: "../userspace/servers/test-presenter",
+        crate_name: "test-presenter",
     },
 ];
 
