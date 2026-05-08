@@ -94,12 +94,14 @@ pub fn compute_dilation(font_size_px: u16, units_per_em: u16, scale: u16) -> (i3
 /// Returns 0 if the vector is zero-length (and leaves it unchanged).
 fn vector_norm_len(x: &mut i64, y: &mut i64) -> i64 {
     let len_sq = *x * *x + *y * *y;
+
     if len_sq == 0 {
         return 0;
     }
 
     // Integer square root via Newton's method.
     let len = isqrt_i64(len_sq);
+
     if len == 0 {
         return 0;
     }
@@ -123,11 +125,14 @@ fn isqrt_i64(n: i64) -> i64 {
     // Initial guess must overshoot the root so Newton's method
     // converges downward. +1 ensures ceil(bit_width/2) bits.
     let mut x = 1i64 << ((64 - n.leading_zeros() + 1) / 2);
+
     loop {
         let next = (x + n / x) / 2;
+
         if next >= x {
             return x;
         }
+
         x = next;
     }
 }
@@ -142,6 +147,7 @@ fn fx_div(a: i64, b: i64) -> i64 {
     if b == 0 {
         return 0;
     }
+
     ((a << 16) + (b >> 1)) / b
 }
 
@@ -150,6 +156,7 @@ fn mul_div(a: i64, b: i64, c: i64) -> i64 {
     if c == 0 {
         return 0;
     }
+
     (a * b) / c
 }
 
@@ -182,6 +189,7 @@ fn detect_orientation(outline: &GlyphOutline) -> Option<Orientation> {
 
     for c in 0..outline.num_contours as usize {
         let end = outline.contour_ends[c] as usize;
+
         if end < start + 2 {
             start = end + 1;
             continue;
@@ -194,6 +202,7 @@ fn detect_orientation(outline: &GlyphOutline) -> Option<Orientation> {
             let yi = outline.points[i].y as i64;
             let xj = outline.points[j].x as i64;
             let yj = outline.points[j].y as i64;
+
             area += xi * yj - xj * yi;
         }
 
@@ -238,8 +247,8 @@ pub fn embolden_outline(outline: &mut GlyphOutline, x_strength: i32, y_strength:
         Some(o) => o,
         None => return,
     };
-
     let np = outline.num_points as usize;
+
     if np < 3 {
         return;
     }
@@ -248,6 +257,7 @@ pub fn embolden_outline(outline: &mut GlyphOutline, x_strength: i32, y_strength:
     // modifying points while iterating over them for direction vectors.
     let mut shifts_x = [0i64; 512];
     let mut shifts_y = [0i64; 512];
+
     if np > 512 {
         return; // Outline too large for our fixed buffer.
     }
@@ -257,9 +267,11 @@ pub fn embolden_outline(outline: &mut GlyphOutline, x_strength: i32, y_strength:
     for c in 0..outline.num_contours as usize {
         let first = (last_end + 1) as usize;
         let last = outline.contour_ends[c] as usize;
+
         last_end = last as i32;
 
         let n = if last >= first { last - first + 1 } else { 0 };
+
         if n < 3 {
             continue;
         }
@@ -268,13 +280,11 @@ pub fn embolden_outline(outline: &mut GlyphOutline, x_strength: i32, y_strength:
             // Previous and next points in the contour (wrapping).
             let prev = if idx == first { last } else { idx - 1 };
             let next = if idx == last { first } else { idx + 1 };
-
             // Edge directions (not normalized yet).
             let mut in_x = outline.points[idx].x as i64 - outline.points[prev].x as i64;
             let mut in_y = outline.points[idx].y as i64 - outline.points[prev].y as i64;
             let mut out_x = outline.points[next].x as i64 - outline.points[idx].x as i64;
             let mut out_y = outline.points[next].y as i64 - outline.points[idx].y as i64;
-
             let l_in = vector_norm_len(&mut in_x, &mut in_y);
             let l_out = vector_norm_len(&mut out_x, &mut out_y);
 
@@ -291,11 +301,9 @@ pub fn embolden_outline(outline: &mut GlyphOutline, x_strength: i32, y_strength:
                 // CCW: outward = right of edge direction = (dy, -dx).
                 (in_y, -in_x, out_y, -out_x)
             };
-
             // Miter direction: sum of the two outward normals.
             let mx = n_in_x + n_out_x;
             let my = n_in_y + n_out_y;
-
             // dot(miter, n_in) — determines the scaling factor.
             // This equals 2 * cos²(θ/2) where θ is the turn angle.
             // In 16.16 × 16.16 → 16.16:
@@ -311,12 +319,10 @@ pub fn embolden_outline(outline: &mut GlyphOutline, x_strength: i32, y_strength:
             // corners, this gets very large. Clamp the shift magnitude
             // to the shorter adjacent edge length.
             let l_min = if l_in < l_out { l_in } else { l_out };
-
             // shift = miter * strength / miter_dot
             // But strength may differ for x and y.
             let raw_sx = mul_div(mx, xs, miter_dot);
             let raw_sy = mul_div(my, ys, miter_dot);
-
             // Compute shift magnitude for clamping.
             // Approximate magnitude: max(|sx|, |sy|) (conservative).
             let mag = if raw_sx.abs() > raw_sy.abs() {
@@ -325,7 +331,6 @@ pub fn embolden_outline(outline: &mut GlyphOutline, x_strength: i32, y_strength:
                 raw_sy.abs()
             };
             let l_min_fx = l_min * FX_ONE;
-
             let (sx, sy) = if mag > l_min_fx {
                 // Clamp: scale down proportionally.
                 let scale = fx_div(l_min_fx, mag);
@@ -343,6 +348,7 @@ pub fn embolden_outline(outline: &mut GlyphOutline, x_strength: i32, y_strength:
     for i in 0..np {
         let dx = ((shifts_x[i] + 0x8000) >> 16) as i32;
         let dy = ((shifts_y[i] + 0x8000) >> 16) as i32;
+
         outline.points[i].x += dx;
         outline.points[i].y += dy;
     }
@@ -354,8 +360,10 @@ pub fn embolden_outline(outline: &mut GlyphOutline, x_strength: i32, y_strength:
         let mut y_min = outline.points[0].y;
         let mut x_max = outline.points[0].x;
         let mut y_max = outline.points[0].y;
+
         for i in 1..np {
             let p = &outline.points[i];
+
             if p.x < x_min {
                 x_min = p.x;
             }
@@ -369,6 +377,7 @@ pub fn embolden_outline(outline: &mut GlyphOutline, x_strength: i32, y_strength:
                 y_max = p.y;
             }
         }
+
         outline.x_min = x_min as i16;
         outline.y_min = y_min as i16;
         outline.x_max = x_max as i16;
@@ -386,6 +395,7 @@ mod tests {
     /// Helper: create an outline from a slice of (x, y) points forming a single contour.
     fn make_outline(points: &[(i32, i32)]) -> GlyphOutline {
         let mut outline = GlyphOutline::zeroed();
+
         for (i, &(x, y)) in points.iter().enumerate() {
             outline.points[i] = GlyphPoint {
                 x,
@@ -393,6 +403,7 @@ mod tests {
                 on_curve: true,
             };
         }
+
         outline.num_points = points.len() as u16;
         outline.num_contours = 1;
         outline.contour_ends[0] = (points.len() - 1) as u16;
@@ -402,6 +413,7 @@ mod tests {
         let mut y_min = points[0].1;
         let mut x_max = points[0].0;
         let mut y_max = points[0].1;
+
         for &(x, y) in &points[1..] {
             if x < x_min {
                 x_min = x;
@@ -416,10 +428,12 @@ mod tests {
                 y_max = y;
             }
         }
+
         outline.x_min = x_min as i16;
         outline.y_min = y_min as i16;
         outline.x_max = x_max as i16;
         outline.y_max = y_max as i16;
+
         outline
     }
 
@@ -427,7 +441,9 @@ mod tests {
     fn zero_strength_no_change() {
         let original = [(0, 0), (100, 0), (100, 200), (0, 200)];
         let mut outline = make_outline(&original);
+
         embolden_outline(&mut outline, 0, 0);
+
         for (i, &(x, y)) in original.iter().enumerate() {
             assert_eq!(outline.points[i].x, x);
             assert_eq!(outline.points[i].y, y);
@@ -438,6 +454,7 @@ mod tests {
     fn orientation_detection_ccw() {
         // In y-up coords: right→up→left→down is CCW.
         let outline = make_outline(&[(0, 0), (100, 0), (100, 100), (0, 100)]);
+
         assert_eq!(
             detect_orientation(&outline),
             Some(Orientation::CounterClockwise)
@@ -448,6 +465,7 @@ mod tests {
     fn orientation_detection_clockwise() {
         // In y-up coords: up→right→down→left is CW (TrueType convention).
         let outline = make_outline(&[(0, 0), (0, 100), (100, 100), (100, 0)]);
+
         assert_eq!(detect_orientation(&outline), Some(Orientation::Clockwise));
     }
 
@@ -457,6 +475,7 @@ mod tests {
         // P0=(0,0), P1=(0,200), P2=(100,200), P3=(100,0)
         let mut outline = make_outline(&[(0, 0), (0, 200), (100, 200), (100, 0)]);
         let strength = 10 << 16; // 10 font units in 16.16
+
         embolden_outline(&mut outline, strength, strength);
 
         // Each corner should have moved outward by ~5 units.
@@ -536,12 +555,14 @@ mod tests {
         // offset (FreeType convention), not total.
         let mut outline = make_outline(&[(0, 0), (0, 100), (100, 100), (100, 0)]);
         let strength = 20 << 16; // 20 font units per edge
+
         embolden_outline(&mut outline, strength, strength);
 
         // At a 90° corner, the bisector miter scale is 1/cos(45°) ≈ 1.414.
         // Projected onto each axis: 20 * 1.414 * cos(45°) = 20.
         let dx = outline.points[0].x;
         let dy = outline.points[0].y;
+
         assert!(dx >= -25 && dx <= -15, "BL.x expected ~-20, got {}", dx);
         assert!(dy >= -25 && dy <= -15, "BL.y expected ~-20, got {}", dy);
     }
@@ -566,6 +587,7 @@ mod tests {
         let mut x: i64 = 3;
         let mut y: i64 = 4;
         let len = vector_norm_len(&mut x, &mut y);
+
         assert_eq!(len, 5);
         // 0.6 * 65536 = 39321.6 → 39322
         // 0.8 * 65536 = 52428.8 → 52429
@@ -578,6 +600,7 @@ mod tests {
         let mut x: i64 = 0;
         let mut y: i64 = 0;
         let len = vector_norm_len(&mut x, &mut y);
+
         assert_eq!(len, 0);
         assert_eq!(x, 0);
         assert_eq!(y, 0);
@@ -590,6 +613,7 @@ mod tests {
         let (x, y) = compute_dilation(12, 1000, 2);
         let x_fu = x as f32 / FX_ONE as f32;
         let y_fu = y as f32 / FX_ONE as f32;
+
         assert!(
             (x_fu - 16.25).abs() < 1.0,
             "x_fu expected ~16.25, got {}",
@@ -609,6 +633,7 @@ mod tests {
         let (x, y) = compute_dilation(36, 1000, 2);
         let x_fu = x as f32 / FX_ONE as f32;
         let y_fu = y as f32 / FX_ONE as f32;
+
         assert!(
             (x_fu - 5.417).abs() < 1.0,
             "x_fu expected ~5.417, got {}",
@@ -624,6 +649,7 @@ mod tests {
     #[test]
     fn compute_dilation_zero_size() {
         let (x, y) = compute_dilation(0, 1000, 2);
+
         assert_eq!(x, 0);
         assert_eq!(y, 0);
     }
@@ -632,6 +658,7 @@ mod tests {
     fn degenerate_outline_no_panic() {
         // Single point — should not panic.
         let mut outline = GlyphOutline::zeroed();
+
         outline.points[0] = GlyphPoint {
             x: 50,
             y: 50,
@@ -640,6 +667,7 @@ mod tests {
         outline.num_points = 1;
         outline.num_contours = 1;
         outline.contour_ends[0] = 0;
+
         embolden_outline(&mut outline, 10 << 16, 10 << 16);
         // Should not crash.
     }
@@ -648,8 +676,11 @@ mod tests {
     fn coincident_points_handled() {
         // Triangle with a duplicated point — should not crash or produce NaN-like results.
         let mut outline = make_outline(&[(0, 0), (0, 0), (100, 0), (50, 100)]);
+
         outline.contour_ends[0] = 3;
+
         embolden_outline(&mut outline, 10 << 16, 10 << 16);
+
         // All points should be finite integers (no overflow).
         for i in 0..4 {
             assert!(outline.points[i].x.abs() < 10000);
@@ -660,9 +691,12 @@ mod tests {
     #[test]
     fn bbox_updated_after_embolden() {
         let mut outline = make_outline(&[(10, 10), (90, 10), (90, 90), (10, 90)]);
+
         assert_eq!(outline.x_min, 10);
         assert_eq!(outline.x_max, 90);
+
         embolden_outline(&mut outline, 10 << 16, 10 << 16);
+
         // Bounding box should be larger than before.
         assert!(outline.x_min < 10, "x_min should have decreased");
         assert!(outline.x_max > 90, "x_max should have increased");

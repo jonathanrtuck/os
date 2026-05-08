@@ -11,7 +11,7 @@
 
 use alloc::{format, vec, vec::Vec};
 
-use crate::{BLOCK_SIZE, FsError, block::BlockDevice, superblock::DATA_START};
+use crate::{block::BlockDevice, superblock::DATA_START, FsError, BLOCK_SIZE};
 
 /// Maximum free extents that fit in one persistence block.
 /// (BLOCK_SIZE - 8 byte header) / 8 bytes per entry.
@@ -57,6 +57,7 @@ impl Allocator {
         } else {
             Vec::new()
         };
+
         Self {
             free,
             free_blocks: free_count,
@@ -66,6 +67,7 @@ impl Allocator {
     /// Load from a persisted free-list block.
     pub fn load(device: &impl BlockDevice, block: u32) -> Result<Self, FsError> {
         let mut buf = vec![0u8; BLOCK_SIZE as usize];
+
         device.read_block(block, &mut buf)?;
 
         let entry_count = get_u32(&buf, OFF_COUNT) as usize;
@@ -101,6 +103,7 @@ impl Allocator {
             }
 
             free.push(Extent { start, count });
+
             sum += count;
             prev_end = start + count;
         }
@@ -132,7 +135,9 @@ impl Allocator {
         }
 
         self.free_blocks -= count;
+
         self.debug_check();
+
         Some(start)
     }
 
@@ -169,9 +174,12 @@ impl Allocator {
             if remaining == 0 {
                 break;
             }
+
             // Take as much as we can from this extent.
             let take = remaining.min(ext.count).min(u16::MAX as u32);
+
             plan.push((ext.start, take));
+
             remaining -= take;
 
             if plan.len() > max_extents {
@@ -189,6 +197,7 @@ impl Allocator {
         // back and each chunk starts at a free extent's start, the first-fit
         // `alloc` will find each one at the expected position.
         let result: Vec<(u32, u32)> = plan.clone();
+
         for &(_, chunk_count) in &result {
             let _start = self
                 .alloc(chunk_count)
@@ -203,7 +212,6 @@ impl Allocator {
         debug_assert!(count > 0, "freeing zero blocks");
 
         let end = start + count;
-
         // Insertion point: first extent starting after `start`.
         let pos = self.free.partition_point(|e| e.start < start);
 
@@ -253,18 +261,20 @@ impl Allocator {
         }
 
         let block = self.alloc(1).ok_or(FsError::NoSpace)?;
-
         let mut buf = vec![0u8; BLOCK_SIZE as usize];
+
         put_u32(&mut buf, OFF_COUNT, self.free.len() as u32);
         put_u32(&mut buf, OFF_FREE, self.free_blocks);
 
         for (i, ext) in self.free.iter().enumerate() {
             let off = OFF_ENTRIES + i * 8;
+
             put_u32(&mut buf, off, ext.start);
             put_u32(&mut buf, off + 4, ext.count);
         }
 
         device.write_block(block, &buf)?;
+
         Ok(block)
     }
 
@@ -283,11 +293,15 @@ impl Allocator {
         if !cfg!(debug_assertions) {
             return;
         }
+
         let mut sum = 0u32;
+
         for (i, ext) in self.free.iter().enumerate() {
             assert!(ext.count > 0, "extent {i} has zero count");
+
             if i > 0 {
                 let prev = &self.free[i - 1];
+
                 assert!(
                     prev.start + prev.count < ext.start,
                     "extents {}/{i} not sorted/coalesced: {:?} vs {:?}",
@@ -296,8 +310,10 @@ impl Allocator {
                     ext
                 );
             }
+
             sum += ext.count;
         }
+
         assert_eq!(
             self.free_blocks, sum,
             "free_blocks ({}) != sum ({})",

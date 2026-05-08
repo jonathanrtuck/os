@@ -155,18 +155,17 @@ pub fn ease(easing: Easing, t: f32) -> f32 {
 
     match easing {
         Easing::Linear => t,
-
         // CSS standard — delegate to the cubic-bezier evaluator
         Easing::Ease => cubic_bezier(0.25, 0.1, 0.25, 1.0, t),
         Easing::EaseIn => cubic_bezier(0.42, 0.0, 1.0, 1.0, t),
         Easing::EaseOut => cubic_bezier(0.0, 0.0, 0.58, 1.0, t),
         Easing::EaseInOut => cubic_bezier(0.42, 0.0, 0.58, 1.0, t),
         Easing::CubicBezier(x1, y1, x2, y2) => cubic_bezier(x1, y1, x2, y2, t),
-
         // Polynomial — quadratic
         Easing::EaseInQuad => t * t,
         Easing::EaseOutQuad => {
             let u = 1.0 - t;
+
             1.0 - u * u
         }
         Easing::EaseInOutQuad => {
@@ -174,14 +173,15 @@ pub fn ease(easing: Easing, t: f32) -> f32 {
                 2.0 * t * t
             } else {
                 let u = -2.0 * t + 2.0;
+
                 1.0 - u * u / 2.0
             }
         }
-
         // Polynomial — cubic
         Easing::EaseInCubic => t * t * t,
         Easing::EaseOutCubic => {
             let u = 1.0 - t;
+
             1.0 - u * u * u
         }
         Easing::EaseInOutCubic => {
@@ -189,10 +189,10 @@ pub fn ease(easing: Easing, t: f32) -> f32 {
                 4.0 * t * t * t
             } else {
                 let u = -2.0 * t + 2.0;
+
                 1.0 - u * u * u / 2.0
             }
         }
-
         // Exponential
         Easing::EaseInExpo => {
             if t == 0.0 {
@@ -219,28 +219,31 @@ pub fn ease(easing: Easing, t: f32) -> f32 {
                 (2.0 - exp2(-20.0 * t + 10.0)) / 2.0
             }
         }
-
         // Back (overshoot)
         Easing::EaseInBack => {
             let s = BACK_S;
+
             t * t * ((s + 1.0) * t - s)
         }
         Easing::EaseOutBack => {
             let s = BACK_S;
             let u = t - 1.0;
+
             u * u * ((s + 1.0) * u + s) + 1.0
         }
         Easing::EaseInOutBack => {
             let s = BACK_S * 1.525; // standard adjustment for InOut
+
             if t < 0.5 {
                 let u = 2.0 * t;
+
                 u * u * ((s + 1.0) * u - s) / 2.0
             } else {
                 let u = 2.0 * t - 2.0;
+
                 (u * u * ((s + 1.0) * u + s) + 2.0) / 2.0
             }
         }
-
         // Elastic
         Easing::EaseInElastic => {
             if t == 0.0 {
@@ -260,11 +263,9 @@ pub fn ease(easing: Easing, t: f32) -> f32 {
                 exp2(-10.0 * t) * sin((10.0 * t - 0.75) * (TAU / 3.0)) + 1.0
             }
         }
-
         // Bounce
         Easing::EaseInBounce => 1.0 - bounce_out(1.0 - t),
         Easing::EaseOutBounce => bounce_out(t),
-
         // Step
         Easing::StepStart => {
             if t > 0.0 {
@@ -299,7 +300,6 @@ fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, t_x: f32) -> f32 {
     let cx = 3.0 * x1;
     let bx = 3.0 * (x2 - x1) - cx;
     let ax = 1.0 - cx - bx;
-
     let cy = 3.0 * y1;
     let by = 3.0 * (y2 - y1) - cy;
     let ay = 1.0 - cy - by;
@@ -339,6 +339,7 @@ fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, t_x: f32) -> f32 {
         }
 
         let x = sample_x(ax, bx, cx, u) - t_x;
+
         u -= x / dx;
     }
 
@@ -355,7 +356,9 @@ fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, t_x: f32) -> f32 {
 
         for _ in 0..32 {
             let mid = (lo + hi) * 0.5;
+
             u = mid; // always update — final iteration's mid is our best guess
+
             let x = sample_x(ax, bx, cx, mid);
 
             if (x - t_x).abs() < 1e-5 {
@@ -387,12 +390,15 @@ fn bounce_out(t: f32) -> f32 {
         N1 * t * t
     } else if t < 2.0 / D1 {
         let t = t - 1.5 / D1;
+
         N1 * t * t + 0.75
     } else if t < 2.5 / D1 {
         let t = t - 2.25 / D1;
+
         N1 * t * t + 0.9375
     } else {
         let t = t - 2.625 / D1;
+
         N1 * t * t + 0.984_375
     }
 }
@@ -414,7 +420,11 @@ fn floor_f32(x: f32) -> f32 {
 
     // If x was negative and truncation moved away from negative infinity,
     // subtract 1 to correct.
-    if x < t { t - 1.0 } else { t }
+    if x < t {
+        t - 1.0
+    } else {
+        t
+    }
 }
 
 /// Sine approximation accurate to < 0.0002 absolute error on `[−π, π]`.
@@ -426,7 +436,6 @@ fn floor_f32(x: f32) -> f32 {
 fn sin(x: f32) -> f32 {
     // range reduction: round(x/TAU) = floor(x/TAU + 0.5)
     let x = x - TAU * floor_f32(x / TAU + 0.5);
-
     let x2 = x * x;
 
     // 7th-order Horner-form minimax polynomial.
@@ -444,16 +453,13 @@ fn sin(x: f32) -> f32 {
 fn exp2(x: f32) -> f32 {
     // Clamp to a safe range to avoid undefined bit-manipulation results.
     let x = x.max(-126.0).min(126.0);
-
     let n = floor_f32(x);
     let f = x - n; // fractional part, in [0, 1)
-
-    // Integer power of two via exponent-field bias.
-    // f32 exponent bias = 127.  Shift into position 23.
-    // SAFETY: n is in [-126, 126], so (n as i32 + 127) is in [1, 253] — a
-    // valid normalised f32 exponent.
+                   // Integer power of two via exponent-field bias.
+                   // f32 exponent bias = 127.  Shift into position 23.
+                   // SAFETY: n is in [-126, 126], so (n as i32 + 127) is in [1, 253] — a
+                   // valid normalised f32 exponent.
     let int_pow: f32 = f32::from_bits(((n as i32 + 127) as u32) << 23);
-
     // Polynomial approximation of 2^f on [0, 1).
     // Coefficients from a minimax fit; error < 0.0002 on [0, 1).
     let frac_pow = 1.0 + f * (0.693_147 + f * (0.240_226 + f * (0.055_504 + f * 0.009_618)));
@@ -528,11 +534,14 @@ impl Spring {
         if dt <= 0.0 {
             return;
         }
+
         // Fixed substep: 4ms (250 Hz physics). Stable for stiffness up to
         // ~15,000 (dt < 2/sqrt(k/m) → k < (2/dt)^2 = 250,000). Well beyond
         // any UI spring. Large dt (e.g. 50ms after wake) gets 12-13 substeps.
         const MAX_SUBSTEP: f32 = 0.004;
+
         let mut remaining = dt;
+
         while remaining > 0.0 {
             let step = if remaining > MAX_SUBSTEP {
                 MAX_SUBSTEP
@@ -542,9 +551,11 @@ impl Spring {
             let displacement = self.value - self.target;
             let force = -self.stiffness * displacement - self.damping * self.velocity;
             let acceleration = force / self.mass;
+
             // Semi-implicit Euler: update velocity first, then position.
             self.velocity += acceleration * step;
             self.value += self.velocity * step;
+
             remaining -= step;
         }
     }
@@ -1147,9 +1158,9 @@ impl LerpColor {
             // Clamp index to valid range before indexing.
             let idx = (linear * 4095.0) as usize;
             let idx = if idx > 4095 { 4095 } else { idx };
+
             LINEAR_TO_SRGB[idx]
         };
-
         // Alpha channel: linear (not gamma-corrected).
         let alpha = u8::lerp(a[3], b[3], t);
 
@@ -1244,8 +1255,10 @@ impl Animation {
         if now_ms <= self.start_time_ms {
             return 0.0;
         }
+
         let elapsed = (now_ms - self.start_time_ms) as f32;
         let t = (elapsed / self.duration_ms as f32).min(1.0);
+
         ease(self.easing, t)
     }
 
@@ -1253,6 +1266,7 @@ impl Animation {
         if now_ms <= self.start_time_ms {
             return self.start_value;
         }
+
         f32::lerp(self.start_value, self.end_value, self.progress_at(now_ms))
     }
 
@@ -1307,19 +1321,23 @@ impl Timeline {
                     duration_ms,
                     easing,
                 });
+
                 self.generations[i] = self.generations[i].wrapping_add(1);
+
                 return Ok(AnimationId {
                     slot: i as u8,
                     generation: self.generations[i],
                 });
             }
         }
+
         Err(()) // at capacity
     }
 
     /// Advance time. Completed animations are removed, freeing their slots.
     pub fn tick(&mut self, now_ms: u64) {
         self.now_ms = now_ms;
+
         for slot in self.slots.iter_mut() {
             if let Some(anim) = slot {
                 if anim.is_complete_at(now_ms) {
@@ -1336,6 +1354,7 @@ impl Timeline {
     /// animation (generation mismatch).
     pub fn value(&self, id: AnimationId) -> f32 {
         let i = id.slot as usize;
+
         if i < MAX_ANIMATIONS && self.generations[i] == id.generation {
             match &self.slots[i] {
                 Some(anim) => anim.value_at(self.now_ms),
@@ -1362,6 +1381,7 @@ impl Timeline {
     /// slot was reused by a different animation (generation mismatch).
     pub fn progress(&self, id: AnimationId) -> f32 {
         let i = id.slot as usize;
+
         if i < MAX_ANIMATIONS && self.generations[i] == id.generation {
             match &self.slots[i] {
                 Some(anim) => anim.progress_at(self.now_ms),
@@ -1378,6 +1398,7 @@ impl Timeline {
     /// by a different animation since this ID was issued).
     pub fn cancel(&mut self, id: AnimationId) {
         let i = id.slot as usize;
+
         if i < MAX_ANIMATIONS && self.generations[i] == id.generation {
             self.slots[i] = None;
         }
@@ -1389,6 +1410,7 @@ impl Timeline {
     /// (generation mismatch), preventing ABA aliasing.
     pub fn is_active(&self, id: AnimationId) -> bool {
         let i = id.slot as usize;
+
         i < MAX_ANIMATIONS && self.generations[i] == id.generation && self.slots[i].is_some()
     }
 
@@ -1473,8 +1495,11 @@ mod tests {
             } else {
                 remaining
             };
+
             self.0[self.1..self.1 + len].copy_from_slice(&bytes[..len]);
+
             self.1 += len;
+
             Ok(())
         }
     }
@@ -1517,7 +1542,6 @@ mod tests {
         assert!((sin(0.0)).abs() < 0.001);
         assert!((sin(PI / 2.0) - 1.0).abs() < 0.001);
         assert!((sin(-PI / 2.0) + 1.0).abs() < 0.001);
-
         // At +-PI the 7th-order Taylor polynomial has larger error (~0.08)
         // because the range reduction maps PI to -PI (the polynomial's edge).
         // The easing functions never evaluate sin near PI directly — they use
@@ -1530,9 +1554,11 @@ mod tests {
     fn sin_accuracy_sweep() {
         // Sweep 1000 points across [-2pi, 2pi] and verify < 0.0003 error.
         let n = 1000;
+
         for i in 0..=n {
             let x = -TAU + 2.0 * TAU * (i as f32 / n as f32);
             let ours = sin(x);
+
             // Reference: Taylor-series independent check at reduced range.
             // We can't call libm, so verify internal consistency at known points.
             // The key property: sin is odd, periodic, and bounded to [-1, 1].
@@ -1549,12 +1575,15 @@ mod tests {
         // it contains only odd powers. Verify for values in the accurate core.
         for &x in &[0.1, 0.5, 1.0, PI / 4.0, PI / 2.0] {
             let diff = (sin(-x) + sin(x)).abs();
+
             assert!(diff < 0.001, "sin symmetry broken at x={x}: diff={diff}");
         }
+
         // At PI the range reduction maps PI -> -PI and -PI -> -PI (same),
         // so the symmetry property still holds — but verify with wider tolerance
         // because both sides have the same edge-of-range error.
         let diff_pi = (sin(-PI) + sin(PI)).abs();
+
         assert!(diff_pi < 0.2, "sin symmetry at PI: diff={diff_pi}");
     }
 
@@ -1577,6 +1606,7 @@ mod tests {
             };
             let result = exp2(n as f32);
             let rel_err = ((result - expected) / expected).abs();
+
             assert!(
                 rel_err < 0.001,
                 "exp2({n}): expected {expected}, got {result}, rel_err={rel_err}"
@@ -1588,13 +1618,16 @@ mod tests {
     fn exp2_monotonic() {
         let mut prev = exp2(-10.0);
         let n = 200;
+
         for i in 1..=n {
             let x = -10.0 + 20.0 * (i as f32 / n as f32);
             let cur = exp2(x);
+
             assert!(
                 cur >= prev - 0.001,
                 "exp2 not monotonic at x={x}: prev={prev}, cur={cur}"
             );
+
             prev = cur;
         }
     }
@@ -1616,9 +1649,11 @@ mod tests {
     #[test]
     fn linear_is_identity() {
         let n = 100;
+
         for i in 0..=n {
             let t = i as f32 / n as f32;
             let result = ease(Easing::Linear, t);
+
             assert!(
                 (result - t).abs() < 1e-6,
                 "Linear({t}) = {result}, expected {t}"
@@ -1632,6 +1667,7 @@ mod tests {
     fn all_easings_return_zero_at_t0() {
         for easing in all_easings() {
             let result = ease(easing, 0.0);
+
             assert!(
                 result.abs() < 0.001,
                 "{easing:?} at t=0: expected ~0, got {result}"
@@ -1643,6 +1679,7 @@ mod tests {
     fn all_easings_return_one_at_t1() {
         for easing in all_easings() {
             let result = ease(easing, 1.0);
+
             assert!(
                 (result - 1.0).abs() < 0.001,
                 "{easing:?} at t=1: expected ~1, got {result}"
@@ -1655,6 +1692,7 @@ mod tests {
         for easing in all_easings() {
             let result = ease(easing, -0.5);
             let at_zero = ease(easing, 0.0);
+
             assert!(
                 (result - at_zero).abs() < 1e-6,
                 "{easing:?} at t=-0.5 should equal t=0"
@@ -1667,6 +1705,7 @@ mod tests {
         for easing in all_easings() {
             let result = ease(easing, 1.5);
             let at_one = ease(easing, 1.0);
+
             assert!(
                 (result - at_one).abs() < 1e-6,
                 "{easing:?} at t=1.5 should equal t=1"
@@ -1677,6 +1716,7 @@ mod tests {
     #[test]
     fn easing_nan_treated_as_zero() {
         let result = ease(Easing::Linear, f32::NAN);
+
         assert!(
             result.abs() < 1e-6,
             "NaN input should produce 0.0, got {result}"
@@ -1706,15 +1746,19 @@ mod tests {
             Easing::EaseInOutExpo,
         ];
         let n = 200;
+
         for easing in monotonic_easings {
             let mut prev = ease(easing, 0.0);
+
             for i in 1..=n {
                 let t = i as f32 / n as f32;
                 let cur = ease(easing, t);
+
                 assert!(
                     cur >= prev - 1e-4,
                     "{easing:?} not monotonic at t={t}: prev={prev}, cur={cur}"
                 );
+
                 prev = cur;
             }
         }
@@ -1727,6 +1771,7 @@ mod tests {
         for &t in &[0.0, 0.25, 0.5, 0.75, 1.0] {
             let result = ease(Easing::EaseInQuad, t);
             let expected = t * t;
+
             assert!(
                 (result - expected).abs() < 1e-6,
                 "EaseInQuad({t}) = {result}, expected {expected}"
@@ -1739,6 +1784,7 @@ mod tests {
         for &t in &[0.0, 0.25, 0.5, 0.75, 1.0] {
             let result = ease(Easing::EaseInCubic, t);
             let expected = t * t * t;
+
             assert!(
                 (result - expected).abs() < 1e-6,
                 "EaseInCubic({t}) = {result}, expected {expected}"
@@ -1753,6 +1799,7 @@ mod tests {
             let result = ease(Easing::EaseOutQuad, t);
             let u = 1.0 - t;
             let expected = 1.0 - u * u;
+
             assert!(
                 (result - expected).abs() < 1e-6,
                 "EaseOutQuad({t}) = {result}, expected {expected}"
@@ -1764,6 +1811,7 @@ mod tests {
     fn ease_in_out_quad_midpoint() {
         // At t=0.5, EaseInOutQuad should be exactly 0.5.
         let result = ease(Easing::EaseInOutQuad, 0.5);
+
         assert!(
             (result - 0.5).abs() < 1e-5,
             "EaseInOutQuad(0.5) = {result}, expected 0.5"
@@ -1773,6 +1821,7 @@ mod tests {
     #[test]
     fn ease_in_out_cubic_midpoint() {
         let result = ease(Easing::EaseInOutCubic, 0.5);
+
         assert!(
             (result - 0.5).abs() < 1e-5,
             "EaseInOutCubic(0.5) = {result}, expected 0.5"
@@ -1785,12 +1834,14 @@ mod tests {
     fn ease_in_expo_near_zero_at_start() {
         // EaseInExpo should be very small for small t values.
         let result = ease(Easing::EaseInExpo, 0.1);
+
         assert!(result < 0.01, "EaseInExpo(0.1) = {result}, expected < 0.01");
     }
 
     #[test]
     fn ease_out_expo_near_one_at_end() {
         let result = ease(Easing::EaseOutExpo, 0.9);
+
         assert!(
             result > 0.99,
             "EaseOutExpo(0.9) = {result}, expected > 0.99"
@@ -1800,6 +1851,7 @@ mod tests {
     #[test]
     fn ease_in_out_expo_midpoint() {
         let result = ease(Easing::EaseInOutExpo, 0.5);
+
         assert!(
             (result - 0.5).abs() < 0.01,
             "EaseInOutExpo(0.5) = {result}, expected ~0.5"
@@ -1812,6 +1864,7 @@ mod tests {
     fn ease_in_back_undershoots() {
         // EaseInBack should go negative near the start.
         let result = ease(Easing::EaseInBack, 0.1);
+
         assert!(
             result < 0.0,
             "EaseInBack(0.1) = {result}, expected negative"
@@ -1822,6 +1875,7 @@ mod tests {
     fn ease_out_back_overshoots() {
         // EaseOutBack should exceed 1.0 near the end.
         let result = ease(Easing::EaseOutBack, 0.9);
+
         assert!(result > 1.0, "EaseOutBack(0.9) = {result}, expected > 1.0");
     }
 
@@ -1831,13 +1885,17 @@ mod tests {
         // value somewhere in (0, 1).
         let mut has_negative = false;
         let n = 200;
+
         for i in 1..n {
             let t = i as f32 / n as f32;
+
             if ease(Easing::EaseInElastic, t) < 0.0 {
                 has_negative = true;
+
                 break;
             }
         }
+
         assert!(has_negative, "EaseInElastic never went negative on (0,1)");
     }
 
@@ -1845,13 +1903,17 @@ mod tests {
     fn ease_out_elastic_overshoots() {
         let mut has_overshoot = false;
         let n = 200;
+
         for i in 1..n {
             let t = i as f32 / n as f32;
+
             if ease(Easing::EaseOutElastic, t) > 1.0 {
                 has_overshoot = true;
+
                 break;
             }
         }
+
         assert!(has_overshoot, "EaseOutElastic never exceeded 1.0 on (0,1)");
     }
 
@@ -1860,9 +1922,11 @@ mod tests {
     #[test]
     fn bounce_out_stays_in_range() {
         let n = 200;
+
         for i in 0..=n {
             let t = i as f32 / n as f32;
             let v = bounce_out(t);
+
             assert!(
                 v >= -0.001 && v <= 1.001,
                 "bounce_out({t}) = {v} out of [0,1]"
@@ -1874,6 +1938,7 @@ mod tests {
     fn ease_in_bounce_boundaries() {
         let at_0 = ease(Easing::EaseInBounce, 0.0);
         let at_1 = ease(Easing::EaseInBounce, 1.0);
+
         assert!(at_0.abs() < 0.001, "EaseInBounce(0) = {at_0}");
         assert!((at_1 - 1.0).abs() < 0.001, "EaseInBounce(1) = {at_1}");
     }
@@ -1903,9 +1968,11 @@ mod tests {
     fn cubic_bezier_linear() {
         // cubic-bezier(0, 0, 1, 1) should be identity (linear).
         let n = 50;
+
         for i in 0..=n {
             let t = i as f32 / n as f32;
             let result = ease(Easing::CubicBezier(0.0, 0.0, 1.0, 1.0), t);
+
             assert!(
                 (result - t).abs() < 0.01,
                 "CubicBezier linear at t={t}: got {result}"
@@ -1917,6 +1984,7 @@ mod tests {
     fn cubic_bezier_overshoot() {
         // y values outside [0,1] create overshoot.
         let result = ease(Easing::CubicBezier(0.0, 1.5, 1.0, 1.5), 0.25);
+
         // With y1=1.5 the curve should exceed 1.0 somewhere in the middle.
         // Just verify it produces a reasonable value (not NaN or wildly wrong).
         assert!(!result.is_nan(), "CubicBezier overshoot produced NaN");
@@ -1927,6 +1995,7 @@ mod tests {
     #[test]
     fn spring_starts_at_rest() {
         let s = Spring::default_preset(100.0);
+
         assert_eq!(s.value(), 0.0);
         assert_eq!(s.velocity(), 0.0);
         assert_eq!(s.target(), 100.0);
@@ -1935,7 +2004,9 @@ mod tests {
     #[test]
     fn spring_moves_toward_target() {
         let mut s = Spring::default_preset(100.0);
+
         s.tick(0.016); // ~1 frame at 60fps
+
         assert!(
             s.value() > 0.0,
             "Spring should move toward target, value={}",
@@ -1946,10 +2017,12 @@ mod tests {
     #[test]
     fn spring_eventually_settles() {
         let mut s = Spring::default_preset(100.0);
+
         // Run for 5 seconds of simulation (plenty of time).
         for _ in 0..300 {
             s.tick(1.0 / 60.0);
         }
+
         assert!(
             s.settled(),
             "Spring should settle after 5s: value={}, velocity={}",
@@ -1971,10 +2044,12 @@ mod tests {
             ("gentle", Spring::gentle(50.0)),
             ("bouncy", Spring::bouncy(50.0)),
         ];
+
         for (name, mut spring) in presets {
             for _ in 0..600 {
                 spring.tick(1.0 / 60.0);
             }
+
             assert!(
                 spring.settled(),
                 "{name} preset didn't settle: value={}, velocity={}",
@@ -1987,7 +2062,9 @@ mod tests {
     #[test]
     fn spring_zero_dt_is_noop() {
         let mut s = Spring::default_preset(100.0);
+
         s.tick(0.0);
+
         assert_eq!(s.value(), 0.0);
         assert_eq!(s.velocity(), 0.0);
     }
@@ -1995,7 +2072,9 @@ mod tests {
     #[test]
     fn spring_negative_dt_is_noop() {
         let mut s = Spring::default_preset(100.0);
+
         s.tick(-0.016);
+
         assert_eq!(s.value(), 0.0);
         assert_eq!(s.velocity(), 0.0);
     }
@@ -2004,7 +2083,9 @@ mod tests {
     fn spring_large_dt_stable() {
         // Large timestep (e.g. after wake from sleep) should not diverge.
         let mut s = Spring::default_preset(100.0);
+
         s.tick(0.5); // 500ms in one step
+
         assert!(
             s.value().is_finite(),
             "Spring diverged with large dt: value={}",
@@ -2020,12 +2101,16 @@ mod tests {
     #[test]
     fn spring_retarget_smooth() {
         let mut s = Spring::default_preset(100.0);
+
         // Move partway.
         for _ in 0..30 {
             s.tick(1.0 / 60.0);
         }
+
         let v_before = s.velocity();
+
         s.set_target(200.0);
+
         assert_eq!(s.target(), 200.0);
         // Velocity should not be reset by retarget.
         assert_eq!(s.velocity(), v_before);
@@ -2034,10 +2119,13 @@ mod tests {
     #[test]
     fn spring_reset_to_stops() {
         let mut s = Spring::default_preset(100.0);
+
         for _ in 0..30 {
             s.tick(1.0 / 60.0);
         }
+
         s.reset_to(50.0);
+
         assert_eq!(s.value(), 50.0);
         assert_eq!(s.target(), 50.0);
         assert_eq!(s.velocity(), 0.0);
@@ -2047,11 +2135,14 @@ mod tests {
     #[test]
     fn spring_settle_threshold() {
         let mut s = Spring::default_preset(100.0);
+
         s.set_settle_threshold(0.001);
+
         // With a tighter threshold, settling takes longer.
         for _ in 0..300 {
             s.tick(1.0 / 60.0);
         }
+
         // After 5s it may or may not have settled with 0.001 threshold.
         // Just verify the method works without panic.
         let _ = s.settled();
@@ -2061,12 +2152,15 @@ mod tests {
     fn spring_bouncy_overshoots() {
         let mut s = Spring::bouncy(100.0);
         let mut max_value = 0.0f32;
+
         for _ in 0..300 {
             s.tick(1.0 / 60.0);
+
             if s.value() > max_value {
                 max_value = s.value();
             }
         }
+
         assert!(
             max_value > 100.0,
             "Bouncy spring should overshoot: max_value={max_value}"
@@ -2106,8 +2200,10 @@ mod tests {
     fn lerp_u8_basic() {
         assert_eq!(u8::lerp(0, 255, 0.0), 0);
         assert_eq!(u8::lerp(0, 255, 1.0), 255);
+
         // Midpoint with rounding: (0 + 255*0.5 + 0.5) = 128.0 -> 128
         let mid = u8::lerp(0, 255, 0.5);
+
         assert!(mid == 128, "u8::lerp(0, 255, 0.5) = {mid}, expected 128");
     }
 
@@ -2124,6 +2220,7 @@ mod tests {
     fn lerp_srgb_boundaries() {
         let a = [255, 0, 0, 255];
         let b = [0, 0, 255, 255];
+
         assert_eq!(LerpColor::lerp_srgb(a, b, 0.0), a);
         assert_eq!(LerpColor::lerp_srgb(a, b, 1.0), b);
     }
@@ -2134,6 +2231,7 @@ mod tests {
         let black = [0, 0, 0, 255];
         let white = [255, 255, 255, 255];
         let mid = LerpColor::lerp_srgb(black, white, 0.5);
+
         // In gamma-correct sRGB, mid-gray is ~188 (not 128).
         assert!(
             mid[0] > 170 && mid[0] < 200,
@@ -2148,6 +2246,7 @@ mod tests {
         let a = [0, 0, 0, 0];
         let b = [0, 0, 0, 255];
         let mid = LerpColor::lerp_srgb(a, b, 0.5);
+
         // Alpha lerp uses u8::lerp which adds 0.5 for rounding.
         // (0 + 255*0.5 + 0.5) = 128.0 -> 128
         assert!(mid[3] == 128, "Alpha midpoint = {}, expected 128", mid[3]);
@@ -2157,6 +2256,7 @@ mod tests {
     fn lerp_srgb_same_color() {
         let c = [128, 64, 200, 180];
         let result = LerpColor::lerp_srgb(c, c, 0.5);
+
         // Same color should stay the same (modulo minimal LUT quantization).
         for i in 0..4 {
             assert!(
@@ -2175,6 +2275,7 @@ mod tests {
         let b = [0, 0, 255, 255];
         let via_trait = <[u8; 4]>::lerp(a, b, 0.5);
         let via_direct = LerpColor::lerp_srgb(a, b, 0.5);
+
         assert_eq!(via_trait, via_direct);
     }
 
@@ -2183,6 +2284,7 @@ mod tests {
     #[test]
     fn transform_identity() {
         let id = Transform2D::identity();
+
         assert_eq!(id.a, 1.0);
         assert_eq!(id.b, 0.0);
         assert_eq!(id.c, 0.0);
@@ -2204,6 +2306,7 @@ mod tests {
         };
         let at_0 = Transform2D::lerp(a, b, 0.0);
         let at_1 = Transform2D::lerp(a, b, 1.0);
+
         assert_eq!(at_0, a);
         assert_eq!(at_1, b);
     }
@@ -2220,6 +2323,7 @@ mod tests {
             ty: 50.0,
         };
         let mid = Transform2D::lerp(a, b, 0.5);
+
         assert!((mid.a - 1.5).abs() < 1e-5);
         assert!((mid.d - 1.5).abs() < 1e-5);
         assert!((mid.tx - 50.0).abs() < 1e-5);
@@ -2232,16 +2336,21 @@ mod tests {
     fn timeline_start_and_value() {
         let mut tl = Timeline::new();
         let id = tl.start(0.0, 100.0, 200, Easing::Linear, 1000).unwrap();
+
         assert!(tl.is_active(id));
 
         // At start time, value should be 0 (start_value).
         tl.tick(1000);
+
         let v = tl.value(id);
+
         assert!(v.abs() < 1e-3, "At start: value={v}, expected ~0");
 
         // At midpoint (t=0.5).
         tl.tick(1100);
+
         let v = tl.value(id);
+
         assert!(
             (v - 50.0).abs() < 1.0,
             "At midpoint: value={v}, expected ~50"
@@ -2249,7 +2358,9 @@ mod tests {
 
         // Just before end (t ~= 0.99): animation still active, value near 100.
         tl.tick(1199);
+
         let v = tl.value(id);
+
         assert!(
             (v - 100.0).abs() < 2.0,
             "Near end: value={v}, expected ~100"
@@ -2260,6 +2371,7 @@ mod tests {
         // 0.0 (the default for freed slots). This is tested separately in
         // timeline_value_after_completion_returns_zero.
         tl.tick(1200);
+
         assert!(!tl.is_active(id));
     }
 
@@ -2267,9 +2379,11 @@ mod tests {
     fn timeline_completes_and_frees_slot() {
         let mut tl = Timeline::new();
         let id = tl.start(0.0, 1.0, 100, Easing::Linear, 0).unwrap();
+
         assert!(tl.is_active(id));
 
         tl.tick(100);
+
         assert!(!tl.is_active(id), "Should be removed after completion");
         assert!(!tl.any_active());
     }
@@ -2278,9 +2392,11 @@ mod tests {
     fn timeline_cancel() {
         let mut tl = Timeline::new();
         let id = tl.start(0.0, 1.0, 1000, Easing::Linear, 0).unwrap();
+
         assert!(tl.is_active(id));
 
         tl.cancel(id);
+
         assert!(!tl.is_active(id));
     }
 
@@ -2290,12 +2406,15 @@ mod tests {
         let id = tl.start(0.0, 1.0, 200, Easing::Linear, 0).unwrap();
 
         tl.tick(0);
+
         assert!((tl.progress(id) - 0.0).abs() < 1e-3);
 
         tl.tick(100);
+
         assert!((tl.progress(id) - 0.5).abs() < 0.01);
 
         tl.tick(200);
+
         // Animation completes and is removed; progress returns 1.0 for
         // completed/invalid animations.
         assert!((tl.progress(id) - 1.0).abs() < 1e-3);
@@ -2305,7 +2424,9 @@ mod tests {
     fn timeline_value_after_completion_returns_zero() {
         let mut tl = Timeline::new();
         let id = tl.start(10.0, 20.0, 100, Easing::Linear, 0).unwrap();
+
         tl.tick(100);
+
         // Slot freed; value returns 0.0 for invalid.
         assert_eq!(tl.value(id), 0.0);
     }
@@ -2313,13 +2434,17 @@ mod tests {
     #[test]
     fn timeline_capacity_limit() {
         let mut tl = Timeline::new();
+
         // Fill all 32 slots.
         for i in 0..32 {
             let result = tl.start(0.0, 1.0, 10000, Easing::Linear, i as u64);
+
             assert!(result.is_ok(), "Slot {i} should succeed");
         }
+
         // 33rd should fail.
         let result = tl.start(0.0, 1.0, 10000, Easing::Linear, 100);
+
         assert!(result.is_err(), "Should fail at capacity");
     }
 
@@ -2331,13 +2456,17 @@ mod tests {
             slot: 0,
             generation: 0,
         }; 32];
+
         for i in 0..32 {
             ids[i] = tl.start(0.0, 1.0, 100, Easing::Linear, 0).unwrap();
         }
+
         // Complete them all.
         tl.tick(100);
+
         // Now slots should be free.
         let new_id = tl.start(0.0, 1.0, 1000, Easing::Linear, 200);
+
         assert!(new_id.is_ok(), "Should reuse freed slot");
     }
 
@@ -2345,19 +2474,21 @@ mod tests {
     fn timeline_generation_prevents_aba() {
         let mut tl = Timeline::new();
         let id_a = tl.start(0.0, 1.0, 100, Easing::Linear, 0).unwrap();
+
         tl.tick(100); // completes, frees slot
 
         let id_b = tl.start(0.0, 1.0, 1000, Easing::Linear, 200).unwrap();
+
         // id_a and id_b use the same slot but different generations.
         assert_eq!(id_a.slot, id_b.slot);
         assert_ne!(id_a.generation, id_b.generation);
-
         // Old id should not be active.
         assert!(!tl.is_active(id_a));
         assert!(tl.is_active(id_b));
 
         // Old id should return default values.
         tl.tick(200);
+
         assert_eq!(tl.value(id_a), 0.0);
         assert_eq!(tl.progress(id_a), 1.0);
     }
@@ -2366,23 +2497,29 @@ mod tests {
     fn timeline_cancel_wrong_generation_noop() {
         let mut tl = Timeline::new();
         let id_a = tl.start(0.0, 1.0, 100, Easing::Linear, 0).unwrap();
+
         tl.tick(100);
 
         let id_b = tl.start(0.0, 1.0, 1000, Easing::Linear, 200).unwrap();
+
         // Cancelling with old generation should not affect new animation.
         tl.cancel(id_a);
+
         assert!(tl.is_active(id_b));
     }
 
     #[test]
     fn timeline_any_active() {
         let mut tl = Timeline::new();
+
         assert!(!tl.any_active());
 
         let id = tl.start(0.0, 1.0, 100, Easing::Linear, 0).unwrap();
+
         assert!(tl.any_active());
 
         tl.tick(100);
+
         assert!(!tl.any_active());
 
         let _ = id; // suppress unused warning
@@ -2395,6 +2532,7 @@ mod tests {
         let id_quad = tl.start(0.0, 100.0, 200, Easing::EaseInQuad, 0).unwrap();
 
         tl.tick(100); // t = 0.5
+
         let v_linear = tl.value(id_linear);
         let v_quad = tl.value(id_quad);
 
@@ -2407,8 +2545,11 @@ mod tests {
     fn timeline_before_start_time() {
         let mut tl = Timeline::new();
         let id = tl.start(10.0, 20.0, 100, Easing::Linear, 1000).unwrap();
+
         tl.tick(500); // before start
+
         let v = tl.value(id);
+
         assert!(
             (v - 10.0).abs() < 1e-3,
             "Before start: value={v}, expected 10.0"
@@ -2424,7 +2565,9 @@ mod tests {
         let anim = Animated::new(0.0f32, 100.0f32, id);
 
         tl.tick(100); // t = 0.5
+
         let v = anim.value(&tl);
+
         assert!((v - 50.0).abs() < 1.0, "Animated f32 at 0.5: value={v}");
     }
 
@@ -2435,13 +2578,17 @@ mod tests {
         let anim = Animated::new([0, 0, 0, 255], [255, 255, 255, 255], id);
 
         tl.tick(0);
+
         let v0 = anim.value(&tl);
+
         // At t=0, should be start color.
         assert_eq!(v0, [0, 0, 0, 255]);
 
         tl.tick(200);
+
         // Animation completes, progress returns 1.0, should be end color.
         let v1 = anim.value(&tl);
+
         assert_eq!(v1, [255, 255, 255, 255]);
     }
 
@@ -2461,7 +2608,9 @@ mod tests {
         let anim = Animated::new(start, end, id);
 
         tl.tick(50);
+
         let mid = anim.value(&tl);
+
         assert!((mid.a - 1.5).abs() < 0.1);
         assert!((mid.tx - 50.0).abs() < 1.0);
     }
@@ -2473,6 +2622,7 @@ mod tests {
             generation: 7,
         };
         let anim = Animated::new(0.0f32, 1.0f32, id);
+
         assert_eq!(anim.id(), id);
     }
 
@@ -2482,10 +2632,12 @@ mod tests {
     fn easing_clone_and_eq() {
         let e = Easing::EaseInOut;
         let e2 = e;
+
         assert_eq!(e, e2);
 
         let cb = Easing::CubicBezier(0.1, 0.2, 0.3, 0.4);
         let cb2 = cb;
+
         assert_eq!(cb, cb2);
     }
 
@@ -2494,14 +2646,19 @@ mod tests {
         // Verify Debug impl exists and doesn't panic.
         // no_std: use core::fmt::Write on a stack buffer.
         let mut buf = StackBuf([0u8; 128], 0);
+
         core::fmt::write(&mut buf, format_args!("{:?}", Easing::Linear)).unwrap();
+
         assert!(buf.1 > 0);
+
         buf.1 = 0;
+
         core::fmt::write(
             &mut buf,
             format_args!("{:?}", Easing::CubicBezier(0.1, 0.2, 0.3, 0.4)),
         )
         .unwrap();
+
         assert!(buf.1 > 0);
     }
 
@@ -2521,10 +2678,14 @@ mod tests {
             slot: 0,
             generation: 2,
         };
+
         assert_eq!(a, b);
         assert_ne!(a, c);
+
         let mut buf = StackBuf([0u8; 128], 0);
+
         core::fmt::write(&mut buf, format_args!("{:?}", a)).unwrap();
+
         assert!(buf.1 > 0);
     }
 }

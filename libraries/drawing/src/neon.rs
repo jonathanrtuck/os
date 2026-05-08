@@ -22,17 +22,17 @@ pub unsafe fn neon_fill_row(row_ptr: *mut u32, pixel_count: usize, pixel_u32: u3
     // SAFETY: vdupq_n_u32 creates a 128-bit vector with all 4 lanes set to
     // the same value. This is a pure register operation with no memory access.
     let pixel_vec = vdupq_n_u32(pixel_u32);
-
     let chunks = pixel_count / 4;
     let tail = pixel_count % 4;
-
     // Process 4 pixels at a time.
     let mut ptr = row_ptr;
+
     for _ in 0..chunks {
         // SAFETY: caller guarantees row_ptr..row_ptr+pixel_count*4 is valid.
         // Each iteration writes 4 u32 values (16 bytes) at the current ptr.
         // We process at most `chunks * 4 <= pixel_count` pixels total.
         vst1q_u32(ptr, pixel_vec);
+
         ptr = ptr.add(4);
     }
 
@@ -40,6 +40,7 @@ pub unsafe fn neon_fill_row(row_ptr: *mut u32, pixel_count: usize, pixel_u32: u3
     for _ in 0..tail {
         // SAFETY: remaining pixels within the valid region.
         core::ptr::write(ptr, pixel_u32);
+
         ptr = ptr.add(1);
     }
 }
@@ -71,7 +72,6 @@ pub unsafe fn neon_blend_4px(
     let mut src_g_lin = [0u16; 4];
     let mut src_b_lin = [0u16; 4];
     let mut src_a = [0u16; 4];
-
     let mut dst_r_lin = [0u16; 4];
     let mut dst_g_lin = [0u16; 4];
     let mut dst_b_lin = [0u16; 4];
@@ -80,13 +80,11 @@ pub unsafe fn neon_blend_4px(
     for i in 0..4 {
         let s = src_ptr.add(i * 4);
         let d = dst_ptr.add(i * 4);
-
         // SAFETY: src_ptr and dst_ptr guaranteed to have 16 bytes each.
         let sb = core::ptr::read(s);
         let sg = core::ptr::read(s.add(1));
         let sr = core::ptr::read(s.add(2));
         let sa = core::ptr::read(s.add(3));
-
         let db = core::ptr::read(d);
         let dg = core::ptr::read(d.add(1));
         let dr = core::ptr::read(d.add(2));
@@ -97,7 +95,6 @@ pub unsafe fn neon_blend_4px(
         src_g_lin[i] = srgb_to_linear[sg as usize];
         src_b_lin[i] = srgb_to_linear[sb as usize];
         src_a[i] = sa as u16;
-
         dst_r_lin[i] = srgb_to_linear[dr as usize];
         dst_g_lin[i] = srgb_to_linear[dg as usize];
         dst_b_lin[i] = srgb_to_linear[db as usize];
@@ -110,35 +107,28 @@ pub unsafe fn neon_blend_4px(
     let v_src_g = vld1_u16(src_g_lin.as_ptr());
     let v_src_b = vld1_u16(src_b_lin.as_ptr());
     let v_src_a = vld1_u16(src_a.as_ptr());
-
     let v_dst_r = vld1_u16(dst_r_lin.as_ptr());
     let v_dst_g = vld1_u16(dst_g_lin.as_ptr());
     let v_dst_b = vld1_u16(dst_b_lin.as_ptr());
     let v_dst_a = vld1_u16(dst_a.as_ptr());
-
     let v_255 = vdup_n_u16(255);
-
     // inv_sa = 255 - src_a
     // SAFETY: vsub_u16 subtracts corresponding u16 lanes.
     let v_inv_sa = vsub_u16(v_255, v_src_a);
-
     // da_eff = div255(dst_a * inv_sa)
     // vmull_u16: uint16x4_t × uint16x4_t → uint32x4_t (widening multiply)
     let v_da_inv = vmull_u16(v_dst_a, v_inv_sa);
     let v_da_eff_32 = neon_div255_u32x4(v_da_inv);
     // Narrow back to u16 (values guaranteed ≤ 255).
     let v_da_eff = vmovn_u32(v_da_eff_32);
-
     // out_a = src_a + da_eff
     let v_out_a = vadd_u16(v_src_a, v_da_eff);
-
     // Blended channels in linear space:
     // num_c = src_c_lin * src_a + dst_c_lin * da_eff
     // vmull_u16 widens to uint32x4_t, vaddq_u32 adds 128-bit vectors.
     let v_num_r = vaddq_u32(vmull_u16(v_src_r, v_src_a), vmull_u16(v_dst_r, v_da_eff));
     let v_num_g = vaddq_u32(vmull_u16(v_src_g, v_src_a), vmull_u16(v_dst_g, v_da_eff));
     let v_num_b = vaddq_u32(vmull_u16(v_src_b, v_src_a), vmull_u16(v_dst_b, v_da_eff));
-
     // Extract lanes for scalar division and linear-to-sRGB lookup.
     let mut num_r = [0u32; 4];
     let mut num_g = [0u32; 4];
@@ -155,6 +145,7 @@ pub unsafe fn neon_blend_4px(
     // Scalar division and linear-to-sRGB table lookup for each pixel.
     for i in 0..4 {
         let oa = out_a_arr[i] as u32;
+
         if oa == 0 {
             // Fully transparent result.
             let d = dst_ptr.add(i * 4);
@@ -168,16 +159,15 @@ pub unsafe fn neon_blend_4px(
         let r_lin = num_r[i] / oa;
         let g_lin = num_g[i] / oa;
         let b_lin = num_b[i] / oa;
-
         // Linear-to-sRGB table lookup (table indexed by linear >> 4).
         let out_r = linear_to_srgb[linear_to_idx_inline(r_lin)];
         let out_g = linear_to_srgb[linear_to_idx_inline(g_lin)];
         let out_b = linear_to_srgb[linear_to_idx_inline(b_lin)];
         let out_a_u8 = if oa > 255 { 255u8 } else { oa as u8 };
-
         // Write BGRA pixel.
         // SAFETY: dst_ptr has at least 16 writable bytes.
         let d = dst_ptr.add(i * 4);
+
         core::ptr::write(d, out_b);
         core::ptr::write(d.add(1), out_g);
         core::ptr::write(d.add(2), out_r);
@@ -214,7 +204,6 @@ pub unsafe fn neon_blend_const_4px(
 
     for i in 0..4 {
         let d = dst_ptr.add(i * 4);
-
         // SAFETY: dst_ptr guaranteed to have 16 bytes.
         let db = core::ptr::read(d);
         let dg = core::ptr::read(d.add(1));
@@ -233,24 +222,19 @@ pub unsafe fn neon_blend_const_4px(
     let v_dst_g = vld1_u16(dst_g_lin.as_ptr());
     let v_dst_b = vld1_u16(dst_b_lin.as_ptr());
     let v_dst_a = vld1_u16(dst_a.as_ptr());
-
     let v_inv_sa = vdup_n_u16(inv_sa);
     let v_src_a = vdup_n_u16(sa);
-
     // da_eff = div255(dst_a * inv_sa)
     let v_da_inv = vmull_u16(v_dst_a, v_inv_sa);
     let v_da_eff_32 = neon_div255_u32x4(v_da_inv);
     let v_da_eff = vmovn_u32(v_da_eff_32);
-
     // out_a = src_a + da_eff
     let v_out_a = vadd_u16(v_src_a, v_da_eff);
-
     // Blended channels: num_c = src_c_lin * src_a + dst_c_lin * da_eff
     // Source values are constant, broadcast to all lanes.
     let v_src_r_lin = vdup_n_u16(src_r_lin);
     let v_src_g_lin = vdup_n_u16(src_g_lin);
     let v_src_b_lin = vdup_n_u16(src_b_lin);
-
     let v_num_r = vaddq_u32(
         vmull_u16(v_src_r_lin, v_src_a),
         vmull_u16(v_dst_r, v_da_eff),
@@ -263,7 +247,6 @@ pub unsafe fn neon_blend_const_4px(
         vmull_u16(v_src_b_lin, v_src_a),
         vmull_u16(v_dst_b, v_da_eff),
     );
-
     // Extract for scalar division and linear-to-sRGB lookup.
     let mut num_r = [0u32; 4];
     let mut num_g = [0u32; 4];
@@ -278,26 +261,28 @@ pub unsafe fn neon_blend_const_4px(
 
     for i in 0..4 {
         let oa = out_a_arr[i] as u32;
+
         if oa == 0 {
             let d = dst_ptr.add(i * 4);
+
             core::ptr::write(d, 0);
             core::ptr::write(d.add(1), 0);
             core::ptr::write(d.add(2), 0);
             core::ptr::write(d.add(3), 0);
+
             continue;
         }
 
         let r_lin = num_r[i] / oa;
         let g_lin = num_g[i] / oa;
         let b_lin = num_b[i] / oa;
-
         let out_r = linear_to_srgb[linear_to_idx_inline(r_lin)];
         let out_g = linear_to_srgb[linear_to_idx_inline(g_lin)];
         let out_b = linear_to_srgb[linear_to_idx_inline(b_lin)];
         let out_a_u8 = if oa > 255 { 255u8 } else { oa as u8 };
-
         // SAFETY: dst_ptr has at least 16 writable bytes.
         let d = dst_ptr.add(i * 4);
+
         core::ptr::write(d, out_b);
         core::ptr::write(d.add(1), out_g);
         core::ptr::write(d.add(2), out_r);
@@ -321,6 +306,7 @@ unsafe fn neon_div255_u32x4(x: uint32x4_t) -> uint32x4_t {
     let one = vdupq_n_u32(1);
     let x_plus_1 = vaddq_u32(x, one);
     let x_shr_8 = vshrq_n_u32::<8>(x);
+
     vshrq_n_u32::<8>(vaddq_u32(x_plus_1, x_shr_8))
 }
 
@@ -330,6 +316,7 @@ unsafe fn neon_div255_u32x4(x: uint32x4_t) -> uint32x4_t {
 #[inline(always)]
 fn linear_to_idx_inline(v: u32) -> usize {
     let idx = v >> 4;
+
     if idx > 4095 {
         4095
     } else {
@@ -398,6 +385,7 @@ pub fn blur_horizontal_scalar_4x(
             // Write 4 output pixels.
             for px in 0..4u32 {
                 let dst_off = dst_row + ((base_x + px) * bpp) as usize;
+
                 dst[dst_off] = ((sums_b[px as usize] + 32768) >> 16) as u8;
                 dst[dst_off + 1] = ((sums_g[px as usize] + 32768) >> 16) as u8;
                 dst[dst_off + 2] = ((sums_r[px as usize] + 32768) >> 16) as u8;
@@ -424,6 +412,7 @@ pub fn blur_horizontal_scalar_4x(
             }
 
             let dst_off = dst_row + (x * bpp) as usize;
+
             dst[dst_off] = ((sum_b + 32768) >> 16) as u8;
             dst[dst_off + 1] = ((sum_g + 32768) >> 16) as u8;
             dst[dst_off + 2] = ((sum_r + 32768) >> 16) as u8;
@@ -475,41 +464,34 @@ pub fn blur_vertical_neon(
                     let src_off = (sy * src_stride + base_x * bpp) as usize;
                     let w = kernel[(k + r) as usize];
                     let v_w = vdupq_n_u32(w);
-
                     // Load 4 BGRA pixels (16 bytes).
                     // SAFETY: src_off points to 4 valid pixels within the
                     // clamped source row. base_x + 3 < width because
                     // base_x = chunk * 4 and chunk < chunks = width / 4.
                     let pixels = vld1q_u8(src.as_ptr().add(src_off));
-
                     // De-interleave BGRA: extract each channel into a u32x4.
                     // B = bytes 0,4,8,12; G = 1,5,9,13; R = 2,6,10,14; A = 3,7,11,15
                     let b0 = vgetq_lane_u8::<0>(pixels) as u32;
                     let b1 = vgetq_lane_u8::<4>(pixels) as u32;
                     let b2 = vgetq_lane_u8::<8>(pixels) as u32;
                     let b3 = vgetq_lane_u8::<12>(pixels) as u32;
-
                     let g0 = vgetq_lane_u8::<1>(pixels) as u32;
                     let g1 = vgetq_lane_u8::<5>(pixels) as u32;
                     let g2 = vgetq_lane_u8::<9>(pixels) as u32;
                     let g3 = vgetq_lane_u8::<13>(pixels) as u32;
-
                     let r0 = vgetq_lane_u8::<2>(pixels) as u32;
                     let r1 = vgetq_lane_u8::<6>(pixels) as u32;
                     let r2 = vgetq_lane_u8::<10>(pixels) as u32;
                     let r3 = vgetq_lane_u8::<14>(pixels) as u32;
-
                     let a0 = vgetq_lane_u8::<3>(pixels) as u32;
                     let a1 = vgetq_lane_u8::<7>(pixels) as u32;
                     let a2 = vgetq_lane_u8::<11>(pixels) as u32;
                     let a3 = vgetq_lane_u8::<15>(pixels) as u32;
-
                     // Build channel vectors and multiply-accumulate.
                     let ch_b = [b0, b1, b2, b3];
                     let ch_g = [g0, g1, g2, g3];
                     let ch_r = [r0, r1, r2, r3];
                     let ch_a = [a0, a1, a2, a3];
-
                     let v_b = vld1q_u32(ch_b.as_ptr());
                     let v_g = vld1q_u32(ch_g.as_ptr());
                     let v_r = vld1q_u32(ch_r.as_ptr());
@@ -529,11 +511,11 @@ pub fn blur_vertical_neon(
                 let res_g = vshrq_n_u32::<16>(vaddq_u32(acc_g, half));
                 let res_r = vshrq_n_u32::<16>(vaddq_u32(acc_r, half));
                 let res_a = vshrq_n_u32::<16>(vaddq_u32(acc_a, half));
-
                 let mut out_b = [0u32; 4];
                 let mut out_g = [0u32; 4];
                 let mut out_r = [0u32; 4];
                 let mut out_a = [0u32; 4];
+
                 vst1q_u32(out_b.as_mut_ptr(), res_b);
                 vst1q_u32(out_g.as_mut_ptr(), res_g);
                 vst1q_u32(out_r.as_mut_ptr(), res_r);
@@ -541,6 +523,7 @@ pub fn blur_vertical_neon(
 
                 for px in 0..4usize {
                     let dst_off = dst_row + ((base_x + px as u32) * bpp) as usize;
+
                     dst[dst_off] = out_b[px] as u8;
                     dst[dst_off + 1] = out_g[px] as u8;
                     dst[dst_off + 2] = out_r[px] as u8;
@@ -568,6 +551,7 @@ pub fn blur_vertical_neon(
             }
 
             let dst_off = dst_row + (x * bpp) as usize;
+
             dst[dst_off] = ((sum_b + 32768) >> 16) as u8;
             dst[dst_off + 1] = ((sum_g + 32768) >> 16) as u8;
             dst[dst_off + 2] = ((sum_r + 32768) >> 16) as u8;

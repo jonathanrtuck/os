@@ -8,7 +8,7 @@
 use read_fonts::{FontRef, TableProvider};
 
 use super::gvar::build_normalized_coords;
-use crate::metrics::{AxisValue, glyph_h_metrics};
+use crate::metrics::{glyph_h_metrics, AxisValue};
 
 /// Returns `true` if the font contains an HVAR table.
 pub fn has_hvar(font_data: &[u8]) -> bool {
@@ -16,6 +16,7 @@ pub fn has_hvar(font_data: &[u8]) -> bool {
         Ok(f) => f,
         Err(_) => return false,
     };
+
     font.hvar().is_ok()
 }
 
@@ -41,6 +42,7 @@ pub fn advance_with_delta(font_data: &[u8], glyph_id: u16, axes: &[AxisValue]) -
     };
 
     let coords = build_normalized_coords(font_data, axes);
+
     if coords.is_empty() || coords.iter().all(|c| c.to_f32().abs() < f32::EPSILON) {
         return Some(default_i32);
     }

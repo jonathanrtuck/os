@@ -7,8 +7,8 @@
 
 use crate::{
     node::{
-        DATA_BUFFER_SIZE, DATA_OFFSET, DIRTY_BITMAP_WORDS, MAX_NODES, NODES_OFFSET, Node, NodeId,
-        SCENE_SIZE, SceneHeader,
+        Node, NodeId, SceneHeader, DATA_BUFFER_SIZE, DATA_OFFSET, DIRTY_BITMAP_WORDS, MAX_NODES,
+        NODES_OFFSET, SCENE_SIZE,
     },
     primitives::{DataRef, ShapedGlyph},
     writer::SceneWriter,
@@ -59,6 +59,7 @@ fn triple_read_ctrl(buf: *mut u8, field_offset: usize) -> u32 {
     // for cross-process shared memory.
     unsafe {
         let ptr = buf.add(TRIPLE_CONTROL_OFFSET + field_offset) as *mut u32;
+
         core::sync::atomic::AtomicU32::from_ptr(ptr).load(core::sync::atomic::Ordering::Relaxed)
     }
 }
@@ -69,6 +70,7 @@ fn triple_read_ctrl_acquire(buf: *mut u8, field_offset: usize) -> u32 {
     // SAFETY: Same alignment and bounds reasoning as triple_read_ctrl.
     unsafe {
         let ptr = buf.add(TRIPLE_CONTROL_OFFSET + field_offset) as *mut u32;
+
         core::sync::atomic::AtomicU32::from_ptr(ptr).load(core::sync::atomic::Ordering::Acquire)
     }
 }
@@ -82,6 +84,7 @@ fn triple_write_ctrl(buf: *mut u8, field_offset: usize, value: u32) {
     // Same alignment and bounds reasoning as triple_read_ctrl.
     unsafe {
         let ptr = buf.add(TRIPLE_CONTROL_OFFSET + field_offset) as *mut u32;
+
         core::sync::atomic::AtomicU32::from_ptr(ptr)
             .store(value, core::sync::atomic::Ordering::Relaxed)
     }
@@ -95,6 +98,7 @@ fn triple_write_ctrl_release(buf: *mut u8, field_offset: usize, value: u32) {
     // store is observed by an Acquire load in the reader.
     unsafe {
         let ptr = buf.add(TRIPLE_CONTROL_OFFSET + field_offset) as *mut u32;
+
         core::sync::atomic::AtomicU32::from_ptr(ptr)
             .store(value, core::sync::atomic::Ordering::Release)
     }
@@ -133,6 +137,7 @@ fn buf_offset(idx: u32) -> usize {
 fn free_index(a: u32, b: u32) -> u32 {
     debug_assert!(a != b, "free_index: a == b == {}", a);
     debug_assert!(a < 3 && b < 3, "free_index: out of range a={} b={}", a, b);
+
     // 0 + 1 + 2 = 3. The free one is 3 - a - b.
     3 - a - b
 }
@@ -157,6 +162,7 @@ impl<'a> TripleWriter<'a> {
         // SAFETY: Control region is within the TRIPLE_SCENE_SIZE buffer.
         unsafe {
             let ctrl = buf.as_mut_ptr().add(TRIPLE_CONTROL_OFFSET);
+
             // latest_buf = 0 (buffer 0 is the initial "latest")
             core::ptr::write_volatile(ctrl as *mut u32, 0);
             // reader_buf = NO_READER (no reader connected)
@@ -180,7 +186,11 @@ impl<'a> TripleWriter<'a> {
         let reader = triple_read_ctrl_acquire(buf.as_mut_ptr(), CTRL_READER_BUF);
         let free = if reader == NO_READER || reader > 2 || reader == latest {
             // Pick any buffer that isn't latest.
-            if latest == 0 { 1 } else { 0 }
+            if latest == 0 {
+                1
+            } else {
+                0
+            }
         } else {
             free_index(latest, reader)
         };
@@ -206,6 +216,7 @@ impl<'a> TripleWriter<'a> {
         self.select_free_buffer();
 
         let off = buf_offset(self.acquired);
+
         SceneWriter::from_existing(&mut self.buf[off..off + SCENE_SIZE])
     }
 
@@ -243,13 +254,11 @@ impl<'a> TripleWriter<'a> {
     /// returned by `acquire()` is visible before the latest pointer update.
     pub fn publish(&mut self) {
         let ptr = self.buf.as_mut_ptr();
-
         // Increment global generation.
         let generation = triple_read_ctrl(ptr, CTRL_GENERATION).wrapping_add(1);
 
         // Write generation into the acquired buffer's header.
         write_generation(ptr, buf_offset(self.acquired), generation);
-
         // Update control region: generation first, then publish latest_buf
         // with a release fence so all scene data + generation are visible
         // before the reader sees the new latest_buf pointer.
@@ -278,6 +287,7 @@ impl<'a> TripleWriter<'a> {
         let count = (hdr.node_count as usize).min(MAX_NODES);
         // SAFETY: NODES_OFFSET is within each SCENE_SIZE buffer. Node is repr(C).
         let ptr = unsafe { self.buf.as_ptr().add(off + NODES_OFFSET) as *const Node };
+
         // SAFETY: `ptr` points to `count` contiguous Node-sized entries.
         unsafe { core::slice::from_raw_parts(ptr, count) }
     }
@@ -286,6 +296,7 @@ impl<'a> TripleWriter<'a> {
     pub fn latest_generation(&self) -> u32 {
         let ptr = self.buf.as_ptr() as *mut u8;
         let latest = triple_read_ctrl(ptr, CTRL_LATEST_BUF);
+
         read_generation(ptr as *const u8, buf_offset(latest))
     }
 
@@ -296,6 +307,7 @@ impl<'a> TripleWriter<'a> {
         // SAFETY: Same as latest_nodes.
         let hdr = unsafe { &*(self.buf.as_ptr().add(off) as *const SceneHeader) };
         let used = (hdr.data_used as usize).min(DATA_BUFFER_SIZE);
+
         &self.buf[off + DATA_OFFSET..off + DATA_OFFSET + used]
     }
 
@@ -307,6 +319,7 @@ impl<'a> TripleWriter<'a> {
         let hdr = unsafe { &*(self.buf.as_ptr().add(off) as *const SceneHeader) };
         let start = off + DATA_OFFSET + dref.offset as usize;
         let end = start + dref.length as usize;
+
         if end <= self.buf.len() && dref.offset.saturating_add(dref.length) <= hdr.data_used {
             &self.buf[start..end]
         } else {
@@ -318,11 +331,14 @@ impl<'a> TripleWriter<'a> {
     pub fn latest_shaped_glyphs(&self, dref: DataRef, glyph_count: u16) -> &[ShapedGlyph] {
         let bytes = self.latest_data(dref);
         let glyph_size = core::mem::size_of::<ShapedGlyph>();
+
         if bytes.is_empty() || bytes.len() < glyph_size {
             return &[];
         }
+
         let available = bytes.len() / glyph_size;
         let count = (glyph_count as usize).min(available);
+
         // SAFETY: ShapedGlyph is #[repr(C)] with no padding.
         unsafe { core::slice::from_raw_parts(bytes.as_ptr() as *const ShapedGlyph, count) }
     }
@@ -340,6 +356,7 @@ impl<'a> TripleWriter<'a> {
         self.copy_latest_to_acquired_inner();
 
         let off = buf_offset(self.acquired);
+
         SceneWriter::from_existing(&mut self.buf[off..off + SCENE_SIZE])
     }
 
@@ -358,18 +375,16 @@ impl<'a> TripleWriter<'a> {
         let latest = triple_read_ctrl(self.buf.as_mut_ptr(), CTRL_LATEST_BUF);
         let src_off = buf_offset(latest);
         let dst_off = buf_offset(self.acquired);
-
         // Read source header to determine how much to copy.
         // SAFETY: src_off is a valid scene buffer offset (0, SCENE_SIZE,
         // or 2*SCENE_SIZE). SceneHeader is repr(C) at the start.
         let src_hdr =
             unsafe { core::ptr::read(self.buf.as_ptr().add(src_off) as *const SceneHeader) };
-
         let node_count = src_hdr.node_count;
         let data_used = src_hdr.data_used;
-
         // Copy node array (only live nodes).
         let node_bytes = node_count as usize * core::mem::size_of::<Node>();
+
         if node_bytes > 0 {
             // SAFETY: src and dst are valid scene buffer offsets that don't
             // overlap (acquired != latest). NODES_OFFSET + node_bytes is
@@ -377,18 +392,21 @@ impl<'a> TripleWriter<'a> {
             unsafe {
                 let src = self.buf.as_ptr().add(src_off + NODES_OFFSET);
                 let dst = self.buf.as_mut_ptr().add(dst_off + NODES_OFFSET);
+
                 core::ptr::copy_nonoverlapping(src, dst, node_bytes);
             }
         }
 
         // Copy data buffer (only used portion).
         let data_bytes = data_used as usize;
+
         if data_bytes > 0 {
             // SAFETY: Same reasoning — DATA_OFFSET + data_bytes is within
             // SCENE_SIZE. src and dst don't overlap.
             unsafe {
                 let src = self.buf.as_ptr().add(src_off + DATA_OFFSET);
                 let dst = self.buf.as_mut_ptr().add(dst_off + DATA_OFFSET);
+
                 core::ptr::copy_nonoverlapping(src, dst, data_bytes);
             }
         }
@@ -397,6 +415,7 @@ impl<'a> TripleWriter<'a> {
         // SAFETY: dst_off is a valid scene buffer offset. SceneHeader is
         // repr(C) at offset 0. Exclusive &mut borrow prevents aliasing.
         let dst_hdr = unsafe { &mut *(self.buf.as_mut_ptr().add(dst_off) as *mut SceneHeader) };
+
         dst_hdr.node_count = node_count;
         dst_hdr.root = src_hdr.root;
         dst_hdr.data_used = data_used;
@@ -485,9 +504,11 @@ impl TripleReader {
             // happened during our claim — the writer hasn't acquired
             // a new buffer, so our claimed buffer is safe.
             let latest2 = triple_read_ctrl_acquire(buf, CTRL_LATEST_BUF);
+
             if latest == latest2 {
                 let read_off = buf_offset(latest);
                 let read_gen = read_generation(buf as *const u8, read_off);
+
                 return Self {
                     buf,
                     len,
@@ -512,6 +533,7 @@ impl TripleReader {
         let hdr = self.header();
         let start = off + DATA_OFFSET + dref.offset as usize;
         let end = start + dref.length as usize;
+
         if end <= self.len && dref.offset.saturating_add(dref.length) <= hdr.data_used {
             // SAFETY: start..end is within the valid buffer region.
             unsafe { core::slice::from_raw_parts((self.buf as *const u8).add(start), end - start) }
@@ -525,6 +547,7 @@ impl TripleReader {
         let off = self.read_off;
         let hdr = self.header();
         let used = (hdr.data_used as usize).min(DATA_BUFFER_SIZE);
+
         // SAFETY: off + DATA_OFFSET + used is within the valid buffer region.
         unsafe { core::slice::from_raw_parts((self.buf as *const u8).add(off + DATA_OFFSET), used) }
     }
@@ -546,6 +569,7 @@ impl TripleReader {
         let count = (hdr.node_count as usize).min(MAX_NODES);
         // SAFETY: NODES_OFFSET is within each SCENE_SIZE buffer. Node is repr(C).
         let ptr = unsafe { (self.buf as *const u8).add(off + NODES_OFFSET) as *const Node };
+
         // SAFETY: `ptr` points to `count` contiguous Node-sized entries.
         unsafe { core::slice::from_raw_parts(ptr, count) }
     }
@@ -554,11 +578,14 @@ impl TripleReader {
     pub fn front_shaped_glyphs(&self, dref: DataRef, glyph_count: u16) -> &[ShapedGlyph] {
         let bytes = self.front_data(dref);
         let glyph_size = core::mem::size_of::<ShapedGlyph>();
+
         if bytes.is_empty() || bytes.len() < glyph_size {
             return &[];
         }
+
         let available = bytes.len() / glyph_size;
         let count = (glyph_count as usize).min(available);
+
         // SAFETY: ShapedGlyph is #[repr(C)] with no padding.
         unsafe { core::slice::from_raw_parts(bytes.as_ptr() as *const ShapedGlyph, count) }
     }
@@ -602,6 +629,7 @@ fn read_generation(buf: *const u8, offset: usize) -> u32 {
     // model for cross-process shared memory.
     unsafe {
         let ptr = buf.add(offset) as *mut u32;
+
         core::sync::atomic::AtomicU32::from_ptr(ptr).load(core::sync::atomic::Ordering::Acquire)
     }
 }
@@ -616,6 +644,7 @@ fn write_generation(buf: *mut u8, offset: usize, value: u32) {
     // Generation is the first u32, 4-byte aligned.
     unsafe {
         let ptr = buf.add(offset) as *mut u32;
+
         core::sync::atomic::AtomicU32::from_ptr(ptr)
             .store(value, core::sync::atomic::Ordering::Release)
     }

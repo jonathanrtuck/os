@@ -1,9 +1,8 @@
 //! Solid and blended rectangle fills, including rounded rectangles.
 
 use crate::{
-    Color, SRGB_TO_LINEAR, Surface,
     blend::{fill_rect_blend_scalar_1px, rounded_rect_write_aa_pixel},
-    isqrt_fp, min,
+    isqrt_fp, min, Color, Surface, SRGB_TO_LINEAR,
 };
 
 impl<'a> Surface<'a> {
@@ -42,7 +41,6 @@ impl<'a> Surface<'a> {
                     // slots within the surface buffer. Bounds verified above.
                     crate::neon_fill_row(row_ptr, pixel_count, pixel_u32);
                 }
-
                 #[cfg(not(target_arch = "aarch64"))]
                 {
                     for i in 0..pixel_count {
@@ -88,8 +86,7 @@ impl<'a> Surface<'a> {
 
         for row in y..y2 {
             let t = (row - y) as u32; // 0..h-1
-
-            // Linearly interpolate each channel: c = top + (bottom - top) * t / denom.
+                                      // Linearly interpolate each channel: c = top + (bottom - top) * t / denom.
             let r =
                 (color_top.r as u32 * (denom - t) + color_bottom.r as u32 * t + denom / 2) / denom;
             let g =
@@ -122,6 +119,7 @@ impl<'a> Surface<'a> {
         if color.a == 0 || w == 0 || h == 0 {
             return;
         }
+
         if x >= self.width || y >= self.height {
             return;
         }
@@ -164,6 +162,7 @@ impl<'a> Surface<'a> {
 
                     for chunk in 0..chunks {
                         let p = row_ptr.add(chunk * 16);
+
                         // SAFETY: p points to 16 writable bytes (4 dst pixels)
                         // within the clipped surface bounds.
                         crate::neon_blend_const_4px(
@@ -181,14 +180,15 @@ impl<'a> Surface<'a> {
                     // Scalar tail.
                     for i in tail_start..pixel_count {
                         let p = row_ptr.add(i * 4);
+
                         fill_rect_blend_scalar_1px(p, src_r_lin, src_g_lin, src_b_lin, sa, inv_sa);
                     }
                 }
-
                 #[cfg(not(target_arch = "aarch64"))]
                 {
                     for i in 0..pixel_count {
                         let p = row_ptr.add(i * 4);
+
                         fill_rect_blend_scalar_1px(p, src_r_lin, src_g_lin, src_b_lin, sa, inv_sa);
                     }
                 }
@@ -216,6 +216,7 @@ impl<'a> Surface<'a> {
         // Zero radius: delegate to fill_rect (no overhead).
         if r == 0 {
             self.fill_rect(x, y, w, h, color);
+
             return;
         }
 
@@ -239,7 +240,6 @@ impl<'a> Surface<'a> {
         let surf_w = self.width;
         let surf_h = self.height;
         let ptr = self.data.as_mut_ptr();
-
         // Pre-convert color to linear for AA blending.
         let src_r_lin = SRGB_TO_LINEAR[color.r as usize] as u32;
         let src_g_lin = SRGB_TO_LINEAR[color.g as usize] as u32;
@@ -253,14 +253,13 @@ impl<'a> Surface<'a> {
             let dy_fp: i64 = (r as i64 * 256) - (arc_row as i64 * 256) - 128;
             let dy_sq = (dy_fp * dy_fp) as u64;
             let r_sq = (r as u64 * 256) * (r as u64 * 256);
-
             // The arc at this row defines x extent: x_arc = sqrt(r^2 - dy^2)
             // This tells us how far the arc extends horizontally from the corner center.
             let x_arc_sq = if r_sq > dy_sq { r_sq - dy_sq } else { 0 };
             let x_arc_fp = isqrt_fp(x_arc_sq); // in 8.8 fixed point
-
-            // Process both top row and bottom row.
+                                               // Process both top row and bottom row.
             let rows: [u32; 2] = [y + arc_row, y + h - 1 - arc_row];
+
             for &py in &rows {
                 if py >= surf_h {
                     continue;
@@ -270,17 +269,18 @@ impl<'a> Surface<'a> {
                 // The solid interior starts at x + r - floor(x_arc) and extends to x + w - r + floor(x_arc).
                 let x_arc_int = (x_arc_fp >> 8) as u32;
                 let x_arc_frac = (x_arc_fp & 0xFF) as u32; // 0..255
-
-                // Left edge pixel: partial coverage.
+                                                           // Left edge pixel: partial coverage.
                 let left_solid = x + r - x_arc_int;
                 let right_solid = x + w - r + x_arc_int;
 
                 // Left AA pixel (if in bounds).
                 if left_solid > 0 && x_arc_frac > 0 {
                     let lx = left_solid - 1;
+
                     if lx >= x && lx < surf_w {
                         // Coverage is x_arc_frac / 256.
                         let cov = x_arc_frac;
+
                         // SAFETY: lx < surf_w and py < surf_h (checked above).
                         // Pixel offset is within the surface data bounds.
                         unsafe {
@@ -303,8 +303,10 @@ impl<'a> Surface<'a> {
                 // Right AA pixel (if in bounds).
                 if right_solid < x + w && x_arc_frac > 0 {
                     let rx = right_solid;
+
                     if rx < surf_w {
                         let cov = x_arc_frac;
+
                         // SAFETY: rx < surf_w and py < surf_h (checked above).
                         unsafe {
                             rounded_rect_write_aa_pixel(
@@ -338,6 +340,7 @@ impl<'a> Surface<'a> {
 
                     if count > 0 {
                         let row_offset = (py * stride + clipped_x0 * bpp) as usize;
+
                         // SAFETY: py < surf_h, clipped_x0..clipped_x1 within [0, surf_w).
                         // row_offset + count * 4 <= surf_h * stride <= data.len().
                         unsafe {
@@ -378,6 +381,7 @@ impl<'a> Surface<'a> {
     ) {
         if color.a == 255 {
             self.fill_rounded_rect(x, y, w, h, radius, color);
+
             return;
         }
         if color.a == 0 || w == 0 || h == 0 {
@@ -421,8 +425,8 @@ impl<'a> Surface<'a> {
             let r_sq = (r as u64 * 256) * (r as u64 * 256);
             let x_arc_sq = if r_sq > dy_sq { r_sq - dy_sq } else { 0 };
             let x_arc_fp = isqrt_fp(x_arc_sq);
-
             let rows: [u32; 2] = [y + arc_row, y + h - 1 - arc_row];
+
             for &py in &rows {
                 if py >= surf_h {
                     continue;
@@ -430,21 +434,24 @@ impl<'a> Surface<'a> {
 
                 let x_arc_int = (x_arc_fp >> 8) as u32;
                 let x_arc_frac = (x_arc_fp & 0xFF) as u32;
-
                 let left_solid = x + r - x_arc_int;
                 let right_solid = x + w - r + x_arc_int;
 
                 // Left AA pixel.
                 if left_solid > 0 && x_arc_frac > 0 {
                     let lx = left_solid - 1;
+
                     if lx >= x && lx < surf_w {
                         // Effective alpha = color.a * coverage / 256.
                         let eff_a = (sa * x_arc_frac) >> 8;
+
                         if eff_a > 0 {
                             let eff_inv_a = 255 - eff_a;
+
                             // SAFETY: lx < surf_w, py < surf_h.
                             unsafe {
                                 let p = ptr.add((py * stride + lx * bpp) as usize);
+
                                 fill_rect_blend_scalar_1px(
                                     p, src_r_lin, src_g_lin, src_b_lin, eff_a, eff_inv_a,
                                 );
@@ -456,13 +463,17 @@ impl<'a> Surface<'a> {
                 // Right AA pixel.
                 if right_solid < x + w && x_arc_frac > 0 {
                     let rx = right_solid;
+
                     if rx < surf_w {
                         let eff_a = (sa * x_arc_frac) >> 8;
+
                         if eff_a > 0 {
                             let eff_inv_a = 255 - eff_a;
+
                             // SAFETY: rx < surf_w, py < surf_h.
                             unsafe {
                                 let p = ptr.add((py * stride + rx * bpp) as usize);
+
                                 fill_rect_blend_scalar_1px(
                                     p, src_r_lin, src_g_lin, src_b_lin, eff_a, eff_inv_a,
                                 );
@@ -489,12 +500,15 @@ impl<'a> Surface<'a> {
                         // SAFETY: py < surf_h, clipped_x0..clipped_x1 within [0, surf_w).
                         unsafe {
                             let row_ptr = ptr.add(row_offset);
+
                             #[cfg(target_arch = "aarch64")]
                             {
                                 let chunks = count / 4;
                                 let tail_start = chunks * 4;
+
                                 for chunk in 0..chunks {
                                     let p = row_ptr.add(chunk * 16);
+
                                     crate::neon_blend_const_4px(
                                         p,
                                         src_r_lin as u16,
@@ -508,6 +522,7 @@ impl<'a> Surface<'a> {
                                 }
                                 for i in tail_start..count {
                                     let p = row_ptr.add(i * 4);
+
                                     fill_rect_blend_scalar_1px(
                                         p, src_r_lin, src_g_lin, src_b_lin, sa, inv_sa,
                                     );

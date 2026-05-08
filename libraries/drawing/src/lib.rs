@@ -47,11 +47,11 @@ mod tests;
 
 // --- Re-exports from submodules ---------------------------------------------
 pub use blur::{
-    BlurStrategy, CpuBlur, MAX_CPU_BLUR_RADIUS, MAX_KERNEL_DIAMETER, ReadSurface, blur_surface,
-    blur_surface_scalar, compute_kernel,
+    blur_surface, blur_surface_scalar, compute_kernel, BlurStrategy, CpuBlur, ReadSurface,
+    MAX_CPU_BLUR_RADIUS, MAX_KERNEL_DIAMETER,
 };
 pub use box_blur::{box_blur_3pass, box_blur_pad, box_blur_widths};
-pub use gradient::{Xorshift32, fill_radial_gradient_noise, fill_radial_gradient_rows};
+pub use gradient::{fill_radial_gradient_noise, fill_radial_gradient_rows, Xorshift32};
 
 // === Core types =============================================================
 
@@ -173,6 +173,7 @@ impl<'a> Surface<'a> {
     /// `stride >= width * bytes_per_pixel`.
     pub fn is_valid(&self) -> bool {
         let bpp = self.format.bytes_per_pixel();
+
         self.stride >= self.width * bpp
             && (self.stride as usize) * (self.height as usize) <= self.data.len()
     }
@@ -227,7 +228,11 @@ impl<'a> Surface<'a> {
 pub fn linear_to_idx(v: u32) -> usize {
     let idx = v >> 4;
 
-    if idx > 4095 { 4095 } else { idx as usize }
+    if idx > 4095 {
+        4095
+    } else {
+        idx as usize
+    }
 }
 
 /// Fast integer divide-by-255: exact for 0..=65025, +/-1 for larger values.
@@ -241,11 +246,19 @@ pub fn div255(x: u32) -> u32 {
 }
 
 pub(crate) fn min(a: u32, b: u32) -> u32 {
-    if a < b { a } else { b }
+    if a < b {
+        a
+    } else {
+        b
+    }
 }
 
 pub(crate) fn abs(x: i32) -> i32 {
-    if x < 0 { -x } else { x }
+    if x < 0 {
+        -x
+    } else {
+        x
+    }
 }
 
 /// Round a float to the nearest integer (round-half-away-from-zero).
@@ -271,6 +284,7 @@ pub fn isqrt_fp(x: u64) -> u64 {
     if x == 0 {
         return 0;
     }
+
     let mut result: u64 = 0;
     let mut bit: u64 = 1u64 << 30; // Start from highest reasonable bit.
 
@@ -281,9 +295,11 @@ pub fn isqrt_fp(x: u64) -> u64 {
 
     while bit != 0 {
         let candidate = result + bit;
+
         if x >= candidate * candidate {
             result = candidate;
         }
+
         bit >>= 1;
     }
 

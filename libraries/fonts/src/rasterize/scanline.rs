@@ -9,7 +9,7 @@
 
 use super::{
     outline::GlyphOutline,
-    scale::{FP_ONE, FP_SHIFT, scale_fu, scale_fu_ceil, scale_fu_floor},
+    scale::{scale_fu, scale_fu_ceil, scale_fu_floor, FP_ONE, FP_SHIFT},
 };
 
 // ---------------------------------------------------------------------------
@@ -60,6 +60,7 @@ impl RasterScratch {
 
 fn fu_to_fp(val: i32, size_px: u32, upem: u16, origin: i32) -> i32 {
     let px = (val as i64 * size_px as i64 * FP_ONE as i64) / upem as i64;
+
     px as i32 - origin * FP_ONE
 }
 
@@ -84,39 +85,50 @@ fn flatten_contour_from_scratch(
     y_origin: i32,
 ) {
     let mut i = start;
+
     while i <= end {
         let i_next = if i == end { start } else { i + 1 };
         let cur_on = scratch.outline.points[i].on_curve;
+
         if cur_on {
             let next_on = scratch.outline.points[i_next].on_curve;
             let (x0, y0) = outline_point_to_fp(scratch, i, size_px, upem, x_origin, y_origin);
+
             if next_on {
                 let (x1, y1) =
                     outline_point_to_fp(scratch, i_next, size_px, upem, x_origin, y_origin);
+
                 emit_segment(x0, y0, x1, y1, scratch);
+
                 i += 1;
             } else {
                 let i_after = if i_next == end { start } else { i_next + 1 };
                 let after_on = scratch.outline.points[i_after].on_curve;
                 let (cx, cy) =
                     outline_point_to_fp(scratch, i_next, size_px, upem, x_origin, y_origin);
+
                 if after_on {
                     let (x2, y2) =
                         outline_point_to_fp(scratch, i_after, size_px, upem, x_origin, y_origin);
+
                     flatten_quadratic(x0, y0, cx, cy, x2, y2, scratch, 0);
+
                     i += 2;
                 } else {
                     let (cx2, cy2) =
                         outline_point_to_fp(scratch, i_after, size_px, upem, x_origin, y_origin);
                     let mid_x = (cx + cx2) >> 1;
                     let mid_y = (cy + cy2) >> 1;
+
                     flatten_quadratic(x0, y0, cx, cy, mid_x, mid_y, scratch, 0);
+
                     i += 1;
                 }
             }
         } else {
             let i_prev = if i == start { end } else { i - 1 };
             let prev_on = scratch.outline.points[i_prev].on_curve;
+
             if !prev_on {
                 let (px_prev, py_prev) =
                     outline_point_to_fp(scratch, i_prev, size_px, upem, x_origin, y_origin);
@@ -125,15 +137,18 @@ fn flatten_contour_from_scratch(
                 let mid_y = (py_prev + cy) >> 1;
                 let i_next2 = if i == end { start } else { i + 1 };
                 let next2_on = scratch.outline.points[i_next2].on_curve;
+
                 if next2_on {
                     let (x2, y2) =
                         outline_point_to_fp(scratch, i_next2, size_px, upem, x_origin, y_origin);
+
                     flatten_quadratic(mid_x, mid_y, cx, cy, x2, y2, scratch, 0);
                 } else {
                     let (cx2, cy2) =
                         outline_point_to_fp(scratch, i_next2, size_px, upem, x_origin, y_origin);
                     let end_x = (cx + cx2) >> 1;
                     let end_y = (cy + cy2) >> 1;
+
                     flatten_quadratic(mid_x, mid_y, cx, cy, end_x, end_y, scratch, 0);
                 }
             }
@@ -151,13 +166,18 @@ pub(crate) fn flatten_outline_from_scratch(
 ) {
     let nc = scratch.outline.num_contours as usize;
     let mut start = 0usize;
+
     for c in 0..nc {
         let end = scratch.outline.contour_ends[c] as usize;
+
         if end < start + 1 {
             start = end + 1;
+
             continue;
         }
+
         flatten_contour_from_scratch(scratch, start, end, size_px, upem, x_origin, y_origin);
+
         start = end + 1;
     }
 }
@@ -175,22 +195,27 @@ fn flatten_quadratic(
     if scratch.num_segments >= MAX_SEGMENTS {
         return;
     }
+
     let mx = (x0 + x2) >> 1;
     let my = (y0 + y2) >> 1;
     let dx = x1 - mx;
     let dy = y1 - my;
     let flatness = (FP_ONE / 2) as i64 * (FP_ONE / 2) as i64;
     let dist_sq = dx as i64 * dx as i64 + dy as i64 * dy as i64;
+
     if depth >= 8 || dist_sq <= flatness {
         emit_segment(x0, y0, x2, y2, scratch);
+
         return;
     }
+
     let q0x = (x0 + x1) >> 1;
     let q0y = (y0 + y1) >> 1;
     let q1x = (x1 + x2) >> 1;
     let q1y = (y1 + y2) >> 1;
     let rx = (q0x + q1x) >> 1;
     let ry = (q0y + q1y) >> 1;
+
     flatten_quadratic(x0, y0, q0x, q0y, rx, ry, scratch, depth + 1);
     flatten_quadratic(rx, ry, q1x, q1y, x2, y2, scratch, depth + 1);
 }
@@ -206,6 +231,7 @@ fn outline_point_to_fp(
     let p = &scratch.outline.points[i];
     let fx = fu_to_fp(p.x, size_px, upem, x_origin);
     let fy = y_origin * FP_ONE - fu_to_fp(p.y, size_px, upem, 0);
+
     (fx, fy)
 }
 
@@ -247,12 +273,12 @@ fn process_edge(
 ) {
     // Signed height of this edge segment within the pixel row.
     let dy = y1 - y0; // In FP units, max FP_ONE.
+
     if dy == 0 {
         return; // Horizontal edge — no coverage contribution.
     }
 
     let dy_signed = dy * dir;
-
     // Determine pixel column range.
     let (x_left, x_right) = if x0 <= x1 { (x0, x1) } else { (x1, x0) };
     let px_min = x_left >> FP_SHIFT;
@@ -261,6 +287,7 @@ fn process_edge(
     if px_min == px_max {
         // Entire edge within a single pixel column.
         let px = px_min;
+
         if px >= 0 && px < width {
             let pxi = px as usize;
             // Average fractional x-position within the pixel.
@@ -270,7 +297,9 @@ fn process_edge(
             // Coverage = dy * (1 - avg_frac / FP_ONE) = dy * (FP_ONE - avg_frac) / FP_ONE
             let coverage_contrib =
                 (dy_signed as i64 * (FP_ONE - avg_frac) as i64 / FP_ONE as i64) as i32;
+
             area[pxi] += coverage_contrib;
+
             // Fill propagates to the right.
             if pxi + 1 < cover.len() {
                 cover[pxi + 1] += dy_signed;
@@ -281,11 +310,13 @@ fn process_edge(
             // Edge is entirely to the left of the bitmap — contributes full fill.
             cover[0] += dy_signed;
         }
+
         return;
     }
 
     // Edge crosses multiple pixel columns. Process first, interior, and last.
     let dx = x1 - x0; // Total x-delta (can be negative).
+
     if dx == 0 {
         // Vertical edge — impossible to cross multiple columns.
         // (This case is handled by px_min == px_max above.)
@@ -298,7 +329,6 @@ fn process_edge(
     let mut cx = x0;
     let mut cy = y0;
     let mut px = x0 >> FP_SHIFT;
-
     // Process pixels from the starting pixel to the ending pixel.
     let end_px = x1 >> FP_SHIFT;
 
@@ -310,10 +340,8 @@ fn process_edge(
         } else {
             (px) << FP_SHIFT // Left edge of current pixel.
         };
-
         // Is this the last pixel?
         let is_last = (step > 0 && next_px > end_px) || (step < 0 && next_px < end_px);
-
         let (next_x, next_y) = if is_last {
             // Last pixel: end at (x1, y1).
             (x1, y1)
@@ -322,11 +350,12 @@ fn process_edge(
             let t_num = (boundary_x - x0) as i64;
             let t_den = dx as i64;
             let by = y0 + ((y1 - y0) as i64 * t_num / t_den) as i32;
+
             (boundary_x, by)
         };
-
         // Process the sub-segment (cx, cy) → (next_x, next_y) within pixel column px.
         let seg_dy = next_y - cy;
+
         if seg_dy != 0 && px >= 0 && px < width {
             let pxi = px as usize;
             let seg_dy_signed = seg_dy * dir;
@@ -338,7 +367,9 @@ fn process_edge(
             let avg_frac = (f0 + f1) / 2;
             let coverage_contrib =
                 (seg_dy_signed as i64 * (FP_ONE - avg_frac) as i64 / FP_ONE as i64) as i32;
+
             area[pxi] += coverage_contrib;
+
             if pxi + 1 < cover.len() {
                 cover[pxi + 1] += seg_dy_signed;
             }
@@ -364,11 +395,12 @@ pub(crate) fn rasterize_segments(
     height: u32,
 ) {
     let nseg = scratch.num_segments;
+
     if nseg == 0 {
         return;
     }
-    let w = width as usize;
 
+    let w = width as usize;
     // Per-row working buffers (stack-allocated, reused each row).
     let mut area = [0i32; GLYPH_MAX_W];
     let mut cover = [0i32; GLYPH_MAX_W + 1];
@@ -388,7 +420,6 @@ pub(crate) fn rasterize_segments(
         // Process each segment that crosses this pixel row.
         for si in 0..nseg {
             let seg = &scratch.segments[si];
-
             // Orient segment top-to-bottom.
             let (sy0, sy1, sx0, sx1, dir) = if seg.y0 <= seg.y1 {
                 (seg.y0, seg.y1, seg.x0, seg.x1, 1i32)
@@ -403,6 +434,7 @@ pub(crate) fn rasterize_segments(
 
             // Clip segment to row's y-extent via linear interpolation.
             let (cx0, cy0, cx1, cy1);
+
             if sy0 >= y_top && sy1 <= y_bot {
                 // Entirely within the row — no clipping needed.
                 cx0 = sx0;
@@ -416,6 +448,7 @@ pub(crate) fn rasterize_segments(
                 // Clip top.
                 if sy0 < y_top {
                     let t = (y_top - sy0) as i64;
+
                     cx0 = sx0 + (dx * t / dy) as i32;
                     cy0 = y_top;
                 } else {
@@ -426,6 +459,7 @@ pub(crate) fn rasterize_segments(
                 // Clip bottom.
                 if sy1 > y_bot {
                     let t = (y_bot - sy0) as i64;
+
                     cx1 = sx0 + (dx * t / dy) as i32;
                     cy1 = y_bot;
                 } else {
@@ -451,14 +485,17 @@ pub(crate) fn rasterize_segments(
         // Sweep left-to-right: convert area/cover to final coverage values.
         let row_start = (row * width) as usize;
         let mut running_cover: i32 = 0;
+
         for x in 0..w {
             running_cover += cover[x];
+
             // Coverage = |running_cover + area[x]| scaled to 0-255.
             // running_cover and area are in FP_ONE units (max FP_ONE per full-height edge).
             let val = (running_cover + area[x]).abs();
             let cov = val * 255 / FP_ONE;
             let cov = if cov > 255 { 255 } else { cov };
             let idx = row_start + x;
+
             if idx < coverage.len() {
                 coverage[idx] = cov as u8;
             }
@@ -494,7 +531,6 @@ pub fn rasterize(
     scale_factor: u16,
 ) -> Option<GlyphMetrics> {
     let size_px = size_px as u32;
-
     let (advance_fu, _lsb_fu, upem) =
         match extract_outline(font_data, glyph_id, &mut scratch.outline) {
             Some(v) => v,
@@ -513,9 +549,11 @@ pub fn rasterize(
 
                 let advance_fu = if (glyph_id as u16) < num_h_metrics {
                     let metrics = hmtx.h_metrics();
+
                     metrics.get(glyph_id as usize)?.advance.get()
                 } else {
                     let metrics = hmtx.h_metrics();
+
                     metrics.get(num_h_metrics as usize - 1)?.advance.get()
                 };
 
@@ -523,10 +561,12 @@ pub fn rasterize(
                 let loca = font.loca(None).ok()?;
                 let glyf = font.glyf().ok()?;
                 let gid = read_fonts::types::GlyphId::new(glyph_id as u32);
+
                 match loca.get_glyf(gid, &glyf) {
                     Ok(None) => {
                         // Empty glyph (space) — return metrics with zero bitmap
                         let advance = scale_fu(advance_fu as i32, size_px, upem) as u32;
+
                         return Some(GlyphMetrics {
                             width: 0,
                             height: 0,
@@ -546,6 +586,7 @@ pub fn rasterize(
 
     // Apply outline dilation for stem darkening (macOS Core Text formula).
     let (dil_x, dil_y) = compute_dilation(size_px as u16, upem, scale_factor);
+
     if dil_x != 0 || dil_y != 0 {
         embolden_outline(&mut scratch.outline, dil_x, dil_y);
     }
@@ -555,21 +596,23 @@ pub fn rasterize(
     let y_min_fu = scratch.outline.y_min;
     let x_max_fu = scratch.outline.x_max;
     let y_max_fu = scratch.outline.y_max;
-
     // Scale bounding box to pixels, then expand by 1px on each side to
     // prevent AA overshoot clipping at glyph edges.
     let x_min_px = scale_fu_floor(x_min_fu as i32, size_px, upem) - 1;
     let y_min_px = scale_fu_floor(y_min_fu as i32, size_px, upem);
     let x_max_px = scale_fu_ceil(x_max_fu as i32, size_px, upem) + 1;
     let y_max_px = scale_fu_ceil(y_max_fu as i32, size_px, upem) + 1;
+
     if x_max_px < x_min_px || y_max_px < y_min_px {
         return None;
     }
+
     let bmp_w = (x_max_px - x_min_px) as u32;
     let bmp_h = (y_max_px - y_min_px) as u32;
 
     if bmp_w == 0 || bmp_h == 0 {
         let advance = scale_fu(advance_fu as i32, size_px, upem) as u32;
+
         return Some(GlyphMetrics {
             width: 0,
             height: 0,
@@ -598,8 +641,8 @@ pub fn rasterize(
 
     // Flatten outline into line segments
     scratch.num_segments = 0;
-    flatten_outline_from_scratch(scratch, size_px, upem, x_min_px, y_max_px);
 
+    flatten_outline_from_scratch(scratch, size_px, upem, x_min_px, y_max_px);
     // Rasterize at native width (no horizontal oversampling)
     rasterize_segments(scratch, &mut buffer.data[..out_total], bmp_w, bmp_h);
 

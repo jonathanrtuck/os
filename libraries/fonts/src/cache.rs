@@ -72,10 +72,13 @@ impl GlyphCache {
     /// Total length = width * height.
     pub fn get(&self, glyph_id: u16) -> Option<(&CachedGlyph, &[u8])> {
         let id = glyph_id as usize;
+
         if id >= MAX_GLYPH_ID {
             return None;
         }
+
         let idx = self.glyph_id_map[id];
+
         if idx == 0xFF {
             return None;
         }
@@ -83,9 +86,11 @@ impl GlyphCache {
         let i = idx as usize;
         let g = &self.glyphs[i];
         let len = (g.width as usize) * (g.height as usize);
+
         if g.buf_offset + len > self.coverage.len() {
             return None; // defensive: glyph data doesn't fit in coverage buffer
         }
+
         let cov = &self.coverage[g.buf_offset..g.buf_offset + len];
 
         Some((g, cov))
@@ -136,7 +141,6 @@ impl GlyphCache {
             Some(m) => m,
             None => return,
         };
-
         let upem = metrics.units_per_em;
         let asc_fu = metrics.ascent as i32;
         let desc_fu = metrics.descent as i32;
@@ -155,11 +159,13 @@ impl GlyphCache {
         // Explicit axes take precedence over auto-computed ones.
         let auto_opsz = metrics::auto_axis_values_for_opsz(font_data, size_px as u16, dpi);
         let mut axes: alloc::vec::Vec<metrics::AxisValue> = alloc::vec::Vec::new();
+
         for av in &auto_opsz {
             if !extra_axes.iter().any(|e| e.tag == av.tag) {
                 axes.push(*av);
             }
         }
+
         axes.extend_from_slice(extra_axes);
 
         // Heap-allocate rasterization scratch space (~39 KiB).
@@ -213,6 +219,7 @@ impl GlyphCache {
                     advance: m.advance,
                     buf_offset,
                 };
+
                 // Record the real font glyph ID → cache index mapping.
                 if (glyph_id as usize) < MAX_GLYPH_ID {
                     self.glyph_id_map[glyph_id as usize] = i as u8;
@@ -306,6 +313,7 @@ impl LruGlyphCache {
     /// `max_capacity` must be at least 1.
     pub fn new(max_capacity: usize) -> Self {
         let cap = if max_capacity == 0 { 1 } else { max_capacity };
+
         LruGlyphCache {
             max_capacity: cap,
             entries: Vec::with_capacity(cap),
@@ -341,7 +349,9 @@ impl LruGlyphCache {
     ) -> Option<&LruCachedGlyph> {
         let key = (glyph_id, font_size, style_id);
         let &idx = self.index.get(&key)?;
+
         self.move_to_head(idx);
+
         Some(&self.entries[idx].glyph)
     }
 
@@ -371,7 +381,9 @@ impl LruGlyphCache {
         // Update existing entry.
         if let Some(&idx) = self.index.get(&key) {
             self.entries[idx].glyph = glyph;
+
             self.move_to_head(idx);
+
             return;
         }
 
@@ -388,15 +400,18 @@ impl LruGlyphCache {
                 prev: NONE,
                 next: NONE,
             };
+
             free_idx
         } else {
             let idx = self.entries.len();
+
             self.entries.push(Slot {
                 key,
                 glyph,
                 prev: NONE,
                 next: NONE,
             });
+
             idx
         };
 
@@ -453,6 +468,7 @@ impl LruGlyphCache {
         if self.head == idx {
             return; // Already at head.
         }
+
         self.unlink(idx);
         self.push_head(idx);
     }
@@ -462,6 +478,7 @@ impl LruGlyphCache {
         if self.tail == NONE {
             return;
         }
+
         let idx = self.tail;
         let key = self.entries[idx].key;
 
@@ -470,6 +487,7 @@ impl LruGlyphCache {
 
         // Clear the slot's coverage to free memory, then add to free list.
         self.entries[idx].glyph.coverage = vec![];
+
         self.free_list.push(idx);
     }
 }

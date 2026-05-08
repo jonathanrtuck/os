@@ -120,7 +120,6 @@ pub fn shape_with_variations(
         Ok(f) => f,
         Err(_) => return Vec::new(),
     };
-
     // Build variation strings for HarfRust.
     let variations: Vec<harfrust::Variation> = axis_values
         .iter()
@@ -129,10 +128,10 @@ pub fn shape_with_variations(
             let tag_str = core::str::from_utf8(&av.tag).ok()?;
             let mut buf = [0u8; 32];
             let s = format_axis_setting(&mut buf, tag_str, av.value)?;
+
             s.parse::<harfrust::Variation>().ok()
         })
         .collect();
-
     let data = harfrust::ShaperData::new(&font);
     let instance = harfrust::ShaperInstance::from_variations(&font, &variations);
     let mut buffer = harfrust::UnicodeBuffer::new();
@@ -172,11 +171,14 @@ pub fn format_axis_setting<'a>(buf: &'a mut [u8], tag: &str, value: f32) -> Opti
     impl<'b> Write for BufWriter<'b> {
         fn write_str(&mut self, s: &str) -> core::fmt::Result {
             let bytes = s.as_bytes();
+
             if self.pos + bytes.len() > self.buf.len() {
                 return Err(core::fmt::Error);
             }
+
             self.buf[self.pos..self.pos + bytes.len()].copy_from_slice(bytes);
             self.pos += bytes.len();
+
             Ok(())
         }
     }
@@ -185,11 +187,13 @@ pub fn format_axis_setting<'a>(buf: &'a mut [u8], tag: &str, value: f32) -> Opti
     // Format as integer if value is a whole number, otherwise as decimal.
     // Check if value is a whole number without using f32::floor (not available in no_std).
     let truncated = value as i32;
+
     if value == truncated as f32 {
         write!(w, "{}={}", tag, truncated).ok()?;
     } else {
         write!(w, "{}={}", tag, value).ok()?;
     }
+
     core::str::from_utf8(&w.buf[..w.pos]).ok()
 }
 
@@ -230,6 +234,7 @@ mod tests {
     fn format_axis_setting_integer() {
         let mut buf = [0u8; 32];
         let s = format_axis_setting(&mut buf, "wght", 700.0).unwrap();
+
         assert_eq!(s, "wght=700");
     }
 
@@ -237,12 +242,14 @@ mod tests {
     fn format_axis_setting_fractional() {
         let mut buf = [0u8; 32];
         let s = format_axis_setting(&mut buf, "opsz", 14.5).unwrap();
+
         assert!(s.starts_with("opsz=14.5"));
     }
 
     #[test]
     fn format_axis_setting_buffer_too_small() {
         let mut buf = [0u8; 3];
+
         assert!(format_axis_setting(&mut buf, "wght", 700.0).is_none());
     }
 
@@ -259,9 +266,11 @@ mod tests {
         };
 
         cache.insert(42, 18, glyph.clone());
+
         assert_eq!(cache.len(), 1);
 
         let g = cache.get(42, 18).unwrap();
+
         assert_eq!(g.width, 10);
         assert_eq!(g.height, 12);
         assert_eq!(g.advance, 8);
@@ -270,6 +279,7 @@ mod tests {
     #[test]
     fn lru_cache_miss() {
         let mut cache = cache::LruGlyphCache::new(4);
+
         assert!(cache.get(99, 18).is_none());
     }
 
@@ -287,11 +297,12 @@ mod tests {
 
         cache.insert(1, 18, mk(1));
         cache.insert(2, 18, mk(2));
+
         assert_eq!(cache.len(), 2);
 
         cache.insert(3, 18, mk(3));
-        assert_eq!(cache.len(), 2);
 
+        assert_eq!(cache.len(), 2);
         assert!(cache.get(1, 18).is_none());
         assert!(cache.get(2, 18).is_some());
         assert!(cache.get(3, 18).is_some());
@@ -313,6 +324,7 @@ mod tests {
         cache.insert(2, 18, mk(2));
         cache.get(1, 18);
         cache.insert(3, 18, mk(3));
+
         assert!(cache.get(2, 18).is_none());
         assert!(cache.get(1, 18).is_some());
     }
@@ -339,6 +351,7 @@ mod tests {
 
         cache.insert(42, 18, glyph1);
         cache.insert(42, 18, glyph2);
+
         assert_eq!(cache.len(), 1);
         assert_eq!(cache.get(42, 18).unwrap().width, 20);
     }
@@ -357,6 +370,7 @@ mod tests {
 
         cache.insert_with_axes(42, 18, 0, mk(10));
         cache.insert_with_axes(42, 18, 1, mk(20));
+
         assert_eq!(cache.len(), 2);
         assert_eq!(cache.get_with_axes(42, 18, 0).unwrap().width, 10);
         assert_eq!(cache.get_with_axes(42, 18, 1).unwrap().width, 20);
@@ -365,6 +379,7 @@ mod tests {
     #[test]
     fn glyph_cache_zeroed() {
         let cache = cache::GlyphCache::zeroed();
+
         assert_eq!(cache.line_height, 0);
         assert_eq!(cache.ascent, 0);
         assert!(cache.get(65).is_none());

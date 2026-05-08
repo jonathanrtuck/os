@@ -63,6 +63,7 @@ impl AffineTransform {
     /// Rotation by `radians` counter-clockwise.
     pub fn rotate(radians: f32) -> Self {
         let (sin, cos) = sin_cos_f32(radians);
+
         Self {
             a: cos,
             b: sin,
@@ -122,10 +123,13 @@ impl AffineTransform {
     /// Returns `None` if the matrix is singular (determinant ≈ 0).
     pub fn inverse(&self) -> Option<Self> {
         let det = self.a * self.d - self.b * self.c;
+
         if det > -1e-10 && det < 1e-10 {
             return None; // Singular matrix.
         }
+
         let inv_det = 1.0 / det;
+
         Some(Self {
             a: self.d * inv_det,
             b: -self.b * inv_det,
@@ -187,7 +191,6 @@ impl AffineTransform {
         let (x1, y1) = self.transform_point(x + w, y);
         let (x2, y2) = self.transform_point(x + w, y + h);
         let (x3, y3) = self.transform_point(x, y + h);
-
         let min_x = min4(x0, x1, x2, x3);
         let min_y = min4(y0, y1, y2, y3);
         let max_x = max4(x0, x1, x2, x3);
@@ -203,14 +206,24 @@ impl AffineTransform {
 fn min4(a: f32, b: f32, c: f32, d: f32) -> f32 {
     let ab = if a < b { a } else { b };
     let cd = if c < d { c } else { d };
-    if ab < cd { ab } else { cd }
+
+    if ab < cd {
+        ab
+    } else {
+        cd
+    }
 }
 
 /// Maximum of four f32 values.
 fn max4(a: f32, b: f32, c: f32, d: f32) -> f32 {
     let ab = if a > b { a } else { b };
     let cd = if c > d { c } else { d };
-    if ab > cd { ab } else { cd }
+
+    if ab > cd {
+        ab
+    } else {
+        cd
+    }
 }
 
 /// Sine and cosine for `no_std`. Uses Taylor series with Payne-Hanek-style
@@ -221,8 +234,10 @@ fn sin_cos_f32(x: f32) -> (f32, f32) {
     let two_pi = 2.0 * pi;
     let half_pi = core::f32::consts::FRAC_PI_2;
     let mut a = x;
+
     if a > pi || a < -pi {
         a = a - ((a / two_pi).floor_f32() * two_pi);
+
         if a > pi {
             a -= two_pi;
         }
@@ -241,13 +256,11 @@ fn sin_cos_f32(x: f32) -> (f32, f32) {
 
     // Taylor series around 0, valid for [-π/2, π/2] with excellent accuracy.
     let a2 = reduced * reduced;
-
     // sin: x - x³/6 + x⁵/120 - x⁷/5040 + x⁹/362880 - x¹¹/39916800
     let sin_val = reduced
         * (1.0
             - a2 / 6.0
                 * (1.0 - a2 / 20.0 * (1.0 - a2 / 42.0 * (1.0 - a2 / 72.0 * (1.0 - a2 / 110.0)))));
-
     // cos: 1 - x²/2 + x⁴/24 - x⁶/720 + x⁸/40320 - x¹⁰/3628800
     let cos_val = 1.0
         - a2 / 2.0 * (1.0 - a2 / 12.0 * (1.0 - a2 / 30.0 * (1.0 - a2 / 56.0 * (1.0 - a2 / 90.0))));
@@ -258,8 +271,13 @@ fn sin_cos_f32(x: f32) -> (f32, f32) {
 /// Tangent for `no_std`. Computed as `sin / cos`.
 fn tan_f32(x: f32) -> f32 {
     let (sin, cos) = sin_cos_f32(x);
+
     if cos.abs_f32() < 1e-10 {
-        if sin >= 0.0 { f32::MAX } else { f32::MIN }
+        if sin >= 0.0 {
+            f32::MAX
+        } else {
+            f32::MIN
+        }
     } else {
         sin / cos
     }
@@ -276,11 +294,20 @@ impl F32Ext for f32 {
     fn floor_f32(self) -> f32 {
         let i = self as i32;
         let f = i as f32;
-        if self < f { f - 1.0 } else { f }
+
+        if self < f {
+            f - 1.0
+        } else {
+            f
+        }
     }
 
     #[inline]
     fn abs_f32(self) -> f32 {
-        if self < 0.0 { -self } else { self }
+        if self < 0.0 {
+            -self
+        } else {
+            self
+        }
     }
 }

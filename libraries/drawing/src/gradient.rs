@@ -31,6 +31,7 @@ impl Xorshift32 {
         x ^= x << 13;
         x ^= x >> 17;
         x ^= x << 5;
+
         self.state = x;
 
         x
@@ -123,8 +124,7 @@ fn gradient_pixel(
     // one integer unit), i.e., 0..3840 in fixed-point.
     let threshold = BAYER4[(y & 3) as usize][(x & 3) as usize] as u32;
     let dither_offset = (threshold << 12) / 16; // 0..3840
-
-    // Add dither offset then truncate (shift right by 12).
+                                                // Add dither offset then truncate (shift right by 12).
     let r = clamp_u8(((base_r_fp + dither_offset) >> 12) as i32);
     let g = clamp_u8(((base_g_fp + dither_offset) >> 12) as i32);
     let b = clamp_u8(((base_b_fp + dither_offset) >> 12) as i32);

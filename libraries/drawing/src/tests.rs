@@ -25,6 +25,7 @@ fn make_surface(buf: &mut [u8], width: u32, height: u32) -> Surface<'_> {
 #[test]
 fn color_rgb_sets_opaque_alpha() {
     let c = Color::rgb(10, 20, 30);
+
     assert_eq!(c.r, 10);
     assert_eq!(c.g, 20);
     assert_eq!(c.b, 30);
@@ -34,6 +35,7 @@ fn color_rgb_sets_opaque_alpha() {
 #[test]
 fn color_rgba_preserves_all_channels() {
     let c = Color::rgba(1, 2, 3, 128);
+
     assert_eq!(c.r, 1);
     assert_eq!(c.g, 2);
     assert_eq!(c.b, 3);
@@ -51,6 +53,7 @@ fn color_constants_correct() {
 fn color_encode_bgra8888() {
     let c = Color::rgb(0xAA, 0xBB, 0xCC);
     let encoded = c.encode(PixelFormat::Bgra8888);
+
     // BGRA order: [B, G, R, A]
     assert_eq!(encoded, [0xCC, 0xBB, 0xAA, 0xFF]);
 }
@@ -60,6 +63,7 @@ fn color_decode_bgra8888() {
     // BGRA byte order in the buffer.
     let bytes: [u8; 4] = [0xCC, 0xBB, 0xAA, 0xFF];
     let c = Color::decode(&bytes, PixelFormat::Bgra8888);
+
     assert_eq!(c.r, 0xAA);
     assert_eq!(c.g, 0xBB);
     assert_eq!(c.b, 0xCC);
@@ -71,6 +75,7 @@ fn color_decode_from_bgra_matches_decode() {
     let bytes: [u8; 4] = [0x10, 0x20, 0x30, 0x40];
     let via_decode = Color::decode(&bytes, PixelFormat::Bgra8888);
     let via_bgra = Color::decode_from_bgra(&bytes);
+
     assert_eq!(via_decode, via_bgra);
 }
 
@@ -79,6 +84,7 @@ fn color_encode_decode_roundtrip() {
     let original = Color::rgba(42, 99, 200, 180);
     let encoded = original.encode(PixelFormat::Bgra8888);
     let decoded = Color::decode(&encoded, PixelFormat::Bgra8888);
+
     assert_eq!(original, decoded);
 }
 
@@ -95,6 +101,7 @@ fn pixel_format_bytes_per_pixel() {
 fn surface_is_valid_correct_dimensions() {
     let mut buf = [0u8; 40]; // 10 pixels * 4 bpp = 40 bytes for 10x1
     let s = make_surface(&mut buf, 10, 1);
+
     assert!(s.is_valid());
 }
 
@@ -108,6 +115,7 @@ fn surface_is_valid_rejects_too_small_buffer() {
         stride: 40,
         format: PixelFormat::Bgra8888,
     };
+
     assert!(!s.is_valid());
 }
 
@@ -122,6 +130,7 @@ fn surface_is_valid_rejects_narrow_stride() {
         stride: 20, // needs 40
         format: PixelFormat::Bgra8888,
     };
+
     assert!(!s.is_valid());
 }
 
@@ -129,9 +138,10 @@ fn surface_is_valid_rejects_narrow_stride() {
 fn surface_get_set_pixel_roundtrip() {
     let mut buf = [0u8; 4 * 4 * 4]; // 4x4 surface
     let mut s = make_surface(&mut buf, 4, 4);
-
     let color = Color::rgb(100, 150, 200);
+
     s.set_pixel(2, 3, color);
+
     assert_eq!(s.get_pixel(2, 3), Some(color));
 }
 
@@ -139,6 +149,7 @@ fn surface_get_set_pixel_roundtrip() {
 fn surface_get_pixel_out_of_bounds_returns_none() {
     let mut buf = [0u8; 4 * 4 * 4];
     let s = make_surface(&mut buf, 4, 4);
+
     assert_eq!(s.get_pixel(4, 0), None);
     assert_eq!(s.get_pixel(0, 4), None);
     assert_eq!(s.get_pixel(100, 100), None);
@@ -148,8 +159,10 @@ fn surface_get_pixel_out_of_bounds_returns_none() {
 fn surface_set_pixel_out_of_bounds_is_noop() {
     let mut buf = [0u8; 16]; // 1x1 surface (4 bytes used)
     let mut s = make_surface(&mut buf, 1, 1);
+
     // Should not panic.
     s.set_pixel(5, 5, Color::WHITE);
+
     // Original pixel should still be black (zeroed).
     assert_eq!(s.get_pixel(0, 0), Some(Color::rgba(0, 0, 0, 0)));
 }
@@ -158,6 +171,7 @@ fn surface_set_pixel_out_of_bounds_is_noop() {
 fn surface_pixel_offset_within_bounds() {
     let mut buf = [0u8; 4 * 4 * 4]; // 4x4
     let s = make_surface(&mut buf, 4, 4);
+
     // pixel (2, 1): offset = 1 * 16 + 2 * 4 = 24
     assert_eq!(s.pixel_offset(2, 1), Some(24));
 }
@@ -166,6 +180,7 @@ fn surface_pixel_offset_within_bounds() {
 fn surface_pixel_offset_out_of_bounds() {
     let mut buf = [0u8; 4 * 4 * 4];
     let s = make_surface(&mut buf, 4, 4);
+
     assert_eq!(s.pixel_offset(4, 0), None);
     assert_eq!(s.pixel_offset(0, 4), None);
 }
@@ -175,6 +190,7 @@ fn surface_clear_fills_all_pixels() {
     let mut buf = [0u8; 4 * 3 * 3]; // 3x3
     let mut s = make_surface(&mut buf, 3, 3);
     let color = Color::rgb(0xAA, 0xBB, 0xCC);
+
     s.clear(color);
 
     for y in 0..3 {
@@ -195,10 +211,13 @@ fn surface_with_stride_padding() {
         stride: 16,
         format: PixelFormat::Bgra8888,
     };
+
     assert!(s.is_valid());
 
     let c = Color::rgb(10, 20, 30);
+
     s.set_pixel(1, 1, c);
+
     assert_eq!(s.get_pixel(1, 1), Some(c));
     // Padding area should be untouched (zero).
     assert_eq!(s.get_pixel(0, 0), Some(Color::rgba(0, 0, 0, 0)));
@@ -212,6 +231,7 @@ fn surface_with_stride_padding() {
 fn blend_over_opaque_source_replaces_dst() {
     let src = Color::rgb(100, 150, 200);
     let dst = Color::rgb(50, 60, 70);
+
     assert_eq!(src.blend_over(dst), src);
 }
 
@@ -219,6 +239,7 @@ fn blend_over_opaque_source_replaces_dst() {
 fn blend_over_transparent_source_preserves_dst() {
     let src = Color::TRANSPARENT;
     let dst = Color::rgb(50, 60, 70);
+
     assert_eq!(src.blend_over(dst), dst);
 }
 
@@ -227,6 +248,7 @@ fn blend_over_zero_alpha_dst_yields_src_weighted() {
     let src = Color::rgba(200, 100, 50, 128);
     let dst = Color::TRANSPARENT;
     let result = src.blend_over(dst);
+
     // With transparent dst, the result should be close to the source color
     // at the source alpha.
     assert_eq!(result.a, 128);
@@ -237,6 +259,7 @@ fn blend_over_zero_alpha_dst_yields_src_weighted() {
 #[test]
 fn blend_over_both_transparent_yields_transparent() {
     let result = Color::TRANSPARENT.blend_over(Color::TRANSPARENT);
+
     assert_eq!(result, Color::TRANSPARENT);
 }
 
@@ -244,8 +267,8 @@ fn blend_over_both_transparent_yields_transparent() {
 fn blend_over_semi_transparent_produces_intermediate() {
     let src = Color::rgba(255, 0, 0, 128); // semi-transparent red
     let dst = Color::rgb(0, 0, 255); // opaque blue
-
     let result = src.blend_over(dst);
+
     // Alpha should be fully opaque (src + dst_eff = 128 + div255(255*127) = 128 + ~127 = ~255).
     assert!(
         result.a >= 254,
@@ -261,8 +284,10 @@ fn blend_over_semi_transparent_produces_intermediate() {
 fn blend_pixel_opaque_overwrites() {
     let mut buf = [0u8; 16]; // 1x1 with extra room
     let mut s = make_surface(&mut buf, 1, 1);
+
     s.set_pixel(0, 0, Color::rgb(10, 20, 30));
     s.blend_pixel(0, 0, Color::rgb(200, 100, 50));
+
     assert_eq!(s.get_pixel(0, 0), Some(Color::rgb(200, 100, 50)));
 }
 
@@ -271,8 +296,10 @@ fn blend_pixel_transparent_is_noop() {
     let mut buf = [0u8; 16];
     let mut s = make_surface(&mut buf, 1, 1);
     let original = Color::rgb(10, 20, 30);
+
     s.set_pixel(0, 0, original);
     s.blend_pixel(0, 0, Color::TRANSPARENT);
+
     assert_eq!(s.get_pixel(0, 0), Some(original));
 }
 
@@ -280,6 +307,7 @@ fn blend_pixel_transparent_is_noop() {
 fn blend_pixel_out_of_bounds_is_noop() {
     let mut buf = [0u8; 16];
     let mut s = make_surface(&mut buf, 1, 1);
+
     // Should not panic.
     s.blend_pixel(10, 10, Color::rgb(255, 0, 0));
 }
@@ -306,6 +334,7 @@ fn fill_rect_basic() {
             );
         }
     }
+
     // Outside the filled region (should be zero).
     assert_eq!(s.get_pixel(0, 0), Some(Color::rgba(0, 0, 0, 0)));
     assert_eq!(s.get_pixel(7, 7), Some(Color::rgba(0, 0, 0, 0)));
@@ -330,8 +359,10 @@ fn fill_rect_clips_to_bounds() {
 fn fill_rect_at_origin_out_of_bounds_is_noop() {
     let mut buf = [0u8; 4 * 4 * 4];
     let mut s = make_surface(&mut buf, 4, 4);
+
     // x >= width: should be a no-op.
     s.fill_rect(4, 0, 2, 2, Color::WHITE);
+
     assert_eq!(s.get_pixel(3, 0), Some(Color::rgba(0, 0, 0, 0)));
 }
 
@@ -339,8 +370,10 @@ fn fill_rect_at_origin_out_of_bounds_is_noop() {
 fn fill_rect_zero_dimensions_is_noop() {
     let mut buf = [0u8; 4 * 4 * 4];
     let mut s = make_surface(&mut buf, 4, 4);
+
     s.fill_rect(0, 0, 0, 4, Color::WHITE);
     s.fill_rect(0, 0, 4, 0, Color::WHITE);
+
     // Nothing should be modified.
     assert_eq!(s.get_pixel(0, 0), Some(Color::rgba(0, 0, 0, 0)));
 }
@@ -349,11 +382,10 @@ fn fill_rect_zero_dimensions_is_noop() {
 fn fill_rect_blend_opaque_delegates_to_fill_rect() {
     let mut buf1 = [0u8; 4 * 4 * 4];
     let mut buf2 = [0u8; 4 * 4 * 4];
-
     let mut s1 = make_surface(&mut buf1, 4, 4);
     let mut s2 = make_surface(&mut buf2, 4, 4);
-
     let color = Color::rgb(200, 100, 50); // fully opaque
+
     s1.fill_rect(0, 0, 4, 4, color);
     s2.fill_rect_blend(0, 0, 4, 4, color);
 
@@ -365,13 +397,15 @@ fn fill_rect_blend_opaque_delegates_to_fill_rect() {
 fn fill_rect_blend_transparent_is_noop() {
     let mut buf = [0u8; 4 * 4 * 4];
     let mut s = make_surface(&mut buf, 4, 4);
+
     s.clear(Color::rgb(100, 100, 100));
 
     // Snapshot the buffer state before the blend.
     let mut before = [0u8; 4 * 4 * 4];
-    before.copy_from_slice(s.data);
 
+    before.copy_from_slice(s.data);
     s.fill_rect_blend(0, 0, 4, 4, Color::TRANSPARENT);
+
     assert_eq!(s.data, &before[..]);
 }
 
@@ -379,16 +413,19 @@ fn fill_rect_blend_transparent_is_noop() {
 fn fill_rect_blend_semi_transparent_modifies_surface() {
     let mut buf = [0u8; 4 * 4 * 4];
     let mut s = make_surface(&mut buf, 4, 4);
+
     s.clear(Color::rgb(0, 0, 255)); // blue background
 
     let mut before = [0u8; 4 * 4 * 4];
-    before.copy_from_slice(s.data);
 
+    before.copy_from_slice(s.data);
     s.fill_rect_blend(0, 0, 4, 4, Color::rgba(255, 0, 0, 128)); // semi-red
+
     assert_ne!(s.data, &before[..], "surface should be modified");
 
     // Each pixel should have some red and some blue.
     let px = s.get_pixel(0, 0).unwrap();
+
     assert!(px.r > 0, "expected red component");
     assert!(px.b > 0, "expected blue component");
 }
@@ -399,7 +436,9 @@ fn fill_gradient_v_single_row() {
     let mut s = make_surface(&mut buf, 8, 1);
     let top = Color::rgb(255, 0, 0);
     let bot = Color::rgb(0, 0, 255);
+
     s.fill_gradient_v(0, 0, 8, 1, top, bot);
+
     // h=1: should be filled with color_top.
     assert_eq!(s.get_pixel(0, 0), Some(top));
     assert_eq!(s.get_pixel(7, 0), Some(top));
@@ -411,7 +450,9 @@ fn fill_gradient_v_two_rows() {
     let mut s = make_surface(&mut buf, 4, 2);
     let top = Color::rgb(0, 0, 0);
     let bot = Color::rgb(200, 200, 200);
+
     s.fill_gradient_v(0, 0, 4, 2, top, bot);
+
     // First row = top color, last row = bottom color.
     assert_eq!(s.get_pixel(0, 0), Some(top));
     assert_eq!(s.get_pixel(0, 1), Some(bot));
@@ -421,11 +462,10 @@ fn fill_gradient_v_two_rows() {
 fn fill_rounded_rect_zero_radius_same_as_fill_rect() {
     let mut buf1 = [0u8; 4 * 8 * 8];
     let mut buf2 = [0u8; 4 * 8 * 8];
-
     let mut s1 = make_surface(&mut buf1, 8, 8);
     let mut s2 = make_surface(&mut buf2, 8, 8);
-
     let color = Color::rgb(128, 64, 32);
+
     s1.fill_rect(1, 1, 6, 4, color);
     s2.fill_rounded_rect(1, 1, 6, 4, 0, color);
 
@@ -436,12 +476,14 @@ fn fill_rounded_rect_zero_radius_same_as_fill_rect() {
 fn fill_rounded_rect_blend_zero_alpha_is_noop() {
     let mut buf = [0u8; 4 * 8 * 8];
     let mut s = make_surface(&mut buf, 8, 8);
+
     s.clear(Color::rgb(100, 100, 100));
 
     let mut before = [0u8; 4 * 8 * 8];
-    before.copy_from_slice(s.data);
 
+    before.copy_from_slice(s.data);
     s.fill_rounded_rect_blend(1, 1, 6, 4, 2, Color::TRANSPARENT);
+
     assert_eq!(s.data, &before[..]);
 }
 
@@ -454,10 +496,13 @@ fn draw_hline_fills_row() {
     let mut buf = [0u8; 4 * 8 * 8];
     let mut s = make_surface(&mut buf, 8, 8);
     let color = Color::rgb(255, 0, 0);
+
     s.draw_hline(1, 3, 5, color);
+
     for x in 1..6 {
         assert_eq!(s.get_pixel(x, 3), Some(color), "pixel at ({x}, 3)");
     }
+
     // Should not touch adjacent rows.
     assert_eq!(s.get_pixel(1, 2), Some(Color::rgba(0, 0, 0, 0)));
     assert_eq!(s.get_pixel(1, 4), Some(Color::rgba(0, 0, 0, 0)));
@@ -468,10 +513,13 @@ fn draw_vline_fills_column() {
     let mut buf = [0u8; 4 * 8 * 8];
     let mut s = make_surface(&mut buf, 8, 8);
     let color = Color::rgb(0, 255, 0);
+
     s.draw_vline(2, 1, 4, color);
+
     for y in 1..5 {
         assert_eq!(s.get_pixel(2, y), Some(color), "pixel at (2, {y})");
     }
+
     // Adjacent columns untouched.
     assert_eq!(s.get_pixel(1, 2), Some(Color::rgba(0, 0, 0, 0)));
     assert_eq!(s.get_pixel(3, 2), Some(Color::rgba(0, 0, 0, 0)));
@@ -482,7 +530,9 @@ fn draw_rect_1x1() {
     let mut buf = [0u8; 4 * 4 * 4];
     let mut s = make_surface(&mut buf, 4, 4);
     let color = Color::rgb(255, 255, 0);
+
     s.draw_rect(1, 1, 1, 1, color);
+
     assert_eq!(s.get_pixel(1, 1), Some(color));
     // Neighbors untouched.
     assert_eq!(s.get_pixel(0, 0), Some(Color::rgba(0, 0, 0, 0)));
@@ -493,6 +543,7 @@ fn draw_rect_3x3_border() {
     let mut buf = [0u8; 4 * 8 * 8];
     let mut s = make_surface(&mut buf, 8, 8);
     let color = Color::rgb(255, 0, 255);
+
     s.draw_rect(2, 2, 3, 3, color);
 
     // Top edge.
@@ -514,7 +565,9 @@ fn draw_rect_3x3_border() {
 fn draw_rect_zero_dimensions_is_noop() {
     let mut buf = [0u8; 4 * 4 * 4];
     let mut s = make_surface(&mut buf, 4, 4);
+
     s.draw_rect(0, 0, 0, 0, Color::WHITE);
+
     assert_eq!(s.get_pixel(0, 0), Some(Color::rgba(0, 0, 0, 0)));
 }
 
@@ -523,7 +576,9 @@ fn draw_line_single_point() {
     let mut buf = [0u8; 4 * 8 * 8];
     let mut s = make_surface(&mut buf, 8, 8);
     let color = Color::rgb(0, 255, 0);
+
     s.draw_line(3, 3, 3, 3, color);
+
     assert_eq!(s.get_pixel(3, 3), Some(color));
 }
 
@@ -532,7 +587,9 @@ fn draw_line_horizontal() {
     let mut buf = [0u8; 4 * 8 * 8];
     let mut s = make_surface(&mut buf, 8, 8);
     let color = Color::rgb(255, 255, 255);
+
     s.draw_line(1, 4, 6, 4, color);
+
     for x in 1..=6 {
         assert_eq!(s.get_pixel(x as u32, 4), Some(color), "pixel at ({x}, 4)");
     }
@@ -543,7 +600,9 @@ fn draw_line_vertical() {
     let mut buf = [0u8; 4 * 8 * 8];
     let mut s = make_surface(&mut buf, 8, 8);
     let color = Color::rgb(255, 255, 255);
+
     s.draw_line(3, 1, 3, 5, color);
+
     for y in 1..=5 {
         assert_eq!(s.get_pixel(3, y as u32), Some(color), "pixel at (3, {y})");
     }
@@ -554,7 +613,9 @@ fn draw_line_diagonal_45_degrees() {
     let mut buf = [0u8; 4 * 8 * 8];
     let mut s = make_surface(&mut buf, 8, 8);
     let color = Color::rgb(200, 200, 200);
+
     s.draw_line(0, 0, 4, 4, color);
+
     // Each diagonal pixel should be set.
     for i in 0..=4 {
         assert_eq!(
@@ -569,6 +630,7 @@ fn draw_line_diagonal_45_degrees() {
 fn draw_line_negative_coords_no_panic() {
     let mut buf = [0u8; 4 * 8 * 8];
     let mut s = make_surface(&mut buf, 8, 8);
+
     // Lines partially or fully out of bounds should not panic.
     s.draw_line(-5, -5, 10, 10, Color::WHITE);
     s.draw_line(-100, 4, -50, 4, Color::WHITE);
@@ -584,6 +646,7 @@ fn div255_exact_for_alpha_range() {
     for x in (0..=65025u32).step_by(255) {
         assert_eq!(div255(x), x / 255, "mismatch for x={x}");
     }
+
     // Spot-check boundaries.
     assert_eq!(div255(0), 0);
     assert_eq!(div255(255), 1);
@@ -647,6 +710,7 @@ fn isqrt_fp_non_perfect() {
     // isqrt_fp returns floor, so it should be 362.
     let val = 2 * 65536u64;
     let result = isqrt_fp(val);
+
     // 362^2 = 131044, 363^2 = 131769. val = 131072. So floor = 362.
     assert_eq!(result, 362);
 }
@@ -667,13 +731,14 @@ fn linear_to_idx_clamps_at_4095() {
 fn blit_copies_pixels() {
     let mut dst_buf = [0u8; 4 * 4 * 4]; // 4x4 destination
     let mut dst = make_surface(&mut dst_buf, 4, 4);
-
     // 2x2 red source.
     let src_color = Color::rgb(255, 0, 0);
     let encoded = src_color.encode(PixelFormat::Bgra8888);
     let mut src_buf = [0u8; 4 * 2 * 2];
+
     for px in 0..4 {
         let off = px * 4;
+
         src_buf[off..off + 4].copy_from_slice(&encoded);
     }
 
@@ -689,9 +754,9 @@ fn blit_copies_pixels() {
 fn blit_clips_to_dst_bounds() {
     let mut dst_buf = [0u8; 4 * 2 * 2]; // 2x2 destination
     let mut dst = make_surface(&mut dst_buf, 2, 2);
-
     // 4x4 source.
     let src_buf = [0xFFu8; 4 * 4 * 4];
+
     dst.blit(&src_buf, 4, 4, 16, 0, 0);
     // Should not panic, and only the 2x2 region should be written.
 }
@@ -701,8 +766,10 @@ fn blit_out_of_bounds_dst_is_noop() {
     let mut dst_buf = [0u8; 4 * 2 * 2];
     let mut dst = make_surface(&mut dst_buf, 2, 2);
     let src_buf = [0xFFu8; 16];
+
     // dst_x >= width.
     dst.blit(&src_buf, 2, 2, 8, 5, 0);
+
     assert_eq!(dst.get_pixel(0, 0), Some(Color::rgba(0, 0, 0, 0)));
 }
 
@@ -714,6 +781,7 @@ fn blit_out_of_bounds_dst_is_noop() {
 fn xorshift32_deterministic() {
     let mut a = Xorshift32::new(42);
     let mut b = Xorshift32::new(42);
+
     for _ in 0..100 {
         assert_eq!(a.next(), b.next());
     }
@@ -723,6 +791,7 @@ fn xorshift32_deterministic() {
 fn xorshift32_never_zero() {
     // Zero seed should be corrected.
     let mut rng = Xorshift32::new(0);
+
     // First output should not be zero.
     assert_ne!(rng.next(), 0);
 }
@@ -730,8 +799,10 @@ fn xorshift32_never_zero() {
 #[test]
 fn xorshift32_noise_in_range() {
     let mut rng = Xorshift32::new(1234);
+
     for _ in 0..1000 {
         let val = rng.noise(3);
+
         assert!(
             (-3..=3).contains(&val),
             "noise(3) produced {val}, expected [-3, 3]"
@@ -747,6 +818,7 @@ fn xorshift32_noise_in_range() {
 fn box_blur_widths_small_sigma() {
     // sigma < 0.5 should return [1, 1, 1].
     let h = box_blur_widths(0.1);
+
     assert_eq!(h, [1, 1, 1]);
 }
 
@@ -754,6 +826,7 @@ fn box_blur_widths_small_sigma() {
 fn box_blur_widths_reasonable_sigma() {
     // For sigma=4, widths should be non-trivial and small.
     let h = box_blur_widths(4.0);
+
     for &half in &h {
         assert!(half > 0, "half-width should be > 0 for sigma=4");
         assert!(half < 20, "half-width should be reasonable");
@@ -764,6 +837,7 @@ fn box_blur_widths_reasonable_sigma() {
 fn box_blur_pad_grows_with_sigma() {
     let pad_small = box_blur_pad(2.0);
     let pad_large = box_blur_pad(8.0);
+
     assert!(
         pad_large > pad_small,
         "larger sigma should produce larger padding"
@@ -778,6 +852,7 @@ fn box_blur_pad_grows_with_sigma() {
 fn compute_kernel_radius_zero() {
     let mut kernel = [0u32; MAX_KERNEL_DIAMETER];
     let diameter = compute_kernel(&mut kernel, 0, 256);
+
     assert_eq!(diameter, 1);
     assert_eq!(kernel[0], 65536); // all weight on center
 }
@@ -785,10 +860,12 @@ fn compute_kernel_radius_zero() {
 #[test]
 fn compute_kernel_sums_to_65536() {
     let mut kernel = [0u32; MAX_KERNEL_DIAMETER];
+
     for radius in 1..=MAX_CPU_BLUR_RADIUS {
         let sigma_fp = radius * 64; // reasonable sigma
         let diameter = compute_kernel(&mut kernel, radius, sigma_fp);
         let sum: u64 = kernel[..diameter].iter().map(|&w| w as u64).sum();
+
         assert_eq!(
             sum, 65536,
             "kernel sum should be 65536 for radius={radius}, got {sum}"
@@ -800,6 +877,7 @@ fn compute_kernel_sums_to_65536() {
 fn compute_kernel_is_symmetric() {
     let mut kernel = [0u32; MAX_KERNEL_DIAMETER];
     let diameter = compute_kernel(&mut kernel, 4, 512);
+
     for i in 0..diameter / 2 {
         assert_eq!(
             kernel[i],
@@ -815,6 +893,7 @@ fn compute_kernel_center_is_largest() {
     let mut kernel = [0u32; MAX_KERNEL_DIAMETER];
     let diameter = compute_kernel(&mut kernel, 4, 512);
     let center = diameter / 2;
+
     for i in 0..diameter {
         assert!(
             kernel[center] >= kernel[i],
@@ -845,6 +924,7 @@ fn palette_constants_exist() {
 fn srgb_to_linear_boundary_values() {
     assert_eq!(SRGB_TO_LINEAR[0], 0);
     assert_eq!(SRGB_TO_LINEAR[255], 65535);
+
     // Monotonically increasing.
     for i in 1..256 {
         assert!(
@@ -858,6 +938,7 @@ fn srgb_to_linear_boundary_values() {
 fn linear_to_srgb_boundary_values() {
     assert_eq!(LINEAR_TO_SRGB[0], 0);
     assert_eq!(LINEAR_TO_SRGB[4095], 255);
+
     // Monotonically non-decreasing.
     for i in 1..4096 {
         assert!(
@@ -880,6 +961,7 @@ fn srgb_roundtrip_approximate() {
         } else {
             srgb - back
         };
+
         assert!(
             diff <= 1,
             "sRGB roundtrip: {srgb} -> linear {linear} -> idx {idx} -> {back} (diff {diff})"
@@ -896,9 +978,9 @@ fn draw_coverage_full_coverage_opaque() {
     let mut buf = [0u8; 4 * 4 * 4]; // 4x4
     let mut s = make_surface(&mut buf, 4, 4);
     let color = Color::rgb(255, 0, 0);
-
     // 2x2 coverage map, all 255 (full coverage).
     let cov = [255u8; 4];
+
     s.draw_coverage(1, 1, &cov, 2, 2, color);
 
     // Covered pixels should have the color.
@@ -910,13 +992,17 @@ fn draw_coverage_full_coverage_opaque() {
 fn draw_coverage_zero_coverage_is_noop() {
     let mut buf = [0u8; 4 * 4 * 4];
     let mut s = make_surface(&mut buf, 4, 4);
+
     s.clear(Color::rgb(100, 100, 100));
 
     let mut before = [0u8; 4 * 4 * 4];
+
     before.copy_from_slice(s.data);
 
     let cov = [0u8; 4];
+
     s.draw_coverage(1, 1, &cov, 2, 2, Color::rgb(255, 0, 0));
+
     assert_eq!(s.data, &before[..]);
 }
 
@@ -924,13 +1010,17 @@ fn draw_coverage_zero_coverage_is_noop() {
 fn draw_coverage_transparent_color_is_noop() {
     let mut buf = [0u8; 4 * 4 * 4];
     let mut s = make_surface(&mut buf, 4, 4);
+
     s.clear(Color::rgb(100, 100, 100));
 
     let mut before = [0u8; 4 * 4 * 4];
+
     before.copy_from_slice(s.data);
 
     let cov = [255u8; 4];
+
     s.draw_coverage(0, 0, &cov, 2, 2, Color::TRANSPARENT);
+
     assert_eq!(s.data, &before[..]);
 }
 
@@ -939,9 +1029,9 @@ fn draw_coverage_negative_offset_clips() {
     let mut buf = [0u8; 4 * 4 * 4];
     let mut s = make_surface(&mut buf, 4, 4);
     let color = Color::rgb(0, 255, 0);
-
     // 4x4 coverage, placed at (-2, -2): only bottom-right 2x2 should be visible.
     let cov = [255u8; 16];
+
     s.draw_coverage(-2, -2, &cov, 4, 4, color);
 
     assert_eq!(s.get_pixel(0, 0), Some(color));

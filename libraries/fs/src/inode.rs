@@ -19,7 +19,7 @@
 
 use alloc::{format, vec, vec::Vec};
 
-use crate::{BLOCK_SIZE, FsError, alloc_mod::Allocator, block::BlockDevice};
+use crate::{alloc_mod::Allocator, block::BlockDevice, FsError, BLOCK_SIZE};
 
 // ── Layout constants ───────────────────────────────────────────────
 
@@ -118,13 +118,16 @@ impl Inode {
             block,
             inline_data: Vec::new(),
         };
+
         inode.save(device)?;
+
         Ok(inode)
     }
 
     /// Load an inode from `block`.
     pub fn load(device: &impl BlockDevice, block: u32) -> Result<Self, FsError> {
         let mut buf = vec![0u8; BLOCK_SIZE as usize];
+
         device.read_block(block, &mut buf)?;
 
         let file_id = get_u64(&buf, H_FILE_ID);
@@ -140,6 +143,7 @@ impl Inode {
         }
 
         let is_inline = flags & FLAG_INLINE != 0;
+
         if is_inline && size > INLINE_CAPACITY as u64 {
             return Err(FsError::Corrupt(format!(
                 "inode {file_id}: inline but size {size} > capacity {INLINE_CAPACITY}"
@@ -147,8 +151,10 @@ impl Inode {
         }
 
         let mut extents = Vec::with_capacity(extent_count);
+
         for i in 0..extent_count {
             let off = HEADER_SIZE + i * EXTENT_SIZE;
+
             extents.push(InodeExtent {
                 start_block: get_u32(&buf, off),
                 count: get_u16(&buf, off + 4),
@@ -162,7 +168,6 @@ impl Inode {
         } else {
             Vec::new()
         };
-
         let inline_data = if is_inline && size > 0 {
             buf[INLINE_OFFSET..INLINE_OFFSET + size as usize].to_vec()
         } else {
@@ -203,6 +208,7 @@ impl Inode {
 
         for (i, ext) in self.extents.iter().enumerate() {
             let off = HEADER_SIZE + i * EXTENT_SIZE;
+
             put_u32(&mut buf, off, ext.start_block);
             put_u16(&mut buf, off + 4, ext.count);
             put_u48(&mut buf, off + 6, ext.birth_txg);
@@ -224,13 +230,18 @@ impl Inode {
         if !self.is_inline() || buf.is_empty() {
             return 0;
         }
+
         let offset = offset as usize;
+
         if offset >= self.inline_data.len() {
             return 0;
         }
+
         let available = self.inline_data.len() - offset;
         let n = buf.len().min(available);
+
         buf[..n].copy_from_slice(&self.inline_data[offset..offset + n]);
+
         n
     }
 
@@ -251,19 +262,26 @@ impl Inode {
             self.is_inline(),
             "write_inline called on extent-based inode"
         );
+
         if data.is_empty() {
             return Ok(());
         }
+
         let offset = offset as usize;
         let end = offset + data.len();
+
         if end > INLINE_CAPACITY {
             return Err(FsError::NoSpace);
         }
+
         if end > self.inline_data.len() {
             self.inline_data.resize(end, 0);
         }
+
         self.inline_data[offset..end].copy_from_slice(data);
+
         self.size = self.inline_data.len() as u64;
+
         Ok(())
     }
 
@@ -275,9 +293,12 @@ impl Inode {
             if new_size > INLINE_CAPACITY as u64 {
                 return Err(FsError::NoSpace);
             }
+
             self.inline_data.resize(new_size as usize, 0);
         }
+
         self.size = new_size;
+
         Ok(())
     }
 
@@ -298,7 +319,9 @@ impl Inode {
             self.extents.clone()
         } else {
             let mut all = self.extents.clone();
+
             all.extend_from_slice(&self.overflow_extents);
+
             all
         }
     }
@@ -328,6 +351,7 @@ impl Inode {
         } else {
             return Err(FsError::NoSpace);
         }
+
         Ok(())
     }
 
@@ -335,6 +359,7 @@ impl Inode {
     pub fn clear_extents(&mut self) {
         self.extents.clear();
         self.overflow_extents.clear();
+
         self.indirect_block = 0;
     }
 
@@ -343,6 +368,7 @@ impl Inode {
     /// writing the inline content to data blocks first.
     pub fn transition_to_extents(&mut self) -> Vec<u8> {
         self.flags &= !FLAG_INLINE;
+
         core::mem::take(&mut self.inline_data)
     }
 
@@ -359,6 +385,7 @@ impl Inode {
         if !self.overflow_extents.is_empty() && self.indirect_block == 0 {
             self.indirect_block = allocator.alloc(1).ok_or(FsError::NoSpace)?;
         }
+
         Ok(())
     }
 
@@ -372,9 +399,9 @@ impl Inode {
     ) -> Result<OldBlocks, FsError> {
         let old_block = self.block;
         let old_indirect = self.indirect_block;
-
         // Allocate new inode block.
         let new_block = allocator.alloc(1).ok_or(FsError::NoSpace)?;
+
         self.block = new_block;
 
         // Allocate new overflow block if needed.
@@ -385,6 +412,7 @@ impl Inode {
         }
 
         self.save(device)?;
+
         Ok(OldBlocks {
             inode: old_block,
             indirect: old_indirect,
@@ -410,9 +438,11 @@ impl Inode {
         for ext in &self.overflow_extents {
             allocator.free(ext.start_block, ext.count as u32);
         }
+
         if self.indirect_block != 0 {
             allocator.free(self.indirect_block, 1);
         }
+
         allocator.free(self.block, 1);
     }
 }
@@ -434,9 +464,11 @@ fn load_overflow_extents(
     block: u32,
 ) -> Result<Vec<InodeExtent>, FsError> {
     let mut buf = vec![0u8; BLOCK_SIZE as usize];
+
     device.read_block(block, &mut buf)?;
 
     let count = get_u32(&buf, 0) as usize;
+
     if count > MAX_OVERFLOW_EXTENTS {
         return Err(FsError::Corrupt(format!(
             "inode {file_id}: overflow block has {count} extents, max {MAX_OVERFLOW_EXTENTS}"
@@ -444,8 +476,10 @@ fn load_overflow_extents(
     }
 
     let mut extents = Vec::with_capacity(count);
+
     for i in 0..count {
         let off = OVERFLOW_HEADER + i * EXTENT_SIZE;
+
         extents.push(InodeExtent {
             start_block: get_u32(&buf, off),
             count: get_u16(&buf, off + 4),
@@ -469,11 +503,13 @@ fn save_overflow_extents(
     );
 
     let mut buf = vec![0u8; BLOCK_SIZE as usize];
+
     put_u32(&mut buf, 0, extents.len() as u32);
     // bytes 4..8: reserved (zero)
 
     for (i, ext) in extents.iter().enumerate() {
         let off = OVERFLOW_HEADER + i * EXTENT_SIZE;
+
         put_u32(&mut buf, off, ext.start_block);
         put_u16(&mut buf, off + 4, ext.count);
         put_u48(&mut buf, off + 6, ext.birth_txg);
@@ -494,7 +530,9 @@ fn get_u32(buf: &[u8], off: usize) -> u32 {
 
 fn get_u48(buf: &[u8], off: usize) -> u64 {
     let mut bytes = [0u8; 8];
+
     bytes[..6].copy_from_slice(&buf[off..off + 6]);
+
     u64::from_le_bytes(bytes)
 }
 

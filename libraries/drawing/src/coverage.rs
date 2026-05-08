@@ -3,7 +3,7 @@
 //! Draws 1-byte-per-pixel grayscale coverage maps (from font rasterizers)
 //! onto BGRA surfaces with sRGB gamma-correct blending.
 
-use crate::{Color, LINEAR_TO_SRGB, SRGB_TO_LINEAR, Surface, div255, linear_to_idx};
+use crate::{div255, linear_to_idx, Color, Surface, LINEAR_TO_SRGB, SRGB_TO_LINEAR};
 
 impl<'a> Surface<'a> {
     /// Draw a 1-byte-per-pixel grayscale coverage map (anti-aliased glyph)
@@ -31,6 +31,7 @@ impl<'a> Surface<'a> {
 
         // Upfront coverage buffer size check.
         let cov_total = (cov_width as usize) * (cov_height as usize);
+
         if coverage.len() < cov_total {
             return;
         }
@@ -42,7 +43,6 @@ impl<'a> Surface<'a> {
         let color_a = color.a as u32;
         let encoded = color.encode(self.format);
         let encoded_u32 = u32::from_ne_bytes(encoded);
-
         // Pre-clip: compute visible range of the coverage buffer against
         // surface bounds, handling negative x/y offsets. Uses i64 to avoid
         // overflow when surface dimensions are added to large negative coords.
@@ -52,7 +52,6 @@ impl<'a> Surface<'a> {
         let surf_h = self.height as i64;
         let cov_w = cov_width as i64;
         let cov_h = cov_height as i64;
-
         let start_row = if yi < 0 { -yi } else { 0 };
         let end_row = if cov_h < surf_h - yi {
             cov_h
@@ -96,7 +95,6 @@ impl<'a> Surface<'a> {
 
                 let px = (x + col as i32) as u32;
                 let pixel_off = row_base + (px * 4) as usize;
-
                 // Effective alpha: color.a * coverage / 255 (uniform for all channels).
                 let alpha = div255(color_a * cov as u32);
 
@@ -117,29 +115,24 @@ impl<'a> Surface<'a> {
                 // px < width, so pixel_off + 4 <= height * stride <= data.len().
                 unsafe {
                     let p = ptr.add(pixel_off);
-
                     // Read BGRA destination pixel.
                     let dst_b = core::ptr::read(p);
                     let dst_g_byte = core::ptr::read(p.add(1));
                     let dst_r_byte = core::ptr::read(p.add(2));
                     let dst_a_byte = core::ptr::read(p.add(3));
-
                     // Convert destination to linear space.
                     let dst_r_lin = SRGB_TO_LINEAR[dst_r_byte as usize] as u32;
                     let dst_g_lin = SRGB_TO_LINEAR[dst_g_byte as usize] as u32;
                     let dst_b_lin = SRGB_TO_LINEAR[dst_b as usize] as u32;
-
                     // Blend uniformly in linear space (same alpha for all channels).
                     let inv_a = 255 - alpha;
                     let out_r_lin = div255(dst_r_lin * inv_a + src_r_lin * alpha);
                     let out_g_lin = div255(dst_g_lin * inv_a + src_g_lin * alpha);
                     let out_b_lin = div255(dst_b_lin * inv_a + src_b_lin * alpha);
-
                     // Convert back to sRGB.
                     let out_r = LINEAR_TO_SRGB[linear_to_idx(out_r_lin)];
                     let out_g = LINEAR_TO_SRGB[linear_to_idx(out_g_lin)];
                     let out_b = LINEAR_TO_SRGB[linear_to_idx(out_b_lin)];
-
                     // Alpha compositing.
                     let out_a = dst_a_byte as u32 + div255(alpha * (255 - dst_a_byte as u32));
                     let out_a = if out_a > 255 { 255u8 } else { out_a as u8 };

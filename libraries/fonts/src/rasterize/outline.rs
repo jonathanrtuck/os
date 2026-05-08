@@ -69,17 +69,14 @@ pub(crate) fn extract_outline(
     outline: &mut GlyphOutline,
 ) -> Option<(u16, i16, u16)> {
     let font = FontRef::new(font_data).ok()?;
-
     // Get units_per_em
     let head = font.head().ok()?;
     let upem = head.units_per_em();
-
     // Get horizontal metrics
     let hmtx = font.hmtx().ok()?;
     let hhea = font.hhea().ok()?;
     let num_h_metrics = hhea.number_of_h_metrics();
     let gid = read_fonts::types::GlyphId::new(glyph_id as u32);
-
     let (advance_fu, lsb_fu) = if (glyph_id as u16) < num_h_metrics {
         let metrics = hmtx.h_metrics();
         let m = metrics.get(glyph_id as usize)?;
@@ -92,9 +89,9 @@ pub(crate) fn extract_outline(
         let lsb_data = hmtx.left_side_bearings();
         let lsb_idx = (glyph_id as usize).checked_sub(num_h_metrics as usize)?;
         let lsb = lsb_data.get(lsb_idx).map(|v| v.get()).unwrap_or(0);
+
         (advance, lsb)
     };
-
     // Get glyph outline from glyf table
     let loca = font.loca(None).ok()?;
     let glyf = font.glyf().ok()?;
@@ -115,22 +112,27 @@ pub(crate) fn extract_outline(
 
             // Extract contours and points
             let num_contours = simple.number_of_contours() as usize;
+
             if num_contours > MAX_CONTOURS {
                 return None;
             }
 
             let end_pts = simple.end_pts_of_contours();
+
             for (i, ep) in end_pts.iter().enumerate() {
                 if i >= MAX_CONTOURS {
                     return None;
                 }
+
                 outline.contour_ends[i] = ep.get();
             }
+
             outline.num_contours = num_contours as u16;
 
             // Iterate points
             let mut pt_idx = 0usize;
             let num_points = simple.num_points();
+
             if num_points > MAX_GLYPH_POINTS {
                 return None;
             }
@@ -139,13 +141,16 @@ pub(crate) fn extract_outline(
                 if pt_idx >= MAX_GLYPH_POINTS {
                     return None;
                 }
+
                 outline.points[pt_idx] = GlyphPoint {
                     x: point.x as i32,
                     y: point.y as i32,
                     on_curve: point.on_curve,
                 };
+
                 pt_idx += 1;
             }
+
             outline.num_points = pt_idx as u16;
         }
         read_fonts::tables::glyf::Glyph::Composite(composite) => {
@@ -159,39 +164,42 @@ pub(crate) fn extract_outline(
             for component in composite.components() {
                 let comp_gid = component.glyph.to_u32() as u16;
                 let flags = component.flags;
-
                 // Get component offsets
                 let (dx, dy) = match component.anchor {
                     read_fonts::tables::glyf::Anchor::Offset { x, y } => (x as i32, y as i32),
                     _ => (0, 0),
                 };
-
                 // Recursively extract the component outline
                 let pts_before = outline.num_points as usize;
                 let contours_before = outline.num_contours as usize;
-
                 // Get component glyph data
                 let comp_gid_rf = read_fonts::types::GlyphId::new(comp_gid as u32);
+
                 if let Ok(Some(comp_data)) = loca.get_glyf(comp_gid_rf, &glyf) {
                     match comp_data {
                         read_fonts::tables::glyf::Glyph::Simple(comp_simple) => {
                             let comp_nc = comp_simple.number_of_contours() as usize;
+
                             if contours_before + comp_nc > MAX_CONTOURS {
                                 continue;
                             }
 
                             let comp_end_pts = comp_simple.end_pts_of_contours();
+
                             for (i, ep) in comp_end_pts.iter().enumerate() {
                                 outline.contour_ends[contours_before + i] =
                                     ep.get() + pts_before as u16;
                             }
+
                             outline.num_contours = (contours_before + comp_nc) as u16;
 
                             let mut pt_idx = pts_before;
+
                             for point in comp_simple.points() {
                                 if pt_idx >= MAX_GLYPH_POINTS {
                                     break;
                                 }
+
                                 outline.points[pt_idx] = GlyphPoint {
                                     x: point.x as i32 + dx,
                                     y: point.y as i32 + dy,
@@ -199,6 +207,7 @@ pub(crate) fn extract_outline(
                                 };
                                 pt_idx += 1;
                             }
+
                             outline.num_points = pt_idx as u16;
                         }
                         _ => {

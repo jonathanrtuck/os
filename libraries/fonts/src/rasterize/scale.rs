@@ -16,6 +16,7 @@ pub(crate) fn scale_fu(val: i32, size_px: u32, upem: u16) -> i32 {
 pub(crate) fn scale_fu_ceil(val: i32, size_px: u32, upem: u16) -> i32 {
     let n = val as i64 * size_px as i64;
     let d = upem as i64;
+
     if n > 0 {
         ((n + d - 1) / d) as i32
     } else {
@@ -27,6 +28,7 @@ pub(crate) fn scale_fu_ceil(val: i32, size_px: u32, upem: u16) -> i32 {
 pub(crate) fn scale_fu_floor(val: i32, size_px: u32, upem: u16) -> i32 {
     let n = val as i64 * size_px as i64;
     let d = upem as i64;
+
     if n < 0 {
         ((n - d + 1) / d) as i32
     } else {

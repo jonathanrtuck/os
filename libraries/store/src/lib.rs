@@ -119,10 +119,12 @@ impl Store {
         }
 
         let catalog_file = fs.create()?;
+
         fs.set_root(catalog_file)?;
 
         let catalog = BTreeMap::new();
         let data = encode_catalog(CATALOG_MAGIC, &catalog);
+
         fs.write(catalog_file, 0, &data)?;
         fs.commit()?;
 
@@ -138,9 +140,9 @@ impl Store {
     /// Fails if no root pointer exists.
     pub fn open(fs: Box<dyn Files>) -> Result<Self, StoreError> {
         let catalog_file = fs.root().ok_or(StoreError::NotInitialized)?;
-
         let size = fs.size(catalog_file)? as usize;
         let mut data = vec![0u8; size];
+
         fs.read(catalog_file, 0, &mut data)?;
 
         let catalog = decode_catalog(CATALOG_MAGIC, &data)?;
@@ -155,6 +157,7 @@ impl Store {
     /// Create a new file with the given media type.
     pub fn create(&mut self, media_type: &str) -> Result<FileId, StoreError> {
         let file_id = self.fs.create()?;
+
         self.catalog.insert(
             file_id.0,
             CatalogEntry {
@@ -162,6 +165,7 @@ impl Store {
                 attributes: BTreeMap::new(),
             },
         );
+
         Ok(file_id)
     }
 
@@ -170,7 +174,9 @@ impl Store {
         if self.catalog.remove(&file.0).is_none() {
             return Err(StoreError::NotFound(file));
         }
+
         self.fs.delete(file)?;
+
         Ok(())
     }
 
@@ -208,7 +214,9 @@ impl Store {
             .catalog
             .get_mut(&file.0)
             .ok_or(StoreError::NotFound(file))?;
+
         entry.attributes.insert(key.to_string(), value.to_string());
+
         Ok(())
     }
 
@@ -218,6 +226,7 @@ impl Store {
             .catalog
             .get(&file.0)
             .ok_or(StoreError::NotFound(file))?;
+
         Ok(entry.attributes.get(key).map(|v| v.as_str()))
     }
 
@@ -228,6 +237,7 @@ impl Store {
             .get(&file.0)
             .ok_or(StoreError::NotFound(file))?;
         let fm = self.fs.metadata(file)?;
+
         Ok(DocumentMetadata {
             file_id: fm.file_id,
             media_type: entry.media_type.clone(),
@@ -253,6 +263,7 @@ impl Store {
         self.write_catalog()?;
 
         let mut all = Vec::with_capacity(files.len() + 1);
+
         all.extend_from_slice(files);
         all.push(self.catalog_file);
 
@@ -263,6 +274,7 @@ impl Store {
     pub fn restore(&mut self, snapshot: SnapshotId) -> Result<(), StoreError> {
         self.fs.restore(snapshot)?;
         self.reload_catalog()?;
+
         Ok(())
     }
 
@@ -275,6 +287,7 @@ impl Store {
     pub fn commit(&mut self) -> Result<(), StoreError> {
         self.write_catalog()?;
         self.fs.commit()?;
+
         Ok(())
     }
 
@@ -287,16 +300,20 @@ impl Store {
 
     fn write_catalog(&mut self) -> Result<(), StoreError> {
         let data = encode_catalog(CATALOG_MAGIC, &self.catalog);
+
         self.fs.truncate(self.catalog_file, 0)?;
         self.fs.write(self.catalog_file, 0, &data)?;
+
         Ok(())
     }
 
     fn reload_catalog(&mut self) -> Result<(), StoreError> {
         let size = self.fs.size(self.catalog_file)? as usize;
         let mut data = vec![0u8; size];
+
         self.fs.read(self.catalog_file, 0, &mut data)?;
         self.catalog = decode_catalog(CATALOG_MAGIC, &data)?;
+
         Ok(())
     }
 }
@@ -323,7 +340,7 @@ fn matches_query(entry: &CatalogEntry, query: &Query) -> bool {
 mod tests {
     use alloc::{boxed::Box, format, string::ToString, vec};
 
-    use fs::{BLOCK_SIZE, Filesystem};
+    use fs::{Filesystem, BLOCK_SIZE};
 
     use super::*;
 
@@ -349,14 +366,18 @@ mod tests {
                     actual: buf.len(),
                 });
             }
+
             let i = index as usize;
+
             if i >= self.blocks.len() {
                 return Err(FsError::OutOfBounds {
                     block: index,
                     count: self.blocks.len() as u32,
                 });
             }
+
             buf.copy_from_slice(&self.blocks[i]);
+
             Ok(())
         }
 
@@ -367,14 +388,18 @@ mod tests {
                     actual: data.len(),
                 });
             }
+
             let i = index as usize;
+
             if i >= self.blocks.len() {
                 return Err(FsError::OutOfBounds {
                     block: index,
                     count: self.blocks.len() as u32,
                 });
             }
+
             self.blocks[i].copy_from_slice(data);
+
             Ok(())
         }
 
@@ -398,12 +423,14 @@ mod tests {
         let catalog = BTreeMap::new();
         let data = serialize::encode_catalog(CATALOG_MAGIC, &catalog);
         let decoded = serialize::decode_catalog(CATALOG_MAGIC, &data).unwrap();
+
         assert!(decoded.is_empty());
     }
 
     #[test]
     fn serialize_single_entry() {
         let mut catalog = BTreeMap::new();
+
         catalog.insert(
             1,
             CatalogEntry {
@@ -411,10 +438,14 @@ mod tests {
                 attributes: BTreeMap::new(),
             },
         );
+
         let data = serialize::encode_catalog(CATALOG_MAGIC, &catalog);
         let decoded = serialize::decode_catalog(CATALOG_MAGIC, &data).unwrap();
+
         assert_eq!(decoded.len(), 1);
+
         let entry = decoded.get(&1).unwrap();
+
         assert_eq!(entry.media_type, "text/plain");
         assert!(entry.attributes.is_empty());
     }
@@ -422,10 +453,12 @@ mod tests {
     #[test]
     fn serialize_with_attributes() {
         let mut attrs = BTreeMap::new();
+
         attrs.insert("title".to_string(), "My Document".to_string());
         attrs.insert("author".to_string(), "Test".to_string());
 
         let mut catalog = BTreeMap::new();
+
         catalog.insert(
             42,
             CatalogEntry {
@@ -436,8 +469,8 @@ mod tests {
 
         let data = serialize::encode_catalog(CATALOG_MAGIC, &catalog);
         let decoded = serialize::decode_catalog(CATALOG_MAGIC, &data).unwrap();
-
         let entry = decoded.get(&42).unwrap();
+
         assert_eq!(entry.media_type, "application/json");
         assert_eq!(entry.attributes.get("title").unwrap(), "My Document");
         assert_eq!(entry.attributes.get("author").unwrap(), "Test");
@@ -446,6 +479,7 @@ mod tests {
     #[test]
     fn serialize_multiple_entries() {
         let mut catalog = BTreeMap::new();
+
         for i in 0..10 {
             catalog.insert(
                 i,
@@ -458,7 +492,9 @@ mod tests {
 
         let data = serialize::encode_catalog(CATALOG_MAGIC, &catalog);
         let decoded = serialize::decode_catalog(CATALOG_MAGIC, &data).unwrap();
+
         assert_eq!(decoded.len(), 10);
+
         for i in 0..10 {
             assert_eq!(decoded.get(&i).unwrap().media_type, format!("type/{i}"));
         }
@@ -469,12 +505,14 @@ mod tests {
         let catalog = BTreeMap::new();
         let data = serialize::encode_catalog(0xDEAD_BEEF, &catalog);
         let result = serialize::decode_catalog(CATALOG_MAGIC, &data);
+
         assert!(matches!(result, Err(StoreError::Corrupt(_))));
     }
 
     #[test]
     fn serialize_truncated_data_fails() {
         let mut catalog = BTreeMap::new();
+
         catalog.insert(
             1,
             CatalogEntry {
@@ -482,10 +520,12 @@ mod tests {
                 attributes: BTreeMap::new(),
             },
         );
+
         let data = serialize::encode_catalog(CATALOG_MAGIC, &catalog);
         // Truncate mid-entry.
         let truncated = &data[..data.len() / 2];
         let result = serialize::decode_catalog(CATALOG_MAGIC, truncated);
+
         assert!(matches!(result, Err(StoreError::Corrupt(_))));
     }
 
@@ -497,6 +537,7 @@ mod tests {
         let store = Store::init(fs).unwrap();
         let fs = store.into_inner();
         let store = Store::open(fs).unwrap();
+
         // Should open without error; catalog is empty.
         assert!(store.query(&Query::Type("text".to_string())).is_empty());
     }
@@ -507,6 +548,7 @@ mod tests {
         let store = Store::init(fs).unwrap();
         let fs = store.into_inner();
         let result = Store::init(fs);
+
         assert!(matches!(result, Err(StoreError::AlreadyInitialized)));
     }
 
@@ -514,6 +556,7 @@ mod tests {
     fn store_open_uninitialized_fails() {
         let fs = make_fs();
         let result = Store::open(fs);
+
         assert!(matches!(result, Err(StoreError::NotInitialized)));
     }
 
@@ -524,6 +567,7 @@ mod tests {
         let fs = make_fs();
         let mut store = Store::init(fs).unwrap();
         let file = store.create("text/plain").unwrap();
+
         assert_eq!(store.media_type(file).unwrap(), "text/plain");
     }
 
@@ -532,10 +576,12 @@ mod tests {
         let fs = make_fs();
         let mut store = Store::init(fs).unwrap();
         let file = store.create("text/plain").unwrap();
+
         store.write(file, 0, b"hello store").unwrap();
 
         let mut buf = [0u8; 11];
         let n = store.read(file, 0, &mut buf).unwrap();
+
         assert_eq!(n, 11);
         assert_eq!(&buf, b"hello store");
     }
@@ -545,7 +591,9 @@ mod tests {
         let fs = make_fs();
         let mut store = Store::init(fs).unwrap();
         let file = store.create("text/plain").unwrap();
+
         store.delete(file).unwrap();
+
         assert!(matches!(
             store.media_type(file),
             Err(StoreError::NotFound(_))
@@ -557,6 +605,7 @@ mod tests {
         let fs = make_fs();
         let mut store = Store::init(fs).unwrap();
         let result = store.delete(FileId(999));
+
         assert!(matches!(result, Err(StoreError::NotFound(_))));
     }
 
@@ -565,6 +614,7 @@ mod tests {
         let fs = make_fs();
         let mut store = Store::init(fs).unwrap();
         let file = store.create("text/plain").unwrap();
+
         store.write(file, 0, b"hello world").unwrap();
         store.truncate(file, 5).unwrap();
     }
@@ -576,7 +626,9 @@ mod tests {
         let fs = make_fs();
         let mut store = Store::init(fs).unwrap();
         let file = store.create("text/plain").unwrap();
+
         store.set_attribute(file, "title", "My Doc").unwrap();
+
         assert_eq!(store.attribute(file, "title").unwrap(), Some("My Doc"));
     }
 
@@ -585,6 +637,7 @@ mod tests {
         let fs = make_fs();
         let mut store = Store::init(fs).unwrap();
         let file = store.create("text/plain").unwrap();
+
         assert_eq!(store.attribute(file, "nonexistent").unwrap(), None);
     }
 
@@ -593,6 +646,7 @@ mod tests {
         let fs = make_fs();
         let store = Store::init(fs).unwrap();
         let result = store.attribute(FileId(999), "key");
+
         assert!(matches!(result, Err(StoreError::NotFound(_))));
     }
 
@@ -603,10 +657,12 @@ mod tests {
         let fs = make_fs();
         let mut store = Store::init(fs).unwrap();
         let file = store.create("image/png").unwrap();
+
         store.write(file, 0, b"PNG data").unwrap();
         store.set_attribute(file, "width", "100").unwrap();
 
         let meta = store.metadata(file).unwrap();
+
         assert_eq!(meta.file_id, file);
         assert_eq!(meta.media_type, "image/png");
         assert_eq!(meta.size, 8);
@@ -621,8 +677,8 @@ mod tests {
         let mut store = Store::init(fs).unwrap();
         let txt = store.create("text/plain").unwrap();
         let _img = store.create("image/png").unwrap();
-
         let results = store.query(&Query::MediaType("text/plain".to_string()));
+
         assert_eq!(results.len(), 1);
         assert_eq!(results[0], txt);
     }
@@ -634,8 +690,8 @@ mod tests {
         let _txt = store.create("text/plain").unwrap();
         let _md = store.create("text/markdown").unwrap();
         let _img = store.create("image/png").unwrap();
-
         let results = store.query(&Query::Type("text".to_string()));
+
         assert_eq!(results.len(), 2);
     }
 
@@ -645,6 +701,7 @@ mod tests {
         let mut store = Store::init(fs).unwrap();
         let a = store.create("text/plain").unwrap();
         let b = store.create("text/plain").unwrap();
+
         store.set_attribute(a, "tag", "important").unwrap();
         store.set_attribute(b, "tag", "draft").unwrap();
 
@@ -652,6 +709,7 @@ mod tests {
             key: "tag".to_string(),
             value: "important".to_string(),
         });
+
         assert_eq!(results.len(), 1);
         assert_eq!(results[0], a);
     }
@@ -662,6 +720,7 @@ mod tests {
         let mut store = Store::init(fs).unwrap();
         let a = store.create("text/plain").unwrap();
         let b = store.create("image/png").unwrap();
+
         store.set_attribute(a, "tag", "x").unwrap();
         store.set_attribute(b, "tag", "x").unwrap();
 
@@ -672,6 +731,7 @@ mod tests {
                 value: "x".to_string(),
             },
         ]));
+
         assert_eq!(results.len(), 1);
         assert_eq!(results[0], a);
     }
@@ -683,11 +743,11 @@ mod tests {
         let a = store.create("text/plain").unwrap();
         let b = store.create("image/png").unwrap();
         let _c = store.create("audio/mp3").unwrap();
-
         let results = store.query(&Query::Or(vec![
             Query::MediaType("text/plain".to_string()),
             Query::MediaType("image/png".to_string()),
         ]));
+
         assert_eq!(results.len(), 2);
     }
 
@@ -698,16 +758,21 @@ mod tests {
         let fs = make_fs();
         let mut store = Store::init(fs).unwrap();
         let file = store.create("text/plain").unwrap();
+
         store.write(file, 0, b"persistent").unwrap();
         store.set_attribute(file, "title", "Test").unwrap();
         store.commit().unwrap();
 
         let fs = store.into_inner();
         let store = Store::open(fs).unwrap();
+
         assert_eq!(store.media_type(file).unwrap(), "text/plain");
         assert_eq!(store.attribute(file, "title").unwrap(), Some("Test"));
+
         let mut buf = [0u8; 10];
+
         store.read(file, 0, &mut buf).unwrap();
+
         assert_eq!(&buf, b"persistent");
     }
 
@@ -718,6 +783,7 @@ mod tests {
         let fs = make_fs();
         let mut store = Store::init(fs).unwrap();
         let file = store.create("text/plain").unwrap();
+
         store.write(file, 0, b"version 1").unwrap();
         store.set_attribute(file, "ver", "1").unwrap();
 
@@ -725,11 +791,12 @@ mod tests {
 
         store.write(file, 0, b"version 2").unwrap();
         store.set_attribute(file, "ver", "2").unwrap();
-
         store.restore(snap).unwrap();
 
         let mut buf = [0u8; 9];
+
         store.read(file, 0, &mut buf).unwrap();
+
         assert_eq!(&buf, b"version 1");
         assert_eq!(store.attribute(file, "ver").unwrap(), Some("1"));
     }
@@ -739,8 +806,11 @@ mod tests {
         let fs = make_fs();
         let mut store = Store::init(fs).unwrap();
         let file = store.create("text/plain").unwrap();
+
         store.write(file, 0, b"data").unwrap();
+
         let snap = store.snapshot(&[file]).unwrap();
+
         store.delete_snapshot(snap).unwrap();
     }
 
@@ -755,8 +825,10 @@ mod tests {
             StoreError::NotFound(FileId(1)),
             StoreError::Corrupt("test".to_string()),
         ];
+
         for err in &errors {
             let s = format!("{err}");
+
             assert!(!s.is_empty());
         }
     }
@@ -768,6 +840,7 @@ mod tests {
         let fs = make_fs();
         let store = Store::init(fs).unwrap();
         let s = format!("{store:?}");
+
         assert!(s.contains("Store"));
     }
 }

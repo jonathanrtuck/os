@@ -2,8 +2,8 @@
 
 use crate::{
     node::{
-        DATA_BUFFER_SIZE, DATA_OFFSET, DIRTY_BITMAP_WORDS, MAX_NODES, NODES_OFFSET, NULL, Node,
-        NodeId, SCENE_SIZE, SceneHeader,
+        Node, NodeId, SceneHeader, DATA_BUFFER_SIZE, DATA_OFFSET, DIRTY_BITMAP_WORDS, MAX_NODES,
+        NODES_OFFSET, NULL, SCENE_SIZE,
     },
     primitives::{Content, DataRef, ShapedGlyph},
 };
@@ -28,16 +28,22 @@ impl<'a> Iterator for ChildIter<'a> {
         if self.current == NULL || self.current == self.stop_before {
             return None;
         }
+
         let id = self.current;
         // Read next_sibling from the node at `id`.
         // SAFETY: the buffer and node layout are the same as SceneWriter::node().
         let offset = NODES_OFFSET + (id as usize) * NODE_SIZE;
+
         if offset + NODE_SIZE > self.buf.len() {
             self.current = NULL;
+
             return None; // Bounds safety
         }
+
         let node = unsafe { &*(self.buf.as_ptr().add(offset) as *const Node) };
+
         self.current = node.next_sibling;
+
         Some(id)
     }
 }
@@ -84,6 +90,7 @@ impl<'a> SceneWriter<'a> {
     /// Link `child` as the last child of `parent`.
     pub fn add_child(&mut self, parent: NodeId, child: NodeId) {
         debug_assert!(parent != child, "add_child: self-parenting");
+
         let first = self.node(parent).first_child;
 
         if first == NULL {
@@ -148,10 +155,12 @@ impl<'a> SceneWriter<'a> {
         let bits = &self.header().dirty_bits;
         let mut count = 0u32;
         let mut i = 0;
+
         while i < DIRTY_BITMAP_WORDS {
             count += bits[i].count_ones();
             i += 1;
         }
+
         count
     }
     /// Increment the generation counter (signals a complete update).
@@ -181,26 +190,33 @@ impl<'a> SceneWriter<'a> {
     /// Test whether a node is marked dirty.
     pub fn is_dirty(&self, node_id: NodeId) -> bool {
         let idx = node_id as usize;
+
         if idx >= MAX_NODES {
             return false;
         }
+
         let word = idx / 64;
         let bit = idx % 64;
+
         (self.header().dirty_bits[word] & (1u64 << bit)) != 0
     }
     /// Mark a single node as dirty in the bitmap.
     pub fn mark_dirty(&mut self, node_id: NodeId) {
         let idx = node_id as usize;
+
         if idx >= MAX_NODES {
             return;
         }
+
         let word = idx / 64;
         let bit = idx % 64;
+
         self.header_mut().dirty_bits[word] |= 1u64 << bit;
     }
     /// Get a shared reference to a node by ID.
     pub fn node(&self, id: NodeId) -> &Node {
         assert!((id as usize) < MAX_NODES, "NodeId out of bounds");
+
         let offset = NODES_OFFSET + (id as usize) * NODE_SIZE;
 
         // SAFETY: `id` is a NodeId returned by `alloc_node` (bounded by
@@ -222,12 +238,14 @@ impl<'a> SceneWriter<'a> {
     /// allocated high-water mark within the current buffer.
     pub fn set_node_count(&mut self, count: u16) {
         let old_count = self.header().node_count;
+
         self.header_mut().node_count = count;
 
         // Clean up dangling first_child pointers in surviving nodes.
         if count < old_count {
             for id in 0..count {
                 let n = self.node_mut(id);
+
                 if n.first_child >= count {
                     n.first_child = NULL;
                 }
@@ -237,6 +255,7 @@ impl<'a> SceneWriter<'a> {
     /// Get a mutable reference to a node by ID.
     pub fn node_mut(&mut self, id: NodeId) -> &mut Node {
         assert!((id as usize) < MAX_NODES, "NodeId out of bounds");
+
         let offset = NODES_OFFSET + (id as usize) * NODE_SIZE;
 
         // SAFETY: Same bounds reasoning as `node()`. Exclusive borrow on
@@ -269,7 +288,6 @@ impl<'a> SceneWriter<'a> {
             let start = DATA_OFFSET + used as usize;
 
             self.buf[start..start + actual].copy_from_slice(&bytes[..actual]);
-
             self.header_mut().data_used = used + actual as u32;
         }
 
@@ -309,10 +327,12 @@ impl<'a> SceneWriter<'a> {
             // Zero the alignment gap so content hashes are deterministic.
             let gap = aligned - used;
             let base = DATA_OFFSET + used;
+
             // SAFETY: base..base+gap is within the data buffer (checked above).
             unsafe {
                 core::ptr::write_bytes(self.buf.as_mut_ptr().add(base), 0, gap);
             }
+
             self.header_mut().data_used = aligned as u32;
         }
 
@@ -350,18 +370,22 @@ impl<'a> SceneWriter<'a> {
     /// similarly cleared.
     pub fn reset_data(&mut self) {
         let count = self.header().node_count;
+
         for id in 0..count {
             let n = self.node_mut(id);
+
             match n.content {
                 Content::Glyphs { .. } | Content::Path { .. } => {
                     n.content = Content::None;
                 }
                 _ => {}
             }
+
             if !n.clip_path.is_empty() {
                 n.clip_path = DataRef::EMPTY;
             }
         }
+
         self.header_mut().data_used = 0;
     }
     pub fn root(&self) -> NodeId {

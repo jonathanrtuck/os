@@ -65,6 +65,7 @@ impl LineBreaker for WordBreaker {
         if pos == 0 || pos >= text.len() {
             return false;
         }
+
         matches!(text[pos - 1], b' ' | b'\t' | b'-')
     }
 
@@ -116,6 +117,7 @@ impl ParagraphLayout {
         if self.lines.is_empty() {
             return (0, 0);
         }
+
         for (i, line) in self.lines.iter().enumerate() {
             let start = line.byte_offset as usize;
             let next_start = if i + 1 < self.lines.len() {
@@ -123,13 +125,16 @@ impl ParagraphLayout {
             } else {
                 usize::MAX
             };
+
             if byte_offset < next_start {
                 return (i, byte_offset.saturating_sub(start));
             }
         }
+
         // Past end — last line.
         let last = self.lines.len() - 1;
         let start = self.lines[last].byte_offset as usize;
+
         (last, byte_offset.saturating_sub(start))
     }
 
@@ -142,15 +147,19 @@ impl ParagraphLayout {
         if self.lines.is_empty() {
             return 0;
         }
+
         if target_line >= self.lines.len() {
             // Past last line — return end of text.
             let last = &self.lines[self.lines.len() - 1];
+
             return (last.byte_offset + last.byte_length) as usize;
         }
+
         let line = &self.lines[target_line];
         let start = line.byte_offset as usize;
         let len = line.byte_length as usize;
         let col = if target_col > len { len } else { target_col };
+
         start + col
     }
 }
@@ -179,9 +188,11 @@ pub fn layout_paragraph(
         // Skip leading whitespace on continuation lines (soft breaks only).
         if trim && !lines.is_empty() {
             let before_skip = pos;
+
             while pos < text.len() && matches!(text[pos], b' ' | b'\t') {
                 pos += 1;
             }
+
             // If we skipped to end-of-text, all remaining was whitespace.
             // Don't emit a blank line for it.
             if pos >= text.len() && before_skip < text.len() {
@@ -208,10 +219,12 @@ pub fn layout_paragraph(
             // Would this character exceed the line width?
             if width + cw > max_width && pos > line_start {
                 broke_soft = true;
+
                 if let Some((bp, bw)) = best_break {
                     pos = bp;
                     width = bw;
                 }
+
                 // else: no break opportunity found, break at current pos
                 // (character-level fallback for very long words).
                 break;
@@ -234,9 +247,11 @@ pub fn layout_paragraph(
             while line_end > line_start && matches!(text[line_end - 1], b' ' | b'\t') {
                 line_end -= 1;
             }
+
             if line_end < pos {
                 // Recalculate width without trailing whitespace.
                 line_width = 0.0;
+
                 for &b in &text[line_start..line_end] {
                     line_width += metrics.char_width(b as char);
                 }
@@ -272,6 +287,7 @@ pub fn layout_paragraph(
             Alignment::Center => max_width * 0.5,
             Alignment::Right => max_width,
         };
+
         lines.push(LayoutLine {
             byte_offset: 0,
             byte_length: 0,
@@ -288,6 +304,7 @@ pub fn layout_paragraph(
             Alignment::Center => max_width * 0.5,
             Alignment::Right => max_width,
         };
+
         lines.push(LayoutLine {
             byte_offset: text.len() as u32,
             byte_length: 0,
@@ -316,6 +333,7 @@ pub fn byte_to_line_col(
     breaker: &dyn LineBreaker,
 ) -> (usize, usize) {
     let layout = layout_paragraph(text, metrics, max_width, Alignment::Left, breaker);
+
     layout.byte_to_line_col(byte_offset)
 }
 
@@ -334,6 +352,7 @@ pub fn line_col_to_byte(
     breaker: &dyn LineBreaker,
 ) -> usize {
     let layout = layout_paragraph(text, metrics, max_width, Alignment::Left, breaker);
+
     layout.line_col_to_byte(target_line, target_col)
 }
 
@@ -345,13 +364,16 @@ pub fn word_boundary_backward(text: &[u8], pos: usize) -> usize {
     if pos == 0 || text.is_empty() {
         return 0;
     }
+
     let mut i = pos;
+
     while i > 0 && is_whitespace(text[i - 1]) {
         i -= 1;
     }
     while i > 0 && !is_whitespace(text[i - 1]) {
         i -= 1;
     }
+
     i
 }
 
@@ -361,16 +383,20 @@ pub fn word_boundary_backward(text: &[u8], pos: usize) -> usize {
 /// forward. Returns the byte offset past the word end.
 pub fn word_boundary_forward(text: &[u8], pos: usize) -> usize {
     let len = text.len();
+
     if pos >= len {
         return len;
     }
+
     let mut i = pos;
+
     while i < len && !is_whitespace(text[i]) {
         i += 1;
     }
     while i < len && is_whitespace(text[i]) {
         i += 1;
     }
+
     i
 }
 
@@ -438,11 +464,13 @@ pub fn break_measured_lines(
     mode: BreakMode,
 ) -> Vec<LineBreak> {
     let mut lines = Vec::new();
+
     if chars.is_empty() {
         return lines;
     }
 
     let mut i = 0;
+
     while i < chars.len() {
         let line_start_byte = chars[i].byte_offset;
         let mut width: f32 = 0.0;
@@ -462,8 +490,10 @@ pub fn break_measured_lines(
                     byte_end: mc.byte_offset,
                     width,
                 });
+
                 i += 1;
                 line_emitted = true;
+
                 break;
             }
 
@@ -476,22 +506,29 @@ pub fn break_measured_lines(
                             byte_end: trimmed_end,
                             width: trimmed_w,
                         });
+
                         // Skip any remaining whitespace to find the next word.
                         i = next_idx;
+
                         while i < chars.len() && chars[i].is_whitespace && !chars[i].is_newline {
                             i += 1;
                         }
+
                         line_emitted = true;
+
                         break;
                     }
                 }
+
                 // Char mode, or word mode with no break opportunity.
                 lines.push(LineBreak {
                     byte_start: line_start_byte,
                     byte_end: mc.byte_offset,
                     width,
                 });
+
                 line_emitted = true;
+
                 break;
             }
 
@@ -501,6 +538,7 @@ pub fn break_measured_lines(
             // Record word-break opportunity after whitespace.
             if mode == BreakMode::Word && mc.is_whitespace && !mc.is_newline {
                 let (trimmed_end, trimmed_w) = trim_trailing(chars, line_start_idx, i);
+
                 best_break = Some((i, trimmed_end, trimmed_w));
             }
         }
@@ -510,11 +548,13 @@ pub fn break_measured_lines(
             let end_byte = chars.last().map_or(line_start_byte, |last| {
                 last.byte_offset + last.byte_len as u32
             });
+
             lines.push(LineBreak {
                 byte_start: line_start_byte,
                 byte_end: end_byte,
                 width,
             });
+
             break;
         }
     }
@@ -536,6 +576,7 @@ mod tests {
         fn char_width(&self, _ch: char) -> f32 {
             10.0
         }
+
         fn line_height(&self) -> f32 {
             20.0
         }
@@ -545,8 +586,13 @@ mod tests {
     struct ProportionalMetrics;
     impl FontMetrics for ProportionalMetrics {
         fn char_width(&self, ch: char) -> f32 {
-            if ch == ' ' { 5.0 } else { 10.0 }
+            if ch == ' ' {
+                5.0
+            } else {
+                10.0
+            }
         }
+
         fn line_height(&self) -> f32 {
             18.0
         }
@@ -557,6 +603,7 @@ mod tests {
     #[test]
     fn char_breaker_allows_any_position() {
         let b = CharBreaker;
+
         assert!(b.can_break_before(b"abc", 1));
         assert!(b.can_break_before(b"abc", 2));
     }
@@ -564,6 +611,7 @@ mod tests {
     #[test]
     fn char_breaker_no_trim() {
         let b = CharBreaker;
+
         assert!(!b.trim_whitespace());
     }
 
@@ -572,36 +620,42 @@ mod tests {
     #[test]
     fn word_breaker_after_space() {
         let b = WordBreaker;
+
         assert!(b.can_break_before(b"a b", 2));
     }
 
     #[test]
     fn word_breaker_after_hyphen() {
         let b = WordBreaker;
+
         assert!(b.can_break_before(b"a-b", 2));
     }
 
     #[test]
     fn word_breaker_not_at_start() {
         let b = WordBreaker;
+
         assert!(!b.can_break_before(b"abc", 0));
     }
 
     #[test]
     fn word_breaker_not_at_end() {
         let b = WordBreaker;
+
         assert!(!b.can_break_before(b"abc", 3));
     }
 
     #[test]
     fn word_breaker_no_break_between_letters() {
         let b = WordBreaker;
+
         assert!(!b.can_break_before(b"abc", 1));
     }
 
     #[test]
     fn word_breaker_trims_whitespace() {
         let b = WordBreaker;
+
         assert!(b.trim_whitespace());
     }
 
@@ -610,6 +664,7 @@ mod tests {
     #[test]
     fn empty_text_produces_one_line() {
         let layout = layout_paragraph(b"", &MonoMetrics, 200.0, Alignment::Left, &CharBreaker);
+
         assert_eq!(layout.lines.len(), 1);
         assert_eq!(layout.lines[0].byte_offset, 0);
         assert_eq!(layout.lines[0].byte_length, 0);
@@ -622,6 +677,7 @@ mod tests {
     fn single_line_fits() {
         let text = b"hello";
         let layout = layout_paragraph(text, &MonoMetrics, 200.0, Alignment::Left, &CharBreaker);
+
         assert_eq!(layout.lines.len(), 1);
         assert_eq!(layout.lines[0].byte_length, 5);
         assert_eq!(layout.lines[0].width, 50.0);
@@ -634,6 +690,7 @@ mod tests {
         // 10pt chars, 30pt width => 3 chars per line.
         let text = b"abcdef";
         let layout = layout_paragraph(text, &MonoMetrics, 30.0, Alignment::Left, &CharBreaker);
+
         assert_eq!(layout.lines.len(), 2);
         assert_eq!(layout.lines[0].byte_length, 3);
         assert_eq!(layout.lines[1].byte_length, 3);
@@ -644,6 +701,7 @@ mod tests {
         // 10pt chars, 30pt width => "abcde" = 3 + 2
         let text = b"abcde";
         let layout = layout_paragraph(text, &MonoMetrics, 30.0, Alignment::Left, &CharBreaker);
+
         assert_eq!(layout.lines.len(), 2);
         assert_eq!(layout.lines[0].byte_length, 3);
         assert_eq!(layout.lines[1].byte_length, 2);
@@ -657,6 +715,7 @@ mod tests {
         // "hello " = 60pt, then "world" on next line.
         let text = b"hello world";
         let layout = layout_paragraph(text, &MonoMetrics, 60.0, Alignment::Left, &WordBreaker);
+
         assert_eq!(layout.lines.len(), 2);
         // First line: "hello" (trimmed trailing space).
         assert_eq!(layout.lines[0].byte_offset, 0);
@@ -671,6 +730,7 @@ mod tests {
         // opportunity, so it falls back to char-level breaking.
         let text = b"abcdefghij";
         let layout = layout_paragraph(text, &MonoMetrics, 50.0, Alignment::Left, &WordBreaker);
+
         assert_eq!(layout.lines.len(), 2);
         assert_eq!(layout.lines[0].byte_length, 5);
         assert_eq!(layout.lines[1].byte_length, 5);
@@ -682,6 +742,7 @@ mod tests {
     fn hard_newline_splits_lines() {
         let text = b"abc\ndef";
         let layout = layout_paragraph(text, &MonoMetrics, 200.0, Alignment::Left, &CharBreaker);
+
         assert_eq!(layout.lines.len(), 2);
         assert_eq!(layout.lines[0].byte_offset, 0);
         assert_eq!(layout.lines[0].byte_length, 3);
@@ -693,6 +754,7 @@ mod tests {
     fn trailing_newline_adds_empty_line() {
         let text = b"abc\n";
         let layout = layout_paragraph(text, &MonoMetrics, 200.0, Alignment::Left, &CharBreaker);
+
         assert_eq!(layout.lines.len(), 2);
         assert_eq!(layout.lines[1].byte_length, 0);
         assert_eq!(layout.lines[1].byte_offset, 4);
@@ -704,6 +766,7 @@ mod tests {
     fn y_positions_increment_by_line_height() {
         let text = b"a\nb\nc";
         let layout = layout_paragraph(text, &MonoMetrics, 200.0, Alignment::Left, &CharBreaker);
+
         assert_eq!(layout.lines.len(), 3);
         assert_eq!(layout.lines[0].y, 0);
         assert_eq!(layout.lines[1].y, 20);
@@ -716,6 +779,7 @@ mod tests {
     fn alignment_left() {
         let text = b"hi";
         let layout = layout_paragraph(text, &MonoMetrics, 100.0, Alignment::Left, &CharBreaker);
+
         assert_eq!(layout.lines[0].x, 0.0);
     }
 
@@ -723,6 +787,7 @@ mod tests {
     fn alignment_center() {
         let text = b"hi"; // width = 20pt, max = 100pt
         let layout = layout_paragraph(text, &MonoMetrics, 100.0, Alignment::Center, &CharBreaker);
+
         assert!((layout.lines[0].x - 40.0).abs() < 0.01);
     }
 
@@ -730,6 +795,7 @@ mod tests {
     fn alignment_right() {
         let text = b"hi"; // width = 20pt, max = 100pt
         let layout = layout_paragraph(text, &MonoMetrics, 100.0, Alignment::Right, &CharBreaker);
+
         assert!((layout.lines[0].x - 80.0).abs() < 0.01);
     }
 
@@ -739,6 +805,7 @@ mod tests {
     fn byte_to_line_col_first_line() {
         let text = b"abc\ndef";
         let layout = layout_paragraph(text, &MonoMetrics, 200.0, Alignment::Left, &CharBreaker);
+
         assert_eq!(layout.byte_to_line_col(0), (0, 0));
         assert_eq!(layout.byte_to_line_col(2), (0, 2));
     }
@@ -747,6 +814,7 @@ mod tests {
     fn byte_to_line_col_second_line() {
         let text = b"abc\ndef";
         let layout = layout_paragraph(text, &MonoMetrics, 200.0, Alignment::Left, &CharBreaker);
+
         assert_eq!(layout.byte_to_line_col(4), (1, 0));
         assert_eq!(layout.byte_to_line_col(6), (1, 2));
     }
@@ -756,12 +824,14 @@ mod tests {
         let text = b"abc";
         let layout = layout_paragraph(text, &MonoMetrics, 200.0, Alignment::Left, &CharBreaker);
         let (line, col) = layout.byte_to_line_col(100);
+
         assert_eq!(line, 0);
     }
 
     #[test]
     fn byte_to_line_col_empty() {
         let layout = layout_paragraph(b"", &MonoMetrics, 200.0, Alignment::Left, &CharBreaker);
+
         assert_eq!(layout.byte_to_line_col(0), (0, 0));
     }
 
@@ -771,6 +841,7 @@ mod tests {
     fn line_col_to_byte_basic() {
         let text = b"abc\ndef";
         let layout = layout_paragraph(text, &MonoMetrics, 200.0, Alignment::Left, &CharBreaker);
+
         assert_eq!(layout.line_col_to_byte(0, 0), 0);
         assert_eq!(layout.line_col_to_byte(0, 2), 2);
         assert_eq!(layout.line_col_to_byte(1, 0), 4);
@@ -781,6 +852,7 @@ mod tests {
     fn line_col_to_byte_clamps_col() {
         let text = b"abc\ndef";
         let layout = layout_paragraph(text, &MonoMetrics, 200.0, Alignment::Left, &CharBreaker);
+
         // Column past end of line snaps to end.
         assert_eq!(layout.line_col_to_byte(0, 100), 3);
     }
@@ -789,12 +861,14 @@ mod tests {
     fn line_col_to_byte_past_last_line() {
         let text = b"abc";
         let layout = layout_paragraph(text, &MonoMetrics, 200.0, Alignment::Left, &CharBreaker);
+
         assert_eq!(layout.line_col_to_byte(100, 0), 3);
     }
 
     #[test]
     fn line_col_to_byte_empty() {
         let layout = layout_paragraph(b"", &MonoMetrics, 200.0, Alignment::Left, &CharBreaker);
+
         assert_eq!(layout.line_col_to_byte(0, 0), 0);
     }
 
@@ -804,6 +878,7 @@ mod tests {
     fn standalone_byte_to_line_col() {
         let text = b"abc\ndef";
         let (line, col) = byte_to_line_col(text, 5, &MonoMetrics, 200.0, &CharBreaker);
+
         assert_eq!(line, 1);
         assert_eq!(col, 1);
     }
@@ -812,6 +887,7 @@ mod tests {
     fn standalone_line_col_to_byte() {
         let text = b"abc\ndef";
         let byte = line_col_to_byte(text, 1, 1, &MonoMetrics, 200.0, &CharBreaker);
+
         assert_eq!(byte, 5);
     }
 
@@ -820,12 +896,14 @@ mod tests {
     #[test]
     fn word_boundary_backward_from_middle() {
         let text = b"hello world foo";
+
         assert_eq!(word_boundary_backward(text, 11), 6);
     }
 
     #[test]
     fn word_boundary_backward_from_start() {
         let text = b"hello";
+
         assert_eq!(word_boundary_backward(text, 0), 0);
     }
 
@@ -837,6 +915,7 @@ mod tests {
     #[test]
     fn word_boundary_forward_from_start() {
         let text = b"hello world";
+
         assert_eq!(word_boundary_forward(text, 0), 6);
     }
 
@@ -881,6 +960,7 @@ mod tests {
     #[test]
     fn measured_lines_empty() {
         let lines = break_measured_lines(&[], 100.0, BreakMode::Word);
+
         assert!(lines.is_empty());
     }
 
@@ -888,6 +968,7 @@ mod tests {
     fn measured_lines_single_line() {
         let chars = make_chars(b"hello", 10.0);
         let lines = break_measured_lines(&chars, 200.0, BreakMode::Char);
+
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].byte_start, 0);
         assert_eq!(lines[0].byte_end, 5);
@@ -898,6 +979,7 @@ mod tests {
     fn measured_lines_char_wrap() {
         let chars = make_chars(b"abcdef", 10.0);
         let lines = break_measured_lines(&chars, 30.0, BreakMode::Char);
+
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].byte_end, 3);
         assert_eq!(lines[1].byte_start, 3);
@@ -909,6 +991,7 @@ mod tests {
         // "hi there " has widths: h(10)+i(10)+' '(10)+t(10)+h(10)+e(10)+r(10)+e(10)+' '(10) = 90
         // With line_width=90, "hi there " fits, then "world".
         let lines = break_measured_lines(&chars, 90.0, BreakMode::Word);
+
         assert!(lines.len() >= 2);
     }
 
@@ -916,6 +999,7 @@ mod tests {
     fn measured_lines_hard_newline() {
         let chars = make_chars(b"ab\ncd", 10.0);
         let lines = break_measured_lines(&chars, 200.0, BreakMode::Char);
+
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].byte_start, 0);
         assert_eq!(lines[0].byte_end, 2);
@@ -937,6 +1021,7 @@ mod tests {
             Alignment::Left,
             &WordBreaker,
         );
+
         assert_eq!(layout.lines.len(), 2);
     }
 
@@ -946,6 +1031,7 @@ mod tests {
     fn total_height_single_line() {
         let text = b"hello";
         let layout = layout_paragraph(text, &MonoMetrics, 200.0, Alignment::Left, &CharBreaker);
+
         // Single line: y starts at 0, total_height = 0 + line_height = 20.
         assert_eq!(layout.total_height, 20);
     }
@@ -954,6 +1040,7 @@ mod tests {
     fn total_height_multiple_lines() {
         let text = b"a\nb\nc";
         let layout = layout_paragraph(text, &MonoMetrics, 200.0, Alignment::Left, &CharBreaker);
+
         assert_eq!(layout.total_height, 60);
     }
 }
@@ -962,18 +1049,23 @@ mod tests {
 /// Returns `(trimmed_byte_end, trimmed_width)`.
 fn trim_trailing(chars: &[MeasuredChar], start_idx: usize, end_idx: usize) -> (u32, f32) {
     let mut trim_end = end_idx;
+
     while trim_end > start_idx && chars[trim_end - 1].is_whitespace {
         trim_end -= 1;
     }
+
     let byte_end = if trim_end > start_idx {
         let last = &chars[trim_end - 1];
+
         last.byte_offset + last.byte_len as u32
     } else {
         chars[start_idx].byte_offset
     };
     let mut w: f32 = 0.0;
+
     for mc in &chars[start_idx..trim_end] {
         w += mc.width;
     }
+
     (byte_end, w)
 }

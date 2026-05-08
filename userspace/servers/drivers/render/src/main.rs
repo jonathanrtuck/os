@@ -176,7 +176,6 @@ fn fullscreen_vertices(r: f32, g: f32, b: f32, a: f32, buf: &mut [u8]) -> usize 
             color: [r, g, b, a],
         },
     ];
-
     let total = 6 * VERTEX_SIZE;
 
     // SAFETY: Vertex is #[repr(C)] with known size; total fits in buf.
@@ -216,7 +215,6 @@ fn render_frame(
             0.14,
             1.0,
         );
-
         w.set_render_pipeline(H_PIPELINE);
 
         let mut verts = [0u8; 6 * VERTEX_SIZE];
@@ -250,7 +248,6 @@ extern "C" fn _start() -> ! {
         Ok(va) => va,
         Err(_) => abi::thread::exit(1),
     };
-
     let (device, metal_slot) = match virtio::find_device(virtio_va, virtio::DEVICE_METAL) {
         Some(d) => d,
         None => abi::thread::exit(0xA0),
@@ -262,7 +259,6 @@ extern "C" fn _start() -> ! {
 
     let display_w = device.config_read32(0x00);
     let display_h = device.config_read32(0x04);
-
     // Set up two virtqueues: setup (0) and render (1).
     let setup_qsize = device
         .queue_max_size(render::VIRTQ_SETUP)
@@ -270,7 +266,6 @@ extern "C" fn _start() -> ! {
     let render_qsize = device
         .queue_max_size(render::VIRTQ_RENDER)
         .min(virtio::DEFAULT_QUEUE_SIZE);
-
     let setup_vq_bytes = virtio::Virtqueue::total_bytes(setup_qsize);
     let setup_vq_alloc = setup_vq_bytes.next_multiple_of(PAGE_SIZE);
     let setup_vq_dma = match init::request_dma(HANDLE_INIT_EP, setup_vq_alloc) {
@@ -317,7 +312,6 @@ extern "C" fn _start() -> ! {
         Ok(d) => d,
         Err(_) => abi::thread::exit(6),
     };
-
     let render_buf_size = PAGE_SIZE * RENDER_BUF_PAGES;
     let render_dma = match init::request_dma(HANDLE_INIT_EP, render_buf_size) {
         Ok(d) => d,
@@ -331,7 +325,6 @@ extern "C" fn _start() -> ! {
         Ok(h) => h,
         Err(_) => abi::thread::exit(8),
     };
-
     let irq_num = virtio::SPI_BASE_INTID + metal_slot;
 
     if abi::event::bind_irq(irq_event, irq_num, 0x1).is_err() {
@@ -377,12 +370,9 @@ extern "C" fn _start() -> ! {
     };
 
     name::register(HANDLE_NS_EP, b"render", own_ep);
-
     console::write(console_ep, b"render: ready\n");
-
     // Idle serve loop — Phase 3-4 will add scene graph update handling.
     ipc::server::serve(own_ep, &mut StubServer);
-
     abi::thread::exit(0);
 }
 

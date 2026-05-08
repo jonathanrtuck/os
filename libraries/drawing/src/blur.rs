@@ -85,6 +85,7 @@ pub fn compute_kernel(
 
     if r == 0 {
         kernel[0] = 65536;
+
         return 1;
     }
 
@@ -101,7 +102,9 @@ pub fn compute_kernel(
         for w in kernel[..diameter].iter_mut() {
             *w = 0;
         }
+
         kernel[r as usize] = 65536;
+
         return diameter;
     }
 
@@ -129,7 +132,6 @@ pub fn compute_kernel(
     for i in 0..diameter {
         let x = i as i64 - r as i64;
         let x_sq = (x * x) as u64;
-
         // t = x^2 * 65536 / two_sigma_sq_fp (in 16.16 FP)
         // We want exp(-x^2/(2sigma^2)).
         // x^2/(2sigma^2) = x_sq * 65536 / two_sigma_sq_fp (converting to same FP scale)
@@ -175,6 +177,7 @@ pub fn compute_kernel(
             // Denominator in 8.8 FP: 1 + t + t^2/2 + t^3/6
             // = 256 + t + t^2/512 + t^3/393216
             let denom = 256u64 + t + t_sq / 512 + (t_sq * t) / (512 * 768);
+
             if denom > 0 {
                 raw[i] = (256u64 * 65536) / denom;
             }
@@ -185,10 +188,12 @@ pub fn compute_kernel(
     // Normalize to sum = 65536.
     if sum == 0 {
         kernel[r as usize] = 65536;
+
         return diameter;
     }
 
     let mut normalized_sum: u64 = 0;
+
     for i in 0..diameter {
         kernel[i] = ((raw[i] * 65536 + sum / 2) / sum) as u32;
         normalized_sum += kernel[i] as u64;
@@ -196,6 +201,7 @@ pub fn compute_kernel(
 
     // Adjust center to ensure exact sum = 65536.
     let diff = 65536i64 - normalized_sum as i64;
+
     kernel[r as usize] = (kernel[r as usize] as i64 + diff) as u32;
 
     diameter
@@ -222,7 +228,6 @@ pub fn blur_surface(
     } else {
         radius
     };
-
     let w = src.width;
     let h = src.height;
 
@@ -235,9 +240,11 @@ pub fn blur_surface(
         // Copy src to dst.
         let bpp = src.format.bytes_per_pixel();
         let row_bytes = (w * bpp) as usize;
+
         for y in 0..h {
             let src_off = (y * src.stride) as usize;
             let dst_off = (y * dst.stride) as usize;
+
             if src_off + row_bytes <= src.data.len() && dst_off + row_bytes <= dst.data.len() {
                 dst.data[dst_off..dst_off + row_bytes]
                     .copy_from_slice(&src.data[src_off..src_off + row_bytes]);
@@ -250,17 +257,16 @@ pub fn blur_surface(
     let mut kernel = [0u32; MAX_KERNEL_DIAMETER];
     let diameter = compute_kernel(&mut kernel, r, sigma_fp);
     let kernel_slice = &kernel[..diameter];
-
     // Ensure tmp is large enough.
     let dst_stride = dst.stride;
     let needed = (dst_stride * h) as usize;
+
     if tmp.len() < needed {
         return;
     }
 
     // Pass 1: horizontal blur from src -> tmp.
     blur_horizontal(src.data, tmp, w, h, src.stride, dst_stride, r, kernel_slice);
-
     // Pass 2: vertical blur from tmp -> dst.
     blur_vertical(tmp, dst.data, w, h, dst_stride, dst_stride, r, kernel_slice);
 }
@@ -279,7 +285,6 @@ pub fn blur_surface_scalar(
     } else {
         radius
     };
-
     let w = src.width;
     let h = src.height;
 
@@ -290,9 +295,11 @@ pub fn blur_surface_scalar(
     if r == 0 {
         let bpp = src.format.bytes_per_pixel();
         let row_bytes = (w * bpp) as usize;
+
         for y in 0..h {
             let src_off = (y * src.stride) as usize;
             let dst_off = (y * dst.stride) as usize;
+
             if src_off + row_bytes <= src.data.len() && dst_off + row_bytes <= dst.data.len() {
                 dst.data[dst_off..dst_off + row_bytes]
                     .copy_from_slice(&src.data[src_off..src_off + row_bytes]);
@@ -304,9 +311,9 @@ pub fn blur_surface_scalar(
     let mut kernel = [0u32; MAX_KERNEL_DIAMETER];
     let diameter = compute_kernel(&mut kernel, r, sigma_fp);
     let kernel_slice = &kernel[..diameter];
-
     let dst_stride = dst.stride;
     let needed = (dst_stride * h) as usize;
+
     if tmp.len() < needed {
         return;
     }
@@ -347,7 +354,6 @@ pub(crate) fn blur_horizontal_scalar(
                 } else {
                     (x as i32 + k) as u32
                 };
-
                 let src_off = src_row + (sx * bpp) as usize;
                 let w = kernel[(k + r) as usize] as u64;
 
@@ -358,6 +364,7 @@ pub(crate) fn blur_horizontal_scalar(
             }
 
             let dst_off = dst_row + (x * bpp) as usize;
+
             // Weights sum to 65536, so divide by 65536 (>> 16) with rounding.
             dst[dst_off] = ((sum_b + 32768) >> 16) as u8;
             dst[dst_off + 1] = ((sum_g + 32768) >> 16) as u8;
@@ -398,7 +405,6 @@ pub(crate) fn blur_vertical_scalar(
                 } else {
                     (y as i32 + k) as u32
                 };
-
                 let src_off = (sy * src_stride + x * bpp) as usize;
                 let w = kernel[(k + r) as usize] as u64;
 
@@ -409,6 +415,7 @@ pub(crate) fn blur_vertical_scalar(
             }
 
             let dst_off = dst_row + (x * bpp) as usize;
+
             dst[dst_off] = ((sum_b + 32768) >> 16) as u8;
             dst[dst_off + 1] = ((sum_g + 32768) >> 16) as u8;
             dst[dst_off + 2] = ((sum_r + 32768) >> 16) as u8;

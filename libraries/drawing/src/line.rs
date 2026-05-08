@@ -3,7 +3,7 @@
 //! Wu's anti-aliased line algorithm for smooth diagonal lines, plus
 //! axis-aligned helpers for borders and outlines.
 
-use crate::{Color, Surface, abs, div255};
+use crate::{abs, div255, Color, Surface};
 
 impl<'a> Surface<'a> {
     /// Draw a horizontal line. Clips to surface bounds.
@@ -59,28 +59,32 @@ impl<'a> Surface<'a> {
             if x0 >= 0 && y0 >= 0 {
                 self.set_pixel(x0 as u32, y0 as u32, color);
             }
+
             return;
         }
-
         // Axis-aligned lines: pixel-perfect, no AA fringe.
         if y0 == y1 {
             // Horizontal line.
             let (lx, rx) = if x0 < x1 { (x0, x1) } else { (x1, x0) };
+
             for x in lx..=rx {
                 if x >= 0 && y0 >= 0 {
                     self.set_pixel(x as u32, y0 as u32, color);
                 }
             }
+
             return;
         }
         if x0 == x1 {
             // Vertical line.
             let (ty, by) = if y0 < y1 { (y0, y1) } else { (y1, y0) };
+
             for y in ty..=by {
                 if x0 >= 0 && y >= 0 {
                     self.set_pixel(x0 as u32, y as u32, color);
                 }
             }
+
             return;
         }
 
@@ -90,7 +94,6 @@ impl<'a> Surface<'a> {
         let mut ay0 = y0;
         let mut ax1 = x1;
         let mut ay1 = y1;
-
         let steep = abs(ay1 - ay0) > abs(ax1 - ax0);
 
         // If steep, swap x and y so we always iterate along the longer axis.
@@ -107,7 +110,6 @@ impl<'a> Surface<'a> {
 
         let dx = ax1 - ax0;
         let dy = ay1 - ay0;
-
         // Gradient in 8.8 fixed-point: dy/dx scaled by 256.
         // dx is guaranteed > 0 here (we ensured ax0 < ax1 and handled ax0==ax1).
         let gradient_fp = if dx == 0 {
@@ -122,6 +124,7 @@ impl<'a> Surface<'a> {
             // 45-degree line: draw solid pixels along the diagonal.
             let sy: i32 = if dy > 0 { 1 } else { -1 };
             let mut cy = ay0;
+
             for cx in ax0..=ax1 {
                 if steep {
                     if cy >= 0 && cx >= 0 {
@@ -130,14 +133,15 @@ impl<'a> Surface<'a> {
                 } else if cx >= 0 && cy >= 0 {
                     self.set_pixel(cx as u32, cy as u32, color);
                 }
+
                 cy += sy;
             }
+
             return;
         }
 
         // First endpoint.
         self.wu_endpoint(ax0, ay0, steep, color);
-
         // Last endpoint.
         self.wu_endpoint(ax1, ay1, steep, color);
 
@@ -154,9 +158,8 @@ impl<'a> Surface<'a> {
                 y_fp / 256
             };
             let frac = ((y_fp - y_int * 256) & 0xFF) as u32; // Fractional part 0..255.
-
-            // Two pixels at this x: one at y_int, one at y_int+1.
-            // Coverage: pixel at y_int gets (255 - frac), pixel at y_int+1 gets frac.
+                                                             // Two pixels at this x: one at y_int, one at y_int+1.
+                                                             // Coverage: pixel at y_int gets (255 - frac), pixel at y_int+1 gets frac.
             let cov_lo = (255 - frac) as u8;
             let cov_hi = frac as u8;
 
@@ -180,8 +183,10 @@ impl<'a> Surface<'a> {
         if coverage == 0 || x < 0 || y < 0 {
             return;
         }
+
         let ux = x as u32;
         let uy = y as u32;
+
         if ux >= self.width || uy >= self.height {
             return;
         }
@@ -189,16 +194,19 @@ impl<'a> Surface<'a> {
         if coverage == 255 {
             // Fully covered: use source-over blend (handles color.a < 255).
             self.blend_pixel(ux, uy, color);
+
             return;
         }
 
         // Effective alpha = color.a * coverage / 255.
         let eff_a = div255(color.a as u32 * coverage as u32);
+
         if eff_a == 0 {
             return;
         }
 
         let aa_color = Color::rgba(color.r, color.g, color.b, eff_a as u8);
+
         self.blend_pixel(ux, uy, aa_color);
     }
 

@@ -904,36 +904,47 @@ fn svg_parse_relative_commands() {
 #[test]
 fn svg_parse_horizontal_vertical() {
     let data = parse_svg_path("M 0 0 H 10 V 10 h -10 v -10 Z");
+
     assert!(!data.is_empty());
 }
 
 #[test]
 fn svg_parse_cubic() {
     let data = parse_svg_path("M 0 0 C 1 2 3 4 5 6");
+
     assert!(!data.is_empty());
+
     let expected_len = PATH_MOVE_TO_SIZE + PATH_CUBIC_TO_SIZE;
+
     assert_eq!(data.len(), expected_len);
 }
 
 #[test]
 fn svg_parse_smooth_cubic() {
     let data = parse_svg_path("M 0 0 C 1 2 3 4 5 6 S 8 9 10 11");
+
     assert!(!data.is_empty());
+
     let expected_len = PATH_MOVE_TO_SIZE + 2 * PATH_CUBIC_TO_SIZE;
+
     assert_eq!(data.len(), expected_len);
 }
 
 #[test]
 fn svg_parse_quadratic() {
     let data = parse_svg_path("M 0 0 Q 5 10 10 0");
+
     assert!(!data.is_empty());
+
     let expected_len = PATH_MOVE_TO_SIZE + PATH_CUBIC_TO_SIZE;
+
     assert_eq!(data.len(), expected_len);
 }
 
 #[test]
 fn svg_parse_arc() {
     let data = parse_svg_path("M 10 80 A 25 25 0 0 1 50 80");
+
     assert!(!data.is_empty());
     assert!(data.len() > PATH_MOVE_TO_SIZE);
 }
@@ -941,6 +952,7 @@ fn svg_parse_arc() {
 #[test]
 fn svg_parse_empty_returns_empty() {
     let data = parse_svg_path("");
+
     assert!(data.is_empty());
 }
 
@@ -949,6 +961,7 @@ fn svg_parse_real_icon() {
     let data = parse_svg_path(
         "M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z",
     );
+
     assert!(!data.is_empty());
 }
 
@@ -957,50 +970,61 @@ fn svg_parse_real_icon() {
 #[test]
 fn stroke_simple_line() {
     let mut path = Vec::new();
+
     path_move_to(&mut path, 0.0, 0.0);
     path_line_to(&mut path, 10.0, 0.0);
 
     let stroked = expand_stroke(&path, 2.0);
+
     assert!(!stroked.is_empty());
 }
 
 #[test]
 fn stroke_closed_triangle() {
     let mut path = Vec::new();
+
     path_move_to(&mut path, 0.0, 0.0);
     path_line_to(&mut path, 10.0, 0.0);
     path_line_to(&mut path, 5.0, 10.0);
     path_close(&mut path);
 
     let stroked = expand_stroke(&path, 1.0);
+
     assert!(!stroked.is_empty());
 }
 
 #[test]
 fn stroke_zero_width_returns_empty() {
     let mut path = Vec::new();
+
     path_move_to(&mut path, 0.0, 0.0);
     path_line_to(&mut path, 10.0, 0.0);
 
     let stroked = expand_stroke(&path, 0.0);
+
     assert!(stroked.is_empty());
 }
 
 #[test]
 fn stroke_empty_input_returns_empty() {
     let stroked = expand_stroke(&[], 2.0);
+
     assert!(stroked.is_empty());
 }
 
 #[test]
 fn stroke_dot_produces_circle() {
     let mut path = Vec::new();
+
     path_move_to(&mut path, 5.0, 5.0);
     path_line_to(&mut path, 5.0, 5.0);
 
     let stroked = expand_stroke(&path, 2.0);
+
     assert!(!stroked.is_empty());
+
     let first_tag = u32::from_le_bytes(stroked[0..4].try_into().unwrap());
+
     assert_eq!(first_tag, PATH_MOVE_TO);
 }
 
@@ -1009,23 +1033,28 @@ fn stroke_dot_produces_circle() {
 #[test]
 fn node_has_shadow() {
     let mut n = Node::EMPTY;
+
     assert!(!n.has_shadow());
 
     n.shadow_color = Color::rgba(0, 0, 0, 128);
     n.shadow_blur_radius = 5;
+
     assert!(n.has_shadow());
 
     n.shadow_color = Color::TRANSPARENT;
+
     assert!(!n.has_shadow());
 }
 
 #[test]
 fn node_flags() {
     let flags = NodeFlags::VISIBLE.union(NodeFlags::CLIPS_CHILDREN);
+
     assert!(flags.contains(NodeFlags::VISIBLE));
     assert!(flags.contains(NodeFlags::CLIPS_CHILDREN));
 
     let empty = NodeFlags::empty();
+
     assert!(!empty.contains(NodeFlags::VISIBLE));
 }
 
@@ -1035,6 +1064,7 @@ fn node_flags() {
 fn content_variants_eq() {
     let c1 = Content::None;
     let c2 = Content::None;
+
     assert_eq!(c1, c2);
 
     let c3 = Content::Image {
@@ -1047,6 +1077,7 @@ fn content_variants_eq() {
         src_width: 100,
         src_height: 100,
     };
+
     assert_eq!(c3, c4);
 }
 
@@ -1056,12 +1087,12 @@ fn content_variants_eq() {
 fn reader_out_of_bounds_data_ref() {
     let mut buf = make_scene_buf();
     let _ = SceneWriter::new(&mut buf);
-
     let r = SceneReader::new(&buf);
     let bad_ref = DataRef {
         offset: DATA_BUFFER_SIZE as u32 + 100,
         length: 10,
     };
+
     assert!(r.data(bad_ref).is_empty());
 }
 
@@ -1071,21 +1102,25 @@ fn reader_empty_shaped_glyphs() {
     let _ = SceneWriter::new(&mut buf);
     let r = SceneReader::new(&buf);
     let g = r.shaped_glyphs(DataRef::EMPTY, 0);
+
     assert!(g.is_empty());
 }
 
 #[test]
 fn from_existing_preserves_state() {
     let mut buf = make_scene_buf();
+
     {
         let mut w = SceneWriter::new(&mut buf);
         let root = w.alloc_node().unwrap();
+
         w.set_root(root);
         w.node_mut(root).x = pt(42);
         w.commit();
     }
 
     let w2 = SceneWriter::from_existing(&mut buf);
+
     assert_eq!(w2.generation(), 1);
     assert_eq!(w2.node_count(), 1);
     assert_eq!(w2.node(0).x, pt(42));

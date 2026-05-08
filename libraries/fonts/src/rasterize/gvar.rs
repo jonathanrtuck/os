@@ -10,11 +10,11 @@ use read_fonts::{FontRef, TableProvider};
 use super::{
     embolden::{compute_dilation, embolden_outline},
     metrics::{GlyphMetrics, RasterBuffer},
-    outline::{GlyphOutline, GlyphPoint, MAX_CONTOURS, MAX_GLYPH_POINTS, extract_outline},
+    outline::{extract_outline, GlyphOutline, GlyphPoint, MAX_CONTOURS, MAX_GLYPH_POINTS},
     scale::{scale_fu, scale_fu_ceil, scale_fu_floor},
-    scanline::{RasterScratch, flatten_outline_from_scratch, rasterize_segments},
+    scanline::{flatten_outline_from_scratch, rasterize_segments, RasterScratch},
 };
-use crate::metrics::{AxisValue, font_axes};
+use crate::metrics::{font_axes, AxisValue};
 
 // ---------------------------------------------------------------------------
 // Axis normalization
@@ -41,6 +41,7 @@ fn normalize_axis_value(value: f32, min: f32, default: f32, max: f32) -> f32 {
         0.0
     } else if clamped < default {
         let range = default - min;
+
         if range.abs() < f32::EPSILON {
             0.0
         } else {
@@ -48,6 +49,7 @@ fn normalize_axis_value(value: f32, min: f32, default: f32, max: f32) -> f32 {
         }
     } else {
         let range = max - default;
+
         if range.abs() < f32::EPSILON {
             0.0
         } else {
@@ -65,6 +67,7 @@ pub(crate) fn build_normalized_coords(
     axis_values: &[AxisValue],
 ) -> alloc::vec::Vec<read_fonts::types::F2Dot14> {
     let font_axes = font_axes(font_data);
+
     font_axes
         .iter()
         .map(|axis| {
@@ -75,6 +78,7 @@ pub(crate) fn build_normalized_coords(
                 .unwrap_or(axis.default_value);
             let norm =
                 normalize_axis_value(user_val, axis.min_value, axis.default_value, axis.max_value);
+
             read_fonts::types::F2Dot14::from_f32(norm)
         })
         .collect()
@@ -98,6 +102,7 @@ fn iup_contour(
     end: usize, // inclusive
 ) {
     let n = end - start + 1;
+
     if n == 0 {
         return;
     }
@@ -116,13 +121,16 @@ fn iup_contour(
 
     // Walk the contour, interpolating runs of untouched points.
     let mut i = first_touched;
+
     loop {
         // Skip touched points.
         while touched[i] {
             let next = if i == end { start } else { i + 1 };
+
             if next == first_touched && touched[next] {
                 return; // Wrapped around -- done.
             }
+
             i = next;
         }
 
@@ -134,21 +142,30 @@ fn iup_contour(
         } else {
             run_start - 1
         };
+
         // Find end of untouched run.
         while !touched[i] {
             let next = if i == end { start } else { i + 1 };
+
             if next == run_start {
                 break; // Shouldn't happen (we know at least one is touched).
             }
+
             i = next;
         }
+
         // i is the next touched point after the run.
         let next_touched_idx = i;
 
         // Interpolate each axis independently.
         for axis in 0..2u8 {
-            let get_coord =
-                |idx: usize| -> i32 { if axis == 0 { orig[idx].x } else { orig[idx].y } };
+            let get_coord = |idx: usize| -> i32 {
+                if axis == 0 {
+                    orig[idx].x
+                } else {
+                    orig[idx].y
+                }
+            };
             let get_delta = |idx: usize| -> i32 {
                 if axis == 0 {
                     delta_x[idx]
@@ -163,17 +180,15 @@ fn iup_contour(
                     dy[idx] = val;
                 }
             };
-
             let a_coord = get_coord(prev_touched_idx);
             let b_coord = get_coord(next_touched_idx);
             let a_delta = get_delta(prev_touched_idx);
             let b_delta = get_delta(next_touched_idx);
-
             // Walk the untouched run.
             let mut j = run_start;
+
             loop {
                 let p_coord = get_coord(j);
-
                 let interp = if a_coord == b_coord {
                     // Both reference points same coord -- average deltas.
                     (a_delta + b_delta + 1) / 2
@@ -192,6 +207,7 @@ fn iup_contour(
                         // Linear interpolation.
                         let t_num = (p_coord - lo_coord) as i64;
                         let t_den = (hi_coord - lo_coord) as i64;
+
                         (lo_delta as i64 + (hi_delta as i64 - lo_delta as i64) * t_num / t_den)
                             as i32
                     }
@@ -200,9 +216,11 @@ fn iup_contour(
                 set_delta(j, interp, delta_x, delta_y);
 
                 let next = if j == end { start } else { j + 1 };
+
                 if next == next_touched_idx {
                     break;
                 }
+
                 j = next;
             }
         }
@@ -245,9 +263,11 @@ fn apply_gvar_simple<'a>(
 
         for td in tuple.deltas() {
             let ix = td.position as usize;
+
             if ix < total_points {
                 let sx = ((td.x_delta as i64 * scalar_bits + 0x8000) >> 16) as i32;
                 let sy = ((td.y_delta as i64 * scalar_bits + 0x8000) >> 16) as i32;
+
                 tuple_dx[ix] = sx;
                 tuple_dy[ix] = sy;
                 tuple_touched[ix] = true;
@@ -257,8 +277,10 @@ fn apply_gvar_simple<'a>(
         // IUP: interpolate untouched points per contour.
         let nc = outline.num_contours as usize;
         let mut contour_start = 0usize;
+
         for c in 0..nc {
             let contour_end = outline.contour_ends[c] as usize;
+
             if contour_end >= contour_start {
                 iup_contour(
                     orig_points,
@@ -269,6 +291,7 @@ fn apply_gvar_simple<'a>(
                     contour_end,
                 );
             }
+
             contour_start = contour_end + 1;
         }
 
@@ -276,6 +299,7 @@ fn apply_gvar_simple<'a>(
         for i in 0..total_points {
             delta_x[i] += tuple_dx[i];
             delta_y[i] += tuple_dy[i];
+
             if tuple_touched[i] {
                 touched[i] = true;
             }
@@ -294,8 +318,10 @@ fn apply_gvar_simple<'a>(
         let mut y_min = outline.points[0].y;
         let mut x_max = outline.points[0].x;
         let mut y_max = outline.points[0].y;
+
         for i in 1..num_points {
             let p = &outline.points[i];
+
             if p.x < x_min {
                 x_min = p.x;
             }
@@ -309,6 +335,7 @@ fn apply_gvar_simple<'a>(
                 y_max = p.y;
             }
         }
+
         outline.x_min = x_min as i16;
         outline.y_min = y_min as i16;
         outline.x_max = x_max as i16;
@@ -344,6 +371,7 @@ pub(crate) fn extract_outline_with_axes(
     }
 
     let coords = build_normalized_coords(font_data, axis_values);
+
     if coords.is_empty() || coords.iter().all(|c| c.to_f32().abs() < f32::EPSILON) {
         return extract_outline(font_data, glyph_id, outline);
     }
@@ -357,29 +385,29 @@ pub(crate) fn extract_outline_with_axes(
     let loca = font.loca(None).ok()?;
     let glyf = font.glyf().ok()?;
     let gid = read_fonts::types::GlyphId::new(glyph_id as u32);
-
     let (advance_fu, lsb_fu) = if (glyph_id as u16) < num_h_metrics {
         let m = hmtx.h_metrics().get(glyph_id as usize)?;
+
         (m.advance.get(), m.side_bearing.get())
     } else {
         let last = hmtx.h_metrics().get(num_h_metrics as usize - 1)?;
         let lsb_data = hmtx.left_side_bearings();
         let lsb_idx = (glyph_id as usize).checked_sub(num_h_metrics as usize)?;
         let lsb = lsb_data.get(lsb_idx).map(|v| v.get()).unwrap_or(0);
+
         (last.advance.get(), lsb)
     };
-
     let glyph_data = loca.get_glyf(gid, &glyf).ok()??;
 
     match glyph_data {
         read_fonts::tables::glyf::Glyph::Simple(ref _simple) => {
             // Extract the default outline.
             let (_, _, _) = extract_outline(font_data, glyph_id, outline)?;
-
             // Save original points for IUP reference.
             let num_points = outline.num_points as usize;
             let mut orig_points =
                 alloc::vec![GlyphPoint { x: 0, y: 0, on_curve: false }; num_points];
+
             for i in 0..num_points {
                 orig_points[i] = outline.points[i];
             }
@@ -392,7 +420,6 @@ pub(crate) fn extract_outline_with_axes(
                 Ok(Some(vd)) => vd,
                 _ => return Some((advance_fu, lsb_fu, upem)),
             };
-
             let (new_advance, new_lsb) = apply_gvar_simple(
                 outline,
                 &orig_points,
@@ -410,7 +437,6 @@ pub(crate) fn extract_outline_with_axes(
             // NOT for individual outline points.
             let components: alloc::vec::Vec<_> = composite.components().collect();
             let num_components = components.len();
-
             // Get gvar deltas for component offsets + phantom points.
             let gvar = match font.gvar() {
                 Ok(g) => g,
@@ -426,8 +452,10 @@ pub(crate) fn extract_outline_with_axes(
             if let Ok(Some(var_data)) = gvar.glyph_variation_data(gid) {
                 for (tuple, scalar) in var_data.active_tuples_at(&coords) {
                     let scalar_bits = scalar.to_bits() as i64;
+
                     for td in tuple.deltas() {
                         let ix = td.position as usize;
+
                         if ix < gvar_total {
                             comp_dx[ix] +=
                                 ((td.x_delta as i64 * scalar_bits + 0x8000) >> 16) as i32;
@@ -455,23 +483,23 @@ pub(crate) fn extract_outline_with_axes(
                 };
                 let adj_dx = base_dx + comp_dx[ci];
                 let adj_dy = base_dy + comp_dy[ci];
-
                 let pts_before = outline.num_points as usize;
                 let contours_before = outline.num_contours as usize;
-
                 // Recursively extract component (typically simple) with variation.
                 // Use a heap-allocated temporary outline to avoid stack overflow.
                 let mut comp_outline: alloc::boxed::Box<GlyphOutline> = unsafe {
                     let layout = alloc::alloc::Layout::new::<GlyphOutline>();
                     let ptr = alloc::alloc::alloc_zeroed(layout) as *mut GlyphOutline;
+
                     if ptr.is_null() {
                         continue;
                     }
+
                     alloc::boxed::Box::from_raw(ptr)
                 };
-
                 let comp_result =
                     extract_outline_with_axes(font_data, comp_gid, axis_values, &mut comp_outline);
+
                 if comp_result.is_none() {
                     // Fall back to default outline for this component.
                     if extract_outline(font_data, comp_gid, &mut comp_outline).is_none() {
@@ -482,6 +510,7 @@ pub(crate) fn extract_outline_with_axes(
                 // Append component points with adjusted offset.
                 let comp_npts = comp_outline.num_points as usize;
                 let comp_nc = comp_outline.num_contours as usize;
+
                 if pts_before + comp_npts > MAX_GLYPH_POINTS {
                     continue;
                 }
@@ -496,24 +525,29 @@ pub(crate) fn extract_outline_with_axes(
                         on_curve: comp_outline.points[i].on_curve,
                     };
                 }
+
                 outline.num_points = (pts_before + comp_npts) as u16;
 
                 for i in 0..comp_nc {
                     outline.contour_ends[contours_before + i] =
                         comp_outline.contour_ends[i] + pts_before as u16;
                 }
+
                 outline.num_contours = (contours_before + comp_nc) as u16;
             }
 
             // Recompute bounding box.
             let num_points = outline.num_points as usize;
+
             if num_points > 0 {
                 let mut x_min = outline.points[0].x;
                 let mut y_min = outline.points[0].y;
                 let mut x_max = outline.points[0].x;
                 let mut y_max = outline.points[0].y;
+
                 for i in 1..num_points {
                     let p = &outline.points[i];
+
                     if p.x < x_min {
                         x_min = p.x;
                     }
@@ -527,6 +561,7 @@ pub(crate) fn extract_outline_with_axes(
                         y_max = p.y;
                     }
                 }
+
                 outline.x_min = x_min as i16;
                 outline.y_min = y_min as i16;
                 outline.x_max = x_max as i16;
@@ -579,7 +614,6 @@ pub fn rasterize_with_axes(
     }
 
     let size_px_u32 = size_px as u32;
-
     let (advance_fu, _lsb_fu, upem) =
         match extract_outline_with_axes(font_data, glyph_id, axis_values, &mut scratch.outline) {
             Some(v) => v,
@@ -598,18 +632,22 @@ pub fn rasterize_with_axes(
 
                 let advance_fu = if (glyph_id as u16) < num_h_metrics {
                     let metrics = hmtx.h_metrics();
+
                     metrics.get(glyph_id as usize)?.advance.get()
                 } else {
                     let metrics = hmtx.h_metrics();
+
                     metrics.get(num_h_metrics as usize - 1)?.advance.get()
                 };
 
                 let loca = font.loca(None).ok()?;
                 let glyf = font.glyf().ok()?;
                 let gid = read_fonts::types::GlyphId::new(glyph_id as u32);
+
                 match loca.get_glyf(gid, &glyf) {
                     Ok(None) => {
                         let advance = scale_fu(advance_fu as i32, size_px_u32, upem) as u32;
+
                         return Some(GlyphMetrics {
                             width: 0,
                             height: 0,
@@ -626,6 +664,7 @@ pub fn rasterize_with_axes(
 
     // Apply outline dilation for stem darkening (macOS Core Text formula).
     let (dil_x, dil_y) = compute_dilation(size_px, upem, scale_factor);
+
     if dil_x != 0 || dil_y != 0 {
         embolden_outline(&mut scratch.outline, dil_x, dil_y);
     }
@@ -635,12 +674,12 @@ pub fn rasterize_with_axes(
     let y_min_fu = scratch.outline.y_min;
     let x_max_fu = scratch.outline.x_max;
     let y_max_fu = scratch.outline.y_max;
-
     // Scale bounding box to pixels, expand by 1px on each side for AA.
     let x_min_px = scale_fu_floor(x_min_fu as i32, size_px_u32, upem) - 1;
     let y_min_px = scale_fu_floor(y_min_fu as i32, size_px_u32, upem);
     let x_max_px = scale_fu_ceil(x_max_fu as i32, size_px_u32, upem) + 1;
     let y_max_px = scale_fu_ceil(y_max_fu as i32, size_px_u32, upem) + 1;
+
     if x_max_px < x_min_px || y_max_px < y_min_px {
         return None;
     }
@@ -649,6 +688,7 @@ pub fn rasterize_with_axes(
 
     if bmp_w == 0 || bmp_h == 0 {
         let advance = scale_fu(advance_fu as i32, size_px_u32, upem) as u32;
+
         return Some(GlyphMetrics {
             width: 0,
             height: 0,
@@ -675,8 +715,8 @@ pub fn rasterize_with_axes(
     }
 
     scratch.num_segments = 0;
-    flatten_outline_from_scratch(scratch, size_px_u32, upem, x_min_px, y_max_px);
 
+    flatten_outline_from_scratch(scratch, size_px_u32, upem, x_min_px, y_max_px);
     // Rasterize at native width (no horizontal oversampling)
     rasterize_segments(scratch, &mut buffer.data[..out_total], bmp_w, bmp_h);
 

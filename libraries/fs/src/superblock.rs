@@ -12,7 +12,7 @@
 
 use alloc::vec;
 
-use crate::{BLOCK_SIZE, FsError, block::BlockDevice, crc32::crc32};
+use crate::{block::BlockDevice, crc32::crc32, FsError, BLOCK_SIZE};
 
 /// Number of slots in the superblock ring.
 pub const RING_SIZE: u32 = 16;
@@ -81,6 +81,7 @@ impl Superblock {
     /// least `DATA_START` (17) blocks.
     pub fn format(device: &mut impl BlockDevice, now: u64) -> Result<Self, FsError> {
         let total = device.block_count();
+
         if total < DATA_START {
             return Err(FsError::DeviceTooSmall {
                 blocks: total,
@@ -90,18 +91,23 @@ impl Superblock {
 
         // Zero header + all ring slots to invalidate any stale entries.
         let zero = vec![0u8; BLOCK_SIZE as usize];
+
         for i in 0..=RING_SIZE {
             device.write_block(i, &zero)?;
         }
 
         // Disk header (block 0).
         let mut hdr = vec![0u8; BLOCK_SIZE as usize];
+
         put_u64(&mut hdr, HDR_MAGIC, DISK_MAGIC);
         put_u32(&mut hdr, HDR_VERSION, DISK_VERSION);
         put_u32(&mut hdr, HDR_RING_SIZE, RING_SIZE);
         put_u32(&mut hdr, HDR_TOTAL, total);
+
         let cksum = crc32(&hdr[..HDR_CKSUM]);
+
         put_u32(&mut hdr, HDR_CKSUM, cksum);
+
         device.write_block(0, &hdr)?;
 
         // Initial superblock entry.
@@ -116,6 +122,7 @@ impl Superblock {
             used_blocks: DATA_START,
             root_file: None,
         };
+
         device.write_block(ring_block(sb.txg), &sb.encode())?;
         device.flush()?;
 
@@ -131,11 +138,14 @@ impl Superblock {
 
         // Validate disk header.
         device.read_block(0, &mut buf)?;
+
         if get_u64(&buf, HDR_MAGIC) != DISK_MAGIC {
             return Err(FsError::BadMagic);
         }
+
         let stored = get_u32(&buf, HDR_CKSUM);
         let computed = crc32(&buf[..HDR_CKSUM]);
+
         if stored != computed {
             return Err(FsError::ChecksumMismatch {
                 expected: stored,
@@ -145,6 +155,7 @@ impl Superblock {
 
         // Scan ring for highest valid txg.
         let mut best: Option<Self> = None;
+
         for slot in 0..RING_SIZE {
             device.read_block(slot + 1, &mut buf)?;
 
@@ -156,6 +167,7 @@ impl Superblock {
             }
 
             let txg = get_u64(&buf, ENT_TXG);
+
             if best.as_ref().map_or(true, |b| txg > b.txg) {
                 best = Some(Self::decode(&buf));
             }
@@ -173,12 +185,14 @@ impl Superblock {
     pub fn commit(&mut self, device: &mut impl BlockDevice, now: u64) -> Result<(), FsError> {
         self.txg += 1;
         self.timestamp = now;
+
         device.write_block(ring_block(self.txg), &self.encode())?;
         device.flush()
     }
 
     fn encode(&self) -> alloc::vec::Vec<u8> {
         let mut buf = vec![0u8; BLOCK_SIZE as usize];
+
         put_u64(&mut buf, ENT_MAGIC, RING_MAGIC);
         put_u64(&mut buf, ENT_TXG, self.txg);
         put_u64(&mut buf, ENT_TS, self.timestamp);
@@ -189,8 +203,11 @@ impl Superblock {
         put_u32(&mut buf, ENT_TOTAL, self.total_blocks);
         put_u32(&mut buf, ENT_USED, self.used_blocks);
         put_u64(&mut buf, ENT_ROOT_FILE, self.root_file.unwrap_or(0));
+
         let cksum = crc32(&buf[..ENT_CKSUM]);
+
         put_u32(&mut buf, ENT_CKSUM, cksum);
+
         buf
     }
 

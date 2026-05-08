@@ -2,7 +2,7 @@
 
 #[cfg(target_arch = "aarch64")]
 use crate::blend::blit_blend_scalar_4px;
-use crate::{Color, SRGB_TO_LINEAR, Surface, blend::blit_blend_scalar_1px, div255, min};
+use crate::{blend::blit_blend_scalar_1px, div255, min, Color, Surface, SRGB_TO_LINEAR};
 
 impl<'a> Surface<'a> {
     /// Copy pixels from a source buffer onto this surface at (dst_x, dst_y).
@@ -83,9 +83,11 @@ impl<'a> Surface<'a> {
 
             // Fast-path: check if all source pixels in this row are opaque.
             let mut all_opaque = true;
+
             for col in 0..copy_w {
                 if src_data[src_row_off + (col * bpp + 3) as usize] != 255 {
                     all_opaque = false;
+
                     break;
                 }
             }
@@ -103,6 +105,7 @@ impl<'a> Surface<'a> {
                         row_bytes,
                     );
                 }
+
                 continue;
             }
 
@@ -126,7 +129,6 @@ impl<'a> Surface<'a> {
                         let base = (chunk * 4 * bpp) as usize;
                         let sp = src_row_ptr.add(base);
                         let dp = dst_row_ptr.add(base);
-
                         // Check if all 4 source pixels in this chunk have
                         // the same alpha (common fast paths).
                         let a0 = core::ptr::read(sp.add(3));
@@ -138,10 +140,10 @@ impl<'a> Surface<'a> {
                             // All transparent: skip.
                             continue;
                         }
-
                         if a0 == 255 && a1 == 255 && a2 == 255 && a3 == 255 {
                             // All opaque: direct copy.
                             core::ptr::copy_nonoverlapping(sp, dp, 16);
+
                             continue;
                         }
 
@@ -168,16 +170,17 @@ impl<'a> Surface<'a> {
                         let offset = (col * bpp) as usize;
                         let sp = src_row_ptr.add(offset);
                         let dp = dst_row_ptr.add(offset);
+
                         blit_blend_scalar_1px(sp, dp, self.format);
                     }
                 }
-
                 #[cfg(not(target_arch = "aarch64"))]
                 {
                     for col in 0..copy_w {
                         let offset = (col * bpp) as usize;
                         let sp = src_row_ptr.add(offset);
                         let dp = dst_row_ptr.add(offset);
+
                         blit_blend_scalar_1px(sp, dp, self.format);
                     }
                 }
@@ -213,8 +216,10 @@ impl<'a> Surface<'a> {
         }
         if opacity == 255 {
             self.blit_blend(src_data, src_width, src_height, src_stride, dst_x, dst_y);
+
             return;
         }
+
         if dst_x >= self.width || dst_y >= self.height {
             return;
         }
@@ -259,6 +264,7 @@ impl<'a> Surface<'a> {
 
                 // Modulate source alpha by group opacity.
                 let effective_a = div255(src_a as u32 * opa) as u8;
+
                 if effective_a == 0 {
                     continue;
                 }
@@ -269,7 +275,6 @@ impl<'a> Surface<'a> {
                     b: src_b,
                     a: effective_a,
                 };
-
                 // Read destination pixel.
                 let dst_b = self.data[dst_off];
                 let dst_g = self.data[dst_off + 1];
@@ -281,7 +286,6 @@ impl<'a> Surface<'a> {
                     b: dst_b,
                     a: dst_a,
                 };
-
                 // sRGB-correct blend.
                 let blended = src_color.blend_over(dst_color);
 

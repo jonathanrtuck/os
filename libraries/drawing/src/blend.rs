@@ -3,7 +3,7 @@
 //! All blending is done in linear light (sRGB gamma-correct) using the
 //! lookup tables in `gamma_tables.rs`. Integer math only.
 
-use crate::{Color, LINEAR_TO_SRGB, PixelFormat, SRGB_TO_LINEAR, Surface, div255, linear_to_idx};
+use crate::{div255, linear_to_idx, Color, PixelFormat, Surface, LINEAR_TO_SRGB, SRGB_TO_LINEAR};
 
 impl Color {
     /// Porter-Duff source-over: composite `self` on top of `dst`.
@@ -97,7 +97,6 @@ pub(crate) unsafe fn fill_rect_blend_scalar_1px(
     let dst_g = core::ptr::read(p.add(1));
     let dst_r = core::ptr::read(p.add(2));
     let dst_a = core::ptr::read(p.add(3));
-
     let da = dst_a as u32;
     let da_eff = div255(da * inv_sa);
     let out_a = sa + da_eff;
@@ -110,11 +109,9 @@ pub(crate) unsafe fn fill_rect_blend_scalar_1px(
     let dst_r_lin = SRGB_TO_LINEAR[dst_r as usize] as u32;
     let dst_g_lin = SRGB_TO_LINEAR[dst_g as usize] as u32;
     let dst_b_lin = SRGB_TO_LINEAR[dst_b as usize] as u32;
-
     let r_lin = (src_r_lin * sa + dst_r_lin * da_eff) / out_a;
     let g_lin = (src_g_lin * sa + dst_g_lin * da_eff) / out_a;
     let b_lin = (src_b_lin * sa + dst_b_lin * da_eff) / out_a;
-
     let out_r = LINEAR_TO_SRGB[linear_to_idx(r_lin)];
     let out_g = LINEAR_TO_SRGB[linear_to_idx(g_lin)];
     let out_b = LINEAR_TO_SRGB[linear_to_idx(b_lin)];
@@ -144,6 +141,7 @@ pub(crate) unsafe fn blit_blend_scalar_1px(sp: *const u8, dp: *mut u8, format: P
     if src_a == 255 {
         // Opaque: direct copy (4 bytes).
         core::ptr::copy_nonoverlapping(sp, dp, 4);
+
         return;
     }
 
@@ -218,9 +216,9 @@ pub(crate) unsafe fn rounded_rect_write_aa_pixel(
 ) {
     let offset = (py * stride + px * bpp) as usize;
     let p = ptr.add(offset);
-
     // Effective alpha = src_a * cov / 256.
     let eff_a = (src_a * cov) >> 8;
+
     if eff_a == 0 {
         return;
     }
@@ -233,10 +231,13 @@ pub(crate) unsafe fn rounded_rect_write_aa_pixel(
             a: 255,
         };
         let encoded = color.encode(PixelFormat::Bgra8888);
+
         core::ptr::write(p as *mut u32, u32::from_ne_bytes(encoded));
+
         return;
     }
 
     let eff_inv_a = 255 - eff_a;
+
     fill_rect_blend_scalar_1px(p, src_r_lin, src_g_lin, src_b_lin, eff_a, eff_inv_a);
 }

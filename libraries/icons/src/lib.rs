@@ -60,9 +60,11 @@ impl IconPath {
     /// creates visual artifacts (wedge shapes from arcs, etc.).
     pub const fn is_closed(&self) -> bool {
         let len = self.commands.len();
+
         if len < PATH_CLOSE_SIZE {
             return false;
         }
+
         // Last 4 bytes should be the Close tag (u32 LE).
         let b = self.commands;
         let i = len - PATH_CLOSE_SIZE;
@@ -70,6 +72,7 @@ impl IconPath {
             | (b[i + 1] as u32) << 8
             | (b[i + 2] as u32) << 16
             | (b[i + 3] as u32) << 24;
+
         tag == PATH_CLOSE_TAG
     }
 }
@@ -101,12 +104,15 @@ impl Icon {
     /// artifacts from implicit closure.
     pub fn all_paths_closed(&self) -> bool {
         let mut i = 0;
+
         while i < self.paths.len() {
             if !self.paths[i].is_closed() {
                 return false;
             }
+
             i += 1;
         }
+
         !self.paths.is_empty()
     }
 }
@@ -129,18 +135,22 @@ pub fn get(name: &str, mimetype: Option<&str>) -> &'static Icon {
         if let Some(icon) = data::lookup(name, Some(mt)) {
             return icon;
         }
+
         // Try category fallback: "text/plain" → "text/".
         if let Some(slash) = mt.find('/') {
             let category = &mt[..=slash]; // e.g., "text/"
+
             if let Some(icon) = data::lookup_category(name, category) {
                 return icon;
             }
         }
     }
+
     // Try base icon (no mimetype).
     if let Some(icon) = data::lookup(name, None) {
         return icon;
     }
+
     // Universal fallback.
     data::fallback()
 }
@@ -160,6 +170,7 @@ mod tests {
     #[test]
     fn lookup_base_document() {
         let icon = get("document", None);
+
         assert_eq!(icon.name, "document");
         assert_eq!(icon.viewbox, 24.0);
         assert!(icon.stroke_width > 0.0);
@@ -169,48 +180,56 @@ mod tests {
     #[test]
     fn lookup_search() {
         let icon = get("search", None);
+
         assert_eq!(icon.name, "search");
     }
 
     #[test]
     fn lookup_settings() {
         let icon = get("settings", None);
+
         assert_eq!(icon.name, "settings");
     }
 
     #[test]
     fn lookup_alert() {
         let icon = get("alert", None);
+
         assert_eq!(icon.name, "alert");
     }
 
     #[test]
     fn lookup_info() {
         let icon = get("info", None);
+
         assert_eq!(icon.name, "info");
     }
 
     #[test]
     fn lookup_check() {
         let icon = get("check", None);
+
         assert_eq!(icon.name, "check");
     }
 
     #[test]
     fn lookup_close() {
         let icon = get("close", None);
+
         assert_eq!(icon.name, "close");
     }
 
     #[test]
     fn lookup_plus() {
         let icon = get("plus", None);
+
         assert_eq!(icon.name, "plus");
     }
 
     #[test]
     fn lookup_minus() {
         let icon = get("minus", None);
+
         assert_eq!(icon.name, "minus");
     }
 
@@ -218,6 +237,7 @@ mod tests {
     fn lookup_arrows() {
         for name in &["arrow-left", "arrow-right", "arrow-up", "arrow-down"] {
             let icon = get(name, None);
+
             assert_eq!(icon.name, *name);
         }
     }
@@ -225,32 +245,39 @@ mod tests {
     #[test]
     fn lookup_undo_redo() {
         let undo = get("undo", None);
+
         assert_eq!(undo.name, "undo");
+
         let redo = get("redo", None);
+
         assert_eq!(redo.name, "redo");
     }
 
     #[test]
     fn lookup_menu() {
         let icon = get("menu", None);
+
         assert_eq!(icon.name, "menu");
     }
 
     #[test]
     fn lookup_loading() {
         let icon = get("loading", None);
+
         assert_eq!(icon.name, "loading");
     }
 
     #[test]
     fn lookup_pointer() {
         let icon = get("pointer", None);
+
         assert_eq!(icon.name, "pointer");
     }
 
     #[test]
     fn lookup_cursor_text() {
         let icon = get("cursor-text", None);
+
         assert_eq!(icon.name, "cursor-text");
     }
 
@@ -259,24 +286,28 @@ mod tests {
     #[test]
     fn document_exact_text_rich() {
         let icon = get("document", Some("text/rich"));
+
         assert_eq!(icon.label, "Rich text document");
     }
 
     #[test]
     fn document_exact_text_markdown() {
         let icon = get("document", Some("text/markdown"));
+
         assert_eq!(icon.label, "Markdown document");
     }
 
     #[test]
     fn document_exact_application_json() {
         let icon = get("document", Some("application/json"));
+
         assert_eq!(icon.label, "Source code");
     }
 
     #[test]
     fn document_exact_text_csv() {
         let icon = get("document", Some("text/csv"));
+
         assert_eq!(icon.label, "Data table");
     }
 
@@ -286,24 +317,28 @@ mod tests {
     fn document_category_text() {
         // "text/html" has no exact match, falls back to "text/" category.
         let icon = get("document", Some("text/html"));
+
         assert_eq!(icon.label, "Text document");
     }
 
     #[test]
     fn document_category_image() {
         let icon = get("document", Some("image/png"));
+
         assert_eq!(icon.label, "Image");
     }
 
     #[test]
     fn document_category_audio() {
         let icon = get("document", Some("audio/mp3"));
+
         assert_eq!(icon.label, "Audio");
     }
 
     #[test]
     fn document_category_video() {
         let icon = get("document", Some("video/mp4"));
+
         assert_eq!(icon.label, "Video");
     }
 
@@ -312,12 +347,14 @@ mod tests {
     #[test]
     fn unknown_name_falls_back_to_document() {
         let icon = get("nonexistent-icon", None);
+
         assert_eq!(icon.name, "document");
     }
 
     #[test]
     fn unknown_name_with_mimetype_falls_back() {
         let icon = get("nonexistent-icon", Some("text/plain"));
+
         assert_eq!(icon.name, "document");
     }
 
@@ -325,6 +362,7 @@ mod tests {
     fn non_document_icon_ignores_mimetype() {
         // "search" has no mimetype variants; should return base "search".
         let icon = get("search", Some("text/plain"));
+
         assert_eq!(icon.name, "search");
     }
 
@@ -353,9 +391,12 @@ mod tests {
             "pointer",
             "cursor-text",
         ];
+
         for name in &names {
             let icon = get(name, None);
+
             assert!(!icon.paths.is_empty(), "icon '{name}' has no paths");
+
             for path in icon.paths {
                 assert!(
                     !path.commands.is_empty(),
@@ -370,6 +411,7 @@ mod tests {
         // Path commands are u32 tags + f32 coords, all 4 bytes each.
         // Total command buffer length must be a multiple of 4.
         let icon = get("document", None);
+
         for path in icon.paths {
             assert_eq!(
                 path.commands.len() % 4,
@@ -431,8 +473,10 @@ mod tests {
     #[test]
     fn all_icons_have_standard_viewbox() {
         let names = ["document", "search", "settings", "alert", "plus"];
+
         for name in &names {
             let icon = get(name, None);
+
             assert_eq!(icon.viewbox, 24.0, "icon '{name}' has non-standard viewbox");
         }
     }
@@ -443,8 +487,10 @@ mod tests {
             "document", "search", "settings", "alert", "check", "close", "plus", "minus", "undo",
             "redo", "menu",
         ];
+
         for name in &names {
             let icon = get(name, None);
+
             assert!(!icon.label.is_empty(), "icon '{name}' has empty label");
         }
     }

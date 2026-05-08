@@ -167,6 +167,7 @@ fn total_used(h: &PieceTableHeader) -> usize {
 #[inline]
 fn read_header(buf: &[u8]) -> &PieceTableHeader {
     debug_assert!(buf.len() >= HEADER_SIZE);
+
     // SAFETY: buf is at least HEADER_SIZE bytes, PieceTableHeader is repr(C)
     // and 64 bytes, and we only require the buffer to be u8-aligned (which it
     // always is). repr(C) structs of u8/u16/u32 fields have alignment ≤ 4,
@@ -177,6 +178,7 @@ fn read_header(buf: &[u8]) -> &PieceTableHeader {
 #[inline]
 fn read_header_mut(buf: &mut [u8]) -> &mut PieceTableHeader {
     debug_assert!(buf.len() >= HEADER_SIZE);
+
     // SAFETY: same as read_header, but mutable.
     unsafe { &mut *(buf.as_mut_ptr() as *mut PieceTableHeader) }
 }
@@ -184,6 +186,7 @@ fn read_header_mut(buf: &mut [u8]) -> &mut PieceTableHeader {
 fn read_piece(buf: &[u8], style_count: u8, index: u16) -> Piece {
     let off = pieces_offset(style_count) + (index as usize) * PIECE_SIZE;
     let src = &buf[off..off + PIECE_SIZE];
+
     // SAFETY: Piece is repr(C), 16 bytes, all-byte-valid fields.
     unsafe { core::ptr::read_unaligned(src.as_ptr() as *const Piece) }
 }
@@ -191,6 +194,7 @@ fn read_piece(buf: &[u8], style_count: u8, index: u16) -> Piece {
 fn write_piece(buf: &mut [u8], style_count: u8, index: u16, piece: &Piece) {
     let off = pieces_offset(style_count) + (index as usize) * PIECE_SIZE;
     let dst = &mut buf[off..off + PIECE_SIZE];
+
     // SAFETY: Piece is repr(C), 16 bytes.
     unsafe { core::ptr::write_unaligned(dst.as_mut_ptr() as *mut Piece, *piece) };
 }
@@ -198,6 +202,7 @@ fn write_piece(buf: &mut [u8], style_count: u8, index: u16, piece: &Piece) {
 fn write_style(buf: &mut [u8], index: u8, style: &Style) {
     let off = styles_offset() + (index as usize) * STYLE_SIZE;
     let dst = &mut buf[off..off + STYLE_SIZE];
+
     // SAFETY: Style is repr(C), 12 bytes.
     unsafe { core::ptr::write_unaligned(dst.as_mut_ptr() as *mut Style, *style) };
 }
@@ -213,6 +218,7 @@ fn read_source_byte(buf: &[u8], h: &PieceTableHeader, piece: &Piece, offset_in_p
             + piece.offset as usize
             + offset_in_piece as usize
     };
+
     buf[abs]
 }
 
@@ -220,6 +226,7 @@ fn read_source_byte(buf: &[u8], h: &PieceTableHeader, piece: &Piece, offset_in_p
 fn shift_pieces_right(buf: &mut [u8], style_count: u8, piece_count: u16, from: u16, count: u16) {
     // Move from the end to avoid overwriting.
     let mut i = piece_count;
+
     while i > from {
         i -= 1;
         let p = read_piece(buf, style_count, i);
@@ -245,6 +252,7 @@ fn relocate_data(buf: &mut [u8], sc: u8, old_pc: u16, new_pc: u16, ol: u32, al: 
     if new_data_off > old_data_off {
         // Shift right — copy backward.
         let mut i = data_len;
+
         while i > 0 {
             i -= 1;
             buf[new_data_off + i] = buf[old_data_off + i];
@@ -255,6 +263,7 @@ fn relocate_data(buf: &mut [u8], sc: u8, old_pc: u16, new_pc: u16, ol: u32, al: 
             buf[new_data_off + i] = buf[old_data_off + i];
         }
     }
+
     true
 }
 
@@ -268,11 +277,14 @@ pub fn init(buf: &mut [u8], _capacity: usize) -> bool {
     if buf.len() < HEADER_SIZE {
         return false;
     }
+
     // Zero the entire buffer first.
     for b in buf.iter_mut() {
         *b = 0;
     }
+
     let h = read_header_mut(buf);
+
     h.magic = MAGIC;
     h.version = VERSION;
     h.piece_count = 0;
@@ -284,6 +296,7 @@ pub fn init(buf: &mut [u8], _capacity: usize) -> bool {
     h.text_len = 0;
     h.cursor_pos = 0;
     h.operation_id = 0;
+
     true
 }
 
@@ -302,6 +315,7 @@ pub fn init_with_text(
 
     // We need: header + 1 style + 1 piece + original text
     let needed = HEADER_SIZE + STYLE_SIZE + PIECE_SIZE + text.len();
+
     if buf.len() < needed {
         return false;
     }
@@ -312,6 +326,7 @@ pub fn init_with_text(
     }
 
     let h = read_header_mut(buf);
+
     h.magic = MAGIC;
     h.version = VERSION;
     h.piece_count = 1;
@@ -337,10 +352,12 @@ pub fn init_with_text(
         length: text.len() as u32,
         operation_id: 0,
     };
+
     write_piece(buf, 1, 0, &piece);
 
     // Copy text into the original buffer area.
     let orig_off = original_offset(1, 1);
+
     buf[orig_off..orig_off + text.len()].copy_from_slice(text);
 
     true
@@ -355,23 +372,29 @@ pub fn validate(buf: &[u8]) -> bool {
     if buf.len() < HEADER_SIZE {
         return false;
     }
+
     let h = read_header(buf);
+
     if h.magic != MAGIC || h.version != VERSION {
         return false;
     }
 
     // Check that the buffer is large enough for all data.
     let needed = total_used(h);
+
     if buf.len() < needed {
         return false;
     }
 
     // Verify text_len matches sum of piece lengths.
     let mut sum: u32 = 0;
+
     for i in 0..h.piece_count {
         let p = read_piece(buf, h.style_count, i);
+
         sum = sum.saturating_add(p.length);
     }
+
     if sum != h.text_len {
         return false;
     }
@@ -418,13 +441,17 @@ pub fn set_cursor_pos(buf: &mut [u8], pos: u32) {
 fn find_piece(buf: &[u8], pos: u32) -> (u16, u32) {
     let h = read_header(buf);
     let mut offset: u32 = 0;
+
     for i in 0..h.piece_count {
         let p = read_piece(buf, h.style_count, i);
+
         if pos < offset + p.length {
             return (i, pos - offset);
         }
+
         offset += p.length;
     }
+
     (h.piece_count, 0)
 }
 
@@ -454,17 +481,25 @@ pub fn insert_bytes(buf: &mut [u8], pos: u32, bytes: &[u8]) -> bool {
     // the same style, and it references the end of the add buffer, just extend.
     if pc > 0 {
         let (pi, off_in) = find_piece(buf, if pos > 0 { pos } else { 0 });
-
         // Coalesce with the previous piece if we're at its end.
         let coalesce_idx = if off_in == 0 && pi > 0 {
             // We're at the start of piece `pi`, which is the end of piece `pi-1`.
             Some(pi - 1)
         } else if pos == tl && pi == pc {
             // Appending at the very end — coalesce with the last piece.
-            if pc > 0 { Some(pc - 1) } else { None }
+            if pc > 0 {
+                Some(pc - 1)
+            } else {
+                None
+            }
         } else if off_in > 0 {
             let p = read_piece(buf, sc, pi);
-            if off_in == p.length { Some(pi) } else { None }
+
+            if off_in == p.length {
+                Some(pi)
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -473,21 +508,30 @@ pub fn insert_bytes(buf: &mut [u8], pos: u32, bytes: &[u8]) -> bool {
             let p = read_piece(buf, sc, ci);
             let add_off = add_offset(sc, pc, read_header(buf).original_len);
             let h = read_header(buf);
+
             if p.source == SOURCE_ADD && p.style_id == cur_style && p.offset + p.length == h.add_len
             {
                 // Append to the add buffer and extend the piece.
                 let add_start = add_off + h.add_len as usize;
+
                 if add_start + bytes.len() > buf.len() {
                     return false;
                 }
+
                 buf[add_start..add_start + bytes.len()].copy_from_slice(bytes);
+
                 let h = read_header_mut(buf);
+
                 h.add_len += bytes.len() as u32;
                 h.text_len += bytes.len() as u32;
+
                 // Extend the piece.
                 let mut p = read_piece(buf, sc, ci);
+
                 p.length += bytes.len() as u32;
+
                 write_piece(buf, sc, ci, &p);
+
                 return true;
             }
         }
@@ -495,7 +539,6 @@ pub fn insert_bytes(buf: &mut [u8], pos: u32, bytes: &[u8]) -> bool {
 
     // Cannot coalesce — need a new piece (and possibly split an existing one).
     let (pi, off_in) = find_piece(buf, pos);
-
     // Determine how many pieces to add. Split replaces 1 piece with 3
     // (left + insert + right) = net +2. No split just inserts 1 = net +1.
     let need_split = off_in > 0;
@@ -521,11 +564,13 @@ pub fn insert_bytes(buf: &mut [u8], pos: u32, bytes: &[u8]) -> bool {
     // Shift original + add buffers right to make room for new pieces.
     let old_orig_off = original_offset(sc, pc);
     let data_len = h.original_len as usize + h.add_len as usize;
+
     if pieces_added > 0 && data_len > 0 {
         let shift = (pieces_added as usize) * PIECE_SIZE;
         // Copy backwards (memmove semantics for rightward shift).
         let src_start = old_orig_off;
         let mut i = data_len;
+
         while i > 0 {
             i -= 1;
             buf[src_start + shift + i] = buf[src_start + i];
@@ -534,14 +579,18 @@ pub fn insert_bytes(buf: &mut [u8], pos: u32, bytes: &[u8]) -> bool {
 
     // Now update piece_count in header BEFORE writing pieces, so offsets are correct.
     let h = read_header_mut(buf);
-    h.piece_count = pc + pieces_added;
-    let new_pc = h.piece_count;
 
+    h.piece_count = pc + pieces_added;
+
+    let new_pc = h.piece_count;
     // Append the new text to the add buffer (at its new position).
     let new_add_data_off =
         add_offset(sc, new_pc, read_header(buf).original_len) + read_header(buf).add_len as usize;
+
     buf[new_add_data_off..new_add_data_off + bytes.len()].copy_from_slice(bytes);
+
     let add_buf_offset = read_header(buf).add_len;
+
     read_header_mut(buf).add_len += bytes.len() as u32;
 
     // Now write the pieces.
@@ -562,6 +611,7 @@ pub fn insert_bytes(buf: &mut [u8], pos: u32, bytes: &[u8]) -> bool {
             length: off_in,
             operation_id: old_piece.operation_id,
         };
+
         write_piece(buf, sc, pi, &left);
 
         // New inserted piece.
@@ -574,6 +624,7 @@ pub fn insert_bytes(buf: &mut [u8], pos: u32, bytes: &[u8]) -> bool {
             length: bytes.len() as u32,
             operation_id: op_id,
         };
+
         write_piece(buf, sc, pi + 1, &new_piece);
 
         // Right half of split.
@@ -586,6 +637,7 @@ pub fn insert_bytes(buf: &mut [u8], pos: u32, bytes: &[u8]) -> bool {
             length: old_piece.length - off_in,
             operation_id: old_piece.operation_id,
         };
+
         write_piece(buf, sc, pi + 2, &right);
     } else {
         // Insert at a piece boundary (beginning of `pi` or end of all pieces).
@@ -601,6 +653,7 @@ pub fn insert_bytes(buf: &mut [u8], pos: u32, bytes: &[u8]) -> bool {
             length: bytes.len() as u32,
             operation_id: op_id,
         };
+
         write_piece(buf, sc, pi, &new_piece);
     }
 
@@ -623,8 +676,10 @@ pub fn delete_range(buf: &mut [u8], start: u32, end: u32) -> bool {
     if start >= end {
         return false;
     }
+
     let h = read_header(buf);
     let tl = h.text_len;
+
     if end > tl {
         return false;
     }
@@ -643,25 +698,32 @@ pub fn delete_range(buf: &mut [u8], start: u32, end: u32) -> bool {
     let might_split = {
         let mut offset: u32 = 0;
         let mut found = false;
+
         for i in 0..pc {
             let p = read_piece(buf, sc, i);
             let p_start = offset;
             let p_end = offset + p.length;
+
             if start > p_start && end < p_end {
                 found = true;
+
                 break;
             }
+
             offset = p_end;
         }
+
         found
     };
 
     if might_split {
         // Need to grow piece array by 1 — check buffer capacity.
         let new_data_off = original_offset(sc, pc + 1);
+
         if new_data_off + ol as usize + al as usize > buf.len() {
             return false;
         }
+
         // Shift data right by one piece slot to make room.
         relocate_data(buf, sc, pc, pc + 1, ol, al);
         read_header_mut(buf).piece_count = pc + 1;
@@ -678,6 +740,7 @@ pub fn delete_range(buf: &mut [u8], start: u32, end: u32) -> bool {
         let p = read_piece(buf, sc, ri);
         let p_start = offset;
         let p_end = offset + p.length;
+
         offset = p_end;
 
         if p_end <= start || p_start >= end {
@@ -685,6 +748,7 @@ pub fn delete_range(buf: &mut [u8], start: u32, end: u32) -> bool {
             if wi != ri {
                 write_piece(buf, sc, wi, &p);
             }
+
             wi += 1;
         } else if p_start >= start && p_end <= end {
             // Entirely within deletion range — skip (remove).
@@ -694,14 +758,19 @@ pub fn delete_range(buf: &mut [u8], start: u32, end: u32) -> bool {
                 length: start - p_start,
                 ..p
             };
+
             write_piece(buf, sc, wi, &left);
+
             wi += 1;
+
             let right = Piece {
                 offset: p.offset + (end - p_start),
                 length: p_end - end,
                 ..p
             };
+
             write_piece(buf, sc, wi, &right);
+
             wi += 1;
         } else if start > p_start {
             // Deletion cuts off the end.
@@ -709,7 +778,9 @@ pub fn delete_range(buf: &mut [u8], start: u32, end: u32) -> bool {
                 length: start - p_start,
                 ..p
             };
+
             write_piece(buf, sc, wi, &trimmed);
+
             wi += 1;
         } else {
             // Deletion cuts off the beginning.
@@ -719,7 +790,9 @@ pub fn delete_range(buf: &mut [u8], start: u32, end: u32) -> bool {
                 length: p.length - trim,
                 ..p
             };
+
             write_piece(buf, sc, wi, &trimmed);
+
             wi += 1;
         }
     }
@@ -733,6 +806,7 @@ pub fn delete_range(buf: &mut [u8], start: u32, end: u32) -> bool {
 
     // Update header.
     let h = read_header_mut(buf);
+
     h.piece_count = new_pc;
     h.text_len -= end - start;
 
@@ -747,23 +821,27 @@ pub fn apply_style(buf: &mut [u8], start: u32, end: u32, style_id: u8) {
     if start >= end {
         return;
     }
+
     let h = read_header(buf);
+
     if end > h.text_len {
         return;
     }
+
     let sc = h.style_count;
     let pc = h.piece_count;
     let ol = h.original_len;
     let al = h.add_len;
-
     // Count how many extra piece slots we need.
     let mut extra_pieces: u16 = 0;
     {
         let mut offset: u32 = 0;
+
         for i in 0..pc {
             let p = read_piece(buf, sc, i);
             let p_start = offset;
             let p_end = offset + p.length;
+
             offset = p_end;
 
             if p_end <= start || p_start >= end {
@@ -783,9 +861,11 @@ pub fn apply_style(buf: &mut [u8], start: u32, end: u32, style_id: u8) {
     if extra_pieces > 0 {
         // Check buffer capacity for expanded piece array.
         let new_data_off = original_offset(sc, pc + extra_pieces);
+
         if new_data_off + ol as usize + al as usize > buf.len() {
             return; // Buffer too small.
         }
+
         // Shift data right to accommodate extra pieces.
         relocate_data(buf, sc, pc, pc + extra_pieces, ol, al);
     }
@@ -793,19 +873,20 @@ pub fn apply_style(buf: &mut [u8], start: u32, end: u32, style_id: u8) {
     // Process pieces right-to-left so that rightward placement doesn't
     // clobber unprocessed pieces.
     let mut slots_remaining = extra_pieces;
-
     let mut i = pc;
+
     while i > 0 {
         i -= 1;
-        let p = read_piece(buf, sc, i);
 
+        let p = read_piece(buf, sc, i);
         // Compute starting offset of piece i by summing pieces 0..i.
         let mut p_start: u32 = 0;
+
         for j in 0..i {
             p_start += read_piece(buf, sc, j).length;
         }
-        let p_end = p_start + p.length;
 
+        let p_end = p_start + p.length;
         // Where this piece lands in the new array.
         let dest = i + slots_remaining;
 
@@ -818,7 +899,9 @@ pub fn apply_style(buf: &mut [u8], start: u32, end: u32, style_id: u8) {
         } else if start > p_start && end < p_end {
             // 1→3 split.
             slots_remaining -= 2;
+
             let base = i + slots_remaining;
+
             write_piece(
                 buf,
                 sc,
@@ -852,7 +935,9 @@ pub fn apply_style(buf: &mut [u8], start: u32, end: u32, style_id: u8) {
         } else if start > p_start {
             // Style cuts into end — 1→2 split.
             slots_remaining -= 1;
+
             let base = i + slots_remaining;
+
             write_piece(
                 buf,
                 sc,
@@ -876,7 +961,9 @@ pub fn apply_style(buf: &mut [u8], start: u32, end: u32, style_id: u8) {
         } else {
             // Style cuts into beginning — 1→2 split.
             slots_remaining -= 1;
+
             let base = i + slots_remaining;
+
             write_piece(
                 buf,
                 sc,
@@ -917,6 +1004,7 @@ pub fn current_style(buf: &[u8]) -> u8 {
 /// Set the selection range in the header.
 pub fn set_selection(buf: &mut [u8], start: u32, end: u32) {
     let h = read_header_mut(buf);
+
     h.selection_start = start;
     h.selection_end = end;
 }
@@ -924,12 +1012,14 @@ pub fn set_selection(buf: &mut [u8], start: u32, end: u32) {
 /// Get the selection range from the header.
 pub fn selection(buf: &[u8]) -> (u32, u32) {
     let h = read_header(buf);
+
     (h.selection_start, h.selection_end)
 }
 
 /// Increment operation_id and return the new value.
 pub fn next_operation(buf: &mut [u8]) -> u32 {
     let h = read_header_mut(buf);
+
     h.operation_id += 1;
     h.operation_id
 }
@@ -955,9 +1045,9 @@ pub fn add_style(buf: &mut [u8], style: &Style) -> Option<u8> {
     }
 
     let new_sc = sc + 1;
-
     // Check that the buffer has room for the extra STYLE_SIZE bytes.
     let old_total = total_used(h);
+
     if old_total + STYLE_SIZE > buf.len() {
         return None;
     }
@@ -969,6 +1059,7 @@ pub fn add_style(buf: &mut [u8], style: &Style) -> Option<u8> {
 
     if data_after_styles > 0 {
         let mut i = data_after_styles;
+
         while i > 0 {
             i -= 1;
             buf[new_pieces_off + i] = buf[old_pieces_off + i];
@@ -977,7 +1068,9 @@ pub fn add_style(buf: &mut [u8], style: &Style) -> Option<u8> {
 
     // Write the new style.
     let h = read_header_mut(buf);
+
     h.style_count = new_sc;
+
     write_style(buf, sc, style);
 
     Some(sc)
@@ -986,13 +1079,17 @@ pub fn add_style(buf: &mut [u8], style: &Style) -> Option<u8> {
 /// Get a style from the palette by index.
 pub fn style(buf: &[u8], id: u8) -> Option<&Style> {
     let h = read_header(buf);
+
     if id >= h.style_count {
         return None;
     }
+
     let off = styles_offset() + (id as usize) * STYLE_SIZE;
+
     if off + STYLE_SIZE > buf.len() {
         return None;
     }
+
     // SAFETY: Style is repr(C), buffer bounds checked above.
     Some(unsafe { &*(buf[off..].as_ptr() as *const Style) })
 }
@@ -1005,6 +1102,7 @@ pub fn style_count(buf: &[u8]) -> u8 {
 /// Find the first style in the palette with the given semantic role.
 pub fn find_style_by_role(buf: &[u8], role: u8) -> Option<u8> {
     let h = read_header(buf);
+
     for i in 0..h.style_count {
         if let Some(s) = style(buf, i) {
             if s.role == role {
@@ -1012,6 +1110,7 @@ pub fn find_style_by_role(buf: &[u8], role: u8) -> Option<u8> {
             }
         }
     }
+
     None
 }
 
@@ -1022,21 +1121,27 @@ pub fn find_style_by_role(buf: &[u8], role: u8) -> Option<u8> {
 /// Read the byte at the given logical position.
 pub fn byte_at(buf: &[u8], pos: u32) -> Option<u8> {
     let h = read_header(buf);
+
     if pos >= h.text_len {
         return None;
     }
+
     let sc = h.style_count;
     let pc = h.piece_count;
-
     let mut offset: u32 = 0;
+
     for i in 0..pc {
         let p = read_piece(buf, sc, i);
+
         if pos < offset + p.length {
             let off_in = pos - offset;
+
             return Some(read_source_byte(buf, h, &p, off_in));
         }
+
         offset += p.length;
     }
+
     None
 }
 
@@ -1046,8 +1151,8 @@ pub fn text_slice(buf: &[u8], start: u32, end: u32, out: &mut [u8]) -> usize {
     let tl = h.text_len;
     let sc = h.style_count;
     let pc = h.piece_count;
-
     let end = if end > tl { tl } else { end };
+
     if start >= end {
         return 0;
     }
@@ -1062,6 +1167,7 @@ pub fn text_slice(buf: &[u8], start: u32, end: u32, out: &mut [u8]) -> usize {
 
         if p_end <= start {
             offset = p_end;
+
             continue;
         }
         if p_start >= end {
@@ -1076,6 +1182,7 @@ pub fn text_slice(buf: &[u8], start: u32, end: u32, out: &mut [u8]) -> usize {
             if written >= out.len() {
                 return written;
             }
+
             out[written] = read_source_byte(buf, h, &p, j);
             written += 1;
         }
@@ -1089,20 +1196,25 @@ pub fn text_slice(buf: &[u8], start: u32, end: u32, out: &mut [u8]) -> usize {
 /// Return the style_id at the given logical byte position.
 pub fn style_at(buf: &[u8], pos: u32) -> Option<u8> {
     let h = read_header(buf);
+
     if pos >= h.text_len {
         return None;
     }
+
     let sc = h.style_count;
     let pc = h.piece_count;
-
     let mut offset: u32 = 0;
+
     for i in 0..pc {
         let p = read_piece(buf, sc, i);
+
         if pos < offset + p.length {
             return Some(p.style_id);
         }
+
         offset += p.length;
     }
+
     None
 }
 
@@ -1113,6 +1225,7 @@ pub fn style_at(buf: &[u8], pos: u32) -> Option<u8> {
 /// Count of coalesced styled runs (adjacent pieces with the same style merge).
 pub fn styled_run_count(buf: &[u8]) -> usize {
     let h = read_header(buf);
+
     if h.piece_count == 0 {
         return 0;
     }
@@ -1123,6 +1236,7 @@ pub fn styled_run_count(buf: &[u8]) -> usize {
 
     for i in 1..h.piece_count {
         let p = read_piece(buf, sc, i);
+
         if p.style_id != prev_style {
             count += 1;
             prev_style = p.style_id;
@@ -1135,6 +1249,7 @@ pub fn styled_run_count(buf: &[u8]) -> usize {
 /// Get the Nth coalesced styled run.
 pub fn styled_run(buf: &[u8], index: usize) -> Option<StyledRun> {
     let h = read_header(buf);
+
     if h.piece_count == 0 {
         return None;
     }
@@ -1157,6 +1272,7 @@ pub fn styled_run(buf: &[u8], index: usize) -> Option<StyledRun> {
                     style_id: current_style,
                 });
             }
+
             run_idx += 1;
             run_start = byte_offset;
             byte_len = 0;
@@ -1204,13 +1320,13 @@ pub fn compact(buf: &mut [u8]) -> u16 {
 
     let ol = h.original_len;
     let al = h.add_len;
-
     // Forward scan with read/write cursors.
     let mut wi: u16 = 0;
     let mut current = read_piece(buf, sc, 0);
 
     for ri in 1..pc {
         let next = read_piece(buf, sc, ri);
+
         if next.source == current.source
             && next.style_id == current.style_id
             && next.offset == current.offset + current.length
@@ -1220,12 +1336,14 @@ pub fn compact(buf: &mut [u8]) -> u16 {
         } else {
             // Flush current, advance.
             write_piece(buf, sc, wi, &current);
+
             wi += 1;
             current = next;
         }
     }
     // Flush last piece.
     write_piece(buf, sc, wi, &current);
+
     wi += 1;
 
     let new_pc = wi;
@@ -1372,7 +1490,9 @@ mod tests {
     /// Helper: initialize an empty piece table in a freshly allocated buffer.
     fn make_empty(size: usize) -> Vec<u8> {
         let mut buf = vec![0u8; size];
+
         assert!(init(&mut buf, size));
+
         buf
     }
 
@@ -1381,7 +1501,9 @@ mod tests {
         let style = default_body_style();
         let mut buf = vec![0u8; size];
         let cap = buf.len();
+
         assert!(init_with_text(&mut buf, cap, text, &style));
+
         buf
     }
 
@@ -1390,7 +1512,9 @@ mod tests {
         let len = text_len(buf) as usize;
         let mut out = vec![0u8; len];
         let copied = text_slice(buf, 0, len as u32, &mut out);
+
         out.truncate(copied);
+
         out
     }
 
@@ -1406,6 +1530,7 @@ mod tests {
     #[test]
     fn init_creates_valid_empty_table() {
         let buf = make_empty(1024);
+
         assert!(validate(&buf));
         assert_eq!(text_len(&buf), 0);
         assert_eq!(cursor_pos(&buf), 0);
@@ -1416,18 +1541,21 @@ mod tests {
     #[test]
     fn init_fails_on_undersized_buffer() {
         let mut buf = vec![0u8; HEADER_SIZE - 1];
+
         assert!(!init(&mut buf, HEADER_SIZE - 1));
     }
 
     #[test]
     fn init_minimum_buffer_succeeds() {
         let buf = make_empty(HEADER_SIZE);
+
         assert!(validate(&buf));
     }
 
     #[test]
     fn init_with_text_creates_single_piece() {
         let buf = make_with_text(1024, b"Hello, world!");
+
         assert!(validate(&buf));
         assert_eq!(text_len(&buf), 13);
         assert_eq!(header(&buf).piece_count, 1);
@@ -1442,12 +1570,14 @@ mod tests {
         let needed = HEADER_SIZE + STYLE_SIZE + PIECE_SIZE + text.len();
         let mut buf = vec![0u8; needed - 1];
         let cap = buf.len();
+
         assert!(!init_with_text(&mut buf, cap, text, &style));
     }
 
     #[test]
     fn empty_table_extract_yields_empty() {
         let buf = make_empty(1024);
+
         assert_eq!(extract_text(&buf), Vec::<u8>::new());
     }
 
@@ -1458,6 +1588,7 @@ mod tests {
     #[test]
     fn insert_single_byte_into_empty_table() {
         let mut buf = make_empty(1024);
+
         assert!(insert(&mut buf, 0, b'A'));
         assert!(validate(&buf));
         assert_eq!(text_len(&buf), 1);
@@ -1467,6 +1598,7 @@ mod tests {
     #[test]
     fn insert_bytes_at_beginning() {
         let mut buf = make_with_text(4096, b"world");
+
         assert!(insert_bytes(&mut buf, 0, b"Hello "));
         assert!(validate(&buf));
         assert_eq!(extract_string(&buf), "Hello world");
@@ -1475,6 +1607,7 @@ mod tests {
     #[test]
     fn insert_bytes_at_end() {
         let mut buf = make_with_text(4096, b"Hello");
+
         assert!(insert_bytes(&mut buf, 5, b" world"));
         assert!(validate(&buf));
         assert_eq!(extract_string(&buf), "Hello world");
@@ -1483,6 +1616,7 @@ mod tests {
     #[test]
     fn insert_bytes_in_middle() {
         let mut buf = make_with_text(4096, b"Heo");
+
         assert!(insert_bytes(&mut buf, 2, b"ll"));
         assert!(validate(&buf));
         assert_eq!(extract_string(&buf), "Hello");
@@ -1492,6 +1626,7 @@ mod tests {
     fn insert_empty_bytes_is_noop() {
         let mut buf = make_with_text(4096, b"Hello");
         let pc_before = header(&buf).piece_count;
+
         assert!(insert_bytes(&mut buf, 2, b""));
         assert_eq!(header(&buf).piece_count, pc_before);
         assert_eq!(extract_string(&buf), "Hello");
@@ -1500,16 +1635,19 @@ mod tests {
     #[test]
     fn insert_past_end_fails() {
         let mut buf = make_empty(1024);
+
         assert!(!insert(&mut buf, 1, b'A'));
     }
 
     #[test]
     fn sequential_inserts_coalesce() {
         let mut buf = make_empty(4096);
+
         // Insert 'H', 'e', 'l', 'l', 'o' one at a time at the end.
         for (i, &ch) in b"Hello".iter().enumerate() {
             assert!(insert(&mut buf, i as u32, ch));
         }
+
         assert!(validate(&buf));
         assert_eq!(extract_string(&buf), "Hello");
         // Sequential appends with the same style should coalesce into 1 piece.
@@ -1519,7 +1657,9 @@ mod tests {
     #[test]
     fn insert_into_empty_then_read_each_byte() {
         let mut buf = make_empty(4096);
+
         assert!(insert_bytes(&mut buf, 0, b"ABCDE"));
+
         for (i, &ch) in b"ABCDE".iter().enumerate() {
             assert_eq!(byte_at(&buf, i as u32), Some(ch));
         }
@@ -1532,6 +1672,7 @@ mod tests {
     #[test]
     fn delete_single_byte_from_beginning() {
         let mut buf = make_with_text(4096, b"Hello");
+
         assert!(delete(&mut buf, 0));
         assert!(validate(&buf));
         assert_eq!(extract_string(&buf), "ello");
@@ -1540,6 +1681,7 @@ mod tests {
     #[test]
     fn delete_single_byte_from_end() {
         let mut buf = make_with_text(4096, b"Hello");
+
         assert!(delete(&mut buf, 4));
         assert!(validate(&buf));
         assert_eq!(extract_string(&buf), "Hell");
@@ -1548,6 +1690,7 @@ mod tests {
     #[test]
     fn delete_single_byte_from_middle() {
         let mut buf = make_with_text(4096, b"Hello");
+
         assert!(delete(&mut buf, 2));
         assert!(validate(&buf));
         assert_eq!(extract_string(&buf), "Helo");
@@ -1556,6 +1699,7 @@ mod tests {
     #[test]
     fn delete_range_removes_substring() {
         let mut buf = make_with_text(4096, b"Hello, world!");
+
         // Delete ", world" (positions 5..12).
         assert!(delete_range(&mut buf, 5, 12));
         assert!(validate(&buf));
@@ -1565,6 +1709,7 @@ mod tests {
     #[test]
     fn delete_entire_content() {
         let mut buf = make_with_text(4096, b"Hello");
+
         assert!(delete_range(&mut buf, 0, 5));
         assert!(validate(&buf));
         assert_eq!(text_len(&buf), 0);
@@ -1574,12 +1719,14 @@ mod tests {
     #[test]
     fn delete_range_past_end_fails() {
         let mut buf = make_with_text(4096, b"Hello");
+
         assert!(!delete_range(&mut buf, 0, 6));
     }
 
     #[test]
     fn delete_empty_range_fails() {
         let mut buf = make_with_text(4096, b"Hello");
+
         // start >= end should return false.
         assert!(!delete_range(&mut buf, 3, 3));
         assert!(!delete_range(&mut buf, 4, 3));
@@ -1588,6 +1735,7 @@ mod tests {
     #[test]
     fn delete_from_empty_table_fails() {
         let mut buf = make_empty(1024);
+
         assert!(!delete(&mut buf, 0));
     }
 
@@ -1598,6 +1746,7 @@ mod tests {
     #[test]
     fn insert_then_delete_restores_original() {
         let mut buf = make_with_text(4096, b"Hello");
+
         // Insert "XX" at position 2.
         assert!(insert_bytes(&mut buf, 2, b"XX"));
         assert_eq!(extract_string(&buf), "HeXXllo");
@@ -1610,6 +1759,7 @@ mod tests {
     #[test]
     fn multiple_inserts_at_different_positions() {
         let mut buf = make_empty(4096);
+
         assert!(insert_bytes(&mut buf, 0, b"AC"));
         assert!(insert_bytes(&mut buf, 1, b"B"));
         assert!(validate(&buf));
@@ -1623,17 +1773,16 @@ mod tests {
         // Delete "cd" (positions 2..4).
         assert!(delete_range(&mut buf, 2, 4));
         assert_eq!(extract_string(&buf), "abef");
-
         // Insert "XY" at position 2.
         assert!(insert_bytes(&mut buf, 2, b"XY"));
         assert_eq!(extract_string(&buf), "abXYef");
-
         // Delete first character.
         assert!(delete(&mut buf, 0));
         assert_eq!(extract_string(&buf), "bXYef");
 
         // Append "Z".
         let len = text_len(&buf);
+
         assert!(insert(&mut buf, len, b'Z'));
         assert!(validate(&buf));
         assert_eq!(extract_string(&buf), "bXYefZ");
@@ -1642,10 +1791,12 @@ mod tests {
     #[test]
     fn build_string_char_by_char_at_front() {
         let mut buf = make_empty(4096);
+
         // Insert characters at position 0 each time, building "edcba".
         for &ch in b"abcde" {
             assert!(insert(&mut buf, 0, ch));
         }
+
         assert!(validate(&buf));
         assert_eq!(extract_string(&buf), "edcba");
     }
@@ -1657,6 +1808,7 @@ mod tests {
     #[test]
     fn byte_at_returns_none_past_end() {
         let buf = make_with_text(4096, b"Hi");
+
         assert_eq!(byte_at(&buf, 0), Some(b'H'));
         assert_eq!(byte_at(&buf, 1), Some(b'i'));
         assert_eq!(byte_at(&buf, 2), None);
@@ -1668,6 +1820,7 @@ mod tests {
         let buf = make_with_text(4096, b"Hello, world!");
         let mut out = [0u8; 5];
         let n = text_slice(&buf, 7, 12, &mut out);
+
         assert_eq!(n, 5);
         assert_eq!(&out[..n], b"world");
     }
@@ -1678,6 +1831,7 @@ mod tests {
         let mut out = [0u8; 64];
         // Request beyond text_len; should clamp.
         let n = text_slice(&buf, 0, 100, &mut out);
+
         assert_eq!(n, 2);
         assert_eq!(&out[..n], b"Hi");
     }
@@ -1686,6 +1840,7 @@ mod tests {
     fn text_slice_start_past_end_returns_zero() {
         let buf = make_with_text(4096, b"Hi");
         let mut out = [0u8; 64];
+
         assert_eq!(text_slice(&buf, 5, 10, &mut out), 0);
     }
 
@@ -1694,6 +1849,7 @@ mod tests {
         let buf = make_with_text(4096, b"Hello, world!");
         let mut out = [0u8; 3];
         let n = text_slice(&buf, 0, 13, &mut out);
+
         assert_eq!(n, 3);
         assert_eq!(&out[..n], b"Hel");
     }
@@ -1701,14 +1857,18 @@ mod tests {
     #[test]
     fn styled_run_count_empty_table() {
         let buf = make_empty(1024);
+
         assert_eq!(styled_run_count(&buf), 0);
     }
 
     #[test]
     fn styled_run_count_single_piece() {
         let buf = make_with_text(4096, b"Hello");
+
         assert_eq!(styled_run_count(&buf), 1);
+
         let run = styled_run(&buf, 0).unwrap();
+
         assert_eq!(run.byte_offset, 0);
         assert_eq!(run.byte_len, 5);
         assert_eq!(run.style_id, 0);
@@ -1717,6 +1877,7 @@ mod tests {
     #[test]
     fn styled_run_out_of_bounds_returns_none() {
         let buf = make_with_text(4096, b"Hello");
+
         assert!(styled_run(&buf, 1).is_none());
         assert!(styled_run(&buf, 100).is_none());
     }
@@ -1727,6 +1888,7 @@ mod tests {
         let run = styled_run(&buf, 0).unwrap();
         let mut out = [0u8; 16];
         let n = copy_run_text(&buf, &run, &mut out);
+
         assert_eq!(&out[..n], b"Hello");
     }
 
@@ -1737,8 +1899,10 @@ mod tests {
     #[test]
     fn validate_rejects_bad_magic() {
         let mut buf = make_empty(1024);
+
         // Corrupt the magic number.
         buf[0] = 0xFF;
+
         assert!(!validate(&buf));
     }
 
@@ -1751,20 +1915,25 @@ mod tests {
     #[test]
     fn cursor_position_roundtrip() {
         let mut buf = make_empty(1024);
+
         set_cursor_pos(&mut buf, 42);
+
         assert_eq!(cursor_pos(&buf), 42);
     }
 
     #[test]
     fn selection_roundtrip() {
         let mut buf = make_empty(1024);
+
         set_selection(&mut buf, 10, 20);
+
         assert_eq!(selection(&buf), (10, 20));
     }
 
     #[test]
     fn operation_id_increments() {
         let mut buf = make_empty(1024);
+
         assert_eq!(header(&buf).operation_id, 0);
         assert_eq!(next_operation(&mut buf), 1);
         assert_eq!(next_operation(&mut buf), 2);
@@ -1775,9 +1944,11 @@ mod tests {
     fn large_insert_then_verify_every_byte() {
         let mut buf = make_empty(8192);
         let text: Vec<u8> = (0u8..=255).cycle().take(500).collect();
+
         assert!(insert_bytes(&mut buf, 0, &text));
         assert!(validate(&buf));
         assert_eq!(text_len(&buf), 500);
+
         for (i, &expected) in text.iter().enumerate() {
             assert_eq!(byte_at(&buf, i as u32), Some(expected), "mismatch at {}", i);
         }
@@ -1786,6 +1957,7 @@ mod tests {
     #[test]
     fn delete_hole_punch_splits_piece() {
         let mut buf = make_with_text(4096, b"ABCDE");
+
         // Delete "CD" (positions 2..4) — punches a hole in the single piece.
         assert!(delete_range(&mut buf, 2, 4));
         assert!(validate(&buf));
@@ -1804,6 +1976,7 @@ mod tests {
         let idx0 = add_style(&mut buf, &default_body_style());
         let idx1 = add_style(&mut buf, &bold_style());
         let idx2 = add_style(&mut buf, &italic_style());
+
         assert_eq!(idx0, Some(0));
         assert_eq!(idx1, Some(1));
         assert_eq!(idx2, Some(2));
@@ -1814,8 +1987,11 @@ mod tests {
     fn style_retrieval_by_index() {
         let mut buf = make_empty(4096);
         let body = default_body_style();
+
         add_style(&mut buf, &body);
+
         let retrieved = style(&buf, 0).unwrap();
+
         assert_eq!(retrieved.role, body.role);
         assert_eq!(retrieved.weight, body.weight);
         assert_eq!(retrieved.font_size_pt, body.font_size_pt);
@@ -1824,6 +2000,7 @@ mod tests {
     #[test]
     fn style_out_of_range_returns_none() {
         let buf = make_empty(4096);
+
         assert!(style(&buf, 0).is_none());
         assert!(style(&buf, 255).is_none());
     }
@@ -1831,9 +2008,11 @@ mod tests {
     #[test]
     fn find_style_by_role_finds_correct_style() {
         let mut buf = make_empty(4096);
+
         add_style(&mut buf, &default_body_style());
         add_style(&mut buf, &bold_style());
         add_style(&mut buf, &code_style());
+
         assert_eq!(find_style_by_role(&buf, ROLE_BODY), Some(0));
         assert_eq!(find_style_by_role(&buf, ROLE_STRONG), Some(1));
         assert_eq!(find_style_by_role(&buf, ROLE_CODE), Some(2));
@@ -1843,6 +2022,7 @@ mod tests {
     #[test]
     fn add_default_styles_adds_seven() {
         let mut buf = make_empty(4096);
+
         assert!(add_default_styles(&mut buf));
         assert_eq!(style_count(&buf), 7);
     }
@@ -1850,16 +2030,17 @@ mod tests {
     #[test]
     fn apply_style_changes_run_style() {
         let mut buf = make_with_text(4096, b"Hello, world!");
+
         add_style(&mut buf, &bold_style());
+
         let bold_idx = style_count(&buf) - 1;
 
         // Apply bold to "world" (positions 7..12).
         apply_style(&mut buf, 7, 12, bold_idx);
-        assert!(validate(&buf));
 
+        assert!(validate(&buf));
         // Text content should be unchanged.
         assert_eq!(extract_string(&buf), "Hello, world!");
-
         // Styles should differ across the range.
         assert_eq!(style_at(&buf, 0), Some(0)); // original style
         assert_eq!(style_at(&buf, 7), Some(bold_idx)); // bold
@@ -1871,15 +2052,20 @@ mod tests {
     fn apply_style_empty_range_is_noop() {
         let mut buf = make_with_text(4096, b"Hello");
         let pc_before = header(&buf).piece_count;
+
         apply_style(&mut buf, 3, 3, 0);
+
         assert_eq!(header(&buf).piece_count, pc_before);
     }
 
     #[test]
     fn set_and_get_current_style() {
         let mut buf = make_empty(1024);
+
         assert_eq!(current_style(&buf), 0);
+
         set_current_style(&mut buf, 5);
+
         assert_eq!(current_style(&buf), 5);
     }
 
@@ -1890,15 +2076,19 @@ mod tests {
     #[test]
     fn compact_merges_adjacent_same_source_pieces() {
         let mut buf = make_with_text(4096, b"Hello");
+
         // Insert in the middle to create multiple pieces, then delete the insert
         // so we have two adjacent pieces from the same source.
         assert!(insert_bytes(&mut buf, 2, b"XX"));
         assert!(delete_range(&mut buf, 2, 4));
+
         // Now we have two original-buffer pieces (He + llo) that are contiguous.
         let pc_before = header(&buf).piece_count;
+
         assert!(pc_before >= 2, "expected >= 2 pieces, got {}", pc_before);
 
         let removed = compact(&mut buf);
+
         assert!(removed > 0);
         assert!(validate(&buf));
         assert_eq!(extract_string(&buf), "Hello");
@@ -1907,6 +2097,7 @@ mod tests {
     #[test]
     fn compact_on_single_piece_is_noop() {
         let mut buf = make_with_text(4096, b"Hello");
+
         assert_eq!(compact(&mut buf), 0);
         assert_eq!(header(&buf).piece_count, 1);
     }
@@ -1914,6 +2105,7 @@ mod tests {
     #[test]
     fn compact_empty_table_is_noop() {
         let mut buf = make_empty(1024);
+
         assert_eq!(compact(&mut buf), 0);
     }
 
@@ -1924,10 +2116,13 @@ mod tests {
     #[test]
     fn repeated_insert_delete_cycles_stay_valid() {
         let mut buf = make_empty(8192);
+
         for round in 0..20u8 {
             let text = [b'A' + (round % 26)];
+
             assert!(insert_bytes(&mut buf, 0, &text));
         }
+
         assert!(validate(&buf));
         assert_eq!(text_len(&buf), 20);
 
@@ -1935,6 +2130,7 @@ mod tests {
         for _ in 0..20 {
             assert!(delete(&mut buf, 0));
         }
+
         assert!(validate(&buf));
         assert_eq!(text_len(&buf), 0);
     }
@@ -1942,10 +2138,12 @@ mod tests {
     #[test]
     fn insert_at_every_position_in_growing_string() {
         let mut buf = make_empty(8192);
+
         // Build "0123456789" by inserting each digit at its correct position.
         for i in 0..10u8 {
             assert!(insert(&mut buf, i as u32, b'0' + i));
         }
+
         assert!(validate(&buf));
         assert_eq!(extract_string(&buf), "0123456789");
     }
@@ -1953,12 +2151,14 @@ mod tests {
     #[test]
     fn style_at_returns_none_on_empty() {
         let buf = make_empty(1024);
+
         assert_eq!(style_at(&buf, 0), None);
     }
 
     #[test]
     fn text_slice_across_multiple_pieces() {
         let mut buf = make_with_text(4096, b"AAABBB");
+
         // Insert "CCC" in the middle to create multiple pieces.
         assert!(insert_bytes(&mut buf, 3, b"CCC"));
         assert_eq!(extract_string(&buf), "AAACCCBBB");
@@ -1966,6 +2166,7 @@ mod tests {
         // Slice across piece boundaries.
         let mut out = [0u8; 5];
         let n = text_slice(&buf, 2, 7, &mut out);
+
         assert_eq!(n, 5);
         assert_eq!(&out[..n], b"ACCCB");
     }
@@ -1973,26 +2174,29 @@ mod tests {
     #[test]
     fn styled_runs_after_apply_style() {
         let mut buf = make_with_text(4096, b"AABBCC");
-        add_style(&mut buf, &bold_style());
 
+        add_style(&mut buf, &bold_style());
         // Apply bold to the middle "BB" (positions 2..4).
         apply_style(&mut buf, 2, 4, 1);
-        assert!(validate(&buf));
 
+        assert!(validate(&buf));
         // Should have 3 styled runs: AA(style=0), BB(style=1), CC(style=0).
         assert_eq!(styled_run_count(&buf), 3);
 
         let r0 = styled_run(&buf, 0).unwrap();
+
         assert_eq!(r0.byte_offset, 0);
         assert_eq!(r0.byte_len, 2);
         assert_eq!(r0.style_id, 0);
 
         let r1 = styled_run(&buf, 1).unwrap();
+
         assert_eq!(r1.byte_offset, 2);
         assert_eq!(r1.byte_len, 2);
         assert_eq!(r1.style_id, 1);
 
         let r2 = styled_run(&buf, 2).unwrap();
+
         assert_eq!(r2.byte_offset, 4);
         assert_eq!(r2.byte_len, 2);
         assert_eq!(r2.style_id, 0);
@@ -2001,17 +2205,22 @@ mod tests {
     #[test]
     fn validate_detects_corrupted_text_len() {
         let mut buf = make_with_text(4096, b"Hello");
+
         assert!(validate(&buf));
+
         // Corrupt text_len to mismatch piece sum.
         header_mut(&mut buf).text_len = 99;
+
         assert!(!validate(&buf));
     }
 
     #[test]
     fn insert_after_style_addition_preserves_data() {
         let mut buf = make_empty(4096);
+
         add_style(&mut buf, &default_body_style());
         add_style(&mut buf, &bold_style());
+
         // Insert text -- style addition shifted pieces/data, verify insert works.
         assert!(insert_bytes(&mut buf, 0, b"Hello"));
         assert!(validate(&buf));

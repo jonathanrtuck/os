@@ -5,7 +5,7 @@
 //! No pixel concepts exist here. Pixel-denominated types (`GlyphMetrics`,
 //! `RasterBuffer`) and rasterization functions live in `crate::rasterize`.
 
-use read_fonts::{FontRef, TableProvider, tables::cmap::Cmap};
+use read_fonts::{tables::cmap::Cmap, FontRef, TableProvider};
 
 // ---------------------------------------------------------------------------
 // Font metrics
@@ -31,7 +31,6 @@ pub fn font_metrics(font_data: &[u8]) -> Option<FontMetrics> {
     let font = FontRef::new(font_data).ok()?;
     let head = font.head().ok()?;
     let hhea = font.hhea().ok()?;
-
     let cap_height = font
         .os2()
         .ok()
@@ -65,9 +64,11 @@ pub fn caret_skew(font_data: &[u8]) -> f32 {
     };
     let rise = hhea.caret_slope_rise();
     let run = hhea.caret_slope_run();
+
     if rise == 0 {
         return 0.0;
     }
+
     -(run as f32) / (rise as f32)
 }
 
@@ -89,12 +90,14 @@ fn cmap_lookup(cmap: &Cmap, codepoint: u32) -> Option<u16> {
         if let Ok(subtable) = record.subtable(cmap.offset_data()) {
             if let Some(gid) = subtable.map_codepoint(codepoint) {
                 let id = gid.to_u32() as u16;
+
                 if id > 0 {
                     return Some(id);
                 }
             }
         }
     }
+
     None
 }
 
@@ -110,6 +113,7 @@ pub fn glyph_h_metrics(font_data: &[u8], glyph_id: u16) -> Option<(u16, i16)> {
     if (glyph_id as u16) < num_h_metrics {
         let metrics = hmtx.h_metrics();
         let m = metrics.get(glyph_id as usize)?;
+
         Some((m.advance.get(), m.side_bearing.get()))
     } else {
         let metrics = hmtx.h_metrics();
@@ -118,6 +122,7 @@ pub fn glyph_h_metrics(font_data: &[u8], glyph_id: u16) -> Option<(u16, i16)> {
         let lsb_data = hmtx.left_side_bearings();
         let lsb_idx = (glyph_id as usize).checked_sub(num_h_metrics as usize)?;
         let lsb = lsb_data.get(lsb_idx).map(|v| v.get()).unwrap_or(0);
+
         Some((advance, lsb))
     }
 }
@@ -175,6 +180,7 @@ pub fn font_axes(font_data: &[u8]) -> alloc::vec::Vec<FontAxis> {
         Ok(a) => a,
         Err(_) => return alloc::vec::Vec::new(),
     };
+
     axes.iter()
         .map(|axis| FontAxis {
             tag: axis.axis_tag().into_bytes(),
@@ -192,13 +198,17 @@ pub fn axis_values_hash(axis_values: &[AxisValue]) -> u32 {
     if axis_values.is_empty() {
         return 0;
     }
+
     let mut h: u32 = 0x811c_9dc5;
+
     for av in axis_values {
         for &b in &av.tag {
             h ^= b as u32;
             h = h.wrapping_mul(0x0100_0193);
         }
+
         let bits = av.value.to_bits();
+
         for shift in [0, 8, 16, 24] {
             h ^= (bits >> shift) as u32 & 0xFF;
             h = h.wrapping_mul(0x0100_0193);
@@ -219,6 +229,7 @@ pub fn compute_optical_size(font_size_px: u16, dpi: u16) -> f32 {
     if dpi == 0 {
         return font_size_px as f32;
     }
+
     font_size_px as f32 * 72.0 / dpi as f32
 }
 
@@ -237,9 +248,7 @@ pub fn auto_axis_values_for_opsz(
         Some(a) => a,
         None => return alloc::vec::Vec::new(),
     };
-
     let raw_opsz = compute_optical_size(font_size_px, dpi);
-
     let clamped = if raw_opsz < opsz_axis.min_value {
         opsz_axis.min_value
     } else if raw_opsz > opsz_axis.max_value {
@@ -262,6 +271,7 @@ pub fn auto_axis_values_for_opsz(
 const SRGB_TO_LINEAR_LUT: [u16; 256] = {
     let mut lut = [0u16; 256];
     let mut i = 0u32;
+
     while i < 256 {
         let s = i as f64 / 255.0;
         let linear = if s <= 0.04045 {
@@ -271,26 +281,34 @@ const SRGB_TO_LINEAR_LUT: [u16; 256] = {
             let base_sq = base * base;
             let mut t = base;
             let mut iter = 0;
+
             while iter < 50 {
                 let t2 = t * t;
                 let t4 = t2 * t2;
+
                 if t4 < 1e-15 {
                     break;
                 }
+
                 let t_new = (4.0 * t + base_sq / t4) / 5.0;
                 let diff = t_new - t;
+
                 if diff < 1e-12 && diff > -1e-12 {
                     break;
                 }
+
                 t = t_new;
                 iter += 1;
             }
+
             base_sq * t
         };
         let scaled = (linear * 65535.0 + 0.5) as u32;
+
         lut[i as usize] = if scaled > 65535 { 65535 } else { scaled as u16 };
         i += 1;
     }
+
     lut
 };
 
@@ -302,6 +320,7 @@ fn relative_luminance(r: u8, g: u8, b: u8) -> f32 {
     let rl = srgb_to_linear(r);
     let gl = srgb_to_linear(g);
     let bl = srgb_to_linear(b);
+
     0.2126 * rl + 0.7152 * gl + 0.0722 * bl
 }
 
@@ -349,7 +368,6 @@ pub fn auto_weight_correction_axes(
         Some(a) => a,
         None => return alloc::vec::Vec::new(),
     };
-
     let factor = weight_correction_factor(fg_r, fg_g, fg_b, bg_r, bg_g, bg_b);
 
     if (factor - 1.0).abs() < f32::EPSILON {
@@ -357,7 +375,6 @@ pub fn auto_weight_correction_axes(
     }
 
     let adjusted = wght_axis.default_value * factor;
-
     let clamped = if adjusted < wght_axis.min_value {
         wght_axis.min_value
     } else if adjusted > wght_axis.max_value {
