@@ -5,7 +5,7 @@ edition = "2024"
 license = "Unlicense"
 
 [dependencies]
-abi = { path = "../abi" }
-protocol = { path = "../protocol" }
+abi = { path = "../../abi" }
+protocol = { path = "../../protocol" }
 
 [workspace]

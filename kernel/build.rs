@@ -29,7 +29,7 @@ fn build_init(kernel_dir: &std::path::Path) {
             "integration-tests",
         )
     } else {
-        (kernel_dir.join("../userspace/init"), "init")
+        (kernel_dir.join("../userspace/servers/init"), "init")
     };
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let init_bin = out_dir.join("init.bin");
@@ -42,10 +42,10 @@ fn build_init(kernel_dir: &std::path::Path) {
         write_empty_service_pack(&out_dir);
     }
 
-    println!("cargo:rerun-if-changed=../userspace/init/src/main.rs");
-    println!("cargo:rerun-if-changed=../userspace/init/src/manifest.rs");
-    println!("cargo:rerun-if-changed=../userspace/init/link.ld");
-    println!("cargo:rerun-if-changed=../userspace/init/Cargo.toml");
+    println!("cargo:rerun-if-changed=../userspace/servers/init/src/main.rs");
+    println!("cargo:rerun-if-changed=../userspace/servers/init/src/manifest.rs");
+    println!("cargo:rerun-if-changed=../userspace/servers/init/link.ld");
+    println!("cargo:rerun-if-changed=../userspace/servers/init/Cargo.toml");
     println!("cargo:rerun-if-changed=../userspace/integration-tests/src/main.rs");
     println!("cargo:rerun-if-changed=../userspace/integration-tests/link.ld");
     println!("cargo:rerun-if-changed=../userspace/integration-tests/Cargo.toml");
@@ -58,15 +58,18 @@ fn build_init(kernel_dir: &std::path::Path) {
     println!("cargo:rerun-if-changed=../userspace/servers/hello/src/main.rs");
     println!("cargo:rerun-if-changed=../userspace/servers/hello/link.ld");
     println!("cargo:rerun-if-changed=../userspace/servers/hello/Cargo.toml");
-    println!("cargo:rerun-if-changed=../userspace/drivers/input/src/main.rs");
-    println!("cargo:rerun-if-changed=../userspace/drivers/input/link.ld");
-    println!("cargo:rerun-if-changed=../userspace/drivers/input/Cargo.toml");
-    println!("cargo:rerun-if-changed=../userspace/drivers/blk/src/main.rs");
-    println!("cargo:rerun-if-changed=../userspace/drivers/blk/link.ld");
-    println!("cargo:rerun-if-changed=../userspace/drivers/blk/Cargo.toml");
-    println!("cargo:rerun-if-changed=../userspace/drivers/metal-render/src/main.rs");
-    println!("cargo:rerun-if-changed=../userspace/drivers/metal-render/link.ld");
-    println!("cargo:rerun-if-changed=../userspace/drivers/metal-render/Cargo.toml");
+    println!("cargo:rerun-if-changed=../userspace/servers/console/src/main.rs");
+    println!("cargo:rerun-if-changed=../userspace/servers/console/link.ld");
+    println!("cargo:rerun-if-changed=../userspace/servers/console/Cargo.toml");
+    println!("cargo:rerun-if-changed=../userspace/servers/drivers/input/src/main.rs");
+    println!("cargo:rerun-if-changed=../userspace/servers/drivers/input/link.ld");
+    println!("cargo:rerun-if-changed=../userspace/servers/drivers/input/Cargo.toml");
+    println!("cargo:rerun-if-changed=../userspace/servers/drivers/blk/src/main.rs");
+    println!("cargo:rerun-if-changed=../userspace/servers/drivers/blk/link.ld");
+    println!("cargo:rerun-if-changed=../userspace/servers/drivers/blk/Cargo.toml");
+    println!("cargo:rerun-if-changed=../userspace/servers/drivers/render/src/main.rs");
+    println!("cargo:rerun-if-changed=../userspace/servers/drivers/render/link.ld");
+    println!("cargo:rerun-if-changed=../userspace/servers/drivers/render/Cargo.toml");
 }
 
 fn build_userspace_crate(crate_dir: &std::path::Path, crate_name: &str, output: &std::path::Path) {
@@ -114,22 +117,22 @@ const SERVICES: &[ServiceDef] = &[
     },
     ServiceDef {
         name: "console",
-        dir: "../userspace/drivers/console",
+        dir: "../userspace/servers/console",
         crate_name: "console-driver",
     },
     ServiceDef {
         name: "input",
-        dir: "../userspace/drivers/input",
+        dir: "../userspace/servers/drivers/input",
         crate_name: "input-driver",
     },
     ServiceDef {
         name: "blk",
-        dir: "../userspace/drivers/blk",
+        dir: "../userspace/servers/drivers/blk",
         crate_name: "blk-driver",
     },
     ServiceDef {
         name: "render",
-        dir: "../userspace/drivers/metal-render",
+        dir: "../userspace/servers/drivers/render",
         crate_name: "metal-render-driver",
     },
 ];
