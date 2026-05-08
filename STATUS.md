@@ -203,8 +203,14 @@ or extend existing ones, never break the existing interface.
 2. **virtio-input** — DONE (skeleton). Probes MMIO for input devices, requests
    DMA from init, sets up virtqueue, binds IRQ, event loop reads EV_KEY/EV_ABS
    with modifier tracking. Event output to presenter not yet wired (Phase 4).
-   `userspace/drivers/input/`
-3. **virtio-blk** — pending
+   Now in service pack. `userspace/drivers/input/`
+3. **virtio-blk** — DONE. Probes MMIO for block device (ID 2), negotiates FLUSH
+   feature, reads capacity, allocates DMA for virtqueue + data buffer, runs
+   self-test (write/read/verify 16 KiB block + flush), registers with name
+   service as "blk", enters IPC serve loop. Protocol: shared data VMO for
+   bulk transfer, read_block/write_block/flush/get_info methods. Verified
+   end-to-end: hypervisor provides file-backed block device, driver reports
+   capacity, write+read 16K: OK, flush: OK. `userspace/drivers/blk/`
 4. **Metal render driver** — pending
 
 **Phase 2.2 infrastructure (DONE):**
@@ -218,13 +224,24 @@ or extend existing ones, never break the existing interface.
 - **ABI extension** — `vmo::create_dma(size, resource)` wraps vmo_create with
   DMA flag and Resource handle argument.
 
-**Next steps for Phase 2.3:**
+**Phase 2.3 kernel fixes:**
 
-1. Add virtio-input to service pack (mkservices integration).
-2. Verify end-to-end: hypervisor event script sends keystrokes → input driver
-   receives events → console output confirms receipt.
-3. Build virtio-blk driver (same DMA/virtio infrastructure).
-4. Metal render driver (compositor).
+- **MAX_BOOTSTRAP_HANDLES** — `thread_create_in` shared the IPC handle limit
+  (4), but driver bootstrapping needs 5 handles (code, stack, name svc, device
+  VMO, init ep). Added separate `MAX_BOOTSTRAP_HANDLES = 8`.
+- **Device IRQ dispatch** — `DEVICE_IRQ_HANDLER` was never registered.
+  `device_irq_dispatch` now looks up `IrqTable` bindings and signals events.
+- **SPI unmask on bind** — `event_bind_irq` recorded bindings but didn't
+  unmask the SPI at the GIC. Added `unmask_spi(intid)` to the bind path.
+- **Console dup-before-register** — IPC handle transfer is a move, not copy.
+  Console (and blk) now dup their endpoint before passing to name service.
+- **Input IRQ from slot** — IRQ number computed from discovered MMIO slot
+  index (48 + slot), not hardcoded.
+
+**Next steps for Phase 2.4:**
+
+1. Metal render driver (compositor).
+2. End-to-end input verification (hypervisor event script → input driver).
 
 ## Session Resume
 
