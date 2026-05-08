@@ -374,9 +374,9 @@ new library tests (1,045 total workspace tests).
 
 1. **Full boot** — DONE. All 10 production services start, discover each other
    via the name service, and enter their serve loops. Boot dependency chain:
-   name → console → blk/input/render → store → document → layout →
-   presenter → text-editor. Test services removed from the production pack.
-   `cargo r` builds and launches the OS fullscreen with Metal GPU + block device.
+   name → console → blk/input/render → store → document → layout → presenter →
+   text-editor. Test services removed from the production pack. `cargo r` builds
+   and launches the OS fullscreen with Metal GPU + block device.
 
 2. **Compositor** — DONE. Render driver transformed from solid-color stub into a
    scene-graph-driven compositor. Receives the presenter's scene graph VMO via
@@ -387,8 +387,8 @@ new library tests (1,045 total workspace tests).
 
 3. **Presenter active mode** — DONE. On boot: connects to document, layout,
    compositor (sends scene graph VMO, receives display dimensions), and text
-   editor. Performs initial scene graph build and render. On `KEY_EVENT` from the
-   input driver: dispatches to text editor, rebuilds scene, re-renders.
+   editor. Performs initial scene graph build and render. On `KEY_EVENT` from
+   the input driver: dispatches to text editor, rebuilds scene, re-renders.
 
 4. **Input driver → presenter pipeline** — DONE. US QWERTY keymap translates
    evdev key codes to ASCII characters / HID special keys. Lazy presenter lookup
@@ -402,25 +402,31 @@ new library tests (1,045 total workspace tests).
    all PASS.
 
 **Rendering note:** glyphs are currently rendered as colored rectangles (one per
-character position). Actual font rasterization + texture rendering is planned but
-not yet wired into the compositor pipeline. The fonts and render libraries exist
-and are tested (Phase 3); connecting them to the Metal compositor is the next
-rendering milestone.
+character position). Actual font rasterization + texture rendering is planned
+but not yet wired into the compositor pipeline. The fonts and render libraries
+exist and are tested (Phase 3); connecting them to the Metal compositor is the
+next rendering milestone.
 
-## What's Next
+## What's Next: v0.6 Parity
 
 The userspace rebuild plan (`design/userspace-rebuild.md`) is complete through
-all 5 phases. The full document editing pipeline works end-to-end. Next steps:
+all 5 phases. The full document editing pipeline works end-to-end. Remaining
+work to reach full v0.6-pre-rewrite parity is tracked in
+`design/v06-parity-plan.md` (Phases 6–13).
 
-- **Font rendering** — connect the fonts + render libraries to the compositor
-  for actual glyph rasterization instead of colored rectangles
-- **Cursor navigation** — arrow keys, Home/End in the presenter (requires layout
-  knowledge)
-- **Multi-line editing** — scroll, viewport tracking
-- **Visual polish** — match the v0.6-pre-rewrite prototype's appearance
+### v0.6 Parity Progress
+
+- Phase 6 (glyph atlas + textured rendering): NOT STARTED
+- Phase 7 (cursor blink + selection): NOT STARTED
+- Phase 8 (keyboard navigation): NOT STARTED
+- Phase 9 (scroll + viewport): NOT STARTED
+- Phase 10 (visual chrome): NOT STARTED
+- Phase 11 (content-type typography): NOT STARTED
+- Phase 12 (PNG decoder): NOT STARTED
+- Phase 13 (filesystem + virtio-9p): NOT STARTED
 
 ## Session Resume
 
-To resume work: read this file, `design/userspace-rebuild.md` for the full plan,
-check `git log --oneline` for recent commits, read MEMORY.md for cross-session
-context.
+To resume work: read this file and `design/v06-parity-plan.md`, check
+`git log --oneline -20` for recent commits, identify the current phase from the
+progress tracker above, and continue.
