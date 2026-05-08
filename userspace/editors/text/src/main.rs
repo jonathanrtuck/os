@@ -23,10 +23,7 @@
 #![no_std]
 #![no_main]
 
-use core::{
-    panic::PanicInfo,
-    sync::atomic::{AtomicU32, Ordering},
-};
+use core::panic::PanicInfo;
 
 use abi::types::{Handle, Rights};
 use ipc::server::{Dispatch, Incoming};
@@ -36,50 +33,9 @@ const HANDLE_NS_EP: Handle = Handle(2);
 const EXIT_CONSOLE_NOT_FOUND: u32 = 0xE301;
 const EXIT_DOC_NOT_FOUND: u32 = 0xE302;
 const EXIT_DOC_SETUP: u32 = 0xE303;
-const EXIT_DOC_MAP: u32 = 0xE304;
 const EXIT_ENDPOINT_CREATE: u32 = 0xE305;
 
 // ── Document buffer access ───────────────────────────────────────
-
-fn read_doc_header(doc_va: usize) -> (usize, usize) {
-    loop {
-        // SAFETY: doc_va + DOC_OFFSET_GENERATION points to an AtomicU32
-        // within the 64-byte document header. The document service
-        // stores with Release ordering; we Acquire-load to see all
-        // prior writes (content_len, cursor_pos, content bytes).
-        let generation = unsafe {
-            let ptr = (doc_va + document_service::DOC_OFFSET_GENERATION) as *const AtomicU32;
-
-            (*ptr).load(Ordering::Acquire)
-        };
-        // SAFETY: doc_va is a valid RO mapping of the document buffer.
-        // Offsets 0..8 = content_len, 8..16 = cursor_pos.
-        let content_len = unsafe { core::ptr::read_volatile(doc_va as *const u64) as usize };
-        let cursor_pos = unsafe { core::ptr::read_volatile((doc_va + 8) as *const u64) as usize };
-        let generation2 = unsafe {
-            let ptr = (doc_va + document_service::DOC_OFFSET_GENERATION) as *const AtomicU32;
-
-            (*ptr).load(Ordering::Acquire)
-        };
-
-        if generation == generation2 {
-            return (content_len, cursor_pos);
-        }
-
-        core::hint::spin_loop();
-    }
-}
-
-fn doc_content(doc_va: usize, len: usize) -> &'static [u8] {
-    // SAFETY: doc_va + DOC_HEADER_SIZE is the start of content bytes.
-    // The document service maintains len as the valid content length.
-    unsafe {
-        core::slice::from_raw_parts(
-            (doc_va + document_service::DOC_HEADER_SIZE) as *const u8,
-            len,
-        )
-    }
-}
 
 fn line_start(text: &[u8], pos: usize) -> usize {
     let mut i = pos;
@@ -136,7 +92,9 @@ struct TextEditor {
 
 impl TextEditor {
     fn handle_key(&mut self, dispatch: text_editor::KeyDispatch) -> text_editor::KeyReply {
-        let (content_len, cursor_pos) = read_doc_header(self.doc_va);
+        // SAFETY: doc_va is a valid RO mapping of the document buffer.
+        let (content_len, cursor_pos, _) =
+            unsafe { document_service::read_doc_header(self.doc_va) };
 
         match dispatch.key_code {
             text_editor::HID_KEY_BACKSPACE => {
@@ -223,7 +181,7 @@ impl TextEditor {
             return self.no_op(content_len, cursor_pos);
         }
 
-        let text = doc_content(self.doc_va, content_len);
+        let text = unsafe { document_service::doc_content_slice(self.doc_va, content_len) };
         let ls = line_start(text, cursor_pos);
         let mut spaces = 0usize;
 
@@ -302,37 +260,11 @@ extern "C" fn _start() -> ! {
             abi::thread::exit(EXIT_DOC_NOT_FOUND);
         }
     };
-    // Call SETUP on document service to get the doc buffer VMO.
-    let doc_va = {
-        let mut buf = [0u8; ipc::message::MSG_SIZE];
-
-        ipc::message::write_request(&mut buf, document_service::SETUP, &[]);
-
-        let mut recv_handles = [0u32; 4];
-        let result = match abi::ipc::call(
-            doc_ep,
-            &mut buf,
-            ipc::message::HEADER_SIZE,
-            &[],
-            &mut recv_handles,
-        ) {
-            Ok(r) => r,
+    let doc_va =
+        match ipc::client::setup_map_vmo(doc_ep, document_service::SETUP, &[], Rights::READ_MAP) {
+            Ok(va) => va,
             Err(_) => abi::thread::exit(EXIT_DOC_SETUP),
         };
-        let header = ipc::message::Header::read_from(&buf);
-
-        if header.is_error() || result.handle_count == 0 {
-            abi::thread::exit(EXIT_DOC_SETUP);
-        }
-
-        let vmo = Handle(recv_handles[0]);
-        let ro = Rights(Rights::READ.0 | Rights::MAP.0);
-
-        match abi::vmo::map(vmo, 0, ro) {
-            Ok(va) => va,
-            Err(_) => abi::thread::exit(EXIT_DOC_MAP),
-        }
-    };
 
     console::write(console_ep, b"text-editor: doc connected\n");
 

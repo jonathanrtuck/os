@@ -4,12 +4,24 @@ version = "0.1.0"
 edition = "2024"
 license = "Unlicense"
 
+[features]
+default = ["service"]
+service = [
+    "dep:abi",
+    "dep:console",
+    "dep:heap",
+    "dep:name",
+    "dep:store-service",
+    "ipc/kernel",
+]
+
 [dependencies]
-abi = { path = "../../abi" }
-heap = { path = "../../heap" }
-console = { path = "../console" }
-ipc = { path = "../../ipc" }
-name = { path = "../name" }
-store-service = { path = "../store" }
+ipc = { path = "../../ipc", default-features = false }
+
+abi = { path = "../../abi", optional = true }
+console = { path = "../console", optional = true }
+heap = { path = "../../heap", optional = true }
+name = { path = "../name", optional = true }
+store-service = { path = "../store", optional = true }
 
 [workspace]

@@ -13,10 +13,7 @@
 extern crate alloc;
 extern crate heap;
 
-use core::{
-    panic::PanicInfo,
-    sync::atomic::{AtomicU32, Ordering},
-};
+use core::panic::PanicInfo;
 
 use abi::types::{Handle, Rights};
 use ipc::server::{Dispatch, Incoming};
@@ -29,82 +26,26 @@ const PAGE_SIZE: usize = 16384;
 const EXIT_CONSOLE_NOT_FOUND: u32 = 0xE201;
 const EXIT_DOC_NOT_FOUND: u32 = 0xE202;
 const EXIT_DOC_SETUP: u32 = 0xE203;
-const EXIT_DOC_MAP: u32 = 0xE204;
 const EXIT_LAYOUT_NOT_FOUND: u32 = 0xE205;
 const EXIT_VIEWPORT_CREATE: u32 = 0xE206;
 const EXIT_VIEWPORT_MAP: u32 = 0xE207;
 const EXIT_LAYOUT_SETUP: u32 = 0xE208;
-const EXIT_RESULTS_MAP: u32 = 0xE209;
 const EXIT_SCENE_CREATE: u32 = 0xE20A;
 const EXIT_SCENE_MAP: u32 = 0xE20B;
 const EXIT_ENDPOINT_CREATE: u32 = 0xE20C;
 
 const MAX_GLYPHS_PER_LINE: usize = 256;
 
-// ── Free helpers (avoid borrow conflicts with scene_buf) ──────────
+// ── Layout results parsing (from seqlock-read buffer) ────────────
 
-fn read_line_at(results_va: usize, index: usize) -> layout_service::LineInfo {
-    let offset = ipc::register::HEADER_SIZE
-        + layout_service::LayoutHeader::SIZE
-        + index * layout_service::LineInfo::SIZE;
-    let mut buf = [0u8; layout_service::LineInfo::SIZE];
-
-    // SAFETY: results_va + offset is within the layout results VMO.
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            (results_va + offset) as *const u8,
-            buf.as_mut_ptr(),
-            layout_service::LineInfo::SIZE,
-        );
-    }
-
-    layout_service::LineInfo::read_from(&buf)
+fn parse_layout_header(buf: &[u8]) -> layout_service::LayoutHeader {
+    layout_service::LayoutHeader::read_from(buf)
 }
 
-fn read_layout_header(results_va: usize) -> layout_service::LayoutHeader {
-    let mut buf = [0u8; layout_service::LayoutHeader::SIZE];
+fn parse_line_at(buf: &[u8], index: usize) -> layout_service::LineInfo {
+    let offset = layout_service::LayoutHeader::SIZE + index * layout_service::LineInfo::SIZE;
 
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            (results_va + ipc::register::HEADER_SIZE) as *const u8,
-            buf.as_mut_ptr(),
-            layout_service::LayoutHeader::SIZE,
-        );
-    }
-
-    layout_service::LayoutHeader::read_from(&buf)
-}
-
-fn read_doc_header(doc_va: usize) -> (usize, usize) {
-    loop {
-        let generation = unsafe {
-            let ptr = (doc_va + document_service::DOC_OFFSET_GENERATION) as *const AtomicU32;
-
-            (*ptr).load(Ordering::Acquire)
-        };
-        let content_len = unsafe { core::ptr::read_volatile(doc_va as *const u64) as usize };
-        let cursor_pos = unsafe { core::ptr::read_volatile((doc_va + 8) as *const u64) as usize };
-        let generation2 = unsafe {
-            let ptr = (doc_va + document_service::DOC_OFFSET_GENERATION) as *const AtomicU32;
-
-            (*ptr).load(Ordering::Acquire)
-        };
-
-        if generation == generation2 {
-            return (content_len, cursor_pos);
-        }
-
-        core::hint::spin_loop();
-    }
-}
-
-fn doc_content_at(doc_va: usize, len: usize) -> &'static [u8] {
-    unsafe {
-        core::slice::from_raw_parts(
-            (doc_va + document_service::DOC_HEADER_SIZE) as *const u8,
-            len,
-        )
-    }
+    layout_service::LineInfo::read_from(&buf[offset..])
 }
 
 // ── Presenter server ──────────────────────────────────────────────
@@ -112,7 +53,9 @@ fn doc_content_at(doc_va: usize, len: usize) -> &'static [u8] {
 struct Presenter {
     doc_va: usize,
     layout_ep: Handle,
-    results_va: usize,
+
+    results_reader: ipc::register::Reader,
+    results_buf: [u8; layout_service::RESULTS_VALUE_SIZE],
 
     scene_buf: &'static mut [u8],
     scene_vmo: Handle,
@@ -121,6 +64,8 @@ struct Presenter {
 
     display_width: u32,
     display_height: u32,
+
+    glyphs: [ShapedGlyph; MAX_GLYPHS_PER_LINE],
 
     last_line_count: u32,
     last_cursor_line: u32,
@@ -162,12 +107,16 @@ impl Presenter {
 
     fn build_scene(&mut self) {
         let _ = ipc::client::call_simple(self.layout_ep, layout_service::RECOMPUTE, &[]);
-        let doc_va = self.doc_va;
-        let results_va = self.results_va;
-        let (content_len, cursor_pos) = read_doc_header(doc_va);
-        let layout_header = read_layout_header(results_va);
+        // SAFETY: doc_va is a valid RO mapping of the document buffer.
+        let (content_len, cursor_pos, _) =
+            unsafe { document_service::read_doc_header(self.doc_va) };
+
+        self.results_reader.read(&mut self.results_buf);
+
+        let layout_header = parse_layout_header(&self.results_buf);
         let line_count = layout_header.line_count as usize;
-        let content = doc_content_at(doc_va, content_len);
+        // SAFETY: doc_va is valid and content_len comes from read_doc_header.
+        let content = unsafe { document_service::doc_content_slice(self.doc_va, content_len) };
         let bg = Color::rgb(
             presenter_service::BG_R,
             presenter_service::BG_G,
@@ -232,7 +181,7 @@ impl Presenter {
         let char_advance = (presenter_service::CHAR_WIDTH_F32 * 65536.0) as i32;
 
         for i in 0..line_count.min(scene::MAX_NODES - 4) {
-            let line_info = read_line_at(results_va, i);
+            let line_info = parse_line_at(&self.results_buf, i);
             let line_start = line_info.byte_offset as usize;
             let line_len = line_info.byte_length as usize;
 
@@ -251,16 +200,9 @@ impl Presenter {
                 continue;
             };
             let glyph_count = line_len.min(MAX_GLYPHS_PER_LINE);
-            let mut glyphs = [ShapedGlyph {
-                glyph_id: 0,
-                _pad: 0,
-                x_advance: 0,
-                x_offset: 0,
-                y_offset: 0,
-            }; MAX_GLYPHS_PER_LINE];
 
             for (j, &byte) in line_bytes.iter().enumerate().take(glyph_count) {
-                glyphs[j] = ShapedGlyph {
+                self.glyphs[j] = ShapedGlyph {
                     glyph_id: byte as u16,
                     _pad: 0,
                     x_advance: char_advance,
@@ -269,7 +211,7 @@ impl Presenter {
                 };
             }
 
-            let glyph_ref = scene.push_shaped_glyphs(&glyphs[..glyph_count]);
+            let glyph_ref = scene.push_shaped_glyphs(&self.glyphs[..glyph_count]);
             let line_node = match scene.alloc_node() {
                 Some(id) => id,
                 None => break,
@@ -297,7 +239,7 @@ impl Presenter {
 
         // Handle cursor past last line.
         if line_count > 0 && cursor_pos >= content_len {
-            let last = read_line_at(results_va, line_count - 1);
+            let last = parse_line_at(&self.results_buf, line_count - 1);
             let last_end = last.byte_offset as usize + last.byte_length as usize;
 
             if cursor_pos >= last_end && cursor_pos > last.byte_offset as usize {
@@ -352,26 +294,22 @@ impl Presenter {
 impl Dispatch for Presenter {
     fn dispatch(&mut self, msg: Incoming<'_>) {
         match msg.method {
-            presenter_service::SETUP => {
-                let ro = Rights(Rights::READ.0 | Rights::MAP.0);
+            presenter_service::SETUP => match abi::handle::dup(self.scene_vmo, Rights::READ_MAP) {
+                Ok(dup) => {
+                    let reply = presenter_service::SetupReply {
+                        display_width: self.display_width,
+                        display_height: self.display_height,
+                    };
+                    let mut data = [0u8; presenter_service::SetupReply::SIZE];
 
-                match abi::handle::dup(self.scene_vmo, ro) {
-                    Ok(dup) => {
-                        let reply = presenter_service::SetupReply {
-                            display_width: self.display_width,
-                            display_height: self.display_height,
-                        };
-                        let mut data = [0u8; presenter_service::SetupReply::SIZE];
+                    reply.write_to(&mut data);
 
-                        reply.write_to(&mut data);
-
-                        let _ = msg.reply_ok(&data, &[dup.0]);
-                    }
-                    Err(_) => {
-                        let _ = msg.reply_error(ipc::STATUS_INVALID);
-                    }
+                    let _ = msg.reply_ok(&data, &[dup.0]);
                 }
-            }
+                Err(_) => {
+                    let _ = msg.reply_error(ipc::STATUS_INVALID);
+                }
+            },
             presenter_service::BUILD => {
                 self.build_scene();
 
@@ -418,36 +356,11 @@ extern "C" fn _start() -> ! {
             abi::thread::exit(EXIT_DOC_NOT_FOUND);
         }
     };
-    let doc_va = {
-        let mut buf = [0u8; ipc::message::MSG_SIZE];
-
-        ipc::message::write_request(&mut buf, document_service::SETUP, &[]);
-
-        let mut recv_handles = [0u32; 4];
-        let result = match abi::ipc::call(
-            doc_ep,
-            &mut buf,
-            ipc::message::HEADER_SIZE,
-            &[],
-            &mut recv_handles,
-        ) {
-            Ok(r) => r,
+    let doc_va =
+        match ipc::client::setup_map_vmo(doc_ep, document_service::SETUP, &[], Rights::READ_MAP) {
+            Ok(va) => va,
             Err(_) => abi::thread::exit(EXIT_DOC_SETUP),
         };
-        let header = ipc::message::Header::read_from(&buf);
-
-        if header.is_error() || result.handle_count == 0 {
-            abi::thread::exit(EXIT_DOC_SETUP);
-        }
-
-        let vmo = Handle(recv_handles[0]);
-        let ro = Rights(Rights::READ.0 | Rights::MAP.0);
-
-        match abi::vmo::map(vmo, 0, ro) {
-            Ok(va) => va,
-            Err(_) => abi::thread::exit(EXIT_DOC_MAP),
-        }
-    };
 
     console::write(console_ep, b"presenter: doc connected\n");
 
@@ -459,14 +372,13 @@ extern "C" fn _start() -> ! {
             abi::thread::exit(EXIT_LAYOUT_NOT_FOUND);
         }
     };
-    let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
     let viewport_vmo_size = ipc::register::required_size(layout_service::ViewportState::SIZE)
         .next_multiple_of(PAGE_SIZE);
     let viewport_vmo = match abi::vmo::create(viewport_vmo_size, 0) {
         Ok(h) => h,
         Err(_) => abi::thread::exit(EXIT_VIEWPORT_CREATE),
     };
-    let viewport_va = match abi::vmo::map(viewport_vmo, 0, rw) {
+    let viewport_va = match abi::vmo::map(viewport_vmo, 0, Rights::READ_WRITE_MAP) {
         Ok(va) => va,
         Err(_) => abi::thread::exit(EXIT_VIEWPORT_MAP),
     };
@@ -477,45 +389,30 @@ extern "C" fn _start() -> ! {
         Ok(h) => h,
         Err(_) => abi::thread::exit(EXIT_VIEWPORT_CREATE),
     };
-    let results_va = {
-        let mut buf = [0u8; ipc::message::MSG_SIZE];
-
-        ipc::message::write_request(&mut buf, layout_service::SETUP, &[]);
-
-        let mut recv_handles = [0u32; 4];
-        let result = match abi::ipc::call(
-            layout_ep,
-            &mut buf,
-            ipc::message::HEADER_SIZE,
-            &[viewport_dup.0],
-            &mut recv_handles,
-        ) {
-            Ok(r) => r,
-            Err(_) => abi::thread::exit(EXIT_LAYOUT_SETUP),
-        };
-        let header = ipc::message::Header::read_from(&buf);
-
-        if header.is_error() || result.handle_count == 0 {
-            abi::thread::exit(EXIT_LAYOUT_SETUP);
-        }
-
-        let vmo = Handle(recv_handles[0]);
-        let ro = Rights(Rights::READ.0 | Rights::MAP.0);
-
-        match abi::vmo::map(vmo, 0, ro) {
-            Ok(va) => va,
-            Err(_) => abi::thread::exit(EXIT_RESULTS_MAP),
-        }
+    let results_va = match ipc::client::setup_map_vmo(
+        layout_ep,
+        layout_service::SETUP,
+        &[viewport_dup.0],
+        Rights::READ_MAP,
+    ) {
+        Ok(va) => va,
+        Err(_) => abi::thread::exit(EXIT_LAYOUT_SETUP),
     };
 
     console::write(console_ep, b"presenter: layout connected\n");
 
+    // SAFETY: results_va is a valid RO mapping of the layout results
+    // VMO, 8-byte aligned, at least RESULTS_VALUE_SIZE + HEADER_SIZE
+    // bytes. The layout service is the sole writer.
+    let results_reader = unsafe {
+        ipc::register::Reader::new(results_va as *const u8, layout_service::RESULTS_VALUE_SIZE)
+    };
     let scene_vmo_size = SCENE_SIZE.next_multiple_of(PAGE_SIZE);
     let scene_vmo = match abi::vmo::create(scene_vmo_size, 0) {
         Ok(h) => h,
         Err(_) => abi::thread::exit(EXIT_SCENE_CREATE),
     };
-    let scene_va = match abi::vmo::map(scene_vmo, 0, rw) {
+    let scene_va = match abi::vmo::map(scene_vmo, 0, Rights::READ_WRITE_MAP) {
         Ok(va) => va,
         Err(_) => abi::thread::exit(EXIT_SCENE_MAP),
     };
@@ -535,12 +432,20 @@ extern "C" fn _start() -> ! {
     let mut server = Presenter {
         doc_va,
         layout_ep,
-        results_va,
+        results_reader,
+        results_buf: [0u8; layout_service::RESULTS_VALUE_SIZE],
         scene_buf,
         scene_vmo,
         viewport_va,
         display_width: presenter_service::DEFAULT_WIDTH,
         display_height: presenter_service::DEFAULT_HEIGHT,
+        glyphs: [ShapedGlyph {
+            glyph_id: 0,
+            _pad: 0,
+            x_advance: 0,
+            x_offset: 0,
+            y_offset: 0,
+        }; MAX_GLYPHS_PER_LINE],
         last_line_count: 0,
         last_cursor_line: 0,
         last_cursor_col: 0,

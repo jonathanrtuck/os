@@ -48,6 +48,7 @@ const EXIT_STORE_CREATE: u32 = 0xE00A;
 
 struct UndoState {
     snapshots: [u64; MAX_UNDO],
+    head: usize,
     count: usize,
     position: usize,
 }
@@ -56,12 +57,18 @@ impl UndoState {
     const fn new() -> Self {
         Self {
             snapshots: [0; MAX_UNDO],
+            head: 0,
             count: 0,
             position: 0,
         }
     }
 
+    fn idx(&self, logical: usize) -> usize {
+        (self.head + logical) % MAX_UNDO
+    }
+
     fn set_initial(&mut self, snap_id: u64) {
+        self.head = 0;
         self.snapshots[0] = snap_id;
         self.count = 1;
         self.position = 0;
@@ -71,25 +78,21 @@ impl UndoState {
         let mut n = 0;
 
         for i in (self.position + 1)..self.count {
-            discarded[n] = self.snapshots[i];
+            discarded[n] = self.snapshots[self.idx(i)];
             n += 1;
         }
 
         self.count = self.position + 1;
 
         if self.count >= MAX_UNDO {
-            discarded[n] = self.snapshots[0];
+            discarded[n] = self.snapshots[self.idx(0)];
             n += 1;
-
-            for i in 0..MAX_UNDO - 1 {
-                self.snapshots[i] = self.snapshots[i + 1];
-            }
-
+            self.head = (self.head + 1) % MAX_UNDO;
             self.count -= 1;
             self.position -= 1;
         }
 
-        self.snapshots[self.count] = snap_id;
+        self.snapshots[self.idx(self.count)] = snap_id;
         self.count += 1;
         self.position = self.count - 1;
 
@@ -99,7 +102,7 @@ impl UndoState {
     fn undo(&mut self) -> Option<u64> {
         if self.position > 0 {
             self.position -= 1;
-            Some(self.snapshots[self.position])
+            Some(self.snapshots[self.idx(self.position)])
         } else {
             None
         }
@@ -109,7 +112,7 @@ impl UndoState {
         if self.count > 0 && self.position < self.count - 1 {
             self.position += 1;
 
-            Some(self.snapshots[self.position])
+            Some(self.snapshots[self.idx(self.position)])
         } else {
             None
         }
@@ -456,28 +459,24 @@ impl DocumentServer {
 impl Dispatch for DocumentServer {
     fn dispatch(&mut self, msg: Incoming<'_>) {
         match msg.method {
-            document_service::SETUP => {
-                let ro = Rights(Rights::READ.0 | Rights::MAP.0);
+            document_service::SETUP => match abi::handle::dup(self.doc_vmo, Rights::READ_MAP) {
+                Ok(dup) => {
+                    let reply = document_service::SetupReply {
+                        content_len: self.content_len as u64,
+                        cursor_pos: self.cursor_pos as u64,
+                        format: document_service::FORMAT_PLAIN,
+                        file_id: self.file_id,
+                    };
+                    let mut data = [0u8; document_service::SetupReply::SIZE];
 
-                match abi::handle::dup(self.doc_vmo, ro) {
-                    Ok(dup) => {
-                        let reply = document_service::SetupReply {
-                            content_len: self.content_len as u64,
-                            cursor_pos: self.cursor_pos as u64,
-                            format: document_service::FORMAT_PLAIN,
-                            file_id: self.file_id,
-                        };
-                        let mut data = [0u8; document_service::SetupReply::SIZE];
+                    reply.write_to(&mut data);
 
-                        reply.write_to(&mut data);
-
-                        let _ = msg.reply_ok(&data, &[dup.0]);
-                    }
-                    Err(_) => {
-                        let _ = msg.reply_error(ipc::STATUS_INVALID);
-                    }
+                    let _ = msg.reply_ok(&data, &[dup.0]);
                 }
-            }
+                Err(_) => {
+                    let _ = msg.reply_error(ipc::STATUS_INVALID);
+                }
+            },
 
             document_service::INSERT => {
                 if msg.payload.len() < document_service::InsertHeader::SIZE {
@@ -623,13 +622,13 @@ extern "C" fn _start() -> ! {
     console::write(console_ep, b"document: store found\n");
 
     // Create shared VMO for bulk I/O with store.
-    let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
     let store_vmo = abi::vmo::create(STORE_SHARED_SIZE, 0).unwrap_or_else(|_| {
         abi::thread::exit(EXIT_SHARED_VMO_CREATE);
     });
-    let store_shared_va = abi::vmo::map(store_vmo, 0, rw).unwrap_or_else(|_| {
-        abi::thread::exit(EXIT_SHARED_VMO_MAP);
-    });
+    let store_shared_va =
+        abi::vmo::map(store_vmo, 0, Rights::READ_WRITE_MAP).unwrap_or_else(|_| {
+            abi::thread::exit(EXIT_SHARED_VMO_MAP);
+        });
     let store_dup = abi::handle::dup(store_vmo, Rights::ALL).unwrap_or_else(|_| {
         abi::thread::exit(EXIT_SHARED_VMO_DUP);
     });
@@ -693,7 +692,7 @@ extern "C" fn _start() -> ! {
     let doc_vmo = abi::vmo::create(DOC_BUF_SIZE, 0).unwrap_or_else(|_| {
         abi::thread::exit(EXIT_DOC_VMO_CREATE);
     });
-    let doc_va = abi::vmo::map(doc_vmo, 0, rw).unwrap_or_else(|_| {
+    let doc_va = abi::vmo::map(doc_vmo, 0, Rights::READ_WRITE_MAP).unwrap_or_else(|_| {
         abi::thread::exit(EXIT_DOC_VMO_MAP);
     });
     // Take initial undo snapshot (empty document).

@@ -10,15 +10,16 @@ service = [
     "dep:abi",
     "dep:console",
     "dep:document-service",
-    "dep:ipc",
     "dep:name",
+    "ipc/kernel",
 ]
 
 [dependencies]
+ipc = { path = "../../ipc", default-features = false }
+
 abi = { path = "../../abi", optional = true }
 console = { path = "../../servers/console", optional = true }
 document-service = { path = "../../servers/document", optional = true }
-ipc = { path = "../../ipc", optional = true }
 name = { path = "../../servers/name", optional = true }
 
 [workspace]

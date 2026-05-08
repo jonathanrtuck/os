@@ -15,10 +15,7 @@
 extern crate alloc;
 extern crate heap;
 
-use core::{
-    panic::PanicInfo,
-    sync::atomic::{AtomicU32, Ordering},
-};
+use core::panic::PanicInfo;
 
 use abi::types::{Handle, Rights};
 use ipc::server::{Dispatch, Incoming};
@@ -31,7 +28,6 @@ const RESULTS_VMO_SIZE: usize = PAGE_SIZE;
 const EXIT_CONSOLE_NOT_FOUND: u32 = 0xE101;
 const EXIT_DOC_NOT_FOUND: u32 = 0xE102;
 const EXIT_DOC_SETUP: u32 = 0xE103;
-const EXIT_DOC_MAP: u32 = 0xE104;
 const EXIT_RESULTS_CREATE: u32 = 0xE105;
 const EXIT_RESULTS_MAP: u32 = 0xE106;
 const EXIT_ENDPOINT_CREATE: u32 = 0xE107;
@@ -39,17 +35,17 @@ const EXIT_ENDPOINT_CREATE: u32 = 0xE107;
 // ── Font metrics adapter ──────────────────────────────────────────
 
 struct MonoMetrics {
-    cw: f32,
-    lh: f32,
+    char_width: f32,
+    line_height: f32,
 }
 
 impl layout::FontMetrics for MonoMetrics {
     fn char_width(&self, _ch: char) -> f32 {
-        self.cw
+        self.char_width
     }
 
     fn line_height(&self) -> f32 {
-        self.lh
+        self.line_height
     }
 }
 
@@ -75,44 +71,6 @@ struct LayoutServer {
 }
 
 impl LayoutServer {
-    // ── Document buffer reading ───────────────────────────────────
-
-    fn read_doc_content(&self) -> (usize, u32) {
-        loop {
-            // SAFETY: doc_va is a valid RO mapping of the document buffer.
-            let generation = unsafe {
-                let ptr =
-                    (self.doc_va + document_service::DOC_OFFSET_GENERATION) as *const AtomicU32;
-
-                (*ptr).load(Ordering::Acquire)
-            };
-            let content_len =
-                unsafe { core::ptr::read_volatile(self.doc_va as *const u64) as usize };
-            let generation2 = unsafe {
-                let ptr =
-                    (self.doc_va + document_service::DOC_OFFSET_GENERATION) as *const AtomicU32;
-
-                (*ptr).load(Ordering::Acquire)
-            };
-
-            if generation == generation2 {
-                return (content_len, generation);
-            }
-
-            core::hint::spin_loop();
-        }
-    }
-
-    fn doc_content(&self, len: usize) -> &[u8] {
-        // SAFETY: doc_va + DOC_HEADER_SIZE..+len is within the mapped VMO.
-        unsafe {
-            core::slice::from_raw_parts(
-                (self.doc_va + document_service::DOC_HEADER_SIZE) as *const u8,
-                len,
-            )
-        }
-    }
-
     // ── Viewport state reading ────────────────────────────────────
 
     fn read_viewport(&self) -> layout_service::ViewportState {
@@ -138,7 +96,8 @@ impl LayoutServer {
             return;
         }
 
-        let (content_len, doc_gen) = self.read_doc_content();
+        // SAFETY: doc_va is a valid RO mapping of the document buffer.
+        let (content_len, _, doc_gen) = unsafe { document_service::read_doc_header(self.doc_va) };
         let viewport = self.read_viewport();
         let cw = viewport.char_width();
         let lh = viewport.line_height as f32;
@@ -147,9 +106,13 @@ impl LayoutServer {
             return;
         }
 
-        let metrics = MonoMetrics { cw, lh };
+        let metrics = MonoMetrics {
+            char_width: cw,
+            line_height: lh,
+        };
         let max_width = viewport.viewport_width as f32;
-        let content = self.doc_content(content_len);
+        // SAFETY: doc_va is valid and content_len comes from read_doc_header.
+        let content = unsafe { document_service::doc_content_slice(self.doc_va, content_len) };
         let result = layout::layout_paragraph(
             content,
             &metrics,
@@ -181,6 +144,8 @@ impl LayoutServer {
         total_height: i32,
         content_len: usize,
     ) {
+        let used =
+            layout_service::LayoutHeader::SIZE + lines.len() * layout_service::LineInfo::SIZE;
         let mut buf = [0u8; layout_service::RESULTS_VALUE_SIZE];
         let header = layout_service::LayoutHeader {
             line_count: lines.len() as u32,
@@ -207,14 +172,19 @@ impl LayoutServer {
         // SAFETY: results_va is a valid RW mapping, 8-byte aligned,
         // of at least RESULTS_VMO_SIZE bytes. This service is the
         // sole writer.
-        let mut writer = unsafe {
-            ipc::register::Writer::new(
-                self.results_va as *mut u8,
-                layout_service::RESULTS_VALUE_SIZE,
-            )
-        };
+        let mut writer = unsafe { ipc::register::Writer::new(self.results_va as *mut u8, used) };
 
-        writer.write(&buf);
+        writer.write(&buf[..used]);
+    }
+
+    fn current_info_reply(&self) -> layout_service::InfoReply {
+        layout_service::InfoReply {
+            line_count: self.last_line_count,
+            total_height: self.last_total_height,
+            content_len: self.last_content_len,
+            viewport_width: self.last_viewport_width,
+            line_height: self.last_line_height,
+        }
     }
 }
 
@@ -231,9 +201,8 @@ impl Dispatch for LayoutServer {
                 }
 
                 let viewport_vmo = Handle(msg.handles[0]);
-                let ro = Rights(Rights::READ.0 | Rights::MAP.0);
 
-                match abi::vmo::map(viewport_vmo, 0, ro) {
+                match abi::vmo::map(viewport_vmo, 0, Rights::READ_MAP) {
                     Ok(va) => {
                         self.viewport_va = va;
                         self.viewport_ready = true;
@@ -245,9 +214,7 @@ impl Dispatch for LayoutServer {
                     }
                 }
 
-                let ro = Rights(Rights::READ.0 | Rights::MAP.0);
-
-                match abi::handle::dup(self.results_vmo, ro) {
+                match abi::handle::dup(self.results_vmo, Rights::READ_MAP) {
                     Ok(dup) => {
                         let reply = layout_service::SetupReply {
                             max_lines: layout_service::MAX_LINES as u32,
@@ -266,13 +233,7 @@ impl Dispatch for LayoutServer {
             layout_service::RECOMPUTE => {
                 self.recompute();
 
-                let reply = layout_service::InfoReply {
-                    line_count: self.last_line_count,
-                    total_height: self.last_total_height,
-                    content_len: self.last_content_len,
-                    viewport_width: self.last_viewport_width,
-                    line_height: self.last_line_height,
-                };
+                let reply = self.current_info_reply();
                 let mut data = [0u8; layout_service::InfoReply::SIZE];
 
                 reply.write_to(&mut data);
@@ -280,13 +241,7 @@ impl Dispatch for LayoutServer {
                 let _ = msg.reply_ok(&data, &[]);
             }
             layout_service::GET_INFO => {
-                let reply = layout_service::InfoReply {
-                    line_count: self.last_line_count,
-                    total_height: self.last_total_height,
-                    content_len: self.last_content_len,
-                    viewport_width: self.last_viewport_width,
-                    line_height: self.last_line_height,
-                };
+                let reply = self.current_info_reply();
                 let mut data = [0u8; layout_service::InfoReply::SIZE];
 
                 reply.write_to(&mut data);
@@ -323,51 +278,20 @@ extern "C" fn _start() -> ! {
 
     console::write(console_ep, b"layout: document found\n");
 
-    // SETUP — get the document buffer VMO.
-    let doc_va = {
-        let mut buf = [0u8; ipc::message::MSG_SIZE];
-
-        ipc::message::write_request(&mut buf, document_service::SETUP, &[]);
-
-        let mut recv_handles = [0u32; 4];
-        let result = match abi::ipc::call(
-            doc_ep,
-            &mut buf,
-            ipc::message::HEADER_SIZE,
-            &[],
-            &mut recv_handles,
-        ) {
-            Ok(r) => r,
-            Err(_) => {
-                console::write(console_ep, b"layout: doc setup failed\n");
-
-                abi::thread::exit(EXIT_DOC_SETUP);
-            }
-        };
-        let header = ipc::message::Header::read_from(&buf);
-
-        if header.is_error() || result.handle_count == 0 {
-            abi::thread::exit(EXIT_DOC_SETUP);
-        }
-
-        let vmo = Handle(recv_handles[0]);
-        let ro = Rights(Rights::READ.0 | Rights::MAP.0);
-
-        match abi::vmo::map(vmo, 0, ro) {
+    let doc_va =
+        match ipc::client::setup_map_vmo(doc_ep, document_service::SETUP, &[], Rights::READ_MAP) {
             Ok(va) => va,
-            Err(_) => abi::thread::exit(EXIT_DOC_MAP),
-        }
-    };
+            Err(_) => abi::thread::exit(EXIT_DOC_SETUP),
+        };
 
     console::write(console_ep, b"layout: doc buffer mapped\n");
 
     // Create layout results VMO.
-    let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
     let results_vmo = match abi::vmo::create(RESULTS_VMO_SIZE, 0) {
         Ok(h) => h,
         Err(_) => abi::thread::exit(EXIT_RESULTS_CREATE),
     };
-    let results_va = match abi::vmo::map(results_vmo, 0, rw) {
+    let results_va = match abi::vmo::map(results_vmo, 0, Rights::READ_WRITE_MAP) {
         Ok(va) => va,
         Err(_) => abi::thread::exit(EXIT_RESULTS_MAP),
     };

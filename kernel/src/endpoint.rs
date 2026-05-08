@@ -609,6 +609,15 @@ impl Endpoint {
 mod tests {
     use super::*;
 
+    #[test]
+    fn endpoint_struct_size() {
+        assert!(
+            core::mem::size_of::<Endpoint>() <= 768,
+            "Endpoint struct grew beyond 768 bytes: {}",
+            core::mem::size_of::<Endpoint>()
+        );
+    }
+
     fn make_endpoint(id: u32) -> Endpoint {
         Endpoint::new(EndpointId(id))
     }

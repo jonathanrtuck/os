@@ -5,7 +5,7 @@
 //! `handle_count` indicating how many entries were written. Use
 //! `call_simple` when no handle transfer is needed.
 
-use abi::types::{Handle, SyscallError};
+use abi::types::{Handle, Rights, SyscallError};
 
 use crate::message::{self, Header, MAX_PAYLOAD, MSG_SIZE};
 
@@ -41,6 +41,36 @@ pub fn call<'a>(
         payload: &reply_buf[message::HEADER_SIZE..payload_end],
         handle_count: result.handle_count,
     })
+}
+
+/// Call a service's SETUP method, receive a VMO handle, and map it.
+///
+/// Sends `send_handles` (if any) along with the request. On success,
+/// maps the received VMO with `map_rights` and returns the VA.
+pub fn setup_map_vmo(
+    endpoint: Handle,
+    method: u32,
+    send_handles: &[u32],
+    map_rights: Rights,
+) -> Result<usize, SyscallError> {
+    let mut buf = [0u8; MSG_SIZE];
+    let mut recv_handles = [0u32; 4];
+    let reply = call(
+        endpoint,
+        method,
+        &[],
+        send_handles,
+        &mut recv_handles,
+        &mut buf,
+    )?;
+
+    if reply.is_error() || reply.handle_count == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    let vmo = Handle(recv_handles[0]);
+
+    abi::vmo::map(vmo, 0, map_rights)
 }
 
 pub fn call_simple(

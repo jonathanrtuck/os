@@ -19,6 +19,9 @@ impl Rights {
     pub const WAIT: Self = Self(1 << 7);
     pub const SPAWN: Self = Self(1 << 8);
     pub const ALL: Self = Self(0x1FF);
+
+    pub const READ_MAP: Self = Self(Self::READ.0 | Self::MAP.0);
+    pub const READ_WRITE_MAP: Self = Self(Self::READ.0 | Self::WRITE.0 | Self::MAP.0);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

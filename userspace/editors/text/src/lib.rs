@@ -10,7 +10,7 @@
 
 #![no_std]
 
-pub const MAX_PAYLOAD: usize = 120;
+pub use ipc::MAX_PAYLOAD;
 
 // ── Methods served by the text editor ────────────────────────────
 

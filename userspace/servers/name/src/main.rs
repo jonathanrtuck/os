@@ -85,6 +85,10 @@ impl NameTable {
     }
 
     fn notify_watchers(&mut self, name: &[u8; NAME_LEN], ep_handle: u32) {
+        let mut buf = [0u8; ipc::message::MSG_SIZE];
+
+        ipc::message::write_reply(&mut buf, name::WATCH, &[]);
+
         let mut i = 0;
 
         while i < self.watchers.len() {
@@ -93,10 +97,6 @@ impl NameTable {
                 let dup = abi::handle::dup(Handle(ep_handle), abi::types::Rights::ALL);
 
                 if let Ok(h) = dup {
-                    let mut buf = [0u8; ipc::message::MSG_SIZE];
-
-                    ipc::message::write_reply(&mut buf, name::WATCH, &[]);
-
                     let _ = abi::ipc::reply(
                         HANDLE_ENDPOINT,
                         w.reply_cap,

@@ -41,9 +41,7 @@ impl<'a> Incoming<'a> {
     pub fn reply_empty(self) -> Result<(), SyscallError> {
         self.reply_ok(&[], &[])
     }
-}
 
-impl<'a> Incoming<'a> {
     pub fn defer(self) -> DeferredReply {
         DeferredReply {
             endpoint: self.endpoint,

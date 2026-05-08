@@ -40,8 +40,7 @@ fn class_index(size: usize) -> Option<usize> {
 fn alloc_pages(pages: usize) -> Option<(usize, Handle)> {
     let size = pages * PAGE_SIZE;
     let vmo = abi::vmo::create(size, 0).ok()?;
-    let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
-    let va = abi::vmo::map(vmo, 0, rw).ok()?;
+    let va = abi::vmo::map(vmo, 0, Rights::READ_WRITE_MAP).ok()?;
 
     Some((va, vmo))
 }
@@ -87,6 +86,8 @@ impl VmoTracker {
                 handle: handle.0,
             };
             self.len += 1;
+        } else {
+            free_pages(va, handle);
         }
     }
 

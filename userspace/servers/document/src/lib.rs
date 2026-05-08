@@ -10,8 +10,9 @@
 
 #![no_std]
 
-/// IPC payload capacity (128-byte message minus 8-byte header).
-pub const MAX_PAYLOAD: usize = 120;
+use core::sync::atomic::{AtomicU32, Ordering};
+
+pub use ipc::MAX_PAYLOAD;
 
 // ── Methods served by the document service ─────────────────────────
 
@@ -35,6 +36,50 @@ pub const DOC_OFFSET_FORMAT: usize = 20;
 
 pub const FORMAT_PLAIN: u32 = 0;
 pub const FORMAT_RICH: u32 = 1;
+
+// ── Client-side document buffer readers ──────────────────────────
+
+/// Read the document buffer header using the seqlock protocol.
+///
+/// Returns `(content_len, cursor_pos, generation)`. Spins until a
+/// consistent snapshot is obtained.
+///
+/// # Safety
+/// `doc_va` must point to a valid mapped document buffer VMO of at
+/// least `DOC_HEADER_SIZE` bytes, 8-byte aligned.
+pub unsafe fn read_doc_header(doc_va: usize) -> (usize, usize, u32) {
+    loop {
+        let ptr = (doc_va + DOC_OFFSET_GENERATION) as *const AtomicU32;
+        // SAFETY: ptr is within the document buffer header (offset 16).
+        let generation = unsafe { (*ptr).load(Ordering::Acquire) };
+        // SAFETY: doc_va offsets 0..8 and 8..16 are content_len and
+        // cursor_pos. read_volatile prevents the compiler from reordering
+        // or caching these reads across the generation check.
+        let content_len = unsafe { core::ptr::read_volatile(doc_va as *const u64) as usize };
+        let cursor_pos = unsafe {
+            core::ptr::read_volatile((doc_va + DOC_OFFSET_CURSOR) as *const u64) as usize
+        };
+        let generation2 = unsafe { (*ptr).load(Ordering::Acquire) };
+
+        if generation == generation2 {
+            return (content_len, cursor_pos, generation);
+        }
+
+        core::hint::spin_loop();
+    }
+}
+
+/// Get a slice over the document content bytes.
+///
+/// # Safety
+/// `doc_va` must point to a valid mapped document buffer VMO.
+/// `len` must not exceed the actual content length obtained from
+/// `read_doc_header`.
+pub unsafe fn doc_content_slice(doc_va: usize, len: usize) -> &'static [u8] {
+    // SAFETY: doc_va + DOC_HEADER_SIZE is the start of content bytes,
+    // and len is bounded by the caller's contract.
+    unsafe { core::slice::from_raw_parts((doc_va + DOC_HEADER_SIZE) as *const u8, len) }
+}
 
 // ── Setup reply ────────────────────────────────────────────────────
 
