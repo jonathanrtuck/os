@@ -96,7 +96,6 @@ fn spawn_service(
     let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
     let rx = Rights(Rights::READ.0 | Rights::EXECUTE.0 | Rights::MAP.0);
     let space = abi::space::create()?;
-
     let code_vmo = if entry.data_offset > 0 {
         let text_size = (entry.data_offset as usize).next_multiple_of(PAGE_SIZE);
         let text_vmo = abi::vmo::create(text_size, 0)?;
@@ -107,6 +106,7 @@ fn spawn_service(
             .copy_from_slice(&pack_data[entry.offset as usize..entry.offset as usize + copy_len]);
 
         drop(text_mapping);
+
         abi::vmo::map_into(text_vmo, space, SERVICE_CODE_VA, rx)?;
 
         let data_va = SERVICE_CODE_VA + entry.data_offset as usize;
@@ -141,6 +141,7 @@ fn spawn_service(
             .copy_from_slice(&pack_data[entry.offset as usize..binary_end]);
 
         drop(code_mapping);
+
         abi::vmo::map_into(code_vmo, space, SERVICE_CODE_VA, rx)?;
 
         code_vmo

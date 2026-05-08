@@ -122,7 +122,6 @@ fn read_elf_meta(elf_path: &std::path::Path) -> ElfMeta {
     let e_phoff = u64::from_le_bytes(data[32..40].try_into().unwrap()) as usize;
     let e_phentsize = u16::from_le_bytes(data[54..56].try_into().unwrap()) as usize;
     let e_phnum = u16::from_le_bytes(data[56..58].try_into().unwrap()) as usize;
-
     let mut rx_end: u64 = 0;
     let mut rw_vaddr: u64 = 0;
     let mut rw_memsz: u64 = 0;
