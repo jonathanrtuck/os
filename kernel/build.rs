@@ -113,27 +113,27 @@ const SERVICES: &[ServiceDef] = &[
     ServiceDef {
         name: "name",
         dir: "../userspace/servers/name",
-        crate_name: "name-service",
+        crate_name: "name",
     },
     ServiceDef {
         name: "console",
         dir: "../userspace/servers/console",
-        crate_name: "console-driver",
+        crate_name: "console",
     },
     ServiceDef {
         name: "input",
         dir: "../userspace/servers/drivers/input",
-        crate_name: "input-driver",
+        crate_name: "input",
     },
     ServiceDef {
         name: "blk",
         dir: "../userspace/servers/drivers/blk",
-        crate_name: "blk-driver",
+        crate_name: "blk",
     },
     ServiceDef {
         name: "render",
         dir: "../userspace/servers/drivers/render",
-        crate_name: "metal-render-driver",
+        crate_name: "render",
     },
 ];
 

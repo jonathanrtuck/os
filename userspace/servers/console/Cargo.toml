@@ -1,5 +1,5 @@
 [package]
-name = "console-driver"
+name = "console"
 version = "0.1.0"
 edition = "2024"
 license = "Unlicense"
@@ -7,6 +7,6 @@ license = "Unlicense"
 [dependencies]
 abi = { path = "../../abi" }
 ipc = { path = "../../ipc" }
-protocol = { path = "../../protocol" }
+name = { path = "../name" }
 
 [workspace]

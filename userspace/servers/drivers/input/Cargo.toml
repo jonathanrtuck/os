@@ -1,13 +1,13 @@
 [package]
-name = "input-driver"
+name = "input"
 version = "0.1.0"
 edition = "2024"
 license = "Unlicense"
 
 [dependencies]
 abi = { path = "../../../abi" }
-ipc = { path = "../../../ipc" }
-protocol = { path = "../../../protocol" }
+init = { path = "../../init" }
+name = { path = "../../name" }
 virtio = { path = "../../../virtio" }
 
 [workspace]

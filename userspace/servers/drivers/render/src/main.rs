@@ -18,15 +18,14 @@
 
 use core::panic::PanicInfo;
 
-use abi::types::{Handle, Rights, SyscallError};
-use protocol::metal::{self, CommandWriter};
+use abi::types::{Handle, Rights};
+use render::CommandWriter;
 
 const HANDLE_NS_EP: Handle = Handle(2);
 const HANDLE_VIRTIO_VMO: Handle = Handle(3);
 const HANDLE_INIT_EP: Handle = Handle(4);
 
 const PAGE_SIZE: usize = virtio::PAGE_SIZE;
-const MSG_SIZE: usize = 128;
 
 // ── MSL shader source ───────────────────────────────────────────────
 
@@ -70,103 +69,6 @@ const H_PIPELINE: u32 = 10;
 const SETUP_BUF_PAGES: usize = 2;
 const RENDER_BUF_PAGES: usize = 1;
 
-struct DmaBuf {
-    va: usize,
-    pa: u64,
-}
-
-// ── Helpers ─────────────────────────────────────────────────────────
-
-fn request_dma(init_ep: Handle, size: usize) -> Result<DmaBuf, SyscallError> {
-    let mut msg = [0u8; MSG_SIZE];
-    let method = protocol::bootstrap::DMA_ALLOC;
-
-    msg[0..4].copy_from_slice(&method.to_le_bytes());
-
-    let req = protocol::bootstrap::DmaAllocRequest { size: size as u32 };
-
-    req.write_to(&mut msg[4..8]);
-
-    let mut recv_handles = [0u32; 4];
-    let result = abi::ipc::call(init_ep, &mut msg, 8, &[], &mut recv_handles)?;
-
-    if result.handle_count == 0 {
-        return Err(SyscallError::InvalidArgument);
-    }
-
-    let vmo = Handle(recv_handles[0]);
-    let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
-    let va = abi::vmo::map(vmo, 0, rw)?;
-
-    Ok(DmaBuf { va, pa: va as u64 })
-}
-
-fn register_with_name_service(ns_ep: Handle, name: &[u8], own_ep: Handle) {
-    let dup = match abi::handle::dup(own_ep, abi::types::Rights::ALL) {
-        Ok(h) => h,
-        Err(_) => return,
-    };
-    let req = protocol::name_service::NameRequest::new(name);
-    let mut buf = [0u8; MSG_SIZE];
-    let total = ipc::message::write_request(&mut buf, protocol::name_service::REGISTER, &req.name);
-    let _ = abi::ipc::call(ns_ep, &mut buf, total, &[dup.0], &mut []);
-}
-
-fn lookup_service(ns_ep: Handle, name: &[u8]) -> Result<Handle, SyscallError> {
-    let req = protocol::name_service::NameRequest::new(name);
-    let mut buf = [0u8; MSG_SIZE];
-    let total = ipc::message::write_request(&mut buf, protocol::name_service::LOOKUP, &req.name);
-    let mut recv_handles = [0u32; 4];
-    let result = abi::ipc::call(ns_ep, &mut buf, total, &[], &mut recv_handles)?;
-
-    if result.handle_count == 0 {
-        return Err(SyscallError::NotFound);
-    }
-
-    Ok(Handle(recv_handles[0]))
-}
-
-fn console_write(console_ep: Handle, text: &[u8]) {
-    let mut buf = [0u8; MSG_SIZE];
-    let total = ipc::message::write_request(&mut buf, 1, text);
-    let _ = abi::ipc::call(console_ep, &mut buf, total, &[], &mut []);
-}
-
-fn console_write_u32(console_ep: Handle, prefix: &[u8], n: u32) {
-    let mut text = [0u8; 80];
-    let plen = prefix.len().min(60);
-
-    text[..plen].copy_from_slice(&prefix[..plen]);
-
-    let nlen = format_u32(n, &mut text[plen..]);
-
-    text[plen + nlen] = b'\n';
-
-    console_write(console_ep, &text[..plen + nlen + 1]);
-}
-
-fn format_u32(mut n: u32, buf: &mut [u8]) -> usize {
-    if n == 0 {
-        buf[0] = b'0';
-        return 1;
-    }
-
-    let mut tmp = [0u8; 10];
-    let mut i = 10;
-
-    while n > 0 {
-        i -= 1;
-        tmp[i] = b'0' + (n % 10) as u8;
-        n /= 10;
-    }
-
-    let len = 10 - i;
-
-    buf[..len].copy_from_slice(&tmp[i..]);
-
-    len
-}
-
 // ── Virtqueue submission ────────────────────────────────────────────
 
 fn submit_and_wait(
@@ -193,7 +95,7 @@ fn setup_pipeline(
     device: &virtio::Device,
     setup_vq: &mut virtio::Virtqueue,
     irq_event: Handle,
-    setup_dma: &DmaBuf,
+    setup_dma: &init::DmaBuf,
     buf_size: usize,
 ) {
     // SAFETY: setup_dma.va is a valid DMA allocation of buf_size bytes.
@@ -212,7 +114,7 @@ fn setup_pipeline(
             COLOR_WRITE_ALL,
             false,
             1,
-            metal::PIXEL_FORMAT_BGRA8_SRGB,
+            render::PIXEL_FORMAT_BGRA8_SRGB,
         );
 
         w.len()
@@ -222,7 +124,7 @@ fn setup_pipeline(
         device,
         setup_vq,
         irq_event,
-        metal::VIRTQ_SETUP,
+        render::VIRTQ_SETUP,
         setup_dma.pa,
         len,
     );
@@ -292,7 +194,7 @@ fn render_frame(
     device: &virtio::Device,
     render_vq: &mut virtio::Virtqueue,
     irq_event: Handle,
-    render_dma: &DmaBuf,
+    render_dma: &init::DmaBuf,
     buf_size: usize,
     frame_id: u32,
 ) {
@@ -302,11 +204,11 @@ fn render_frame(
         let mut w = CommandWriter::new(dma_buf);
 
         w.begin_render_pass(
-            metal::DRAWABLE_HANDLE,
+            render::DRAWABLE_HANDLE,
             0,
             0,
-            metal::LOAD_CLEAR,
-            metal::STORE_STORE,
+            render::LOAD_CLEAR,
+            render::STORE_STORE,
             0,
             0,
             0.13,
@@ -321,7 +223,7 @@ fn render_frame(
         let vert_len = fullscreen_vertices(0.13, 0.13, 0.14, 1.0, &mut verts);
 
         w.set_vertex_bytes(0, &verts[..vert_len]);
-        w.draw_primitives(metal::PRIM_TRIANGLE, 0, 6);
+        w.draw_primitives(render::PRIM_TRIANGLE, 0, 6);
         w.end_render_pass();
         w.present_and_commit(frame_id);
 
@@ -332,7 +234,7 @@ fn render_frame(
         device,
         render_vq,
         irq_event,
-        metal::VIRTQ_RENDER,
+        render::VIRTQ_RENDER,
         render_dma.pa,
         len,
     );
@@ -363,15 +265,15 @@ extern "C" fn _start() -> ! {
 
     // Set up two virtqueues: setup (0) and render (1).
     let setup_qsize = device
-        .queue_max_size(metal::VIRTQ_SETUP)
+        .queue_max_size(render::VIRTQ_SETUP)
         .min(virtio::DEFAULT_QUEUE_SIZE);
     let render_qsize = device
-        .queue_max_size(metal::VIRTQ_RENDER)
+        .queue_max_size(render::VIRTQ_RENDER)
         .min(virtio::DEFAULT_QUEUE_SIZE);
 
     let setup_vq_bytes = virtio::Virtqueue::total_bytes(setup_qsize);
     let setup_vq_alloc = setup_vq_bytes.next_multiple_of(PAGE_SIZE);
-    let setup_vq_dma = match request_dma(HANDLE_INIT_EP, setup_vq_alloc) {
+    let setup_vq_dma = match init::request_dma(HANDLE_INIT_EP, setup_vq_alloc) {
         Ok(d) => d,
         Err(_) => abi::thread::exit(4),
     };
@@ -382,7 +284,7 @@ extern "C" fn _start() -> ! {
     let mut setup_vq = virtio::Virtqueue::new(setup_qsize, setup_vq_dma.va, setup_vq_dma.pa);
 
     device.setup_queue(
-        metal::VIRTQ_SETUP,
+        render::VIRTQ_SETUP,
         setup_qsize,
         setup_vq.desc_pa(),
         setup_vq.avail_pa(),
@@ -391,7 +293,7 @@ extern "C" fn _start() -> ! {
 
     let render_vq_bytes = virtio::Virtqueue::total_bytes(render_qsize);
     let render_vq_alloc = render_vq_bytes.next_multiple_of(PAGE_SIZE);
-    let render_vq_dma = match request_dma(HANDLE_INIT_EP, render_vq_alloc) {
+    let render_vq_dma = match init::request_dma(HANDLE_INIT_EP, render_vq_alloc) {
         Ok(d) => d,
         Err(_) => abi::thread::exit(5),
     };
@@ -402,7 +304,7 @@ extern "C" fn _start() -> ! {
     let mut render_vq = virtio::Virtqueue::new(render_qsize, render_vq_dma.va, render_vq_dma.pa);
 
     device.setup_queue(
-        metal::VIRTQ_RENDER,
+        render::VIRTQ_RENDER,
         render_qsize,
         render_vq.desc_pa(),
         render_vq.avail_pa(),
@@ -411,13 +313,13 @@ extern "C" fn _start() -> ! {
 
     // DMA buffers for command data.
     let setup_buf_size = PAGE_SIZE * SETUP_BUF_PAGES;
-    let setup_dma = match request_dma(HANDLE_INIT_EP, setup_buf_size) {
+    let setup_dma = match init::request_dma(HANDLE_INIT_EP, setup_buf_size) {
         Ok(d) => d,
         Err(_) => abi::thread::exit(6),
     };
 
     let render_buf_size = PAGE_SIZE * RENDER_BUF_PAGES;
-    let render_dma = match request_dma(HANDLE_INIT_EP, render_buf_size) {
+    let render_dma = match init::request_dma(HANDLE_INIT_EP, render_buf_size) {
         Ok(d) => d,
         Err(_) => abi::thread::exit(7),
     };
@@ -437,13 +339,13 @@ extern "C" fn _start() -> ! {
     }
 
     // Look up the console for status output.
-    let console_ep = match lookup_service(HANDLE_NS_EP, b"console") {
+    let console_ep = match name::lookup(HANDLE_NS_EP, b"console") {
         Ok(h) => h,
         Err(_) => abi::thread::exit(10),
     };
 
-    console_write_u32(console_ep, b"render: display ", display_w);
-    console_write_u32(console_ep, b"render: display h=", display_h);
+    console::write_u32(console_ep, b"render: display ", display_w);
+    console::write_u32(console_ep, b"render: display h=", display_h);
 
     // Compile shaders and create the render pipeline.
     setup_pipeline(
@@ -454,7 +356,7 @@ extern "C" fn _start() -> ! {
         setup_buf_size,
     );
 
-    console_write(console_ep, b"render: pipeline ready\n");
+    console::write(console_ep, b"render: pipeline ready\n");
 
     // Render verification frame — solid dark background.
     render_frame(
@@ -466,7 +368,7 @@ extern "C" fn _start() -> ! {
         0,
     );
 
-    console_write(console_ep, b"render: frame 0 presented\n");
+    console::write(console_ep, b"render: frame 0 presented\n");
 
     // Register with name service.
     let own_ep = match abi::ipc::endpoint_create() {
@@ -474,9 +376,9 @@ extern "C" fn _start() -> ! {
         Err(_) => abi::thread::exit(11),
     };
 
-    register_with_name_service(HANDLE_NS_EP, b"render", own_ep);
+    name::register(HANDLE_NS_EP, b"render", own_ep);
 
-    console_write(console_ep, b"render: ready\n");
+    console::write(console_ep, b"render: ready\n");
 
     // Idle serve loop — Phase 3-4 will add scene graph update handling.
     ipc::server::serve(own_ep, &mut StubServer);
@@ -488,7 +390,7 @@ struct StubServer;
 
 impl ipc::server::Dispatch for StubServer {
     fn dispatch(&mut self, msg: ipc::server::Incoming<'_>) {
-        let _ = msg.reply_error(protocol::STATUS_UNSUPPORTED);
+        let _ = msg.reply_error(ipc::STATUS_UNSUPPORTED);
     }
 }
 

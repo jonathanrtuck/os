@@ -7,6 +7,22 @@ name = "abi"
 version = "0.1.0"
 
 [[package]]
+name = "console"
+version = "0.1.0"
+dependencies = [
+ "abi",
+ "ipc",
+ "name",
+]
+
+[[package]]
+name = "init"
+version = "0.1.0"
+dependencies = [
+ "abi",
+]
+
+[[package]]
 name = "ipc"
 version = "0.1.0"
 dependencies = [
@@ -14,18 +30,24 @@ dependencies = [
 ]
 
 [[package]]
-name = "metal-render-driver"
+name = "name"
 version = "0.1.0"
 dependencies = [
  "abi",
  "ipc",
- "protocol",
- "virtio",
 ]
 
 [[package]]
-name = "protocol"
+name = "render"
 version = "0.1.0"
+dependencies = [
+ "abi",
+ "console",
+ "init",
+ "ipc",
+ "name",
+ "virtio",
+]
 
 [[package]]
 name = "virtio"

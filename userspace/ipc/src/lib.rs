@@ -14,6 +14,17 @@
 
 #![no_std]
 
+/// IPC payload capacity (128-byte message minus 8-byte header).
+pub const MAX_PAYLOAD: usize = 120;
+
+pub const STATUS_OK: u16 = 0;
+pub const STATUS_NOT_FOUND: u16 = 1;
+pub const STATUS_ALREADY_EXISTS: u16 = 2;
+pub const STATUS_INVALID: u16 = 3;
+pub const STATUS_NO_SPACE: u16 = 4;
+pub const STATUS_IO_ERROR: u16 = 5;
+pub const STATUS_UNSUPPORTED: u16 = 6;
+
 pub mod message;
 pub mod register;
 pub mod ring;

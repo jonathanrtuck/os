@@ -149,8 +149,8 @@ fn serve_dma_requests(init_ep: Handle) -> ! {
             0
         };
 
-        if method == protocol::bootstrap::DMA_ALLOC && recv.msg_len >= 8 {
-            let req = protocol::bootstrap::DmaAllocRequest::read_from(&msg_buf[4..8]);
+        if method == init::DMA_ALLOC && recv.msg_len >= 8 {
+            let req = init::DmaAllocRequest::read_from(&msg_buf[4..8]);
             let size = (req.size as usize).next_multiple_of(PAGE_SIZE);
 
             match abi::vmo::create_dma(size, HANDLE_DMA_RESOURCE) {

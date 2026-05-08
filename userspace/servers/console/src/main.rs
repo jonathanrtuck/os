@@ -16,10 +16,7 @@
 use core::panic::PanicInfo;
 
 use abi::types::{Handle, Rights};
-use ipc::{
-    message::{self, MSG_SIZE},
-    server::{self, Dispatch, Incoming},
-};
+use ipc::server::{self, Dispatch, Incoming};
 
 const HANDLE_NS_EP: Handle = Handle(2);
 const HANDLE_UART_VMO: Handle = Handle(3);
@@ -27,8 +24,6 @@ const HANDLE_UART_VMO: Handle = Handle(3);
 const PL011_DR: usize = 0x00;
 const PL011_FR: usize = 0x18;
 const PL011_TXFF: u32 = 1 << 5;
-
-const METHOD_WRITE: u32 = 1;
 
 struct Console {
     uart_base: usize,
@@ -61,27 +56,16 @@ impl Console {
 impl Dispatch for Console {
     fn dispatch(&mut self, msg: Incoming<'_>) {
         match msg.method {
-            METHOD_WRITE => {
+            console::METHOD_WRITE => {
                 self.write_bytes(msg.payload);
 
                 let _ = msg.reply_empty();
             }
             _ => {
-                let _ = msg.reply_error(protocol::STATUS_UNSUPPORTED);
+                let _ = msg.reply_error(ipc::STATUS_UNSUPPORTED);
             }
         }
     }
-}
-
-fn register_with_name_service(ns_ep: Handle, own_ep: Handle) {
-    let dup = match abi::handle::dup(own_ep, abi::types::Rights::ALL) {
-        Ok(h) => h,
-        Err(_) => return,
-    };
-    let req = protocol::name_service::NameRequest::new(b"console");
-    let mut buf = [0u8; MSG_SIZE];
-    let total = message::write_request(&mut buf, protocol::name_service::REGISTER, &req.name);
-    let _ = abi::ipc::call(ns_ep, &mut buf, total, &[dup.0], &mut []);
 }
 
 #[unsafe(no_mangle)]
@@ -97,7 +81,7 @@ extern "C" fn _start() -> ! {
         Err(_) => abi::thread::exit(2),
     };
 
-    register_with_name_service(HANDLE_NS_EP, own_ep);
+    name::register(HANDLE_NS_EP, b"console", own_ep);
 
     let mut console = Console { uart_base: uart_va };
 

@@ -14,14 +14,13 @@
 
 use core::panic::PanicInfo;
 
-use abi::types::{Handle, Rights, SyscallError};
+use abi::types::{Handle, Rights};
 
 const HANDLE_NS_EP: Handle = Handle(2);
 const HANDLE_VIRTIO_VMO: Handle = Handle(3);
 const HANDLE_INIT_EP: Handle = Handle(4);
 
 const PAGE_SIZE: usize = virtio::PAGE_SIZE;
-const MSG_SIZE: usize = 128;
 
 const EV_KEY: u16 = 1;
 const EV_ABS: u16 = 3;
@@ -52,47 +51,12 @@ struct VirtioInputEvent {
     value: u32,
 }
 
-fn request_dma(init_ep: Handle, size: usize) -> Result<(Handle, usize), SyscallError> {
-    let mut msg = [0u8; MSG_SIZE];
-    let method = protocol::bootstrap::DMA_ALLOC;
-
-    msg[0..4].copy_from_slice(&method.to_le_bytes());
-
-    let req = protocol::bootstrap::DmaAllocRequest { size: size as u32 };
-
-    req.write_to(&mut msg[4..8]);
-
-    let mut recv_handles = [0u32; 4];
-    let result = abi::ipc::call(init_ep, &mut msg, 8, &[], &mut recv_handles)?;
-
-    if result.handle_count == 0 {
-        return Err(SyscallError::InvalidArgument);
-    }
-
-    let vmo = Handle(recv_handles[0]);
-    let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
-    let va = abi::vmo::map(vmo, 0, rw)?;
-
-    Ok((vmo, va))
-}
-
-fn register_with_name_service(ns_ep: Handle, name: &[u8]) {
-    let my_ep = match abi::ipc::endpoint_create() {
-        Ok(h) => h,
-        Err(_) => return,
-    };
-    let req = protocol::name_service::NameRequest::new(name);
-    let mut buf = [0u8; MSG_SIZE];
-    let total = ipc::message::write_request(&mut buf, protocol::name_service::REGISTER, &req.name);
-    let _ = abi::ipc::call(ns_ep, &mut buf, total, &[my_ep.0], &mut []);
-}
-
 fn modifier_bit(code: u16) -> u8 {
     match code {
-        KEY_LSHIFT | KEY_RSHIFT => protocol::input::MOD_SHIFT,
-        KEY_LCTRL | KEY_RCTRL => protocol::input::MOD_CONTROL,
-        KEY_LALT | KEY_RALT => protocol::input::MOD_ALT,
-        KEY_LMETA | KEY_RMETA => protocol::input::MOD_SUPER,
+        KEY_LSHIFT | KEY_RSHIFT => input::MOD_SHIFT,
+        KEY_LCTRL | KEY_RCTRL => input::MOD_CONTROL,
+        KEY_LALT | KEY_RALT => input::MOD_ALT,
+        KEY_LMETA | KEY_RMETA => input::MOD_SUPER,
         _ => 0,
     }
 }
@@ -119,10 +83,11 @@ extern "C" fn _start() -> ! {
         .min(virtio::DEFAULT_QUEUE_SIZE);
     let vq_bytes = virtio::Virtqueue::total_bytes(queue_size);
     let vq_alloc = vq_bytes.next_multiple_of(PAGE_SIZE);
-    let (_vq_vmo, vq_va) = match request_dma(HANDLE_INIT_EP, vq_alloc) {
+    let vq_dma = match init::request_dma(HANDLE_INIT_EP, vq_alloc) {
         Ok(r) => r,
         Err(_) => abi::thread::exit(4),
     };
+    let vq_va = vq_dma.va;
 
     // SAFETY: vq_va is a valid DMA allocation; zeroing before virtqueue init.
     unsafe { core::ptr::write_bytes(vq_va as *mut u8, 0, vq_alloc) };
@@ -139,10 +104,11 @@ extern "C" fn _start() -> ! {
     );
 
     let event_alloc = PAGE_SIZE;
-    let (_evt_vmo, event_va) = match request_dma(HANDLE_INIT_EP, event_alloc) {
+    let evt_dma = match init::request_dma(HANDLE_INIT_EP, event_alloc) {
         Ok(r) => r,
         Err(_) => abi::thread::exit(5),
     };
+    let event_va = evt_dma.va;
 
     // SAFETY: event_va is a valid DMA allocation; zeroing event buffer memory.
     unsafe { core::ptr::write_bytes(event_va as *mut u8, 0, event_alloc) };
@@ -168,7 +134,12 @@ extern "C" fn _start() -> ! {
         abi::thread::exit(7);
     }
 
-    register_with_name_service(HANDLE_NS_EP, b"input");
+    let own_ep = match abi::ipc::endpoint_create() {
+        Ok(h) => h,
+        Err(_) => abi::thread::exit(8),
+    };
+
+    name::register(HANDLE_NS_EP, b"input", own_ep);
 
     let mut _modifiers: u8 = 0;
 
@@ -199,12 +170,13 @@ extern "C" fn _start() -> ! {
 
                 if event.code == BTN_LEFT || event.code == BTN_RIGHT {
                     let _button = if event.code == BTN_LEFT {
-                        protocol::input::BUTTON_LEFT
+                        input::BUTTON_LEFT
                     } else {
-                        protocol::input::BUTTON_RIGHT
+                        input::BUTTON_RIGHT
                     };
                 } else {
                     let mod_bit = modifier_bit(event.code);
+
                     if mod_bit != 0 {
                         if pressed {
                             _modifiers |= mod_bit;
@@ -215,9 +187,9 @@ extern "C" fn _start() -> ! {
 
                     if event.code == KEY_CAPSLOCK {
                         if pressed {
-                            _modifiers |= protocol::input::MOD_CAPS_LOCK;
+                            _modifiers |= input::MOD_CAPS_LOCK;
                         } else {
-                            _modifiers &= !protocol::input::MOD_CAPS_LOCK;
+                            _modifiers &= !input::MOD_CAPS_LOCK;
                         }
                     }
                 }

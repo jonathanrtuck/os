@@ -7,12 +7,12 @@ name = "abi"
 version = "0.1.0"
 
 [[package]]
-name = "console-driver"
+name = "console"
 version = "0.1.0"
 dependencies = [
  "abi",
  "ipc",
- "protocol",
+ "name",
 ]
 
 [[package]]
@@ -23,5 +23,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "protocol"
+name = "name"
 version = "0.1.0"
+dependencies = [
+ "abi",
+ "ipc",
+]

@@ -5,7 +5,7 @@
 //!   Handle 1: stack VMO (refcount anchor)
 //!   Handle 2: endpoint to recv on (created by init)
 //!
-//! Protocol: Register, Lookup, Unregister (see protocol::name_service).
+//! Protocol: Register, Lookup, Unregister (see name::lib).
 
 #![no_std]
 #![no_main]
@@ -14,7 +14,6 @@ use core::panic::PanicInfo;
 
 use abi::types::Handle;
 use ipc::server::{self, Dispatch, Incoming};
-use protocol::name_service;
 
 const HANDLE_ENDPOINT: Handle = Handle(2);
 const MAX_ENTRIES: usize = 16;
@@ -48,7 +47,7 @@ impl NameTable {
     fn register(&mut self, name: &[u8; NAME_LEN], ep_handle: u32) -> Result<(), u16> {
         for entry in &self.entries {
             if entry.occupied && entry.name == *name {
-                return Err(protocol::STATUS_ALREADY_EXISTS);
+                return Err(ipc::STATUS_ALREADY_EXISTS);
             }
         }
 
@@ -64,7 +63,7 @@ impl NameTable {
             }
         }
 
-        Err(protocol::STATUS_NO_SPACE)
+        Err(ipc::STATUS_NO_SPACE)
     }
 
     fn lookup(&self, name: &[u8; NAME_LEN]) -> Option<u32> {
@@ -97,14 +96,14 @@ impl NameTable {
 impl Dispatch for NameTable {
     fn dispatch(&mut self, msg: Incoming<'_>) {
         match msg.method {
-            name_service::REGISTER => {
-                if msg.payload.len() < name_service::NameRequest::SIZE || msg.handles.is_empty() {
-                    let _ = msg.reply_error(protocol::STATUS_INVALID);
+            name::REGISTER => {
+                if msg.payload.len() < name::NameRequest::SIZE || msg.handles.is_empty() {
+                    let _ = msg.reply_error(ipc::STATUS_INVALID);
 
                     return;
                 }
 
-                let req = name_service::NameRequest::read_from(msg.payload);
+                let req = name::NameRequest::read_from(msg.payload);
                 let ep_handle = msg.handles[0];
 
                 match self.register(&req.name, ep_handle) {
@@ -116,15 +115,14 @@ impl Dispatch for NameTable {
                     }
                 }
             }
-
-            name_service::LOOKUP => {
-                if msg.payload.len() < name_service::NameRequest::SIZE {
-                    let _ = msg.reply_error(protocol::STATUS_INVALID);
+            name::LOOKUP => {
+                if msg.payload.len() < name::NameRequest::SIZE {
+                    let _ = msg.reply_error(ipc::STATUS_INVALID);
 
                     return;
                 }
 
-                let req = name_service::NameRequest::read_from(msg.payload);
+                let req = name::NameRequest::read_from(msg.payload);
 
                 match self.lookup(&req.name) {
                     Some(ep_handle) => {
@@ -136,34 +134,32 @@ impl Dispatch for NameTable {
                                 let _ = msg.reply_ok(&[], &[h.0]);
                             }
                             Err(_) => {
-                                let _ = msg.reply_error(protocol::STATUS_NOT_FOUND);
+                                let _ = msg.reply_error(ipc::STATUS_NOT_FOUND);
                             }
                         }
                     }
                     None => {
-                        let _ = msg.reply_error(protocol::STATUS_NOT_FOUND);
+                        let _ = msg.reply_error(ipc::STATUS_NOT_FOUND);
                     }
                 }
             }
-
-            name_service::UNREGISTER => {
-                if msg.payload.len() < name_service::NameRequest::SIZE {
-                    let _ = msg.reply_error(protocol::STATUS_INVALID);
+            name::UNREGISTER => {
+                if msg.payload.len() < name::NameRequest::SIZE {
+                    let _ = msg.reply_error(ipc::STATUS_INVALID);
 
                     return;
                 }
 
-                let req = name_service::NameRequest::read_from(msg.payload);
+                let req = name::NameRequest::read_from(msg.payload);
 
                 if self.unregister(&req.name) {
                     let _ = msg.reply_empty();
                 } else {
-                    let _ = msg.reply_error(protocol::STATUS_NOT_FOUND);
+                    let _ = msg.reply_error(ipc::STATUS_NOT_FOUND);
                 }
             }
-
             _ => {
-                let _ = msg.reply_error(protocol::STATUS_UNSUPPORTED);
+                let _ = msg.reply_error(ipc::STATUS_UNSUPPORTED);
             }
         }
     }

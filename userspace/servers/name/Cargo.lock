@@ -14,14 +14,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "name-service"
+name = "name"
 version = "0.1.0"
 dependencies = [
  "abi",
  "ipc",
- "protocol",
 ]
-
-[[package]]
-name = "protocol"
-version = "0.1.0"

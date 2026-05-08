@@ -6,6 +6,5 @@ license = "Unlicense"
 
 [dependencies]
 abi = { path = "../../abi" }
-protocol = { path = "../../protocol" }
 
 [workspace]

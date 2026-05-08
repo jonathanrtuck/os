@@ -13,7 +13,7 @@ use core::panic::PanicInfo;
 
 use abi::types::Handle;
 use ipc::message::{self, MSG_SIZE};
-use protocol::name_service;
+use name as name_service;
 
 const HANDLE_NAME_SVC: Handle = Handle(2);
 const MAGIC_REQUEST: u64 = 0xDEAD_BEEF;

@@ -7,12 +7,19 @@ name = "abi"
 version = "0.1.0"
 
 [[package]]
-name = "input-driver"
+name = "init"
 version = "0.1.0"
 dependencies = [
  "abi",
- "ipc",
- "protocol",
+]
+
+[[package]]
+name = "input"
+version = "0.1.0"
+dependencies = [
+ "abi",
+ "init",
+ "name",
  "virtio",
 ]
 
@@ -24,8 +31,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "protocol"
+name = "name"
 version = "0.1.0"
+dependencies = [
+ "abi",
+ "ipc",
+]
 
 [[package]]
 name = "virtio"
