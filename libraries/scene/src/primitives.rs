@@ -383,26 +383,136 @@ fn cubic_winding_recursive(
 
 #[inline]
 fn f32_min(a: f32, b: f32) -> f32 {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 
 #[inline]
 fn f32_max(a: f32, b: f32) -> f32 {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 // ── Font identity constants ─────────────────────────────────────────
 
 // Font identity constants FONT_MONO/FONT_SANS/FONT_SERIF removed.
 // Style IDs are now assigned at runtime by core's StyleTable.
+
+// ── Animation ───────────────────────────────────────────────────────
+
+/// Target property for a node animation.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
+pub enum AnimationTarget {
+    None = 0,
+    Opacity = 1,
+}
+
+/// Easing curve index (matches `animation::Easing` variants).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
+pub enum AnimationEasing {
+    Linear = 0,
+    EaseInOut = 1,
+}
+
+/// How the animation behaves after completing one cycle.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
+pub enum RepeatMode {
+    Once = 0,
+    Loop = 1,
+}
+
+/// One phase of a keyframe animation. The compositor transitions from
+/// the previous phase's value to this phase's value over `duration_ms`
+/// using the specified easing, then holds at this value for any remaining
+/// time before the next phase begins.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(C)]
+pub struct AnimationPhase {
+    pub value: u8,
+    pub easing: AnimationEasing,
+    pub duration_ms: u16,
+}
+
+const _: () = assert!(core::mem::size_of::<AnimationPhase>() == 4);
+
+/// Per-node animation descriptor. The compositor evaluates this each frame
+/// using `clock_read`. Supports up to 4 keyframe phases per animation.
+///
+/// For cursor blink: target=Opacity, repeat=Loop, 4 phases:
+///   (255, Linear, 500)  — visible hold
+///   (0,   EaseInOut, 150) — fade out
+///   (0,   Linear, 300)  — hidden hold
+///   (255, EaseInOut, 150) — fade in
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(C)]
+pub struct Animation {
+    /// Absolute counter tick when the animation started. 0 = inactive.
+    pub start_tick: u64,
+    /// Target property.
+    pub target: AnimationTarget,
+    /// Repeat mode.
+    pub repeat: RepeatMode,
+    /// Number of phases (1-4). Unused phases are ignored.
+    pub phase_count: u8,
+    pub _pad: u8,
+    /// Keyframe phases. Evaluated sequentially; total cycle duration is
+    /// the sum of all phase durations.
+    pub phases: [AnimationPhase; 4],
+}
+
+const _: () = assert!(core::mem::size_of::<Animation>() == 32);
+
+impl Animation {
+    pub const NONE: Self = Self {
+        start_tick: 0,
+        target: AnimationTarget::None,
+        repeat: RepeatMode::Once,
+        phase_count: 0,
+        _pad: 0,
+        phases: [AnimationPhase {
+            value: 0,
+            easing: AnimationEasing::Linear,
+            duration_ms: 0,
+        }; 4],
+    };
+
+    pub fn is_active(&self) -> bool {
+        self.start_tick > 0 && self.target != AnimationTarget::None && self.phase_count > 0
+    }
+
+    pub fn cursor_blink(start_tick: u64) -> Self {
+        Self {
+            start_tick,
+            target: AnimationTarget::Opacity,
+            repeat: RepeatMode::Loop,
+            phase_count: 4,
+            _pad: 0,
+            phases: [
+                AnimationPhase {
+                    value: 255,
+                    easing: AnimationEasing::Linear,
+                    duration_ms: 500,
+                },
+                AnimationPhase {
+                    value: 0,
+                    easing: AnimationEasing::EaseInOut,
+                    duration_ms: 150,
+                },
+                AnimationPhase {
+                    value: 0,
+                    easing: AnimationEasing::Linear,
+                    duration_ms: 300,
+                },
+                AnimationPhase {
+                    value: 255,
+                    easing: AnimationEasing::EaseInOut,
+                    duration_ms: 150,
+                },
+            ],
+        }
+    }
+}
 
 // ── Content variant ─────────────────────────────────────────────────
 

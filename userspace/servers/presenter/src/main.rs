@@ -97,6 +97,8 @@ struct Presenter {
     cmap: [u16; 128],
     char_width: f32,
 
+    blink_start: u64,
+
     last_line_count: u32,
     last_cursor_line: u32,
     last_cursor_col: u32,
@@ -286,7 +288,7 @@ impl Presenter {
         }
 
         // Cursor node.
-        let cursor_x = cursor_col as f32 * presenter_service::CHAR_WIDTH_F32;
+        let cursor_x = cursor_col as f32 * self.char_width;
         let cursor_y = cursor_line as i32 * presenter_service::LINE_HEIGHT as i32;
 
         if let Some(cursor_node) = scene.alloc_node() {
@@ -297,6 +299,7 @@ impl Presenter {
             n.width = upt(presenter_service::CURSOR_WIDTH);
             n.height = upt(presenter_service::LINE_HEIGHT);
             n.background = cursor_color;
+            n.animation = scene::Animation::cursor_blink(self.blink_start);
             n.role = scene::ROLE_CARET;
 
             scene.add_child(viewport, cursor_node);
@@ -381,6 +384,7 @@ impl Dispatch for Presenter {
                     let _ =
                         ipc::client::call_simple(self.editor_ep, text_editor::DISPATCH_KEY, &data);
 
+                    self.blink_start = abi::system::clock_read().unwrap_or(0);
                     self.build_scene();
                     self.request_render();
                 }
@@ -553,6 +557,7 @@ extern "C" fn _start() -> ! {
         }; MAX_GLYPHS_PER_LINE],
         cmap: build_cmap_table(),
         char_width: compute_char_advance(),
+        blink_start: abi::system::clock_read().unwrap_or(0),
         last_line_count: 0,
         last_cursor_line: 0,
         last_cursor_col: 0,

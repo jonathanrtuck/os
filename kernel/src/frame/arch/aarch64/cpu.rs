@@ -476,6 +476,7 @@ pub fn idle_loop_ctx(core_id: usize) -> ! {
         // syscall that called block_current). Pending IPIs must be taken
         // so the GIC can deliver future ones.
         super::sysreg::enable_irqs();
+        super::idle::drain_deferred_timer_wake(core_id);
 
         let next = {
             let mut sched = crate::frame::state::schedulers().core(core_id).lock();
@@ -516,6 +517,7 @@ pub fn idle_loop_ctx(core_id: usize) -> ! {
         }
 
         super::halt();
+        super::idle::drain_deferred_timer_wake(core_id);
     }
 }
 

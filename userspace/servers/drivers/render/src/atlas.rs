@@ -36,7 +36,6 @@ fn pack_key(glyph_id: u16, font_size_px: u16, style_id: u32) -> u64 {
 fn hash_key(key: u64) -> usize {
     const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const FNV_PRIME: u64 = 0x0100_0000_01b3;
-
     let bytes = key.to_le_bytes();
     let mut h = FNV_OFFSET;
     let mut i = 0;
@@ -73,6 +72,7 @@ impl GlyphAtlas {
             let mut b = Box::from_raw(ptr);
 
             b.reset();
+
             b
         }
     }
@@ -149,7 +149,6 @@ impl GlyphAtlas {
 
         let u = self.row_x;
         let v = self.row_y;
-
         let mut row = 0u16;
 
         while row < h {
@@ -175,6 +174,7 @@ impl GlyphAtlas {
         };
 
         self.row_x += w;
+
         if h > self.row_h {
             self.row_h = h;
         }

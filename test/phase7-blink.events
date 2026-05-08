@@ -1,0 +1,9 @@
+# Phase 7 — cursor blink verification.
+# Type "hi", capture at frame 2 (just typed, cursor visible),
+# then wait for blink animation frames. Frame ~15 should be
+# well into the hidden phase (past 500ms hold + 150ms fade).
+0 key h
+1 key i
+2 capture /tmp/os-phase7-visible.png
+15 capture /tmp/os-phase7-hidden.png
+15 exit

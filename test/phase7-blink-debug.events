@@ -1,0 +1,5 @@
+# Two keystrokes then wait for frame 3 (first timer frame).
+0 key h
+1 key i
+3 capture /tmp/os-blink-d3.png
+3 exit

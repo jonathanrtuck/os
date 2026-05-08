@@ -56,6 +56,28 @@ pub fn clear(handle: Handle, bits: u64) -> Result<(), SyscallError> {
     .map(|_| ())
 }
 
+/// Wait on a single event with a deadline. Returns the event handle on
+/// signal, or `Err(TimedOut)` if `deadline_tick` passes first.
+/// `deadline_tick` is an absolute counter value from `clock_read`.
+/// Pass 0 for infinite wait.
+pub fn wait_deadline(
+    handle: Handle,
+    mask: u64,
+    deadline_tick: u64,
+) -> Result<Handle, SyscallError> {
+    let handle_id = check(raw::syscall(
+        num::EVENT_WAIT_DEADLINE,
+        handle.0 as u64,
+        mask,
+        deadline_tick,
+        0,
+        0,
+        0,
+    ))?;
+
+    Ok(Handle(handle_id as u32))
+}
+
 pub fn bind_irq(event: Handle, intid: u32, bits: u64) -> Result<(), SyscallError> {
     check(raw::syscall(
         num::EVENT_BIND_IRQ,

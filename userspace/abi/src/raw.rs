@@ -33,6 +33,8 @@ pub mod num {
     pub const SYSTEM_INFO: u64 = 27;
     pub const EVENT_BIND_IRQ: u64 = 28;
     pub const ENDPOINT_BIND_EVENT: u64 = 29;
+    pub const EVENT_WAIT_DEADLINE: u64 = 30;
+    pub const RECV_TIMED: u64 = 31;
 }
 
 #[inline(always)]

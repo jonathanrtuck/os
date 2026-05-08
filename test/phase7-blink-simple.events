@@ -1,0 +1,5 @@
+# Simple blink test: no keystrokes, capture initial cursor (frame 0)
+# and wait for animation frames. Frame 5 should be after the first blink.
+0 capture /tmp/os-blink-0.png
+5 capture /tmp/os-blink-5.png
+5 exit

@@ -1,7 +1,7 @@
 //! Scene graph node type, header, and memory layout constants.
 
 use crate::{
-    primitives::{Border, Color, Content, DataRef, bitflags},
+    primitives::{Animation, Border, Color, Content, DataRef, bitflags},
     transform::AffineTransform,
 };
 
@@ -278,6 +278,8 @@ pub struct Node {
     /// entries in the data buffer: `[relation_type: u8, target: NodeId,
     /// pad: u8]`. `DataRef::EMPTY` means no relationships.
     pub relations: DataRef,
+    // ── animation ──
+    pub animation: Animation,
     // ── content ──
     pub content: Content,
 }
@@ -319,6 +321,7 @@ impl Node {
         state: 0,
         name: DataRef::EMPTY,
         relations: DataRef::EMPTY,
+        animation: Animation::NONE,
         content: Content::None,
     };
 
@@ -345,7 +348,7 @@ impl Node {
 // If you add a field, update this assertion and verify both sides agree.
 // Layout: 84 (tree+geometry+decoration+transform+hash) + 8 (clip_path)
 //       + 4 (cursor_shape+_reserved) + 24 (accessibility) + 24 (content) = 144.
-const _: () = assert!(core::mem::size_of::<Node>() == 144);
+const _: () = assert!(core::mem::size_of::<Node>() == 176);
 
 // ── Shared memory layout ────────────────────────────────────────────
 

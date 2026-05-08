@@ -7,6 +7,10 @@ name = "abi"
 version = "0.1.0"
 
 [[package]]
+name = "animation"
+version = "0.1.0"
+
+[[package]]
 name = "bitflags"
 version = "2.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -150,6 +154,7 @@ name = "render"
 version = "0.1.0"
 dependencies = [
  "abi",
+ "animation",
  "console",
  "fonts",
  "heap",

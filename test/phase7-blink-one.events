@@ -1,0 +1,7 @@
+# One keystroke, then wait for blink animation.
+# Frame 0 = initial render. Frame 1 fires key 'a'. Frame 2 = render after 'a'.
+# Frame 3+ should be timer-driven animation frames.
+0 key a
+2 capture /tmp/os-blink-one-2.png
+10 capture /tmp/os-blink-one-10.png
+10 exit

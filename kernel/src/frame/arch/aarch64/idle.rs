@@ -137,17 +137,17 @@ pub fn park_and_wait(thread_idx: u32, core_id: usize) {
 extern "C" fn park_loop(core_id: usize) -> ! {
     super::sysreg::enable_irqs();
 
-    // Immediate check — a thread may have been enqueued between
-    // switch_away's pick_next (empty) and reaching here.
+    drain_deferred_timer_wake(core_id);
+
     if let Some(tid) = pick_and_setup(core_id) {
         resume_thread(tid);
     }
 
-    // Bounded WFE spin: two iterations cover the common IPC case where
-    // a cross-core IPI delivers a wakeup within a few hundred cycles.
     for _ in 0..2 {
         // SAFETY: wfe is a hint with no side effects.
         unsafe { core::arch::asm!("wfe", options(nomem, nostack)) };
+
+        drain_deferred_timer_wake(core_id);
 
         if let Some(tid) = pick_and_setup(core_id) {
             resume_thread(tid);
@@ -156,6 +156,24 @@ extern "C" fn park_loop(core_id: usize) -> ! {
 
     // No wakeup arrived — commit to the full idle loop.
     super::cpu::idle_loop_ctx(core_id);
+}
+
+/// Drain any deferred timer wakeup into the run queue. The timer ISR
+/// cannot safely enqueue (scheduler lock may be held by the idle loop),
+/// so it stores the wakeup here for the idle loop to drain.
+#[cfg(target_os = "none")]
+pub fn drain_deferred_timer_wake(core_id: usize) {
+    if let Some((tid, pri)) = super::timer::take_deferred_wake(core_id) {
+        crate::println!(
+            "drain_timer: enqueue tid={} pri={pri} on core {core_id}",
+            tid.0
+        );
+
+        crate::frame::state::schedulers()
+            .core(core_id)
+            .lock()
+            .enqueue(tid, crate::types::Priority(pri));
+    }
 }
 
 /// Pick the next runnable thread and set it up as Running + current.

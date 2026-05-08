@@ -6,7 +6,11 @@
 //! blocking condition is met, the waker calls `wake()` which marks the thread
 //! as Ready and enqueues it.
 
-use crate::{frame::state, thread::ThreadRunState, types::ThreadId};
+use crate::{
+    frame::state,
+    thread::ThreadRunState,
+    types::{SyscallError, ThreadId},
+};
 
 /// Block the current thread and switch to the next runnable thread.
 ///
@@ -30,6 +34,43 @@ pub fn block_current(current: ThreadId, core_id: usize) {
     }
 
     switch_away(current, core_id);
+}
+
+/// Block with a deadline — same as `block_current`, but arms the per-core
+/// timer. If `deadline_tick` arrives before any other wake, the timer ISR
+/// sets `wakeup_error = TimedOut` and wakes the thread.
+///
+/// `deadline_tick` is an absolute counter value from `clock_read`. If the
+/// deadline has already passed, the thread is woken immediately with TimedOut.
+pub fn block_with_deadline(current: ThreadId, core_id: usize, deadline_tick: u64) {
+    use crate::frame::arch::timer;
+
+    let now = timer::now();
+
+    if now >= deadline_tick {
+        let mut thread = state::threads().write(current.0).unwrap();
+
+        thread.set_wakeup_error(SyscallError::TimedOut);
+
+        return;
+    }
+
+    {
+        let mut thread = state::threads().write(current.0).unwrap();
+
+        if thread.take_pending_wake() {
+            return;
+        }
+
+        thread.set_state(ThreadRunState::Blocked);
+    }
+
+    timer::set_deadline_thread(core_id, current);
+    timer::set_deadline(core_id, deadline_tick.saturating_sub(timer::now()).max(1));
+
+    switch_away(current, core_id);
+
+    timer::clear_deadline_thread(core_id);
 }
 
 /// Wake a blocked thread by marking it Ready and enqueuing it.

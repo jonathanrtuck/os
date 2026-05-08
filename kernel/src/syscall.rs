@@ -51,6 +51,8 @@ pub mod num {
     pub const SYSTEM_INFO: u64 = 27;
     pub const EVENT_BIND_IRQ: u64 = 28;
     pub const ENDPOINT_BIND_EVENT: u64 = 29;
+    pub const EVENT_WAIT_DEADLINE: u64 = 30;
+    pub const RECV_TIMED: u64 = 31;
 }
 
 struct StagedHandles {
@@ -565,6 +567,8 @@ pub fn dispatch(
         num::SYSTEM_INFO => sys_system_info(current, space_id, core_id, args),
         num::EVENT_BIND_IRQ => sys_event_bind_irq(current, space_id, core_id, args),
         num::ENDPOINT_BIND_EVENT => sys_endpoint_bind_event(current, space_id, core_id, args),
+        num::EVENT_WAIT_DEADLINE => sys_event_wait_deadline(current, space_id, core_id, args),
+        num::RECV_TIMED => sys_recv_timed(current, space_id, core_id, args),
         _ => Err(SyscallError::InvalidArgument),
     };
 
@@ -1423,6 +1427,111 @@ fn event_wait_common(
     Ok(0)
 }
 
+/// Wait on a single event with a deadline. Returns the event handle on
+/// signal, or `Err(TimedOut)` if the deadline passes first. If both the
+/// event and deadline fire concurrently, the event wins (no false timeout).
+///
+/// Args: [handle, mask, deadline_tick, 0, 0, 0]
+/// `deadline_tick` is an absolute counter value (from `clock_read`).
+/// Pass 0 for infinite wait (equivalent to `event_wait`).
+#[inline(never)]
+fn sys_event_wait_deadline(
+    current: ThreadId,
+    space_id: Option<AddressSpaceId>,
+    core_id: usize,
+    args: &[u64; 6],
+) -> Result<u64, SyscallError> {
+    let hid_raw = args[0] as u32;
+    let mask = args[1];
+    let deadline_tick = args[2];
+    let space_id = space_id.ok_or(SyscallError::InvalidArgument)?;
+
+    if mask == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    let handle = lookup_handle(space_id, HandleId(hid_raw))?;
+
+    if handle.object_type != ObjectType::Event {
+        return Err(SyscallError::WrongHandleType);
+    }
+    if !handle.rights.contains(Rights::WAIT) {
+        return Err(SyscallError::InsufficientRights);
+    }
+
+    let obj_id = handle.object_id;
+
+    {
+        let event = state::events()
+            .write(obj_id)
+            .ok_or(SyscallError::InvalidHandle)?;
+
+        if event.check(mask).is_some() {
+            return Ok(hid_raw as u64);
+        }
+    }
+    {
+        let mut event = state::events()
+            .write(obj_id)
+            .ok_or(SyscallError::InvalidHandle)?;
+
+        if event.check(mask).is_some() {
+            return Ok(hid_raw as u64);
+        }
+
+        event.add_waiter(current, mask)?;
+    }
+
+    state::threads()
+        .write(current.0)
+        .ok_or(SyscallError::InvalidArgument)?
+        .set_wait_events(&[obj_id]);
+
+    if deadline_tick == 0 {
+        crate::sched::block_current(current, core_id);
+    } else {
+        let freq = crate::frame::arch::timer::TIMER_FREQ_HZ;
+        let deadline_secs = deadline_tick / 1_000_000_000;
+        let deadline_nanos = deadline_tick % 1_000_000_000;
+        let raw_ticks = deadline_secs * freq + deadline_nanos * freq / 1_000_000_000;
+
+        crate::sched::block_with_deadline(current, core_id, raw_ticks);
+    }
+
+    let timed_out = state::threads()
+        .write(current.0)
+        .ok_or(SyscallError::InvalidArgument)?
+        .take_wakeup_error()
+        == Some(SyscallError::TimedOut);
+
+    state::threads()
+        .write(current.0)
+        .ok_or(SyscallError::InvalidArgument)?
+        .take_wait_events();
+
+    if let Some(e) = state::events().write(obj_id)
+        && e.check(mask).is_some()
+    {
+        drop(e);
+
+        if let Some(mut ev) = state::events().write(obj_id) {
+            ev.remove_waiter(current);
+        }
+
+        return Ok(hid_raw as u64);
+    }
+
+    if let Some(mut e) = state::events().write(obj_id) {
+        e.remove_waiter(current);
+    }
+
+    if timed_out {
+        Err(SyscallError::TimedOut)
+    } else {
+        Ok(0)
+    }
+}
+
 // ── IPC blocking ────────────────────────────────────────────
 
 #[inline(never)]
@@ -1566,6 +1675,7 @@ fn sys_call(
                     .map_or(Priority::Idle, |t| t.effective_priority());
                 let server_was_blocked =
                     if let Some(mut server) = state::threads().write(server_tid.0) {
+                        server.take_wakeup_error();
                         server.set_wakeup_value(packed);
                         server.boost_priority(caller_pri);
                         server.state() == crate::thread::ThreadRunState::Blocked
@@ -1794,6 +1904,153 @@ fn sys_recv(
     }
 }
 
+/// RECV with a deadline. arg5 points to `[u64; 2]`: `[reply_cap_out_ptr, deadline_ns]`.
+/// `deadline_ns` is an absolute nanosecond timestamp (0 = infinite).
+/// Returns `Err(TimedOut)` if the deadline expires before a message arrives.
+#[inline(never)]
+fn sys_recv_timed(
+    current: ThreadId,
+    space_id: Option<AddressSpaceId>,
+    core_id: usize,
+    args: &[u64; 6],
+) -> Result<u64, SyscallError> {
+    let handle_id = HandleId(args[0] as u32);
+    let out_buf = args[1] as usize;
+    let out_cap = args[2] as usize;
+    let handles_out = args[3] as usize;
+    let handles_cap = args[4] as usize;
+    let extra_ptr = args[5] as usize;
+    let (reply_cap_out, deadline_ns) = if extra_ptr == 0 {
+        (0usize, 0u64)
+    } else {
+        let mut words = [0u32; 4];
+
+        user_mem::read_user_u32s(extra_ptr, 4, &mut words)?;
+
+        let reply_out = (words[0] as u64 | ((words[1] as u64) << 32)) as usize;
+        let deadline = words[2] as u64 | ((words[3] as u64) << 32);
+
+        (reply_out, deadline)
+    };
+
+    let space_id = space_id.ok_or(SyscallError::InvalidArgument)?;
+    let obj_id = lookup_endpoint_id(space_id, handle_id)?;
+
+    if out_cap > 0 && out_buf == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    if let Some(result) = try_dequeue_and_deliver(
+        obj_id,
+        current,
+        space_id,
+        out_buf,
+        out_cap,
+        handles_out,
+        handles_cap,
+        reply_cap_out,
+    ) {
+        return result;
+    }
+
+    if let Some(val) = state::threads()
+        .write(current.0)
+        .and_then(|mut t| t.take_wakeup_value())
+    {
+        return Ok(val);
+    }
+
+    {
+        let ep = state::endpoints()
+            .read(obj_id)
+            .ok_or(SyscallError::InvalidHandle)?;
+
+        if ep.is_peer_closed() {
+            return Err(SyscallError::PeerClosed);
+        }
+    }
+
+    let deadline_raw = if deadline_ns == 0 {
+        0
+    } else {
+        let freq = crate::frame::arch::timer::TIMER_FREQ_HZ;
+        let secs = deadline_ns / 1_000_000_000;
+        let nanos = deadline_ns % 1_000_000_000;
+
+        secs * freq + nanos * freq / 1_000_000_000
+    };
+
+    loop {
+        state::endpoints()
+            .write(obj_id)
+            .ok_or(SyscallError::InvalidHandle)?
+            .add_recv_waiter(current)?;
+
+        if let Some(mut t) = state::threads().write(current.0) {
+            t.set_recv_state(crate::thread::RecvState {
+                endpoint_id: obj_id,
+                space_id,
+                out_buf,
+                out_cap,
+                handles_out,
+                handles_cap,
+                reply_cap_out,
+            });
+        }
+
+        if deadline_raw == 0 {
+            crate::sched::block_current(current, core_id);
+        } else {
+            crate::sched::block_with_deadline(current, core_id, deadline_raw);
+        }
+
+        if let Some(mut t) = state::threads().write(current.0) {
+            t.take_recv_state();
+        }
+
+        if let Some(err) = state::threads()
+            .write(current.0)
+            .and_then(|mut t| t.take_wakeup_error())
+        {
+            if let Some(mut ep) = state::endpoints().write(obj_id) {
+                ep.remove_recv_waiter(current);
+            }
+
+            return Err(err);
+        }
+        if let Some(val) = state::threads()
+            .write(current.0)
+            .and_then(|mut t| t.take_wakeup_value())
+        {
+            return Ok(val);
+        }
+
+        if let Some(result) = try_dequeue_and_deliver(
+            obj_id,
+            current,
+            space_id,
+            out_buf,
+            out_cap,
+            handles_out,
+            handles_cap,
+            reply_cap_out,
+        ) {
+            return result;
+        }
+
+        if state::endpoints()
+            .read(obj_id)
+            .is_some_and(|ep| ep.is_peer_closed())
+        {
+            return Err(SyscallError::PeerClosed);
+        }
+
+        if let Some(mut ep) = state::endpoints().write(obj_id) {
+            ep.remove_recv_waiter(current);
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn try_dequeue_and_deliver(
     ep_obj_id: u32,
@@ -1805,22 +2062,20 @@ fn try_dequeue_and_deliver(
     handles_cap: usize,
     reply_cap_out: usize,
 ) -> Option<Result<u64, SyscallError>> {
-    let (caller_tid, reply_cap, clear_info) = {
+    let (caller_tid, reply_cap) = {
         let mut ep = state::endpoints().write(ep_obj_id)?;
         let (caller_tid, reply_cap) = ep.dequeue_caller()?;
 
         ep.set_active_server(Some(server));
 
-        let clear_info = check_clear_readable(&ep);
+        if let Some((eid, bits)) = check_clear_readable(&ep)
+            && let Some(mut e) = state::events().write(eid.0)
+        {
+            e.clear(bits);
+        }
 
-        (caller_tid, reply_cap, clear_info)
+        (caller_tid, reply_cap)
     };
-
-    if let Some((eid, bits)) = clear_info
-        && let Some(mut e) = state::events().write(eid.0)
-    {
-        e.clear(bits);
-    }
 
     Some(recv_deliver_from_thread(
         caller_tid,
@@ -1878,7 +2133,9 @@ fn recv_deliver_from_thread(
         0
     };
 
-    Ok((badge as u64) << 32 | (h_count << 16) | msg_len)
+    let packed = (badge as u64) << 32 | (h_count << 16) | msg_len;
+
+    Ok(packed)
 }
 
 #[inline(never)]

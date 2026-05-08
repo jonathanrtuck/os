@@ -14,7 +14,7 @@
 
 #[cfg(miri)]
 use core::sync::atomic::AtomicU64;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 #[cfg(not(miri))]
 use super::sysreg;
@@ -29,6 +29,12 @@ pub const TIMER_FREQ_HZ: u64 = 24_000_000;
 /// prevent one core from stealing another's timer expiry.
 static DEADLINE_EXPIRED: [AtomicBool; crate::config::MAX_CORES] =
     [const { AtomicBool::new(false) }; crate::config::MAX_CORES];
+
+/// Per-core tracking of which thread armed the deadline timer.
+/// `u32::MAX` means no thread. Set by `set_deadline_thread`, consumed by
+/// `take_deadline_thread` in the timer ISR to know who to wake on timeout.
+static DEADLINE_THREAD: [AtomicU32; crate::config::MAX_CORES] =
+    [const { AtomicU32::new(u32::MAX) }; crate::config::MAX_CORES];
 
 /// Monotonic counter for Miri — increments on each `now()` call so clock
 /// reads are always non-decreasing.
@@ -95,16 +101,17 @@ pub fn set_deadline(core_id: usize, _ticks_from_now: u64) {
     #[cfg(not(miri))]
     {
         sysreg::set_cntv_tval_el0(_ticks_from_now);
-        sysreg::set_cntv_ctl_el0(1); // ENABLE=1, IMASK=0
+        sysreg::set_cntv_ctl_el0(1); // ENABLE=1, IMASK=0 — TVAL write updates CVAL for HVF detection
         sysreg::isb();
     }
 }
 
-/// Disarm the timer. No interrupt will fire until the next [`set_deadline`].
+/// Disarm the timer by pushing CVAL far into the future. Keeps CTL
+/// enabled (avoids HVF re-arm issues with CTL 0→1 transitions).
 pub fn clear_deadline() {
     #[cfg(not(miri))]
     {
-        sysreg::set_cntv_ctl_el0(0);
+        sysreg::set_cntv_tval_el0(TIMER_FREQ_HZ * 3600);
         sysreg::isb();
     }
 }
@@ -116,7 +123,7 @@ pub fn clear_deadline() {
 pub fn handle_deadline(core_id: usize) {
     #[cfg(not(miri))]
     {
-        sysreg::set_cntv_ctl_el0(0b11); // ENABLE=1, IMASK=1
+        sysreg::set_cntv_ctl_el0(0b11); // ENABLE=1, IMASK=1 (HVF detects re-arm via CVAL change)
         sysreg::isb();
     }
 
@@ -129,4 +136,56 @@ pub fn handle_deadline(core_id: usize) {
 /// calls this to decide whether to preempt or wake a timed-out thread.
 pub fn deadline_elapsed(core_id: usize) -> bool {
     DEADLINE_EXPIRED[core_id].swap(false, Ordering::Acquire)
+}
+
+/// Record which thread armed the timer on this core. Called by
+/// `block_with_deadline` before arming the timer.
+pub fn set_deadline_thread(core_id: usize, thread_id: crate::types::ThreadId) {
+    DEADLINE_THREAD[core_id].store(thread_id.0, Ordering::Release);
+}
+
+/// Atomically take the deadline thread for this core. Returns `Some` exactly
+/// once per `set_deadline_thread` call. The timer ISR calls this to find
+/// which thread to wake on timeout.
+pub fn take_deadline_thread(core_id: usize) -> Option<crate::types::ThreadId> {
+    let id = DEADLINE_THREAD[core_id].swap(u32::MAX, Ordering::Acquire);
+
+    if id == u32::MAX {
+        None
+    } else {
+        Some(crate::types::ThreadId(id))
+    }
+}
+
+/// Clear the deadline thread for this core without returning it. Called
+/// when a thread wakes normally (event signal) to prevent the stale timer
+/// from waking the wrong thread.
+pub fn clear_deadline_thread(core_id: usize) {
+    DEADLINE_THREAD[core_id].store(u32::MAX, Ordering::Release);
+}
+
+/// Per-core deferred timer wakeup: thread ID + priority to enqueue.
+/// The ISR cannot safely call `sched::wake` (scheduler lock may be held
+/// by the idle loop on the same core). Instead, the ISR stores the wakeup
+/// here, and the idle loop / park_loop drains it before pick_next.
+static TIMER_WAKE_TID: [AtomicU32; crate::config::MAX_CORES] =
+    [const { AtomicU32::new(u32::MAX) }; crate::config::MAX_CORES];
+static TIMER_WAKE_PRI: [AtomicU32; crate::config::MAX_CORES] =
+    [const { AtomicU32::new(0) }; crate::config::MAX_CORES];
+
+pub fn set_deferred_wake(core_id: usize, tid: crate::types::ThreadId, priority: u8) {
+    TIMER_WAKE_PRI[core_id].store(priority as u32, Ordering::Relaxed);
+    TIMER_WAKE_TID[core_id].store(tid.0, Ordering::Release);
+}
+
+pub fn take_deferred_wake(core_id: usize) -> Option<(crate::types::ThreadId, u8)> {
+    let tid = TIMER_WAKE_TID[core_id].swap(u32::MAX, Ordering::Acquire);
+
+    if tid == u32::MAX {
+        None
+    } else {
+        let pri = TIMER_WAKE_PRI[core_id].load(Ordering::Relaxed);
+
+        Some((crate::types::ThreadId(tid), pri as u8))
+    }
 }

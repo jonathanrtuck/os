@@ -10,7 +10,7 @@ use crate::{
     stroke::expand_stroke,
     svg_path::parse_svg_path,
     transform::AffineTransform,
-    triple::{TripleWriter, TRIPLE_SCENE_SIZE},
+    triple::{TRIPLE_SCENE_SIZE, TripleWriter},
     writer::SceneWriter,
 };
 
@@ -46,8 +46,8 @@ fn millipoint_rounding() {
 // ── Node layout ────────────────────────────────────────────────────
 
 #[test]
-fn node_size_is_144() {
-    assert_eq!(core::mem::size_of::<Node>(), 144);
+fn node_size_is_176() {
+    assert_eq!(core::mem::size_of::<Node>(), 176);
 }
 
 #[test]
@@ -68,7 +68,7 @@ fn shaped_glyph_size_is_16() {
 #[test]
 fn scene_size_consistent() {
     assert_eq!(NODES_OFFSET, core::mem::size_of::<SceneHeader>());
-    assert_eq!(DATA_OFFSET, NODES_OFFSET + MAX_NODES * 144);
+    assert_eq!(DATA_OFFSET, NODES_OFFSET + MAX_NODES * 176);
     assert_eq!(SCENE_SIZE, DATA_OFFSET + DATA_BUFFER_SIZE);
 }
 

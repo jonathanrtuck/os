@@ -274,7 +274,7 @@ fn setup_pipeline(
             PIPE_SOLID,
             H_VERTEX_FN,
             H_FRAG_SOLID,
-            false,
+            true,
             COLOR_WRITE_ALL,
             false,
             1,
@@ -320,6 +320,8 @@ fn setup_pipeline(
 const RASTER_BUF_SIZE: usize = 100 * 100;
 const ATLAS_W_F: f32 = atlas::ATLAS_WIDTH as f32;
 const ATLAS_H_F: f32 = atlas::ATLAS_HEIGHT as f32;
+const NS_PER_MS: u64 = 1_000_000;
+const FRAME_INTERVAL_NS: u64 = 16_666_667;
 
 struct WalkContext {
     atlas: alloc::boxed::Box<GlyphAtlas>,
@@ -327,6 +329,59 @@ struct WalkContext {
     raster_buf: alloc::vec::Vec<u8>,
     ascent_px: f32,
     atlas_dirty: bool,
+    now_tick: u64,
+    next_deadline: u64,
+}
+
+fn evaluate_animation(anim: &scene::Animation, now_ns: u64) -> (u8, u64) {
+    if !anim.is_active() {
+        return (255, 0);
+    }
+
+    let elapsed_ns = now_ns.saturating_sub(anim.start_tick);
+    let elapsed_ms = elapsed_ns / NS_PER_MS;
+    let mut total_ms = 0u64;
+
+    for i in 0..anim.phase_count as usize {
+        total_ms += anim.phases[i].duration_ms as u64;
+    }
+
+    if total_ms == 0 {
+        return (255, 0);
+    }
+
+    let cycle_ms = if anim.repeat == scene::RepeatMode::Loop {
+        elapsed_ms % total_ms
+    } else {
+        elapsed_ms.min(total_ms)
+    };
+    let mut acc = 0u64;
+    let mut prev_value = anim.phases[anim.phase_count as usize - 1].value;
+
+    for i in 0..anim.phase_count as usize {
+        let phase = &anim.phases[i];
+        let phase_end = acc + phase.duration_ms as u64;
+
+        if cycle_ms < phase_end {
+            let phase_remaining_ms = phase_end - cycle_ms;
+
+            if phase.duration_ms == 0 || phase.easing == scene::AnimationEasing::Linear {
+                return (phase.value, now_ns + phase_remaining_ms * NS_PER_MS);
+            }
+
+            let phase_elapsed = cycle_ms - acc;
+            let t = phase_elapsed as f32 / phase.duration_ms as f32;
+            let eased = animation::ease(animation::Easing::EaseInOut, t);
+            let v = prev_value as f32 + (phase.value as f32 - prev_value as f32) * eased;
+
+            return (v as u8, now_ns + FRAME_INTERVAL_NS);
+        }
+
+        acc = phase_end;
+        prev_value = phase.value;
+    }
+
+    (prev_value, 0)
 }
 
 fn walk_node(
@@ -343,9 +398,29 @@ fn walk_node(
     let y = parent_y + scene::mpt_to_f32(node.y);
     let w = scene::umpt_to_f32(node.width);
     let h = scene::umpt_to_f32(node.height);
+    let effective_opacity =
+        if node.animation.is_active() && node.animation.target == scene::AnimationTarget::Opacity {
+            let (val, deadline) = evaluate_animation(&node.animation, ctx.now_tick);
+
+            if deadline > 0 && (ctx.next_deadline == 0 || deadline < ctx.next_deadline) {
+                ctx.next_deadline = deadline;
+            }
+
+            val
+        } else {
+            node.opacity
+        };
+
+    if effective_opacity == 0 {
+        return;
+    }
 
     if !is_root && node.background.a > 0 {
-        frame.push_rect(x, y, w, h, node.background);
+        let mut bg = node.background;
+
+        bg.a = ((bg.a as u16 * effective_opacity as u16) / 255) as u8;
+
+        frame.push_rect(x, y, w, h, bg);
     }
 
     if let Content::Glyphs {
@@ -558,10 +633,15 @@ impl Compositor {
         self.walk_ctx.atlas_dirty = false;
     }
 
-    fn render_frame(&mut self) {
+    fn render_frame(&mut self) -> u64 {
         if self.scene_va == 0 {
-            return;
+            return 0;
         }
+
+        let now = abi::system::clock_read().unwrap_or(0);
+
+        self.walk_ctx.now_tick = now;
+        self.walk_ctx.next_deadline = 0;
 
         // SAFETY: scene_va is a valid RO mapping of at least SCENE_SIZE bytes.
         let scene_buf =
@@ -570,7 +650,7 @@ impl Compositor {
         let root = reader.root();
 
         if reader.node_count() == 0 || root == NULL {
-            return;
+            return 0;
         }
 
         let root_node = reader.node(root);
@@ -644,6 +724,8 @@ impl Compositor {
         );
 
         self.frame_count += 1;
+
+        self.walk_ctx.next_deadline
     }
 }
 
@@ -824,6 +906,8 @@ extern "C" fn _start() -> ! {
         raster_buf: alloc::vec![0u8; RASTER_BUF_SIZE],
         ascent_px,
         atlas_dirty: false,
+        now_tick: 0,
+        next_deadline: 0,
     };
 
     console::write(console_ep, b"render: atlas ready\n");
@@ -854,7 +938,19 @@ extern "C" fn _start() -> ! {
         atlas_upload_y: 0,
     };
 
-    ipc::server::serve(own_ep, &mut compositor);
+    let mut next_deadline: u64 = 0;
+
+    loop {
+        match ipc::server::serve_one_timed(own_ep, &mut compositor, next_deadline) {
+            Ok(()) => {
+                next_deadline = compositor.walk_ctx.next_deadline;
+            }
+            Err(abi::types::SyscallError::TimedOut) => {
+                next_deadline = compositor.render_frame();
+            }
+            Err(_) => break,
+        }
+    }
 
     abi::thread::exit(0);
 }

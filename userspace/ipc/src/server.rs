@@ -86,6 +86,54 @@ pub trait Dispatch {
     fn dispatch(&mut self, msg: Incoming<'_>);
 }
 
+pub fn serve_one(endpoint: Handle, handler: &mut impl Dispatch) -> Result<(), SyscallError> {
+    let mut buf = [0u8; MSG_SIZE];
+    let mut handle_buf = [0u32; MAX_HANDLES];
+    let recv = abi::ipc::recv(endpoint, &mut buf, &mut handle_buf)?;
+    let header = Header::read_from(&buf);
+    let raw_payload_len = recv.msg_len.saturating_sub(message::HEADER_SIZE);
+    let payload_end = message::HEADER_SIZE + (header.len as usize).min(raw_payload_len);
+    let payload = &buf[message::HEADER_SIZE..payload_end];
+    let handles = &handle_buf[..recv.handle_count];
+    let msg = Incoming {
+        method: header.method,
+        payload,
+        handles,
+        reply_cap: recv.reply_cap,
+        endpoint,
+    };
+
+    handler.dispatch(msg);
+
+    Ok(())
+}
+
+pub fn serve_one_timed(
+    endpoint: Handle,
+    handler: &mut impl Dispatch,
+    deadline_ns: u64,
+) -> Result<(), SyscallError> {
+    let mut buf = [0u8; MSG_SIZE];
+    let mut handle_buf = [0u32; MAX_HANDLES];
+    let recv = abi::ipc::recv_timed(endpoint, &mut buf, &mut handle_buf, deadline_ns)?;
+    let header = Header::read_from(&buf);
+    let raw_payload_len = recv.msg_len.saturating_sub(message::HEADER_SIZE);
+    let payload_end = message::HEADER_SIZE + (header.len as usize).min(raw_payload_len);
+    let payload = &buf[message::HEADER_SIZE..payload_end];
+    let handles = &handle_buf[..recv.handle_count];
+    let msg = Incoming {
+        method: header.method,
+        payload,
+        handles,
+        reply_cap: recv.reply_cap,
+        endpoint,
+    };
+
+    handler.dispatch(msg);
+
+    Ok(())
+}
+
 pub fn serve(endpoint: Handle, handler: &mut impl Dispatch) -> SyscallError {
     let mut buf = [0u8; MSG_SIZE];
     let mut handle_buf = [0u32; MAX_HANDLES];

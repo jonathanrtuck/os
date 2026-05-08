@@ -6,6 +6,7 @@ license = "Unlicense"
 
 [dependencies]
 abi = { path = "../../../abi" }
+animation = { path = "../../../../libraries/animation" }
 console = { path = "../../console" }
 fonts = { path = "../../../../libraries/fonts" }
 heap = { path = "../../../heap" }

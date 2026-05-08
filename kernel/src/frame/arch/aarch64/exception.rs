@@ -142,7 +142,6 @@ extern "C" fn exception_handler(frame: &mut TrapFrame, source: u64) {
         // EL0/64 Sync — syscalls (SVC) and faults from userspace.
         8 => el0_sync_handler(frame),
         // EL0/64 IRQ — device interrupt while running userspace code.
-        // Same GIC path as EL1h IRQ; only the interrupted context differs.
         9 => irq_handler(frame),
         // Everything else is unhandled.
         _ => fatal_exception(frame, source),
@@ -181,6 +180,18 @@ fn irq_handler(_frame: &mut TrapFrame) {
             let core = 0;
 
             super::timer::handle_deadline(core);
+
+            if super::timer::deadline_elapsed(core)
+                && let Some(tid) = super::timer::take_deadline_thread(core)
+                && let Some(mut t) = crate::frame::state::threads().write(tid.0)
+                && t.state() == crate::thread::ThreadRunState::Blocked
+            {
+                t.set_wakeup_error(crate::types::SyscallError::TimedOut);
+
+                drop(t);
+
+                crate::sched::wake(tid, core);
+            }
 
             #[cfg(all(debug_assertions, target_os = "none"))]
             // SAFETY: percpu() valid — IRQ handlers fire after boot.
