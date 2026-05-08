@@ -22,11 +22,8 @@ const HANDLE_NS_EP: Handle = Handle(2);
 const HANDLE_VIRTIO_VMO: Handle = Handle(3);
 const HANDLE_INIT_EP: Handle = Handle(4);
 
-const PAGE_SIZE: usize = 16384;
+const PAGE_SIZE: usize = virtio::PAGE_SIZE;
 const MSG_SIZE: usize = 128;
-
-const VIRTIO_MMIO_STRIDE: usize = 0x200;
-const MAX_VIRTIO_DEVICES: usize = 8;
 
 const BLOCK_SIZE: usize = protocol::blk::BLOCK_SIZE as usize;
 const SECTORS_PER_BLOCK: u32 = protocol::blk::SECTORS_PER_BLOCK;
@@ -37,6 +34,7 @@ const VIRTIO_BLK_T_FLUSH: u32 = 4;
 
 const VIRTIO_BLK_F_FLUSH: u64 = 1 << 9;
 const VIRTIO_BLK_S_OK: u8 = 0;
+const STATUS_NOT_SUPPORTED: u8 = 0xFF;
 
 const VIRTQ_REQUEST: u32 = 0;
 const DATA_OFFSET: usize = 16;
@@ -76,7 +74,7 @@ impl BlkDevice {
         let status_pa = self.buf_pa + status_offset as u64;
 
         // SAFETY: status_offset is within the DMA buffer (16 + data_bytes < 2 pages).
-        unsafe { *buf_ptr.add(status_offset) = 0xFF };
+        unsafe { *buf_ptr.add(status_offset) = STATUS_NOT_SUPPORTED };
 
         if data_bytes == 0 {
             self.vq
@@ -118,7 +116,7 @@ impl BlkDevice {
 
     fn flush(&mut self) -> u8 {
         if !self.has_flush {
-            return 0xFF;
+            return STATUS_NOT_SUPPORTED;
         }
 
         self.submit(VIRTIO_BLK_T_FLUSH, 0, 0)
@@ -189,10 +187,17 @@ impl Dispatch for BlkServer {
 
                 if self.shared_va != 0 {
                     let offset = req.vmo_offset as usize;
+
+                    if offset + BLOCK_SIZE > self.shared_len {
+                        let _ = msg.reply_error(protocol::STATUS_INVALID);
+
+                        return;
+                    }
+
                     let dst = (self.shared_va + offset) as *mut u8;
                     let src = self.blk.data_ptr();
 
-                    // SAFETY: Both pointers are within their respective mapped regions.
+                    // SAFETY: offset + BLOCK_SIZE <= shared_len, checked above.
                     unsafe { core::ptr::copy_nonoverlapping(src, dst, BLOCK_SIZE) };
                 }
 
@@ -220,10 +225,17 @@ impl Dispatch for BlkServer {
                 }
 
                 let offset = req.vmo_offset as usize;
+
+                if offset + BLOCK_SIZE > self.shared_len {
+                    let _ = msg.reply_error(protocol::STATUS_INVALID);
+
+                    return;
+                }
+
                 let src = (self.shared_va + offset) as *const u8;
                 let dst = self.blk.data_ptr();
 
-                // SAFETY: Both pointers are within their respective mapped regions.
+                // SAFETY: offset + BLOCK_SIZE <= shared_len, checked above.
                 unsafe { core::ptr::copy_nonoverlapping(src, dst, BLOCK_SIZE) };
 
                 let status = self.blk.write_block(req.block_index);
@@ -239,7 +251,7 @@ impl Dispatch for BlkServer {
 
                 if status == VIRTIO_BLK_S_OK {
                     let _ = msg.reply_empty();
-                } else if status == 0xFF {
+                } else if status == STATUS_NOT_SUPPORTED {
                     let _ = msg.reply_error(protocol::STATUS_UNSUPPORTED);
                 } else {
                     let _ = msg.reply_error(protocol::STATUS_IO_ERROR);
@@ -394,7 +406,7 @@ fn self_test(blk: &mut BlkDevice, console_ep: Handle) {
 
     if status == VIRTIO_BLK_S_OK {
         console_write(console_ep, b"blk: flush: OK\n");
-    } else if status == 0xFF {
+    } else if status == STATUS_NOT_SUPPORTED {
         console_write(console_ep, b"blk: flush: not supported\n");
     } else {
         console_write_u32(console_ep, b"blk: FAIL flush status=", status as u32);
@@ -421,26 +433,10 @@ extern "C" fn _start() -> ! {
         Err(_) => abi::thread::exit(1),
     };
 
-    let mut blk_base: usize = 0;
-    let mut blk_slot: u32 = 0;
-
-    for i in 0..MAX_VIRTIO_DEVICES {
-        let base = virtio_va + i * VIRTIO_MMIO_STRIDE;
-        let dev = virtio::Device::new(base);
-
-        if dev.is_valid() && dev.device_id() == virtio::DEVICE_BLK {
-            blk_base = base;
-            blk_slot = i as u32;
-
-            break;
-        }
-    }
-
-    if blk_base == 0 {
-        abi::thread::exit(0xB0);
-    }
-
-    let device = virtio::Device::new(blk_base);
+    let (device, blk_slot) = match virtio::find_device(virtio_va, virtio::DEVICE_BLK) {
+        Some(d) => d,
+        None => abi::thread::exit(0xB0),
+    };
 
     let (ok, accepted) = device.negotiate_features(VIRTIO_BLK_F_FLUSH);
 
@@ -493,7 +489,7 @@ extern "C" fn _start() -> ! {
         Err(_) => abi::thread::exit(6),
     };
 
-    let irq_num = 48 + blk_slot;
+    let irq_num = virtio::SPI_BASE_INTID + blk_slot;
 
     if abi::event::bind_irq(irq_event, irq_num, 0x1).is_err() {
         abi::thread::exit(7);

@@ -47,6 +47,10 @@ pub const DEVICE_BLK: u32 = 2;
 pub const DEVICE_INPUT: u32 = 18;
 pub const DEVICE_METAL: u32 = 22;
 
+pub const MMIO_STRIDE: usize = 0x200;
+pub const MAX_DEVICES: usize = 8;
+pub const SPI_BASE_INTID: u32 = 48;
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Descriptor {
@@ -61,6 +65,22 @@ pub struct Descriptor {
 pub struct UsedElem {
     pub id: u32,
     pub len: u32,
+}
+
+/// Scan the virtio MMIO region for a device with the given ID.
+///
+/// Returns the `Device` and its slot index (0-based), or `None` if not found.
+pub fn find_device(virtio_va: usize, device_id: u32) -> Option<(Device, u32)> {
+    for i in 0..MAX_DEVICES {
+        let base = virtio_va + i * MMIO_STRIDE;
+        let dev = Device::new(base);
+
+        if dev.is_valid() && dev.device_id() == device_id {
+            return Some((dev, i as u32));
+        }
+    }
+
+    None
 }
 
 /// A virtio-mmio device backed by a mapped MMIO region.

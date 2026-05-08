@@ -25,11 +25,8 @@ const HANDLE_NS_EP: Handle = Handle(2);
 const HANDLE_VIRTIO_VMO: Handle = Handle(3);
 const HANDLE_INIT_EP: Handle = Handle(4);
 
-const PAGE_SIZE: usize = 16384;
+const PAGE_SIZE: usize = virtio::PAGE_SIZE;
 const MSG_SIZE: usize = 128;
-
-const VIRTIO_MMIO_STRIDE: usize = 0x200;
-const MAX_VIRTIO_DEVICES: usize = 8;
 
 // ── MSL shader source ───────────────────────────────────────────────
 
@@ -61,6 +58,8 @@ fragment float4 fragment_main(VertexOut in [[stage_in]]) {
 ";
 
 // Guest-assigned Metal object handle IDs.
+const COLOR_WRITE_ALL: u8 = 0xF;
+
 const H_LIBRARY: u32 = 1;
 const H_VERTEX_FN: u32 = 2;
 const H_FRAGMENT_FN: u32 = 3;
@@ -175,16 +174,10 @@ fn submit_and_wait(
     vq: &mut virtio::Virtqueue,
     irq_event: Handle,
     queue_index: u32,
-    dma: &DmaBuf,
-    cmd_buf: &[u8],
+    dma_pa: u64,
     cmd_len: usize,
 ) {
-    // SAFETY: dma.va is a valid DMA allocation; cmd_len <= dma.size.
-    unsafe {
-        core::ptr::copy_nonoverlapping(cmd_buf.as_ptr(), dma.va as *mut u8, cmd_len);
-    }
-
-    vq.push(dma.pa, cmd_len as u32, false);
+    vq.push(dma_pa, cmd_len as u32, false);
     device.notify(queue_index);
 
     let _ = abi::event::wait(&[(irq_event, 0x1)]);
@@ -201,10 +194,12 @@ fn setup_pipeline(
     setup_vq: &mut virtio::Virtqueue,
     irq_event: Handle,
     setup_dma: &DmaBuf,
+    buf_size: usize,
 ) {
-    let mut cmd = [0u8; PAGE_SIZE * 2];
+    // SAFETY: setup_dma.va is a valid DMA allocation of buf_size bytes.
+    let dma_buf = unsafe { core::slice::from_raw_parts_mut(setup_dma.va as *mut u8, buf_size) };
     let len = {
-        let mut w = CommandWriter::new(&mut cmd);
+        let mut w = CommandWriter::new(dma_buf);
 
         w.compile_library(H_LIBRARY, MSL_SOLID_COLOR);
         w.get_function(H_VERTEX_FN, H_LIBRARY, b"vertex_main");
@@ -214,7 +209,7 @@ fn setup_pipeline(
             H_VERTEX_FN,
             H_FRAGMENT_FN,
             false,
-            0xF,
+            COLOR_WRITE_ALL,
             false,
             1,
             metal::PIXEL_FORMAT_BGRA8_SRGB,
@@ -228,8 +223,7 @@ fn setup_pipeline(
         setup_vq,
         irq_event,
         metal::VIRTQ_SETUP,
-        setup_dma,
-        &cmd,
+        setup_dma.pa,
         len,
     );
 }
@@ -299,11 +293,13 @@ fn render_frame(
     render_vq: &mut virtio::Virtqueue,
     irq_event: Handle,
     render_dma: &DmaBuf,
+    buf_size: usize,
     frame_id: u32,
 ) {
-    let mut cmd = [0u8; PAGE_SIZE];
+    // SAFETY: render_dma.va is a valid DMA allocation of buf_size bytes.
+    let dma_buf = unsafe { core::slice::from_raw_parts_mut(render_dma.va as *mut u8, buf_size) };
     let len = {
-        let mut w = CommandWriter::new(&mut cmd);
+        let mut w = CommandWriter::new(dma_buf);
 
         w.begin_render_pass(
             metal::DRAWABLE_HANDLE,
@@ -337,8 +333,7 @@ fn render_frame(
         render_vq,
         irq_event,
         metal::VIRTQ_RENDER,
-        render_dma,
-        &cmd,
+        render_dma.pa,
         len,
     );
 }
@@ -354,36 +349,17 @@ extern "C" fn _start() -> ! {
         Err(_) => abi::thread::exit(1),
     };
 
-    // Probe for Metal GPU device (device ID 22).
-    let mut metal_base: usize = 0;
-    let mut metal_slot: u32 = 0;
-
-    for i in 0..MAX_VIRTIO_DEVICES {
-        let base = virtio_va + i * VIRTIO_MMIO_STRIDE;
-        let dev = virtio::Device::new(base);
-
-        if dev.is_valid() && dev.device_id() == virtio::DEVICE_METAL {
-            metal_base = base;
-            metal_slot = i as u32;
-
-            break;
-        }
-    }
-
-    if metal_base == 0 {
-        abi::thread::exit(0xA0);
-    }
-
-    let device = virtio::Device::new(metal_base);
+    let (device, metal_slot) = match virtio::find_device(virtio_va, virtio::DEVICE_METAL) {
+        Some(d) => d,
+        None => abi::thread::exit(0xA0),
+    };
 
     if !device.negotiate() {
         abi::thread::exit(3);
     }
 
-    // Read display config from device config space.
     let display_w = device.config_read32(0x00);
     let display_h = device.config_read32(0x04);
-    let _refresh_hz = device.config_read32(0x08);
 
     // Set up two virtqueues: setup (0) and render (1).
     let setup_qsize = device
@@ -454,7 +430,7 @@ extern "C" fn _start() -> ! {
         Err(_) => abi::thread::exit(8),
     };
 
-    let irq_num = 48 + metal_slot;
+    let irq_num = virtio::SPI_BASE_INTID + metal_slot;
 
     if abi::event::bind_irq(irq_event, irq_num, 0x1).is_err() {
         abi::thread::exit(9);
@@ -470,12 +446,25 @@ extern "C" fn _start() -> ! {
     console_write_u32(console_ep, b"render: display h=", display_h);
 
     // Compile shaders and create the render pipeline.
-    setup_pipeline(&device, &mut setup_vq, irq_event, &setup_dma);
+    setup_pipeline(
+        &device,
+        &mut setup_vq,
+        irq_event,
+        &setup_dma,
+        setup_buf_size,
+    );
 
     console_write(console_ep, b"render: pipeline ready\n");
 
     // Render verification frame — solid dark background.
-    render_frame(&device, &mut render_vq, irq_event, &render_dma, 0);
+    render_frame(
+        &device,
+        &mut render_vq,
+        irq_event,
+        &render_dma,
+        render_buf_size,
+        0,
+    );
 
     console_write(console_ep, b"render: frame 0 presented\n");
 

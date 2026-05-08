@@ -20,11 +20,8 @@ const HANDLE_NS_EP: Handle = Handle(2);
 const HANDLE_VIRTIO_VMO: Handle = Handle(3);
 const HANDLE_INIT_EP: Handle = Handle(4);
 
-const PAGE_SIZE: usize = 16384;
+const PAGE_SIZE: usize = virtio::PAGE_SIZE;
 const MSG_SIZE: usize = 128;
-
-const VIRTIO_MMIO_STRIDE: usize = 0x200;
-const MAX_VIRTIO_DEVICES: usize = 8;
 
 const EV_KEY: u16 = 1;
 const EV_ABS: u16 = 3;
@@ -108,27 +105,10 @@ extern "C" fn _start() -> ! {
         Ok(va) => va,
         Err(_) => abi::thread::exit(1),
     };
-
-    let mut input_base: usize = 0;
-    let mut input_slot: u32 = 0;
-
-    for i in 0..MAX_VIRTIO_DEVICES {
-        let base = virtio_va + i * VIRTIO_MMIO_STRIDE;
-        let dev = virtio::Device::new(base);
-
-        if dev.is_valid() && dev.device_id() == virtio::DEVICE_INPUT {
-            input_base = base;
-            input_slot = i as u32;
-
-            break;
-        }
-    }
-
-    if input_base == 0 {
-        abi::thread::exit(2);
-    }
-
-    let device = virtio::Device::new(input_base);
+    let (device, input_slot) = match virtio::find_device(virtio_va, virtio::DEVICE_INPUT) {
+        Some(d) => d,
+        None => abi::thread::exit(2),
+    };
 
     if !device.negotiate() {
         abi::thread::exit(3);
@@ -182,8 +162,7 @@ extern "C" fn _start() -> ! {
         Ok(h) => h,
         Err(_) => abi::thread::exit(6),
     };
-
-    let irq_num = 48 + input_slot;
+    let irq_num = virtio::SPI_BASE_INTID + input_slot;
 
     if abi::event::bind_irq(irq_event, irq_num, 0x1).is_err() {
         abi::thread::exit(7);

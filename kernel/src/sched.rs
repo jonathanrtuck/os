@@ -231,21 +231,17 @@ pub fn wake_and_switch(woken: ThreadId, current: ThreadId, core_id: usize) {
         .write(current.0)
         .unwrap()
         .set_state(ThreadRunState::Ready);
+    state::threads()
+        .write(woken.0)
+        .unwrap()
+        .set_state(ThreadRunState::Running);
 
     {
         let mut sched = state::schedulers().core(core_id).lock();
 
         sched.enqueue(current, current_pri);
+        sched.set_current(Some(woken));
     }
-
-    state::threads()
-        .write(woken.0)
-        .unwrap()
-        .set_state(ThreadRunState::Running);
-    state::schedulers()
-        .core(core_id)
-        .lock()
-        .set_current(Some(woken));
 
     #[cfg(target_os = "none")]
     {
@@ -269,12 +265,8 @@ pub fn wake_and_switch_fast(
         let mut sched = state::schedulers().core(core_id).lock();
 
         sched.enqueue(current, current_pri);
+        sched.set_current(Some(woken.thread_id));
     }
-
-    state::schedulers()
-        .core(core_id)
-        .lock()
-        .set_current(Some(woken.thread_id));
 
     #[cfg(target_os = "none")]
     {

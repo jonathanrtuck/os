@@ -109,9 +109,8 @@ fn spawn_service(
     abi::vmo::map_into(code_vmo, space, SERVICE_CODE_VA, rx)?;
 
     let stack_vmo = abi::vmo::create(STACK_SIZE, 0)?;
-    let stack_rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
 
-    abi::vmo::map_into(stack_vmo, space, SERVICE_STACK_VA, stack_rw)?;
+    abi::vmo::map_into(stack_vmo, space, SERVICE_STACK_VA, rw)?;
 
     let stack_top = SERVICE_STACK_VA + STACK_SIZE;
     let mut bootstrap_handles = [0u32; 8];

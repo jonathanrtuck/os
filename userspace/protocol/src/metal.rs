@@ -66,38 +66,65 @@ pub const VIRTQ_RENDER: u32 = 1;
 pub struct CommandWriter<'a> {
     buf: &'a mut [u8],
     pos: usize,
+    overflow: bool,
 }
 
 impl<'a> CommandWriter<'a> {
     pub fn new(buf: &'a mut [u8]) -> Self {
-        Self { buf, pos: 0 }
+        Self {
+            buf,
+            pos: 0,
+            overflow: false,
+        }
     }
 
     pub fn len(&self) -> usize {
         self.pos
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.pos == 0
+    }
+
+    pub fn has_overflow(&self) -> bool {
+        self.overflow
+    }
+
     fn put_u8(&mut self, v: u8) {
-        if self.pos < self.buf.len() {
-            self.buf[self.pos] = v;
-            self.pos += 1;
+        if self.overflow || self.pos >= self.buf.len() {
+            self.overflow = true;
+
+            return;
         }
+
+        self.buf[self.pos] = v;
+        self.pos += 1;
     }
 
     fn put_u16(&mut self, v: u16) {
-        let b = v.to_le_bytes();
-        if self.pos + 2 <= self.buf.len() {
-            self.buf[self.pos..self.pos + 2].copy_from_slice(&b);
-            self.pos += 2;
+        if self.overflow || self.pos + 2 > self.buf.len() {
+            self.overflow = true;
+
+            return;
         }
+
+        let b = v.to_le_bytes();
+
+        self.buf[self.pos..self.pos + 2].copy_from_slice(&b);
+        self.pos += 2;
     }
 
     fn put_u32(&mut self, v: u32) {
-        let b = v.to_le_bytes();
-        if self.pos + 4 <= self.buf.len() {
-            self.buf[self.pos..self.pos + 4].copy_from_slice(&b);
-            self.pos += 4;
+        if self.overflow || self.pos + 4 > self.buf.len() {
+            self.overflow = true;
+
+            return;
         }
+
+        let b = v.to_le_bytes();
+
+        self.buf[self.pos..self.pos + 4].copy_from_slice(&b);
+        self.pos += 4;
     }
 
     fn put_f32(&mut self, v: f32) {
@@ -105,11 +132,14 @@ impl<'a> CommandWriter<'a> {
     }
 
     fn put_bytes(&mut self, data: &[u8]) {
-        let end = (self.pos + data.len()).min(self.buf.len());
-        let n = end - self.pos;
+        if self.overflow || self.pos + data.len() > self.buf.len() {
+            self.overflow = true;
 
-        self.buf[self.pos..self.pos + n].copy_from_slice(&data[..n]);
-        self.pos += n;
+            return;
+        }
+
+        self.buf[self.pos..self.pos + data.len()].copy_from_slice(data);
+        self.pos += data.len();
     }
 
     fn header(&mut self, method: u16, payload_size: u32) {
@@ -344,6 +374,19 @@ mod tests {
 
         // begin_render_pass(8+32) + set_pipeline(8+4) + draw(8+12) + end(8) + present(8+4)
         assert_eq!(w.len(), 40 + 12 + 20 + 8 + 12);
+    }
+
+    #[test]
+    fn command_writer_overflow_detected() {
+        let mut buf = [0u8; 16];
+        let mut w = CommandWriter::new(&mut buf);
+
+        assert!(!w.has_overflow());
+        assert!(w.is_empty());
+
+        w.compile_library(1, b"this source is way too long for 16 bytes");
+
+        assert!(w.has_overflow());
     }
 
     #[test]
