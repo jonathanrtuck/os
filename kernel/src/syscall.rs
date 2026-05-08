@@ -1932,7 +1932,6 @@ fn sys_recv_timed(
 
         (reply_out, deadline)
     };
-
     let space_id = space_id.ok_or(SyscallError::InvalidArgument)?;
     let obj_id = lookup_endpoint_id(space_id, handle_id)?;
 

@@ -899,7 +899,6 @@ extern "C" fn _start() -> ! {
         Some(ref m) => m.ascent as f32 * 14.0 / m.units_per_em as f32,
         None => 11.0,
     };
-
     let walk_ctx = WalkContext {
         atlas: GlyphAtlas::new_boxed(),
         scratch: alloc::boxed::Box::new(RasterScratch::zeroed()),
@@ -937,7 +936,6 @@ extern "C" fn _start() -> ! {
         walk_ctx,
         atlas_upload_y: 0,
     };
-
     let mut next_deadline: u64 = 0;
 
     loop {
