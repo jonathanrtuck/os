@@ -1165,10 +1165,12 @@ impl Presenter {
         let now_ns = abi::system::clock_read().unwrap_or(0);
         let now_ms = now_ns / 1_000_000;
 
-        let dx = click_x.abs_diff(self.last_click_x);
-        let dy = click_y.abs_diff(self.last_click_y);
+        let mpt = scene::MPT_PER_PT as u32;
+        let dx_mpt = click_x.abs_diff(self.last_click_x) * mpt;
+        let dy_mpt = click_y.abs_diff(self.last_click_y) * mpt;
         let dt = now_ms.saturating_sub(self.last_click_ms);
-        let same_spot = dx <= 4 && dy <= 4 && dt <= 400;
+        let click_tolerance_mpt = 4 * mpt;
+        let same_spot = dx_mpt <= click_tolerance_mpt && dy_mpt <= click_tolerance_mpt && dt <= 400;
 
         let click_count = if same_spot {
             (self.click_count % 3) + 1

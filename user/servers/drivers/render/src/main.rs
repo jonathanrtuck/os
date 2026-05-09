@@ -1113,33 +1113,59 @@ fn rasterize_cursor_icon(icon_name: &str, scale: u32) -> (alloc::vec::Vec<u8>, u
 
     let path_data = offset_path(icon.paths[0].commands, margin_vb, margin_vb);
     let raster_scale = px_scale;
+    let stroke_only = !icon.all_paths_closed();
 
-    // Rasterize the fill (black body).
-    let fill = path::rasterize_path(
-        &path_data,
-        tex_sz,
-        tex_sz,
-        raster_scale,
-        scene::FillRule::Winding,
-        None,
-    );
-    // Rasterize the stroke (white outline).
-    let stroke_expanded = scene::stroke::expand_stroke(&path_data, stroke_w);
-    let stroke = path::rasterize_path(
-        &path_data,
-        tex_sz,
-        tex_sz,
-        raster_scale,
-        scene::FillRule::Winding,
-        Some(&stroke_expanded),
-    );
+    // For closed paths (arrow): fill = black body, stroke = white outline.
+    // For open paths (I-beam): fill is garbage (implicit closure artifacts),
+    // so use stroke as black body with a wider outline stroke for white border.
+    let (body, outline) = if stroke_only {
+        let body_expanded = scene::stroke::expand_stroke(&path_data, stroke_w);
+        let body = path::rasterize_path(
+            &path_data,
+            tex_sz,
+            tex_sz,
+            raster_scale,
+            scene::FillRule::Winding,
+            Some(&body_expanded),
+        );
+        let outline_expanded = scene::stroke::expand_stroke(&path_data, stroke_w + 2.0);
+        let outline = path::rasterize_path(
+            &path_data,
+            tex_sz,
+            tex_sz,
+            raster_scale,
+            scene::FillRule::Winding,
+            Some(&outline_expanded),
+        );
+
+        (body, outline)
+    } else {
+        let fill = path::rasterize_path(
+            &path_data,
+            tex_sz,
+            tex_sz,
+            raster_scale,
+            scene::FillRule::Winding,
+            None,
+        );
+        let stroke_expanded = scene::stroke::expand_stroke(&path_data, stroke_w);
+        let stroke = path::rasterize_path(
+            &path_data,
+            tex_sz,
+            tex_sz,
+            raster_scale,
+            scene::FillRule::Winding,
+            Some(&stroke_expanded),
+        );
+
+        (fill, stroke)
+    };
 
     // Rasterize shadow: same shape at offset, then blur.
     let shadow_ox = (CURSOR_SHADOW_DX * px_scale) as i32;
     let shadow_oy = (CURSOR_SHADOW_DY * px_scale) as i32;
     let mut shadow = alloc::vec![0u8; (tex_sz * tex_sz) as usize];
 
-    // Composite fill+stroke into shadow source at offset.
     for y in 0..tex_sz as i32 {
         for x in 0..tex_sz as i32 {
             let sx = (x - shadow_ox) as usize;
@@ -1147,9 +1173,9 @@ fn rasterize_cursor_icon(icon_name: &str, scale: u32) -> (alloc::vec::Vec<u8>, u
 
             if sx < tex_sz as usize && sy < tex_sz as usize {
                 let idx = sy * tex_sz as usize + sx;
-                let fa = fill.get(idx).copied().unwrap_or(0) as u16;
-                let sa = stroke.get(idx).copied().unwrap_or(0) as u16;
-                let a = fa.max(sa).min(255) as u8;
+                let ba = body.get(idx).copied().unwrap_or(0) as u16;
+                let oa = outline.get(idx).copied().unwrap_or(0) as u16;
+                let a = ba.max(oa).min(255) as u8;
 
                 shadow[(y as usize) * tex_sz as usize + (x as usize)] = a;
             }
@@ -1165,19 +1191,19 @@ fn rasterize_cursor_icon(icon_name: &str, scale: u32) -> (alloc::vec::Vec<u8>, u
         box_blur_1d(&mut shadow, tex_sz as usize, tex_sz as usize, radius, false);
     }
 
-    // Composite: shadow (bottom) + stroke (middle) + fill (top) → BGRA.
+    // Composite: shadow (bottom) + outline (white, middle) + body (black, top) → BGRA.
     let mut bgra = alloc::vec![0u8; (tex_sz * tex_sz * 4) as usize];
 
     for i in 0..(tex_sz * tex_sz) as usize {
-        let fill_a = fill.get(i).copied().unwrap_or(0) as u16;
-        let stroke_a = stroke.get(i).copied().unwrap_or(0) as u16;
+        let body_a = body.get(i).copied().unwrap_or(0) as u16;
+        let outline_a = outline.get(i).copied().unwrap_or(0) as u16;
         let shadow_a = shadow[i] as u16;
-        let border_only = stroke_a.saturating_sub(fill_a);
+        let border_only = outline_a.saturating_sub(body_a);
 
         // Shadow layer: black at reduced alpha.
         let sha = (shadow_a * CURSOR_SHADOW_ALPHA as u16 / 255).min(255);
-        // Cursor body: black fill + white outline, composited over shadow.
-        let cursor_a = fill_a.max(border_only).min(255);
+        // Cursor: black body + white outline border, composited over shadow.
+        let cursor_a = body_a.max(border_only).min(255);
         let cursor_lum = if cursor_a > 0 {
             (255 * border_only / cursor_a.max(1)) as u8
         } else {
