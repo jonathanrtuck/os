@@ -9,27 +9,28 @@ sprint that achieves macOS Core Text-level rendering for Latin text.
 JetBrains Mono (monospace — editor/code), Inter (sans-serif — chrome/UI), Source
 Serif 4 (serif — prose/body). All variable fonts with weight axes.
 
-**Font library** (`libraries/fonts/`): Rasterizer (`src/rasterize/`) with
-modular pipeline: outline extraction (read-fonts), gvar delta interpolation,
-scanline sweep, analytic area coverage (exact signed-area trapezoids), outline
-dilation via symmetric miter-join for stem darkening (macOS formula, Pathfinder
-coefficients × 1.3 boost), optical sizing. Device-pixel rasterization: atlas
-rendered at `font_size_pt × scale_factor` for crisp output at native display
-resolution. Glyph cache (`src/cache.rs`): LRU keyed by (glyph_id, font_size,
-axis_hash), bounded memory. On-demand atlas upload in metal-render (fixes
-ligature drops from fixed-size atlases).
+**Font library** (`userspace/libraries/fonts/`): Rasterizer (`src/rasterize/`)
+with modular pipeline: outline extraction (read-fonts), gvar delta
+interpolation, scanline sweep, analytic area coverage (exact signed-area
+trapezoids), outline dilation via symmetric miter-join for stem darkening (macOS
+formula, Pathfinder coefficients × 1.3 boost), optical sizing. Device-pixel
+rasterization: atlas rendered at `font_size_pt × scale_factor` for crisp output
+at native display resolution. Glyph cache (`src/cache.rs`): LRU keyed by
+(glyph_id, font_size, axis_hash), bounded memory. On-demand atlas upload in
+metal-render (fixes ligature drops from fixed-size atlases).
 
 **Shaping:** Wraps HarfRust (pure Rust port of HarfBuzz, no_std+alloc).
 `ShapedGlyph` is 16 bytes with 16.16 fixed-point advances for subpixel glyph
 positioning. Eliminates cursor drift from float truncation. Single `char_w_fx`
 source of truth across layout and rendering.
 
-**Scene graph** (`libraries/scene/lib.rs`): TextRun carries `ShapedGlyph` arrays
-via DataRef in shared memory. Core writes shaped glyph data; render services
-read and rasterize. Cross-process safe with compile-time size assertion.
+**Scene graph** (`userspace/libraries/scene/lib.rs`): TextRun carries
+`ShapedGlyph` arrays via DataRef in shared memory. Core writes shaped glyph
+data; render services read and rasterize. Cross-process safe with compile-time
+size assertion.
 
-**Text layout** (`libraries/layout/`): Unified `layout_paragraph()` for both
-monospace and proportional text, parameterized by `FontMetrics` trait.
+**Text layout** (`userspace/libraries/layout/`): Unified `layout_paragraph()`
+for both monospace and proportional text, parameterized by `FontMetrics` trait.
 `CharBreaker` (character-level wrapping) and `WordBreaker` (word-boundary
 wrapping). Standalone `byte_to_line_col()` for cursor positioning.
 
@@ -164,9 +165,9 @@ outlines instead of custom parser).
 
 **What was built:**
 
-- `libraries/shaping/` — new Cargo crate with HarfRust dependency
-- `libraries/shaping/src/rasterize.rs` — glyph rasterizer using read-fonts for
-  outline extraction
+- `userspace/libraries/shaping/` — new Cargo crate with HarfRust dependency
+- `userspace/libraries/shaping/src/rasterize.rs` — glyph rasterizer using
+  read-fonts for outline extraction
 - Scene graph evolved to carry ShapedGlyph arrays
 - LRU glyph cache replaced fixed 95-slot ASCII cache
 - Core service shapes text, compositor rasterizes from glyph IDs
@@ -178,10 +179,10 @@ outlines instead of custom parser).
 combination.
 
 **Status:** Already implemented before this mission began. `draw_coverage` and
-`blend_over` in `libraries/drawing/lib.rs` already blend in linear light space
-with sRGB↔linear LUTs. The research doc was stale on this point — compositing
-was listed as "no gamma correction" but gamma-correct blending was already in
-place.
+`blend_over` in `userspace/libraries/drawing/lib.rs` already blend in linear
+light space with sRGB↔linear LUTs. The research doc was stale on this point —
+compositing was listed as "no gamma correction" but gamma-correct blending was
+already in place.
 
 ### Phase 3: Unicode Coverage & Font Fallback ✅ COMPLETE
 
@@ -192,10 +193,10 @@ place.
 - LRU glyph cache with configurable capacity, keyed by (glyph_id, font_size,
   axis_hash). Supports arbitrary Unicode codepoints and variable font axis
   differentiation.
-- Font fallback chain (`libraries/shaping/src/fallback.rs`): ordered list of
-  font data references. When primary font produces .notdef, subsequent fonts are
-  tried. Content-type-aware: Code → monospace primary + proportional fallback;
-  Prose/UI → proportional primary + monospace fallback.
+- Font fallback chain (`userspace/libraries/shaping/src/fallback.rs`): ordered
+  list of font data references. When primary font produces .notdef, subsequent
+  fonts are tried. Content-type-aware: Code → monospace primary + proportional
+  fallback; Prose/UI → proportional primary + monospace fallback.
 - Latin Extended codepoints (é, ñ, ü) render correctly. Supplementary plane
   codepoints don't crash.
 - Cache key includes font identifier hash for fallback chain separation.
@@ -254,8 +255,8 @@ project.
 **Goal:** Text rendering defaults that match the content's purpose.
 
 **Implemented:** `TypographyConfig` struct in
-`libraries/shaping/src/typography.rs` maps content types to font family,
-OpenType features, weight preference, tracking, and optical sizing flag.
+`userspace/libraries/shaping/src/typography.rs` maps content types to font
+family, OpenType features, weight preference, tracking, and optical sizing flag.
 
 | Content Type | Font         | Features     | Weight | Optical Sizing | Notes                                                |
 | ------------ | ------------ | ------------ | ------ | -------------- | ---------------------------------------------------- |

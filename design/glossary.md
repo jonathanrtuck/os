@@ -238,7 +238,7 @@ model itself. The document has semantic content; the scene graph has geometry.
 Content types: `None`, `Image`, `InlineImage`, `Path`, `Glyphs`. Triple-buffered
 with generation-based swap. See
 [architecture.md § The Scene Graph](architecture.md#the-scene-graph) and
-`libraries/scene/`.
+`userspace/libraries/scene/`.
 
 ---
 
@@ -327,8 +327,8 @@ undo granularity. See
 type). A sequence of pieces referencing either the original text or an
 append-only add buffer, with style IDs per piece. Enables operation-aware
 editing (selective undo, future collaboration) via the same rebase machinery the
-architecture calls for. Leaf node library at `libraries/piecetable/`. See
-[journal.md](journal.md) "Rich Text Design."
+architecture calls for. Leaf node library at `userspace/libraries/piecetable/`.
+See [journal.md](journal.md) "Rich Text Design."
 
 **Shell** — the navigation interface (GUI, CLI, or TUI). A blue-layer tool: an
 untrusted userspace process that translates navigational intent (find documents,
@@ -352,7 +352,7 @@ replace it. The viewer is a pure function of state:
 memory pages (one ring per direction), created by the kernel. The `ipc` library
 provides lock-free SPSC ring buffer mechanics; the `protocol` library defines
 message types. Notification via `channel_signal` syscall. See
-[design/userspace.md § 1.5](userspace.md) and `libraries/ipc/`.
+[design/userspace.md § 1.5](userspace.md) and `userspace/libraries/ipc/`.
 
 **Event ring** — a SPSC ring buffer of 64-byte messages over a shared memory
 page. Used for discrete events where order and count matter: key presses, button

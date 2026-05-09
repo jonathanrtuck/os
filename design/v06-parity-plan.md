@@ -26,11 +26,12 @@ rectangles to actual rendered text.
 
 ### What exists now
 
-- `libraries/fonts/` — font parsing, metrics, shaping, rasterization (3,403 LOC,
-  32 tests). Produces `ShapedGlyph` arrays and can rasterize to grayscale
-  bitmaps.
-- `libraries/render/` — `CommandWriter` for Metal-over-virtio commands. Already
-  has `PIXEL_FORMAT_BGRA8_SRGB`, `PRIM_TRIANGLE`, texture commands.
+- `userspace/libraries/fonts/` — font parsing, metrics, shaping, rasterization
+  (3,403 LOC, 32 tests). Produces `ShapedGlyph` arrays and can rasterize to
+  grayscale bitmaps.
+- `userspace/libraries/render/` — `CommandWriter` for Metal-over-virtio
+  commands. Already has `PIXEL_FORMAT_BGRA8_SRGB`, `PRIM_TRIANGLE`, texture
+  commands.
 - Compositor (`userspace/servers/drivers/render/`) — walks scene graph, emits
   solid-color rectangles. Single shader pipeline (vertex + fragment_solid).
 
@@ -69,10 +70,11 @@ Add Metal setup commands to create:
 Port the sRGB conversion functions from
 `v0.6-pre-rewrite:services/drivers/metal-render/shaders.rs`.
 
-**Add to `libraries/render/`:** `CommandWriter` methods for `create_texture`,
-`update_texture_region`, `set_fragment_texture`, `set_fragment_sampler`, and the
-`create_render_pipeline` variant with alpha blending. Check what already exists
-there first — some of these may already be present from the v0.6 port.
+**Add to `userspace/libraries/render/`:** `CommandWriter` methods for
+`create_texture`, `update_texture_region`, `set_fragment_texture`,
+`set_fragment_sampler`, and the `create_render_pipeline` variant with alpha
+blending. Check what already exists there first — some of these may already be
+present from the v0.6 port.
 
 **Verification:** Compile, pipeline setup succeeds (no hypervisor crash on
 boot). Existing solid-color rendering still works.
@@ -269,7 +271,8 @@ Add Left/Right key handling to the text editor:
 
 - Left: move cursor back one byte (or to previous UTF-8 char boundary)
 - Right: move cursor forward one byte (or to next UTF-8 char boundary)
-- Opt+Left: `word_boundary_backward` (already exists in `libraries/layout/`)
+- Opt+Left: `word_boundary_backward` (already exists in
+  `userspace/libraries/layout/`)
 - Opt+Right: `word_boundary_forward`
 - Cmd+Left: start of current visual line
 - Cmd+Right: end of current visual line
@@ -386,18 +389,18 @@ scroll support:
 
 ### What exists now
 
-- Scene library (`libraries/scene/`) — `Node` struct has generic shadow fields:
-  `shadow_color` (RGBA8), `shadow_offset_x/y` (i16), `shadow_blur_radius` (u8),
-  `shadow_spread` (i8). `has_shadow()` returns true when any shadow parameter is
-  non-default. `Content::Path` variant stores fill/stroke colors, fill rule,
-  stroke width, and path command data. `CursorShape` enum
-  (Inherit/Pointer/Text). Path command parsing and stroke expansion in
-  `stroke.rs`.
-- Render library (`libraries/render/`) — `emit_shadow_quad` (6-vertex quad with
-  3σ padding), `pack_shadow_params` (48-byte uniform), `render_shadow` and
-  `shadow_overflow` in CPU scene walker. No GPU pipeline support yet.
-- Icons library (`libraries/icons/`) — Tabler icon path data, 1,080 LOC, 37
-  tests. Compile-time SVG path extraction.
+- Scene library (`userspace/libraries/scene/`) — `Node` struct has generic
+  shadow fields: `shadow_color` (RGBA8), `shadow_offset_x/y` (i16),
+  `shadow_blur_radius` (u8), `shadow_spread` (i8). `has_shadow()` returns true
+  when any shadow parameter is non-default. `Content::Path` variant stores
+  fill/stroke colors, fill rule, stroke width, and path command data.
+  `CursorShape` enum (Inherit/Pointer/Text). Path command parsing and stroke
+  expansion in `stroke.rs`.
+- Render library (`userspace/libraries/render/`) — `emit_shadow_quad` (6-vertex
+  quad with 3σ padding), `pack_shadow_params` (48-byte uniform), `render_shadow`
+  and `shadow_overflow` in CPU scene walker. No GPU pipeline support yet.
+- Icons library (`userspace/libraries/icons/`) — Tabler icon path data, 1,080
+  LOC, 37 tests. Compile-time SVG path extraction.
 - Compositor (`userspace/servers/drivers/render/`) — walks scene graph, emits
   solid-color backgrounds and glyph atlas quads. Two pipelines: `PIPE_SOLID`,
   `PIPE_GLYPH`. No shadow, stencil, or path rendering.
@@ -731,9 +734,9 @@ it; the presenter and compositor read it for per-run metrics.
 #### 12.1 — PNG library
 
 Port the PNG decoder from `v0.6-pre-rewrite:services/decoders/png/png.rs` into a
-library crate `libraries/png/`. The decoder is pure computation — no kernel
-dependencies. Adapt to the current crate style (module doc, co-located impl,
-tests).
+library crate `userspace/libraries/png/`. The decoder is pure computation — no
+kernel dependencies. Adapt to the current crate style (module doc, co-located
+impl, tests).
 
 **Verification:** Host-target tests with the PNG test suite fixtures
 (`host/fixtures/pngsuite/`). Decode reference PNGs, verify pixel-exact output
@@ -747,7 +750,7 @@ Create `userspace/servers/png-decoder/`:
 - Registers as "png-decoder" with name service
 - IPC protocol: `DECODE` request with PNG data VMO handle → reply with decoded
   RGBA VMO handle (width, height in reply payload)
-- Uses the `libraries/png/` crate for actual decoding
+- Uses the `userspace/libraries/png/` crate for actual decoding
 
 Add to the service pack and boot sequence.
 

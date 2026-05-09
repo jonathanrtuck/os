@@ -9,10 +9,10 @@ abi = { path = "../../abi" }
 blk = { path = "../drivers/blk" }
 heap = { path = "../../heap" }
 console = { path = "../console" }
-fs = { path = "../../../libraries/fs" }
+fs = { path = "../../libraries/fs" }
 init = { path = "../init" }
 ipc = { path = "../../ipc" }
 name = { path = "../name" }
-store = { path = "../../../libraries/store" }
+store = { path = "../../libraries/store" }
 
 [workspace]

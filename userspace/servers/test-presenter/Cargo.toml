@@ -12,6 +12,6 @@ heap = { path = "../../heap" }
 ipc = { path = "../../ipc" }
 name = { path = "../name" }
 presenter-service = { path = "../presenter" }
-scene = { path = "../../../libraries/scene" }
+scene = { path = "../../libraries/scene" }
 
 [workspace]

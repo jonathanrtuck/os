@@ -60,22 +60,25 @@ Adapted from the old prototype (`git show v0.6-pre-rewrite:<path>`). These are
 kernel-agnostic — pure algorithms and data structures. Update imports to use the
 new `abi`/`ipc` crates, run old tests against new code.
 
-- **Scene graph** (`libraries/scene`) — shared-memory node tree. First-child /
-  next-sibling encoding. Double-buffered with generation counter.
-- **Fonts** (`libraries/fonts`) — font table parsing, glyph metrics, shaping,
-  rasterization. Used by layout (metrics only) and compositor (rasterization).
-- **Drawing** (`libraries/drawing`) — 2D primitives: blending, blur, fill, line,
-  gradient, NEON SIMD paths.
-- **Render** (`libraries/render`) — scene graph rendering, clip masks, damage
-  tracking, surface pool, frame scheduling.
-- **Layout lib** (`libraries/layout`) — line breaking, text wrapping, glyph
-  positioning.
-- **Piece table** (`libraries/piecetable`) — text buffer with efficient
-  insert/delete.
-- **Animation** (`libraries/animation`) — timing curves, easing functions.
-- **Filesystem** (`libraries/fs`) — COW block filesystem with snapshots.
-- **Icons** (`libraries/icons`) — build-time SVG → vector path data.
-- **Store** (`libraries/store`) — catalog serialization format.
+- **Scene graph** (`userspace/libraries/scene`) — shared-memory node tree.
+  First-child / next-sibling encoding. Double-buffered with generation counter.
+- **Fonts** (`userspace/libraries/fonts`) — font table parsing, glyph metrics,
+  shaping, rasterization. Used by layout (metrics only) and compositor
+  (rasterization).
+- **Drawing** (`userspace/libraries/drawing`) — 2D primitives: blending, blur,
+  fill, line, gradient, NEON SIMD paths.
+- **Render** (`userspace/libraries/render`) — scene graph rendering, clip masks,
+  damage tracking, surface pool, frame scheduling.
+- **Layout lib** (`userspace/libraries/layout`) — line breaking, text wrapping,
+  glyph positioning.
+- **Piece table** (`userspace/libraries/piecetable`) — text buffer with
+  efficient insert/delete.
+- **Animation** (`userspace/libraries/animation`) — timing curves, easing
+  functions.
+- **Filesystem** (`userspace/libraries/fs`) — COW block filesystem with
+  snapshots.
+- **Icons** (`userspace/libraries/icons`) — build-time SVG → vector path data.
+- **Store** (`userspace/libraries/store`) — catalog serialization format.
 
 ### Layer 4: Core services
 
@@ -358,16 +361,16 @@ Cargo.toml (workspace root)
     userspace/drivers/blk/
     userspace/drivers/metal-render/
     userspace/editors/text/
-    libraries/scene/
-    libraries/fonts/
-    libraries/drawing/
-    libraries/render/
-    libraries/layout/
-    libraries/piecetable/
-    libraries/animation/
-    libraries/fs/
-    libraries/icons/
-    libraries/store/
+    userspace/libraries/scene/
+    userspace/libraries/fonts/
+    userspace/libraries/drawing/
+    userspace/libraries/render/
+    userspace/libraries/layout/
+    userspace/libraries/piecetable/
+    userspace/libraries/animation/
+    userspace/libraries/fs/
+    userspace/libraries/icons/
+    userspace/libraries/store/
     tools/mkservices/
 ```
 

@@ -27,13 +27,13 @@ ipc = { path = "../../ipc", default-features = false }
 abi = { path = "../../abi", optional = true }
 console = { path = "../console", optional = true }
 document-service = { path = "../document", optional = true }
-fonts = { path = "../../../libraries/fonts", optional = true }
+fonts = { path = "../../libraries/fonts", optional = true }
 heap = { path = "../../heap", optional = true }
-layout = { path = "../../../libraries/layout", optional = true }
+layout = { path = "../../libraries/layout", optional = true }
 layout-service = { path = "../layout", optional = true }
 name = { path = "../name", optional = true }
 render = { path = "../drivers/render", optional = true }
-scene = { path = "../../../libraries/scene", optional = true }
+scene = { path = "../../libraries/scene", optional = true }
 text-editor = { path = "../../editors/text", optional = true }
 
 [workspace]
