@@ -425,6 +425,33 @@ def assert_row_is_bg(img: Image.Image, args: str, tolerance: int) -> bool:
         return False
 
 
+def assert_ocr_contains(img: Image.Image, args: str, tolerance: int) -> bool:
+    """OCR the image and check that it contains the expected substring.
+
+    Inverts the image (light text on dark bg -> dark text on light bg) for
+    better OCR accuracy. Args: expected substring (case-insensitive).
+    """
+    try:
+        import pytesseract
+    except ImportError:
+        print("FAIL: pytesseract not installed")
+        return False
+
+    inverted = Image.eval(img.convert("L"), lambda x: 255 - x)
+    text = pytesseract.image_to_string(inverted, config="--psm 6")
+    text_lower = text.lower().strip()
+    expected_lower = args.lower().strip()
+
+    if expected_lower in text_lower:
+        preview = text_lower[:200].replace('\n', ' ')
+        print(f"PASS: OCR found '{args}' in rendered text: '{preview}...'")
+        return True
+    else:
+        preview = text_lower[:300].replace('\n', ' ')
+        print(f"FAIL: OCR did not find '{args}' in rendered text: '{preview}'")
+        return False
+
+
 ASSERTIONS = {
     "solid_color": assert_solid_color,
     "uniform": assert_uniform,
@@ -438,6 +465,7 @@ ASSERTIONS = {
     "selection_in_region": assert_selection_in_region,
     "row_has_text": assert_row_has_text,
     "row_is_bg": assert_row_is_bg,
+    "ocr_contains": assert_ocr_contains,
 }
 
 
