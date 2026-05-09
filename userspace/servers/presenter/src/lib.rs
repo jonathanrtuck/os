@@ -31,6 +31,10 @@ pub const KEY_EVENT: u32 = 4;
 /// Presenter adjusts scroll_y, rebuilds scene, re-renders.
 pub const SCROLL_EVENT: u32 = 5;
 
+/// Pointer position update from input driver. Payload: PointerEvent (8 bytes).
+/// Presenter forwards to compositor for hardware cursor positioning.
+pub const POINTER_EVENT: u32 = 6;
+
 // ── Visual constants ────────────────────────────────────────────
 
 pub const DEFAULT_WIDTH: u32 = 1440;
@@ -103,6 +107,31 @@ impl SetupReply {
         Self {
             display_width: u32::from_le_bytes(buf[0..4].try_into().unwrap()),
             display_height: u32::from_le_bytes(buf[4..8].try_into().unwrap()),
+        }
+    }
+}
+
+// ── POINTER_EVENT payload ───────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PointerEvent {
+    pub abs_x: u32,
+    pub abs_y: u32,
+}
+
+impl PointerEvent {
+    pub const SIZE: usize = 8;
+
+    pub fn write_to(&self, buf: &mut [u8]) {
+        buf[0..4].copy_from_slice(&self.abs_x.to_le_bytes());
+        buf[4..8].copy_from_slice(&self.abs_y.to_le_bytes());
+    }
+
+    #[must_use]
+    pub fn read_from(buf: &[u8]) -> Self {
+        Self {
+            abs_x: u32::from_le_bytes(buf[0..4].try_into().unwrap()),
+            abs_y: u32::from_le_bytes(buf[4..8].try_into().unwrap()),
         }
     }
 }
@@ -222,7 +251,14 @@ mod tests {
 
     #[test]
     fn method_ids_distinct() {
-        let methods = [SETUP, BUILD, GET_INFO, KEY_EVENT, SCROLL_EVENT];
+        let methods = [
+            SETUP,
+            BUILD,
+            GET_INFO,
+            KEY_EVENT,
+            SCROLL_EVENT,
+            POINTER_EVENT,
+        ];
 
         for i in 0..methods.len() {
             for j in (i + 1)..methods.len() {

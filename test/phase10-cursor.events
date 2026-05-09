@@ -1,0 +1,9 @@
+# Phase 10 — cursor visibility test.
+# Move the pointer, capture the frame.
+# The cursor renders on a separate layer (not in the main framebuffer),
+# but cursor position updates exercise the full pipeline.
+0 key h
+1 move 400 300
+2 move 500 400
+3 capture /tmp/os-p10-cursor.png
+3 exit

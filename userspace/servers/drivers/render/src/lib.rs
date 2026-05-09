@@ -440,6 +440,22 @@ impl<'a> CommandWriter<'a> {
         self.put_u16(hotspot_x);
         self.put_u16(hotspot_y);
     }
+
+    pub fn set_cursor_image(
+        &mut self,
+        width: u16,
+        height: u16,
+        hotspot_x: i16,
+        hotspot_y: i16,
+        bgra_pixels: &[u8],
+    ) {
+        self.header(CMD_SET_CURSOR_IMAGE, 8 + bgra_pixels.len() as u32);
+        self.put_u16(width);
+        self.put_u16(height);
+        self.put_u16(hotspot_x as u16);
+        self.put_u16(hotspot_y as u16);
+        self.put_bytes(bgra_pixels);
+    }
 }
 
 // ── Vertex batching ───────────────────────────────────────────────
@@ -524,6 +540,9 @@ pub mod comp {
 
     /// Query display dimensions and frame count.
     pub const GET_INFO: u32 = 3;
+
+    /// Update pointer position. Payload: x: f32, y: f32 (logical points).
+    pub const POINTER: u32 = 4;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct SetupReply {

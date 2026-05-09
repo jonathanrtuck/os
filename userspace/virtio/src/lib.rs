@@ -71,7 +71,11 @@ pub struct UsedElem {
 ///
 /// Returns the `Device` and its slot index (0-based), or `None` if not found.
 pub fn find_device(virtio_va: usize, device_id: u32) -> Option<(Device, u32)> {
-    for i in 0..MAX_DEVICES {
+    find_device_from(virtio_va, device_id, 0)
+}
+
+pub fn find_device_from(virtio_va: usize, device_id: u32, start: usize) -> Option<(Device, u32)> {
+    for i in start..MAX_DEVICES {
         let base = virtio_va + i * MMIO_STRIDE;
         let dev = Device::new(base);
 

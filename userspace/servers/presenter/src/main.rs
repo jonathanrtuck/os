@@ -956,6 +956,22 @@ impl Dispatch for Presenter {
 
                 let _ = msg.reply_empty();
             }
+            presenter_service::POINTER_EVENT => {
+                if msg.payload.len() >= presenter_service::PointerEvent::SIZE {
+                    let event = presenter_service::PointerEvent::read_from(msg.payload);
+                    let px = (event.abs_x as u64 * self.display_width as u64 / 32768) as f32;
+                    let py = (event.abs_y as u64 * self.display_height as u64 / 32768) as f32;
+                    let mut payload = [0u8; 8];
+
+                    payload[0..4].copy_from_slice(&px.to_le_bytes());
+                    payload[4..8].copy_from_slice(&py.to_le_bytes());
+
+                    let _ =
+                        ipc::client::call_simple(self.render_ep, render::comp::POINTER, &payload);
+                }
+
+                let _ = msg.reply_empty();
+            }
             _ => {
                 let _ = msg.reply_error(ipc::STATUS_UNSUPPORTED);
             }

@@ -1035,6 +1035,77 @@ fn lookup_or_rasterize_path(
 
 // ── Compositor ──────────────────────────────────────────────────────
 
+// ── Cursor ─────────────────────────────────────────────────────────
+
+const CURSOR_SIZE: u16 = 32;
+const CURSOR_HOTSPOT_X: u16 = 3;
+const CURSOR_HOTSPOT_Y: u16 = 1;
+
+fn build_arrow_path() -> alloc::vec::Vec<u8> {
+    let mut data = alloc::vec::Vec::with_capacity(128);
+
+    scene::path_move_to(&mut data, 1.0, 0.0);
+    scene::path_line_to(&mut data, 1.0, 21.0);
+    scene::path_line_to(&mut data, 6.0, 16.5);
+    scene::path_line_to(&mut data, 12.0, 23.0);
+    scene::path_line_to(&mut data, 15.0, 21.0);
+    scene::path_line_to(&mut data, 9.0, 14.5);
+    scene::path_line_to(&mut data, 16.0, 14.0);
+    scene::path_close(&mut data);
+
+    data
+}
+
+fn rasterize_cursor(scale: u32) -> alloc::vec::Vec<u8> {
+    let sz = CURSOR_SIZE as u32 * scale;
+    let arrow = build_arrow_path();
+    let coverage = path::rasterize_path(
+        &arrow,
+        sz,
+        sz,
+        scale as f32 * 1.4,
+        scene::FillRule::Winding,
+        None,
+    );
+
+    if coverage.is_empty() {
+        return alloc::vec::Vec::new();
+    }
+
+    let mut bgra = alloc::vec![0u8; (sz * sz * 4) as usize];
+
+    let outline_path = scene::stroke::expand_stroke(&arrow, 1.5);
+    let outline = path::rasterize_path(
+        &arrow,
+        sz,
+        sz,
+        scale as f32 * 1.4,
+        scene::FillRule::Winding,
+        Some(&outline_path),
+    );
+
+    for i in 0..(sz * sz) as usize {
+        let fill_a = coverage[i] as u16;
+        let border_a = if i < outline.len() {
+            outline[i] as u16
+        } else {
+            0
+        };
+        let outer = border_a.saturating_sub(fill_a).min(255);
+        let r = (255 * outer / outer.max(1).max(fill_a.max(1))) as u8;
+        let g = r;
+        let b = r;
+        let a = fill_a.max(outer).min(255) as u8;
+
+        bgra[i * 4] = b;
+        bgra[i * 4 + 1] = g;
+        bgra[i * 4 + 2] = r;
+        bgra[i * 4 + 3] = a;
+    }
+
+    bgra
+}
+
 struct Compositor {
     device: virtio::Device,
     setup_vq: virtio::Virtqueue,
@@ -1049,11 +1120,15 @@ struct Compositor {
     console_ep: Handle,
     logical_w: u32,
     logical_h: u32,
+    scale: u32,
 
     scene_va: usize,
     frame_count: u32,
     walk_ctx: WalkContext,
     atlas_upload_y: u16,
+
+    cursor_uploaded: bool,
+    cursor_visible: bool,
 }
 
 impl Compositor {
@@ -1123,6 +1198,71 @@ impl Compositor {
 
         self.atlas_upload_y = atlas.row_y;
         self.walk_ctx.atlas_dirty = false;
+    }
+
+    fn upload_cursor(&mut self) {
+        if self.cursor_uploaded {
+            return;
+        }
+
+        let bgra = rasterize_cursor(self.scale);
+
+        if bgra.is_empty() {
+            return;
+        }
+
+        let sz = CURSOR_SIZE * self.scale as u16;
+        let hotspot_x = CURSOR_HOTSPOT_X as i16 * self.scale as i16;
+        let hotspot_y = CURSOR_HOTSPOT_Y as i16 * self.scale as i16;
+        // SAFETY: render_dma.va is a valid DMA allocation.
+        let dma_buf = unsafe {
+            core::slice::from_raw_parts_mut(self.render_dma.va as *mut u8, self.render_buf_size)
+        };
+        let len = {
+            let mut w = CommandWriter::new(dma_buf);
+
+            w.set_cursor_image(sz, sz, hotspot_x, hotspot_y, &bgra);
+            w.set_cursor_visible(true);
+
+            w.len()
+        };
+
+        submit_and_wait(
+            &self.device,
+            &mut self.render_vq,
+            self.irq_event,
+            render::VIRTQ_RENDER,
+            self.render_dma.pa,
+            len,
+        );
+
+        self.cursor_uploaded = true;
+        self.cursor_visible = true;
+    }
+
+    fn update_cursor_position(&mut self, x: f32, y: f32) {
+        self.upload_cursor();
+
+        // SAFETY: render_dma.va is a valid DMA allocation.
+        let dma_buf = unsafe {
+            core::slice::from_raw_parts_mut(self.render_dma.va as *mut u8, self.render_buf_size)
+        };
+        let len = {
+            let mut w = CommandWriter::new(dma_buf);
+
+            w.set_cursor_position(x, y);
+
+            w.len()
+        };
+
+        submit_and_wait(
+            &self.device,
+            &mut self.render_vq,
+            self.irq_event,
+            render::VIRTQ_RENDER,
+            self.render_dma.pa,
+            len,
+        );
     }
 
     fn render_frame(&mut self) -> u64 {
@@ -1337,6 +1477,16 @@ impl Dispatch for Compositor {
 
                 let _ = msg.reply_ok(&data, &[]);
             }
+            render::comp::POINTER => {
+                if msg.payload.len() >= 8 {
+                    let x = f32::from_le_bytes(msg.payload[0..4].try_into().unwrap());
+                    let y = f32::from_le_bytes(msg.payload[4..8].try_into().unwrap());
+
+                    self.update_cursor_position(x, y);
+                }
+
+                let _ = msg.reply_empty();
+            }
             _ => {
                 let _ = msg.reply_error(ipc::STATUS_UNSUPPORTED);
             }
@@ -1501,10 +1651,13 @@ extern "C" fn _start() -> ! {
         console_ep,
         logical_w,
         logical_h,
+        scale,
         scene_va: 0,
         frame_count: 0,
         walk_ctx,
         atlas_upload_y: 0,
+        cursor_uploaded: false,
+        cursor_visible: false,
     };
     let mut next_deadline: u64 = 0;
 

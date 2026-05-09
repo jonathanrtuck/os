@@ -151,7 +151,7 @@ fn evdev_to_key(code: u16, shift: bool) -> (u16, u8) {
     }
 }
 
-// ── Forward key event to presenter ──────────────────────────────────
+// ── Forward events to presenter ─────────────────────────────────────
 
 fn forward_key(presenter_ep: Handle, hid_code: u16, modifiers: u8, character: u8) {
     let mut payload = [0u8; 4];
@@ -161,6 +161,15 @@ fn forward_key(presenter_ep: Handle, hid_code: u16, modifiers: u8, character: u8
     payload[3] = character;
 
     let _ = ipc::client::call_simple(presenter_ep, presenter_service::KEY_EVENT, &payload);
+}
+
+fn forward_pointer(presenter_ep: Handle, abs_x: u32, abs_y: u32) {
+    let event = presenter_service::PointerEvent { abs_x, abs_y };
+    let mut payload = [0u8; presenter_service::PointerEvent::SIZE];
+
+    event.write_to(&mut payload);
+
+    let _ = ipc::client::call_simple(presenter_ep, presenter_service::POINTER_EVENT, &payload);
 }
 
 // ── Entry point ─────────────────────────────────────────────────────
@@ -173,6 +182,8 @@ extern "C" fn _start() -> ! {
         Ok(va) => va,
         Err(_) => abi::thread::exit(1),
     };
+
+    // Probe for two input devices: keyboard (first) and tablet (second).
     let (device, input_slot) = match virtio::find_device(virtio_va, virtio::DEVICE_INPUT) {
         Some(d) => d,
         None => abi::thread::exit(2),
@@ -238,6 +249,77 @@ extern "C" fn _start() -> ! {
         abi::thread::exit(7);
     }
 
+    // Tablet device (second input device) — optional.
+    let tablet = virtio::find_device_from(virtio_va, virtio::DEVICE_INPUT, input_slot as usize + 1);
+    let mut tab_vq: Option<virtio::Virtqueue> = None;
+    let mut tab_device: Option<virtio::Device> = None;
+    let mut tab_event_va: usize = 0;
+    let mut tab_event_pa: u64 = 0;
+    let tab_irq_event: Option<Handle>;
+
+    if let Some((tab_dev, tab_slot)) = tablet {
+        if tab_dev.negotiate() {
+            let tq_size = tab_dev
+                .queue_max_size(EVENT_VIRTQ)
+                .min(virtio::DEFAULT_QUEUE_SIZE);
+            let tq_alloc = virtio::Virtqueue::total_bytes(tq_size).next_multiple_of(PAGE_SIZE);
+
+            if let Ok(tq_dma) = init::request_dma(HANDLE_INIT_EP, tq_alloc) {
+                // SAFETY: tq_dma.va is a valid DMA allocation.
+                unsafe { core::ptr::write_bytes(tq_dma.va as *mut u8, 0, tq_alloc) };
+
+                let mut tvq = virtio::Virtqueue::new(tq_size, tq_dma.va, tq_dma.va as u64);
+
+                tab_dev.setup_queue(
+                    EVENT_VIRTQ,
+                    tq_size,
+                    tvq.desc_pa(),
+                    tvq.avail_pa(),
+                    tvq.used_pa(),
+                );
+
+                if let Ok(te_dma) = init::request_dma(HANDLE_INIT_EP, event_alloc) {
+                    // SAFETY: te_dma.va is a valid DMA allocation.
+                    unsafe { core::ptr::write_bytes(te_dma.va as *mut u8, 0, event_alloc) };
+
+                    tab_event_va = te_dma.va;
+                    tab_event_pa = te_dma.va as u64;
+
+                    for i in 0..NUM_EVENT_BUFS {
+                        let buf_pa = tab_event_pa + (i as u64 * VIRTIO_EVENT_SIZE as u64);
+
+                        tvq.push(buf_pa, VIRTIO_EVENT_SIZE, true);
+                    }
+
+                    tab_dev.driver_ok();
+                    tab_dev.notify(EVENT_VIRTQ);
+
+                    if let Ok(te) = abi::event::create() {
+                        let tab_irq = virtio::SPI_BASE_INTID + tab_slot;
+
+                        if abi::event::bind_irq(te, tab_irq, 0x1).is_ok() {
+                            tab_irq_event = Some(te);
+                            tab_vq = Some(tvq);
+                            tab_device = Some(tab_dev);
+                        } else {
+                            tab_irq_event = None;
+                        }
+                    } else {
+                        tab_irq_event = None;
+                    }
+                } else {
+                    tab_irq_event = None;
+                }
+            } else {
+                tab_irq_event = None;
+            }
+        } else {
+            tab_irq_event = None;
+        }
+    } else {
+        tab_irq_event = None;
+    }
+
     let own_ep = match abi::ipc::endpoint_create() {
         Ok(h) => h,
         Err(_) => abi::thread::exit(8),
@@ -248,10 +330,22 @@ extern "C" fn _start() -> ! {
     let console_ep = name::lookup(HANDLE_NS_EP, b"console").ok();
     let mut presenter_ep: Option<Handle> = None;
     let mut modifiers: u8 = 0;
+    let mut pointer_x: u32 = 0;
+    let mut pointer_y: u32 = 0;
+    let mut pointer_dirty = false;
+
+    let mut wait_entries: [_; 2] = [(irq_event, 0x1), (Handle(0), 0)];
+    let wait_count = if let Some(te) = tab_irq_event {
+        wait_entries[1] = (te, 0x1);
+        2
+    } else {
+        1
+    };
 
     loop {
-        let _ = abi::event::wait(&[(irq_event, 0x1)]);
+        let _ = abi::event::wait(&wait_entries[..wait_count]);
 
+        // ── Keyboard device events ──
         device.ack_interrupt();
 
         let _ = abi::event::clear(irq_event, 0x1);
@@ -324,11 +418,6 @@ extern "C" fn _start() -> ! {
                         }
                     }
                 }
-            } else if event.event_type == EV_ABS {
-                match event.code {
-                    ABS_X | ABS_Y => {}
-                    _ => {}
-                }
             }
 
             // SAFETY: buf_va is within DMA allocation; zeroing before repost.
@@ -343,6 +432,68 @@ extern "C" fn _start() -> ! {
 
         if repost_count > 0 {
             device.notify(EVENT_VIRTQ);
+        }
+
+        // ── Tablet device events (pointer) ──
+        if let (Some(td), Some(tvq), Some(te)) = (&tab_device, &mut tab_vq, tab_irq_event) {
+            td.ack_interrupt();
+
+            let _ = abi::event::clear(te, 0x1);
+            let mut tab_repost = 0u32;
+
+            while let Some(used) = tvq.pop_used() {
+                let idx = used.id as usize;
+
+                if idx >= NUM_EVENT_BUFS {
+                    continue;
+                }
+
+                let buf_offset = idx * VIRTIO_EVENT_SIZE as usize;
+                let buf_va = tab_event_va + buf_offset;
+                let buf_pa = tab_event_pa + buf_offset as u64;
+                // SAFETY: buf_va points to tablet DMA buffer written by device.
+                let event: VirtioInputEvent =
+                    unsafe { core::ptr::read_volatile(buf_va as *const VirtioInputEvent) };
+
+                if event.event_type == EV_ABS {
+                    match event.code {
+                        ABS_X => {
+                            pointer_x = event.value;
+                            pointer_dirty = true;
+                        }
+                        ABS_Y => {
+                            pointer_y = event.value;
+                            pointer_dirty = true;
+                        }
+                        _ => {}
+                    }
+                }
+
+                // SAFETY: buf_va is within DMA allocation.
+                unsafe {
+                    core::ptr::write_bytes(buf_va as *mut u8, 0, VIRTIO_EVENT_SIZE as usize);
+                };
+
+                tvq.push(buf_pa, VIRTIO_EVENT_SIZE, true);
+
+                tab_repost += 1;
+            }
+
+            if tab_repost > 0 {
+                td.notify(EVENT_VIRTQ);
+            }
+        }
+
+        if pointer_dirty {
+            pointer_dirty = false;
+
+            if presenter_ep.is_none() {
+                presenter_ep = name::lookup(HANDLE_NS_EP, b"presenter").ok();
+            }
+
+            if let Some(ep) = presenter_ep {
+                forward_pointer(ep, pointer_x, pointer_y);
+            }
         }
     }
 }
