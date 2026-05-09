@@ -439,11 +439,11 @@ next rendering milestone.
    CommandWriter. 21 wire protocol tests.
 
 7. **Hardware cursor (10.3)** — DONE. End-to-end pointer tracking: input driver
-   discovers both keyboard and tablet virtio-input devices, receives EV_ABS
-   from tablet, forwards to presenter → compositor. Arrow cursor rasterized
-   via CPU path rasterizer (black fill, white anti-aliased outline), uploaded
-   as BGRA pixels to hypervisor hardware cursor layer (NSCursor). Position
-   updates via CMD_SET_CURSOR_POSITION.
+   discovers both keyboard and tablet virtio-input devices, receives EV_ABS from
+   tablet, forwards to presenter → compositor. Arrow cursor rasterized via CPU
+   path rasterizer (black fill, white anti-aliased outline), uploaded as BGRA
+   pixels to hypervisor hardware cursor layer (NSCursor). Position updates via
+   CMD_SET_CURSOR_POSITION.
 
 ## What's Next: v0.6 Parity
 

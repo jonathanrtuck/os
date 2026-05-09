@@ -333,7 +333,6 @@ extern "C" fn _start() -> ! {
     let mut pointer_x: u32 = 0;
     let mut pointer_y: u32 = 0;
     let mut pointer_dirty = false;
-
     let mut wait_entries: [_; 2] = [(irq_event, 0x1), (Handle(0), 0)];
     let wait_count = if let Some(te) = tab_irq_event {
         wait_entries[1] = (te, 0x1);

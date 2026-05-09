@@ -1073,7 +1073,6 @@ fn rasterize_cursor(scale: u32) -> alloc::vec::Vec<u8> {
     }
 
     let mut bgra = alloc::vec![0u8; (sz * sz * 4) as usize];
-
     let outline_path = scene::stroke::expand_stroke(&arrow, 1.5);
     let outline = path::rasterize_path(
         &arrow,
