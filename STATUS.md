@@ -144,11 +144,9 @@ cross-core wake.
 ## What's Next: Userspace
 
 Rebuild the userspace on the verified kernel, targeting the same UI/UX as the
-v0.6-pre-rewrite prototype. Full plan in `design/userspace-rebuild.md`.
+v0.6-pre-rewrite prototype.
 
 **Architecture:** `design/architecture.md` (pipeline, responsibilities).
-**Rebuild plan:** `design/userspace-rebuild.md` (layering, protocol design,
-build order, verification strategy).
 
 ### Completed (Layer 0)
 
@@ -583,29 +581,7 @@ next rendering milestone.
    is smooth. Editor keys suppressed in image space. All 584 kernel tests +
    1,114 library tests pass. Visual regression (Phase 5) passes.
 
-## v0.6 Parity: COMPLETE
-
-All 14 phases of the v0.6 parity plan are complete. The userspace rebuild
-matches the v0.6-pre-rewrite prototype's functionality: text editing, glyph
-rendering, cursor blink, selection, keyboard navigation, scroll, visual chrome,
-pointer interaction, content-type typography, PNG decoding, host filesystem
-access, and document switching with spring animation.
-
-### v0.6 Parity Progress
-
-- Phase 6 (glyph atlas + textured rendering): COMPLETE
-- Phase 7 (cursor blink + selection): COMPLETE
-- Phase 8 (keyboard navigation): COMPLETE
-- Phase 9 (scroll + viewport): COMPLETE
-- Phase 10 (visual chrome): COMPLETE
-- Phase 10a (pointer interaction — I-beam cursor, click/drag/multi-click):
-  COMPLETE
-- Phase 11 (content-type typography): COMPLETE
-- Phase 12 (PNG decoder): COMPLETE
-- Phase 13 (filesystem + virtio-9p): COMPLETE
-- Phase 14 (document switching — Ctrl+Tab text↔image, slide animation): COMPLETE
-
 ## Session Resume
 
 To resume work: read this file, check `git log --oneline -20` for recent
-commits, and review what's next beyond v0.6 parity.
+commits, and review what's next.

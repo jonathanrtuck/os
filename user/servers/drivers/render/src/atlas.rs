@@ -1,7 +1,7 @@
 //! Glyph texture atlas with open-addressed hash table lookup.
 //!
 //! Keyed by `(glyph_id, font_size_px, style_id)`. Row-based bin packing
-//! into a 2048x2048 R8 texture. Ported from v0.6-pre-rewrite.
+//! into a 2048x2048 R8 texture.
 
 extern crate alloc;
 
