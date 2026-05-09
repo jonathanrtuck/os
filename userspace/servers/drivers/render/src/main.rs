@@ -82,6 +82,79 @@ fragment float4 fragment_glyph(
     float alpha = tex.sample(s, in.texCoord).r;
     return float4(srgb_to_linear(in.color.rgb), in.color.a * alpha);
 }
+
+vertex float4 vertex_stencil(VertexIn in [[stage_in]]) {
+    return float4(in.position, 0.0, 1.0);
+}
+
+struct ShadowParams {
+    float rect_min_x;
+    float rect_min_y;
+    float rect_max_x;
+    float rect_max_y;
+    float color_r;
+    float color_g;
+    float color_b;
+    float color_a;
+    float sigma;
+    float corner_radius;
+    float _pad0;
+    float _pad1;
+};
+
+float erf_approx(float x) {
+    float ax = abs(x);
+    float t = 1.0 / (1.0 + 0.3275911 * ax);
+    float poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741
+                 + t * (-1.453152027 + t * 1.061405429))));
+    float result = 1.0 - poly * exp(-ax * ax);
+    return x >= 0.0 ? result : -result;
+}
+
+float shadow_1d(float p, float lo, float hi, float inv_s2) {
+    return 0.5 * (erf_approx((hi - p) * inv_s2) - erf_approx((lo - p) * inv_s2));
+}
+
+float sd_rounded_rect(float2 p, float2 b, float r) {
+    float2 q = abs(p) - b + r;
+    return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - r;
+}
+
+fragment float4 fragment_shadow(
+    VertexOut in [[stage_in]],
+    constant ShadowParams& params [[buffer(0)]]
+) {
+    float2 p = in.texCoord;
+    float sigma = params.sigma;
+    float3 color_lin = srgb_to_linear(float3(params.color_r, params.color_g,
+                                               params.color_b));
+
+    if (sigma <= 0.0) {
+        bool inside = p.x >= params.rect_min_x && p.x <= params.rect_max_x
+                   && p.y >= params.rect_min_y && p.y <= params.rect_max_y;
+        float a = inside ? params.color_a : 0.0;
+        return float4(color_lin, a);
+    }
+
+    float inv_s2 = 1.0 / (sigma * 1.41421356);
+    float alpha;
+
+    if (params.corner_radius <= 0.0) {
+        float ix = shadow_1d(p.x, params.rect_min_x, params.rect_max_x, inv_s2);
+        float iy = shadow_1d(p.y, params.rect_min_y, params.rect_max_y, inv_s2);
+        alpha = ix * iy;
+    } else {
+        float2 center = 0.5 * float2(params.rect_min_x + params.rect_max_x,
+                                       params.rect_min_y + params.rect_max_y);
+        float2 half_ext = 0.5 * float2(params.rect_max_x - params.rect_min_x,
+                                         params.rect_max_y - params.rect_min_y);
+        float r = min(params.corner_radius, min(half_ext.x, half_ext.y));
+        float dist = sd_rounded_rect(p - center, half_ext, r);
+        alpha = 0.5 * (1.0 - erf_approx(dist * inv_s2));
+    }
+
+    return float4(color_lin, params.color_a * alpha);
+}
 ";
 
 const COLOR_WRITE_ALL: u8 = 0xF;
@@ -89,9 +162,22 @@ const H_LIBRARY: u32 = 1;
 const H_VERTEX_FN: u32 = 2;
 const H_FRAG_SOLID: u32 = 3;
 const H_FRAG_GLYPH: u32 = 4;
+const H_FRAG_SHADOW: u32 = 5;
+const H_VERTEX_STENCIL: u32 = 6;
 const PIPE_SOLID: u32 = 10;
 const PIPE_GLYPH: u32 = 11;
+const PIPE_SHADOW: u32 = 12;
+#[allow(dead_code)]
+const PIPE_STENCIL_WRITE: u32 = 13;
+#[allow(dead_code)]
+const PIPE_STENCIL_COVER: u32 = 14;
+#[allow(dead_code)]
+const DSS_STENCIL_WRITE: u32 = 40;
+#[allow(dead_code)]
+const DSS_STENCIL_TEST: u32 = 41;
 const TEX_ATLAS: u32 = 20;
+#[allow(dead_code)]
+const TEX_STENCIL: u32 = 21;
 const SAMPLER_NEAREST: u32 = 30;
 
 const FILTER_NEAREST: u8 = 0;
@@ -104,45 +190,153 @@ const RENDER_BUF_PAGES: usize = 4;
 
 // ── Vertex data ─────────────────────────────────────────────────────
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Vertex {
-    position: [f32; 2],
-    tex_coord: [f32; 2],
-    color: [f32; 4],
-}
+const VERTEX_SIZE: usize = render::batch::VERTEX_SIZE;
+const QUAD_BYTES: usize = VERTEX_SIZE * 6;
 
-const VERTEX_SIZE: usize = core::mem::size_of::<Vertex>();
-
-struct FrameBuilder {
-    solid_verts: alloc::vec::Vec<u8>,
-    glyph_verts: alloc::vec::Vec<u8>,
+#[allow(clippy::too_many_arguments)]
+fn push_quad(
+    buf: &mut alloc::vec::Vec<u8>,
     display_w: f32,
     display_h: f32,
+    px: f32,
+    py: f32,
+    pw: f32,
+    ph: f32,
+    color: scene::Color,
+    uv0: [f32; 2],
+    uv1: [f32; 2],
+) {
+    let x0 = px / display_w * 2.0 - 1.0;
+    let y0 = 1.0 - py / display_h * 2.0;
+    let x1 = (px + pw) / display_w * 2.0 - 1.0;
+    let y1 = 1.0 - (py + ph) / display_h * 2.0;
+    let c = [
+        color.r as f32 / 255.0,
+        color.g as f32 / 255.0,
+        color.b as f32 / 255.0,
+        color.a as f32 / 255.0,
+    ];
+
+    for &(pos, tc) in &[
+        ([x0, y0], [uv0[0], uv0[1]]),
+        ([x0, y1], [uv0[0], uv1[1]]),
+        ([x1, y1], [uv1[0], uv1[1]]),
+        ([x0, y0], [uv0[0], uv0[1]]),
+        ([x1, y1], [uv1[0], uv1[1]]),
+        ([x1, y0], [uv1[0], uv0[1]]),
+    ] {
+        buf.extend_from_slice(&pos[0].to_le_bytes());
+        buf.extend_from_slice(&pos[1].to_le_bytes());
+        buf.extend_from_slice(&tc[0].to_le_bytes());
+        buf.extend_from_slice(&tc[1].to_le_bytes());
+        buf.extend_from_slice(&c[0].to_le_bytes());
+        buf.extend_from_slice(&c[1].to_le_bytes());
+        buf.extend_from_slice(&c[2].to_le_bytes());
+        buf.extend_from_slice(&c[3].to_le_bytes());
+    }
 }
 
-impl FrameBuilder {
+#[allow(clippy::too_many_arguments)]
+fn pack_shadow_params(
+    rect_min_x: f32,
+    rect_min_y: f32,
+    rect_max_x: f32,
+    rect_max_y: f32,
+    color_r: f32,
+    color_g: f32,
+    color_b: f32,
+    color_a: f32,
+    sigma: f32,
+    corner_radius: f32,
+) -> [u8; 48] {
+    let mut buf = [0u8; 48];
+
+    buf[0..4].copy_from_slice(&rect_min_x.to_le_bytes());
+    buf[4..8].copy_from_slice(&rect_min_y.to_le_bytes());
+    buf[8..12].copy_from_slice(&rect_max_x.to_le_bytes());
+    buf[12..16].copy_from_slice(&rect_max_y.to_le_bytes());
+    buf[16..20].copy_from_slice(&color_r.to_le_bytes());
+    buf[20..24].copy_from_slice(&color_g.to_le_bytes());
+    buf[24..28].copy_from_slice(&color_b.to_le_bytes());
+    buf[28..32].copy_from_slice(&color_a.to_le_bytes());
+    buf[32..36].copy_from_slice(&sigma.to_le_bytes());
+    buf[36..40].copy_from_slice(&corner_radius.to_le_bytes());
+
+    buf
+}
+
+// ── Draw list ──────────────────────────────────────────────────────
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pipe {
+    Solid,
+    Glyph,
+    Shadow,
+}
+
+struct DrawOp {
+    pipe: Pipe,
+    vert_offset: usize,
+    vert_bytes: usize,
+    shadow_params: [u8; 48],
+}
+
+struct DrawList {
+    verts: alloc::vec::Vec<u8>,
+    ops: alloc::vec::Vec<DrawOp>,
+    display_w: f32,
+    display_h: f32,
+    current_pipe: Pipe,
+    current_start: usize,
+}
+
+impl DrawList {
     fn new(display_w: f32, display_h: f32) -> Self {
         Self {
-            solid_verts: alloc::vec::Vec::with_capacity(256 * 6 * VERTEX_SIZE),
-            glyph_verts: alloc::vec::Vec::with_capacity(512 * 6 * VERTEX_SIZE),
+            verts: alloc::vec::Vec::with_capacity(1024 * QUAD_BYTES),
+            ops: alloc::vec::Vec::with_capacity(64),
             display_w,
             display_h,
+            current_pipe: Pipe::Solid,
+            current_start: 0,
         }
     }
 
-    fn push_solid_quad(&mut self, quad: &[Vertex; 6]) {
-        // SAFETY: Vertex is repr(C) with known layout.
-        let bytes =
-            unsafe { core::slice::from_raw_parts(quad.as_ptr() as *const u8, 6 * VERTEX_SIZE) };
+    fn flush_current(&mut self) {
+        let end = self.verts.len();
 
-        self.solid_verts.extend_from_slice(bytes);
+        if end > self.current_start {
+            self.ops.push(DrawOp {
+                pipe: self.current_pipe,
+                vert_offset: self.current_start,
+                vert_bytes: end - self.current_start,
+                shadow_params: [0; 48],
+            });
+            self.current_start = end;
+        }
+    }
+
+    fn ensure_pipe(&mut self, pipe: Pipe) {
+        if self.current_pipe != pipe {
+            self.flush_current();
+            self.current_pipe = pipe;
+        }
     }
 
     fn push_rect(&mut self, px: f32, py: f32, pw: f32, ph: f32, color: scene::Color) {
-        let quad = self.make_quad(px, py, pw, ph, color, [0.0; 2], [0.0; 2]);
-
-        self.push_solid_quad(&quad);
+        self.ensure_pipe(Pipe::Solid);
+        push_quad(
+            &mut self.verts,
+            self.display_w,
+            self.display_h,
+            px,
+            py,
+            pw,
+            ph,
+            color,
+            [0.0; 2],
+            [0.0; 2],
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -156,68 +350,97 @@ impl FrameBuilder {
         uv0: [f32; 2],
         uv1: [f32; 2],
     ) {
-        let quad = self.make_quad(px, py, pw, ph, color, uv0, uv1);
-        // SAFETY: Vertex is repr(C) with known layout.
-        let bytes =
-            unsafe { core::slice::from_raw_parts(quad.as_ptr() as *const u8, 6 * VERTEX_SIZE) };
-
-        self.glyph_verts.extend_from_slice(bytes);
+        self.ensure_pipe(Pipe::Glyph);
+        push_quad(
+            &mut self.verts,
+            self.display_w,
+            self.display_h,
+            px,
+            py,
+            pw,
+            ph,
+            color,
+            uv0,
+            uv1,
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn make_quad(
-        &self,
+    fn push_shadow(
+        &mut self,
         px: f32,
         py: f32,
         pw: f32,
         ph: f32,
-        color: scene::Color,
-        uv0: [f32; 2],
-        uv1: [f32; 2],
-    ) -> [Vertex; 6] {
-        let x0 = px / self.display_w * 2.0 - 1.0;
-        let y0 = 1.0 - py / self.display_h * 2.0;
-        let x1 = (px + pw) / self.display_w * 2.0 - 1.0;
-        let y1 = 1.0 - (py + ph) / self.display_h * 2.0;
-        let c = [
-            color.r as f32 / 255.0,
-            color.g as f32 / 255.0,
-            color.b as f32 / 255.0,
-            color.a as f32 / 255.0,
-        ];
+        blur_radius: f32,
+        spread: f32,
+        offset_x: f32,
+        offset_y: f32,
+        shadow_color: scene::Color,
+        corner_radius: f32,
+        scale: f32,
+    ) {
+        self.flush_current();
 
-        [
-            Vertex {
-                position: [x0, y0],
-                tex_coord: [uv0[0], uv0[1]],
-                color: c,
-            },
-            Vertex {
-                position: [x0, y1],
-                tex_coord: [uv0[0], uv1[1]],
-                color: c,
-            },
-            Vertex {
-                position: [x1, y1],
-                tex_coord: [uv1[0], uv1[1]],
-                color: c,
-            },
-            Vertex {
-                position: [x0, y0],
-                tex_coord: [uv0[0], uv0[1]],
-                color: c,
-            },
-            Vertex {
-                position: [x1, y1],
-                tex_coord: [uv1[0], uv1[1]],
-                color: c,
-            },
-            Vertex {
-                position: [x1, y0],
-                tex_coord: [uv1[0], uv0[1]],
-                color: c,
-            },
-        ]
+        let sx = px + offset_x + spread;
+        let sy = py + offset_y + spread;
+        let sw = pw - 2.0 * spread;
+        let sh = ph - 2.0 * spread;
+        let sigma = blur_radius / 2.0;
+        let pad = 3.0 * sigma;
+
+        let qx = sx - pad;
+        let qy = sy - pad;
+        let qw = sw + 2.0 * pad;
+        let qh = sh + 2.0 * pad;
+
+        let px_sx = sx * scale;
+        let px_sy = sy * scale;
+        let px_sw = sw * scale;
+        let px_sh = sh * scale;
+        let px_sigma = sigma * scale;
+        let px_cr = corner_radius * scale;
+
+        let params = pack_shadow_params(
+            px_sx,
+            px_sy,
+            px_sx + px_sw,
+            px_sy + px_sh,
+            shadow_color.r as f32 / 255.0,
+            shadow_color.g as f32 / 255.0,
+            shadow_color.b as f32 / 255.0,
+            shadow_color.a as f32 / 255.0,
+            px_sigma,
+            px_cr,
+        );
+
+        let start = self.verts.len();
+
+        push_quad(
+            &mut self.verts,
+            self.display_w,
+            self.display_h,
+            qx,
+            qy,
+            qw,
+            qh,
+            scene::Color::TRANSPARENT,
+            [qx * scale, qy * scale],
+            [(qx + qw) * scale, (qy + qh) * scale],
+        );
+
+        self.ops.push(DrawOp {
+            pipe: Pipe::Shadow,
+            vert_offset: start,
+            vert_bytes: self.verts.len() - start,
+            shadow_params: params,
+        });
+
+        self.current_start = self.verts.len();
+    }
+
+    fn finalize(&mut self) {
+        self.flush_current();
     }
 }
 
@@ -255,7 +478,7 @@ fn setup_pipeline(
     // SAFETY: setup_dma.va is a valid DMA allocation of buf_size bytes.
     let dma_buf = unsafe { core::slice::from_raw_parts_mut(setup_dma.va as *mut u8, buf_size) };
 
-    // Batch 1: compile shaders, get functions, create both pipelines.
+    // Batch 1: compile shaders, get functions.
     let len = {
         let mut w = CommandWriter::new(dma_buf);
 
@@ -263,6 +486,24 @@ fn setup_pipeline(
         w.get_function(H_VERTEX_FN, H_LIBRARY, b"vertex_main");
         w.get_function(H_FRAG_SOLID, H_LIBRARY, b"fragment_solid");
         w.get_function(H_FRAG_GLYPH, H_LIBRARY, b"fragment_glyph");
+        w.get_function(H_FRAG_SHADOW, H_LIBRARY, b"fragment_shadow");
+        w.get_function(H_VERTEX_STENCIL, H_LIBRARY, b"vertex_stencil");
+
+        w.len()
+    };
+
+    submit_and_wait(
+        device,
+        setup_vq,
+        irq_event,
+        render::VIRTQ_SETUP,
+        setup_dma.pa,
+        len,
+    );
+
+    // Batch 2: create pipelines, textures, samplers, depth-stencil states.
+    let len = {
+        let mut w = CommandWriter::new(dma_buf);
 
         w.create_render_pipeline(
             PIPE_SOLID,
@@ -278,6 +519,16 @@ fn setup_pipeline(
             PIPE_GLYPH,
             H_VERTEX_FN,
             H_FRAG_GLYPH,
+            true,
+            COLOR_WRITE_ALL,
+            false,
+            1,
+            render::PIXEL_FORMAT_BGRA8_SRGB,
+        );
+        w.create_render_pipeline(
+            PIPE_SHADOW,
+            H_VERTEX_FN,
+            H_FRAG_SHADOW,
             true,
             COLOR_WRITE_ALL,
             false,
@@ -408,7 +659,7 @@ fn walk_node(
     parent_x: f32,
     parent_y: f32,
     clip: ClipRect,
-    frame: &mut FrameBuilder,
+    draws: &mut DrawList,
     ctx: &mut WalkContext,
     is_root: bool,
 ) {
@@ -441,12 +692,32 @@ fn walk_node(
         return;
     }
 
+    if node.has_shadow() {
+        let mut sc = node.shadow_color;
+
+        sc.a = ((sc.a as u16 * effective_opacity as u16) / 255) as u8;
+
+        draws.push_shadow(
+            x,
+            y,
+            w,
+            h,
+            node.shadow_blur_radius as f32,
+            node.shadow_spread as f32,
+            node.shadow_offset_x as f32,
+            node.shadow_offset_y as f32,
+            sc,
+            node.corner_radius as f32,
+            ctx.scale as f32,
+        );
+    }
+
     if !is_root && node.background.a > 0 {
         let mut bg = node.background;
 
         bg.a = ((bg.a as u16 * effective_opacity as u16) / 255) as u8;
 
-        frame.push_rect(x, y, w, h, bg);
+        draws.push_rect(x, y, w, h, bg);
     }
 
     if let Content::Glyphs {
@@ -480,7 +751,7 @@ fn walk_node(
                     let u1 = (e.u + e.width) as f32 / ATLAS_W_F;
                     let v1 = (e.v + e.height) as f32 / ATLAS_H_F;
 
-                    frame.push_glyph_quad(px, py, pw, ph, color, [u0, v0], [u1, v1]);
+                    draws.push_glyph_quad(px, py, pw, ph, color, [u0, v0], [u1, v1]);
                 }
             }
 
@@ -504,7 +775,7 @@ fn walk_node(
 
     while child != NULL {
         walk_node(
-            reader, child, child_x, child_y, child_clip, frame, ctx, false,
+            reader, child, child_x, child_y, child_clip, draws, ctx, false,
         );
 
         child = reader.node(child).next_sibling;
@@ -698,7 +969,7 @@ impl Compositor {
 
         let root_node = reader.node(root);
         let bg = root_node.background;
-        let mut frame = FrameBuilder::new(self.logical_w as f32, self.logical_h as f32);
+        let mut draws = DrawList::new(self.logical_w as f32, self.logical_h as f32);
 
         walk_node(
             &reader,
@@ -706,19 +977,19 @@ impl Compositor {
             0.0,
             0.0,
             None,
-            &mut frame,
+            &mut draws,
             &mut self.walk_ctx,
             true,
         );
 
+        draws.finalize();
         self.upload_atlas_dirty();
 
-        if render::batch::fits_single_submission(
-            frame.solid_verts.len(),
-            frame.glyph_verts.len(),
-            self.render_buf_size,
-        ) {
-            // Fast path: single submission, one virtio round-trip.
+        let clear_r = bg.r as f32 / 255.0;
+        let clear_g = bg.g as f32 / 255.0;
+        let clear_b = bg.b as f32 / 255.0;
+
+        if draws.ops.is_empty() {
             // SAFETY: render_dma.va is a valid DMA allocation of render_buf_size bytes.
             let dma_buf = unsafe {
                 core::slice::from_raw_parts_mut(self.render_dma.va as *mut u8, self.render_buf_size)
@@ -734,26 +1005,11 @@ impl Compositor {
                     render::STORE_STORE,
                     0,
                     0,
-                    bg.r as f32 / 255.0,
-                    bg.g as f32 / 255.0,
-                    bg.b as f32 / 255.0,
+                    clear_r,
+                    clear_g,
+                    clear_b,
                     1.0,
                 );
-
-                if !frame.solid_verts.is_empty() {
-                    w.set_render_pipeline(PIPE_SOLID);
-
-                    render::batch::emit_draws(&mut w, &frame.solid_verts);
-                }
-
-                if !frame.glyph_verts.is_empty() {
-                    w.set_render_pipeline(PIPE_GLYPH);
-                    w.set_fragment_texture(TEX_ATLAS, 0);
-                    w.set_fragment_sampler(SAMPLER_NEAREST, 0);
-
-                    render::batch::emit_draws(&mut w, &frame.glyph_verts);
-                }
-
                 w.end_render_pass();
                 w.present_and_commit(self.frame_count);
 
@@ -769,25 +1025,15 @@ impl Compositor {
                 len,
             );
         } else {
-            // Slow path: split across multiple submissions.
-            // Each submission is a complete render pass.
-            let max_draws_per_submit =
-                render::batch::max_draws_per_submission(self.render_buf_size);
             let mut first = true;
-            // Solid draws.
-            let mut offset = 0;
+            let mut active_pipe: Option<Pipe> = None;
 
-            while offset < frame.solid_verts.len() {
-                let batch_end = (offset
-                    + max_draws_per_submit * render::batch::MAX_VERTEX_BYTES_PER_DRAW)
-                    .min(frame.solid_verts.len());
-                let chunk = &frame.solid_verts[offset..batch_end];
-                let load = if first {
-                    render::LOAD_CLEAR
-                } else {
-                    render::LOAD_LOAD
-                };
-                let is_last = batch_end >= frame.solid_verts.len() && frame.glyph_verts.is_empty();
+            for op_idx in 0..draws.ops.len() {
+                let op = &draws.ops[op_idx];
+                let is_last = op_idx == draws.ops.len() - 1;
+                let verts = &draws.verts[op.vert_offset..op.vert_offset + op.vert_bytes];
+
+                // SAFETY: render_dma.va is a valid DMA allocation of render_buf_size bytes.
                 let dma_buf = unsafe {
                     core::slice::from_raw_parts_mut(
                         self.render_dma.va as *mut u8,
@@ -796,6 +1042,11 @@ impl Compositor {
                 };
                 let len = {
                     let mut w = CommandWriter::new(dma_buf);
+                    let load = if first {
+                        render::LOAD_CLEAR
+                    } else {
+                        render::LOAD_LOAD
+                    };
 
                     w.begin_render_pass(
                         render::DRAWABLE_HANDLE,
@@ -805,14 +1056,31 @@ impl Compositor {
                         render::STORE_STORE,
                         0,
                         0,
-                        bg.r as f32 / 255.0,
-                        bg.g as f32 / 255.0,
-                        bg.b as f32 / 255.0,
+                        clear_r,
+                        clear_g,
+                        clear_b,
                         1.0,
                     );
-                    w.set_render_pipeline(PIPE_SOLID);
 
-                    render::batch::emit_draws(&mut w, chunk);
+                    if active_pipe != Some(op.pipe) || op.pipe == Pipe::Shadow {
+                        match op.pipe {
+                            Pipe::Solid => {
+                                w.set_render_pipeline(PIPE_SOLID);
+                            }
+                            Pipe::Glyph => {
+                                w.set_render_pipeline(PIPE_GLYPH);
+                                w.set_fragment_texture(TEX_ATLAS, 0);
+                                w.set_fragment_sampler(SAMPLER_NEAREST, 0);
+                            }
+                            Pipe::Shadow => {
+                                w.set_render_pipeline(PIPE_SHADOW);
+                                w.set_fragment_bytes(0, &op.shadow_params);
+                            }
+                        }
+                        active_pipe = Some(op.pipe);
+                    }
+
+                    render::batch::emit_draws(&mut w, verts);
 
                     w.end_render_pass();
 
@@ -831,113 +1099,7 @@ impl Compositor {
                     self.render_dma.pa,
                     len,
                 );
-
                 first = false;
-                offset = batch_end;
-            }
-
-            // Glyph draws.
-            offset = 0;
-
-            while offset < frame.glyph_verts.len() {
-                let batch_end = (offset
-                    + max_draws_per_submit * render::batch::MAX_VERTEX_BYTES_PER_DRAW)
-                    .min(frame.glyph_verts.len());
-                let chunk = &frame.glyph_verts[offset..batch_end];
-                let load = if first {
-                    render::LOAD_CLEAR
-                } else {
-                    render::LOAD_LOAD
-                };
-                let is_last = batch_end >= frame.glyph_verts.len();
-                let dma_buf = unsafe {
-                    core::slice::from_raw_parts_mut(
-                        self.render_dma.va as *mut u8,
-                        self.render_buf_size,
-                    )
-                };
-                let len = {
-                    let mut w = CommandWriter::new(dma_buf);
-
-                    w.begin_render_pass(
-                        render::DRAWABLE_HANDLE,
-                        0,
-                        0,
-                        load,
-                        render::STORE_STORE,
-                        0,
-                        0,
-                        bg.r as f32 / 255.0,
-                        bg.g as f32 / 255.0,
-                        bg.b as f32 / 255.0,
-                        1.0,
-                    );
-                    w.set_render_pipeline(PIPE_GLYPH);
-                    w.set_fragment_texture(TEX_ATLAS, 0);
-                    w.set_fragment_sampler(SAMPLER_NEAREST, 0);
-
-                    render::batch::emit_draws(&mut w, chunk);
-
-                    w.end_render_pass();
-
-                    if is_last {
-                        w.present_and_commit(self.frame_count);
-                    }
-
-                    w.len()
-                };
-
-                submit_and_wait(
-                    &self.device,
-                    &mut self.render_vq,
-                    self.irq_event,
-                    render::VIRTQ_RENDER,
-                    self.render_dma.pa,
-                    len,
-                );
-
-                first = false;
-                offset = batch_end;
-            }
-
-            // Empty frame — still need to present.
-            if first {
-                let dma_buf = unsafe {
-                    core::slice::from_raw_parts_mut(
-                        self.render_dma.va as *mut u8,
-                        self.render_buf_size,
-                    )
-                };
-                let len = {
-                    let mut w = CommandWriter::new(dma_buf);
-
-                    w.begin_render_pass(
-                        render::DRAWABLE_HANDLE,
-                        0,
-                        0,
-                        render::LOAD_CLEAR,
-                        render::STORE_STORE,
-                        0,
-                        0,
-                        bg.r as f32 / 255.0,
-                        bg.g as f32 / 255.0,
-                        bg.b as f32 / 255.0,
-                        1.0,
-                    );
-                    w.end_render_pass();
-                    w.present_and_commit(self.frame_count);
-
-                    w.len()
-                };
-
-                submit_and_wait(
-                    &self.device,
-                    &mut self.render_vq,
-                    self.irq_event,
-                    render::VIRTQ_RENDER,
-                    self.render_dma.pa,
-                    len,
-                );
             }
         }
 

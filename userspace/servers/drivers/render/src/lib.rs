@@ -25,6 +25,7 @@ pub const HEADER_SIZE: usize = 8;
 pub const CMD_COMPILE_LIBRARY: u16 = 0x0001;
 pub const CMD_GET_FUNCTION: u16 = 0x0002;
 pub const CMD_CREATE_RENDER_PIPELINE: u16 = 0x0010;
+pub const CMD_CREATE_DEPTH_STENCIL_STATE: u16 = 0x0012;
 pub const CMD_CREATE_SAMPLER: u16 = 0x0013;
 pub const CMD_CREATE_TEXTURE: u16 = 0x0020;
 pub const CMD_UPLOAD_TEXTURE: u16 = 0x0021;
@@ -35,6 +36,8 @@ pub const CMD_DESTROY_OBJECT: u16 = 0x00FF;
 pub const CMD_BEGIN_RENDER_PASS: u16 = 0x0100;
 pub const CMD_END_RENDER_PASS: u16 = 0x0101;
 pub const CMD_SET_RENDER_PIPELINE: u16 = 0x0110;
+pub const CMD_SET_DEPTH_STENCIL_STATE: u16 = 0x0111;
+pub const CMD_SET_STENCIL_REF: u16 = 0x0112;
 pub const CMD_SET_SCISSOR: u16 = 0x0113;
 pub const CMD_SET_VERTEX_BYTES: u16 = 0x0120;
 pub const CMD_SET_FRAGMENT_TEXTURE: u16 = 0x0121;
@@ -43,6 +46,13 @@ pub const CMD_SET_FRAGMENT_BYTES: u16 = 0x0123;
 pub const CMD_DRAW_PRIMITIVES: u16 = 0x0130;
 pub const CMD_PRESENT_AND_COMMIT: u16 = 0x0F00;
 
+// ── Cursor commands ────────────────────────────────────────────────
+
+pub const CMD_SET_CURSOR_IMAGE: u16 = 0x0F10;
+pub const CMD_SET_CURSOR_POSITION: u16 = 0x0F11;
+pub const CMD_SET_CURSOR_VISIBLE: u16 = 0x0F12;
+pub const CMD_SET_CURSOR_FROM_TEXTURE: u16 = 0x0F13;
+
 // ── Special handles ─────────────────────────────────────────────────
 
 pub const DRAWABLE_HANDLE: u32 = 0xFFFF_FFFF;
@@ -50,11 +60,15 @@ pub const DRAWABLE_HANDLE: u32 = 0xFFFF_FFFF;
 // ── Pixel formats ───────────────────────────────────────────────────
 
 pub const PIXEL_FORMAT_R8_UNORM: u8 = 3;
+pub const PIXEL_FORMAT_STENCIL8: u8 = 4;
+pub const PIXEL_FORMAT_RGBA16_FLOAT: u8 = 5;
 pub const PIXEL_FORMAT_BGRA8_SRGB: u8 = 6;
 
 // ── Texture usage flags ────────────────────────────────────────────
 
 pub const TEX_USAGE_SHADER_READ: u8 = 0x01;
+pub const TEX_USAGE_SHADER_WRITE: u8 = 0x02;
+pub const TEX_USAGE_RENDER_TARGET: u8 = 0x04;
 
 // ── Load/store actions ──────────────────────────────────────────────
 
@@ -67,6 +81,20 @@ pub const STORE_STORE: u8 = 1;
 // ── Primitive types ─────────────────────────────────────────────────
 
 pub const PRIM_TRIANGLE: u8 = 0;
+
+// ── Stencil compare functions ──────────────────────────────────────
+
+pub const CMP_NEVER: u8 = 0;
+pub const CMP_ALWAYS: u8 = 1;
+pub const CMP_NOT_EQUAL: u8 = 3;
+
+// ── Stencil operations ─────────────────────────────────────────────
+
+pub const STENCIL_KEEP: u8 = 0;
+pub const STENCIL_ZERO: u8 = 1;
+pub const STENCIL_REPLACE: u8 = 2;
+pub const STENCIL_INCR_WRAP: u8 = 6;
+pub const STENCIL_DECR_WRAP: u8 = 7;
 
 // ── Virtqueue indices ───────────────────────────────────────────────
 
@@ -197,6 +225,44 @@ impl<'a> CommandWriter<'a> {
         self.put_u8(pixel_format);
     }
 
+    pub fn create_depth_stencil_state(
+        &mut self,
+        handle: u32,
+        enabled: bool,
+        compare_fn: u8,
+        pass_op: u8,
+        fail_op: u8,
+    ) {
+        self.header(CMD_CREATE_DEPTH_STENCIL_STATE, 8);
+        self.put_u32(handle);
+        self.put_u8(enabled as u8);
+        self.put_u8(compare_fn);
+        self.put_u8(pass_op);
+        self.put_u8(fail_op);
+    }
+
+    pub fn create_depth_stencil_state_two_sided(
+        &mut self,
+        handle: u32,
+        front_compare: u8,
+        front_pass: u8,
+        front_fail: u8,
+        back_compare: u8,
+        back_pass: u8,
+        back_fail: u8,
+    ) {
+        self.header(CMD_CREATE_DEPTH_STENCIL_STATE, 12);
+        self.put_u32(handle);
+        self.put_u8(1);
+        self.put_u8(front_compare);
+        self.put_u8(front_pass);
+        self.put_u8(front_fail);
+        self.put_u8(back_compare);
+        self.put_u8(back_pass);
+        self.put_u8(back_fail);
+        self.put_u8(0);
+    }
+
     pub fn begin_render_pass(
         &mut self,
         color_texture: u32,
@@ -232,6 +298,16 @@ impl<'a> CommandWriter<'a> {
     pub fn set_render_pipeline(&mut self, handle: u32) {
         self.header(CMD_SET_RENDER_PIPELINE, 4);
         self.put_u32(handle);
+    }
+
+    pub fn set_depth_stencil_state(&mut self, handle: u32) {
+        self.header(CMD_SET_DEPTH_STENCIL_STATE, 4);
+        self.put_u32(handle);
+    }
+
+    pub fn set_stencil_ref(&mut self, value: u32) {
+        self.header(CMD_SET_STENCIL_REF, 4);
+        self.put_u32(value);
     }
 
     pub fn set_vertex_bytes(&mut self, buffer_index: u8, data: &[u8]) {
@@ -321,12 +397,48 @@ impl<'a> CommandWriter<'a> {
         self.put_u16(0);
     }
 
+    pub fn set_fragment_bytes(&mut self, buffer_index: u8, data: &[u8]) {
+        self.header(CMD_SET_FRAGMENT_BYTES, 8 + data.len() as u32);
+        self.put_u8(buffer_index);
+        self.put_u8(0);
+        self.put_u16(0);
+        self.put_u32(data.len() as u32);
+        self.put_bytes(data);
+    }
+
     pub fn set_scissor(&mut self, x: u32, y: u32, w: u32, h: u32) {
         self.header(CMD_SET_SCISSOR, 16);
         self.put_u32(x);
         self.put_u32(y);
         self.put_u32(w);
         self.put_u32(h);
+    }
+
+    pub fn set_cursor_position(&mut self, x: f32, y: f32) {
+        self.header(CMD_SET_CURSOR_POSITION, 8);
+        self.put_f32(x);
+        self.put_f32(y);
+    }
+
+    pub fn set_cursor_visible(&mut self, visible: bool) {
+        self.header(CMD_SET_CURSOR_VISIBLE, 1);
+        self.put_u8(visible as u8);
+    }
+
+    pub fn set_cursor_from_texture(
+        &mut self,
+        texture: u32,
+        width: u16,
+        height: u16,
+        hotspot_x: u16,
+        hotspot_y: u16,
+    ) {
+        self.header(CMD_SET_CURSOR_FROM_TEXTURE, 12);
+        self.put_u32(texture);
+        self.put_u16(width);
+        self.put_u16(height);
+        self.put_u16(hotspot_x);
+        self.put_u16(hotspot_y);
     }
 }
 
@@ -657,11 +769,31 @@ mod tests {
     }
 
     #[test]
+    fn set_fragment_bytes_wire_format() {
+        let mut buf = [0u8; 256];
+        let mut w = CommandWriter::new(&mut buf);
+        let params = [1u8; 48];
+
+        w.set_fragment_bytes(0, &params);
+
+        let method = u16::from_le_bytes(buf[0..2].try_into().unwrap());
+
+        assert_eq!(method, CMD_SET_FRAGMENT_BYTES);
+
+        let payload_size = u32::from_le_bytes(buf[4..8].try_into().unwrap());
+
+        assert_eq!(payload_size, 8 + 48);
+        assert_eq!(buf[8], 0);
+    }
+
+    #[test]
     fn command_ids_distinct() {
         let setup = [
             CMD_COMPILE_LIBRARY,
             CMD_GET_FUNCTION,
             CMD_CREATE_RENDER_PIPELINE,
+            CMD_CREATE_DEPTH_STENCIL_STATE,
+            CMD_CREATE_SAMPLER,
             CMD_CREATE_TEXTURE,
             CMD_UPLOAD_TEXTURE,
             CMD_DESTROY_OBJECT,
@@ -670,6 +802,8 @@ mod tests {
             CMD_BEGIN_RENDER_PASS,
             CMD_END_RENDER_PASS,
             CMD_SET_RENDER_PIPELINE,
+            CMD_SET_DEPTH_STENCIL_STATE,
+            CMD_SET_STENCIL_REF,
             CMD_SET_SCISSOR,
             CMD_SET_VERTEX_BYTES,
             CMD_SET_FRAGMENT_TEXTURE,
@@ -677,6 +811,10 @@ mod tests {
             CMD_SET_FRAGMENT_BYTES,
             CMD_DRAW_PRIMITIVES,
             CMD_PRESENT_AND_COMMIT,
+            CMD_SET_CURSOR_IMAGE,
+            CMD_SET_CURSOR_POSITION,
+            CMD_SET_CURSOR_VISIBLE,
+            CMD_SET_CURSOR_FROM_TEXTURE,
         ];
 
         for i in 0..setup.len() {
