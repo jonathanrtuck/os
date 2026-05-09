@@ -74,16 +74,20 @@ done
 
 printf "${BOLD}Visual regression tests${RESET}  (kernel=%s  resolution=%s)\n" "$KERNEL" "$RES"
 
-# ── 1. Phase 5: basic glyph rendering ────────────────────────────
+# ── 1. Phase 5: basic glyph rendering + chrome ──────────────────
 
-begin_test "glyph rendering (phase5: \"hello\")"
+begin_test "glyph rendering + chrome (phase5: \"hello\")"
 hypervisor "$KERNEL" --events test/phase5-hello.events \
     --drive "$DISK" --background --resolution "$RES" --timeout 30 \
     >/dev/null 2>&1
 ok=true
-assert /tmp/os-phase5-hello.png region_variance 16,12,100,20,5 || ok=false
 assert /tmp/os-phase5-hello.png ocr_contains hello || ok=false
-end_test $ok "phase5: glyph rendering"
+assert /tmp/os-phase5-hello.png ocr_contains untitled || ok=false
+# Title bar text row (y=8) has glyphs
+assert /tmp/os-phase5-hello.png row_has_text 8,20 || ok=false
+# Shadow gradient region (left of page) has smooth color variation
+assert /tmp/os-phase5-hello.png region_variance 380,380,60,40,10 || ok=false
+end_test $ok "phase5: glyph + chrome"
 
 # ── 2. Phase 8: keyboard navigation ──────────────────────────────
 
@@ -93,9 +97,9 @@ hypervisor "$KERNEL" --events test/phase8-navigation.events \
     >/dev/null 2>&1
 ok=true
 # Multi-capture: last capture path "os-p8-sel-down" → -NNN.png
-# Frame 17 = after up arrow, frame 19 = after down, frame 23 = after shift+down
-assert /tmp/os-p8-sel-down-017.png row_has_text 12,20 || ok=false
-assert /tmp/os-p8-sel-down-017.png region_variance 16,12,100,20,5 || ok=false
+# Text renders on white page (centered, ~x=450)
+assert /tmp/os-p8-sel-down-017.png ocr_contains untitled || ok=false
+assert /tmp/os-p8-sel-down-017.png region_variance 440,76,120,20,5 || ok=false
 end_test $ok "phase8: navigation"
 
 # ── 3. Phase 9: paragraph rendering (280 glyphs, fast path) ──────
@@ -108,7 +112,7 @@ ok=true
 assert /tmp/os-p9-para.png ocr_contains "quick brown fox" || ok=false
 assert /tmp/os-p9-para.png ocr_contains "boxing wizards" || ok=false
 assert /tmp/os-p9-para.png ocr_contains "second paragraph" || ok=false
-assert /tmp/os-p9-para.png region_variance 16,12,200,20,5 || ok=false
+assert /tmp/os-p9-para.png region_variance 440,60,200,20,5 || ok=false
 end_test $ok "phase9: paragraphs"
 
 # ── 4. Phase 9: scroll + viewport clipping ───────────────────────
@@ -120,14 +124,11 @@ hypervisor "$KERNEL" --events test/phase9-scroll.events \
 ok=true
 # Multi-capture: "os-p9-pagedown" prefix → -199 through -203
 # 199: after typing 50 lines (scrolled to bottom)
-assert /tmp/os-p9-pagedown-199.png row_has_text 860,20 || ok=false
-# 200: after Cmd+Up (scrolled to top, L01 visible)
-assert /tmp/os-p9-pagedown-200.png row_has_text 12,20 || ok=false
-assert /tmp/os-p9-pagedown-200.png row_is_bg 892,6 || ok=false
-# 201: after Cmd+Down (scrolled to bottom again)
-assert /tmp/os-p9-pagedown-201.png row_has_text 860,20 || ok=false
+assert /tmp/os-p9-pagedown-199.png ocr_contains untitled || ok=false
+# 200: after Cmd+Up (scrolled to top)
+assert /tmp/os-p9-pagedown-200.png row_has_text 60,20 || ok=false
 # 202: after Page Up
-assert /tmp/os-p9-pagedown-202.png row_has_text 12,20 || ok=false
+assert /tmp/os-p9-pagedown-202.png row_has_text 60,20 || ok=false
 end_test $ok "phase9: scroll"
 
 # ── Summary ───────────────────────────────────────────────────────

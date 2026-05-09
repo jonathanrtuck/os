@@ -176,9 +176,25 @@ struct Presenter {
 }
 
 impl Presenter {
+    fn text_area_dims(&self) -> (u32, u32) {
+        let content_h = self
+            .display_height
+            .saturating_sub(presenter_service::TITLE_BAR_H);
+        let page_h = content_h.saturating_sub(2 * presenter_service::PAGE_MARGIN_V);
+        let page_w = ((page_h as u64 * 210 / 297) as u32).min(
+            self.display_width
+                .saturating_sub(2 * presenter_service::PAGE_MARGIN_V),
+        );
+        let pad = presenter_service::PAGE_PADDING;
+
+        (
+            page_w.saturating_sub(2 * pad),
+            page_h.saturating_sub(2 * pad),
+        )
+    }
+
     fn viewport_height(&self) -> i32 {
-        self.display_height
-            .saturating_sub(presenter_service::MARGIN_TOP as u32 * 2) as i32
+        self.text_area_dims().1 as i32
     }
 
     fn ensure_cursor_visible(&mut self, cursor_line: u32) {
@@ -209,14 +225,11 @@ impl Presenter {
     }
 
     fn write_viewport(&self) {
+        let (tw, th) = self.text_area_dims();
         let state = layout_service::ViewportState {
             scroll_y: self.scroll_y,
-            viewport_width: self
-                .display_width
-                .saturating_sub(presenter_service::MARGIN_LEFT as u32 * 2),
-            viewport_height: self
-                .display_height
-                .saturating_sub(presenter_service::MARGIN_TOP as u32 * 2),
+            viewport_width: tw,
+            viewport_height: th,
             char_width_fp: layout_service::ViewportState::encode_char_width(self.char_width),
             line_height: presenter_service::LINE_HEIGHT,
         };
@@ -273,6 +286,21 @@ impl Presenter {
             presenter_service::SEL_G,
             presenter_service::SEL_B,
         );
+        let page_bg = Color::rgb(
+            presenter_service::PAGE_BG_R,
+            presenter_service::PAGE_BG_G,
+            presenter_service::PAGE_BG_B,
+        );
+        let title_color = Color::rgb(
+            presenter_service::CHROME_TITLE_R,
+            presenter_service::CHROME_TITLE_G,
+            presenter_service::CHROME_TITLE_B,
+        );
+        let clock_color = Color::rgb(
+            presenter_service::CHROME_CLOCK_R,
+            presenter_service::CHROME_CLOCK_G,
+            presenter_service::CHROME_CLOCK_B,
+        );
         let has_selection = sel_anchor != cursor_pos;
         let sel_start = sel_anchor.min(cursor_pos);
         let sel_end = sel_anchor.max(cursor_pos);
@@ -280,6 +308,17 @@ impl Presenter {
 
         scene.clear();
 
+        let title_bar_h = presenter_service::TITLE_BAR_H;
+        let page_margin = presenter_service::PAGE_MARGIN_V;
+        let page_padding = presenter_service::PAGE_PADDING;
+        let content_h = self.display_height.saturating_sub(title_bar_h);
+        let page_h = content_h.saturating_sub(2 * page_margin);
+        let page_w = (page_h as u64 * 210 / 297) as u32;
+        let page_w = page_w.min(self.display_width.saturating_sub(2 * page_margin));
+        let page_x = ((self.display_width - page_w) / 2) as i32;
+        let page_y = page_margin as i32;
+        let text_area_w = page_w.saturating_sub(2 * page_padding);
+        let text_area_h = page_h.saturating_sub(2 * page_padding);
         // Root node — full screen background.
         let root = match scene.alloc_node() {
             Some(id) => id,
@@ -296,7 +335,142 @@ impl Presenter {
 
         scene.set_root(root);
 
-        // Viewport node — clips children, scroll offset.
+        // Title bar text — "untitled" label.
+        let title_label = b"untitled";
+        let title_text_y = (title_bar_h.saturating_sub(presenter_service::LINE_HEIGHT)) / 2;
+        let title_glyphs_count = title_label.len().min(MAX_GLYPHS_PER_LINE);
+        let char_advance = (self.char_width * 65536.0) as i32;
+
+        for (j, &byte) in title_label.iter().enumerate().take(title_glyphs_count) {
+            let gid = if byte < 128 {
+                self.cmap[byte as usize]
+            } else {
+                0
+            };
+
+            self.glyphs[j] = ShapedGlyph {
+                glyph_id: gid,
+                _pad: 0,
+                x_advance: char_advance,
+                x_offset: 0,
+                y_offset: 0,
+            };
+        }
+
+        let title_glyph_ref = scene.push_shaped_glyphs(&self.glyphs[..title_glyphs_count]);
+
+        if let Some(title_node) = scene.alloc_node() {
+            let n = scene.node_mut(title_node);
+
+            n.x = pt(page_x + page_padding as i32);
+            n.y = pt(title_text_y as i32);
+            n.width = upt((title_glyphs_count as f32 * self.char_width) as u32 + 1);
+            n.height = upt(presenter_service::LINE_HEIGHT);
+            n.content = Content::Glyphs {
+                color: title_color,
+                glyphs: title_glyph_ref,
+                glyph_count: title_glyphs_count as u16,
+                font_size: presenter_service::FONT_SIZE,
+                style_id: 0,
+            };
+            n.role = scene::ROLE_LABEL;
+
+            scene.add_child(root, title_node);
+        }
+
+        // Clock text — right-aligned.
+        let clock_ns = abi::system::clock_read().unwrap_or(0);
+        let clock_secs = (clock_ns / 1_000_000_000) % 86400;
+        let hours = (clock_secs / 3600) % 24;
+        let minutes = (clock_secs / 60) % 60;
+        let clock_chars: [u8; 5] = [
+            b'0' + (hours / 10) as u8,
+            b'0' + (hours % 10) as u8,
+            b':',
+            b'0' + (minutes / 10) as u8,
+            b'0' + (minutes % 10) as u8,
+        ];
+
+        for (j, &byte) in clock_chars.iter().enumerate() {
+            let gid = if byte < 128 {
+                self.cmap[byte as usize]
+            } else {
+                0
+            };
+
+            self.glyphs[j] = ShapedGlyph {
+                glyph_id: gid,
+                _pad: 0,
+                x_advance: char_advance,
+                x_offset: 0,
+                y_offset: 0,
+            };
+        }
+
+        let clock_glyph_ref = scene.push_shaped_glyphs(&self.glyphs[..5]);
+        let clock_x = self
+            .display_width
+            .saturating_sub(page_padding + (5.0 * self.char_width) as u32 + page_margin)
+            as i32;
+
+        if let Some(clock_node) = scene.alloc_node() {
+            let n = scene.node_mut(clock_node);
+
+            n.x = pt(clock_x);
+            n.y = pt(title_text_y as i32);
+            n.width = upt((5.0 * self.char_width) as u32 + 1);
+            n.height = upt(presenter_service::LINE_HEIGHT);
+            n.content = Content::Glyphs {
+                color: clock_color,
+                glyphs: clock_glyph_ref,
+                glyph_count: 5,
+                font_size: presenter_service::FONT_SIZE,
+                style_id: 0,
+            };
+            n.role = scene::ROLE_LABEL;
+
+            scene.add_child(root, clock_node);
+        }
+
+        // Content area — below title bar, clips children.
+        let content_area = match scene.alloc_node() {
+            Some(id) => id,
+            None => return,
+        };
+
+        {
+            let n = scene.node_mut(content_area);
+
+            n.y = pt(title_bar_h as i32);
+            n.width = upt(self.display_width);
+            n.height = upt(content_h);
+            n.flags = NodeFlags::VISIBLE.union(NodeFlags::CLIPS_CHILDREN);
+        }
+
+        scene.add_child(root, content_area);
+
+        // Page surface — white, centered, with shadow.
+        let page = match scene.alloc_node() {
+            Some(id) => id,
+            None => return,
+        };
+
+        {
+            let n = scene.node_mut(page);
+
+            n.x = pt(page_x);
+            n.y = pt(page_y);
+            n.width = upt(page_w);
+            n.height = upt(page_h);
+            n.background = page_bg;
+            n.shadow_color = Color::rgba(0, 0, 0, 255);
+            n.shadow_blur_radius = presenter_service::SHADOW_BLUR_RADIUS;
+            n.shadow_spread = presenter_service::SHADOW_SPREAD;
+        }
+
+        scene.add_child(content_area, page);
+
+        // Viewport node — clips children, scroll offset, inside page.
         let viewport = match scene.alloc_node() {
             Some(id) => id,
             None => return,
@@ -305,20 +479,16 @@ impl Presenter {
         {
             let n = scene.node_mut(viewport);
 
-            n.x = pt(presenter_service::MARGIN_LEFT);
-            n.y = pt(presenter_service::MARGIN_TOP);
-            n.width = upt(self
-                .display_width
-                .saturating_sub(presenter_service::MARGIN_LEFT as u32 * 2));
-            n.height = upt(self
-                .display_height
-                .saturating_sub(presenter_service::MARGIN_TOP as u32 * 2));
+            n.x = pt(page_padding as i32);
+            n.y = pt(page_padding as i32);
+            n.width = upt(text_area_w);
+            n.height = upt(text_area_h);
             n.flags = NodeFlags::VISIBLE.union(NodeFlags::CLIPS_CHILDREN);
             n.child_offset_y = -(self.scroll_y as f32);
             n.role = scene::ROLE_DOCUMENT;
         }
 
-        scene.add_child(root, viewport);
+        scene.add_child(page, viewport);
 
         // Selection rectangles — rendered behind text, before glyph nodes.
         if has_selection && line_count > 0 {

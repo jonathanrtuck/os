@@ -385,10 +385,10 @@ impl DrawList {
     ) {
         self.flush_current();
 
-        let sx = px + offset_x + spread;
-        let sy = py + offset_y + spread;
-        let sw = pw - 2.0 * spread;
-        let sh = ph - 2.0 * spread;
+        let sx = px + offset_x - spread;
+        let sy = py + offset_y - spread;
+        let sw = pw + 2.0 * spread;
+        let sh = ph + 2.0 * spread;
         let sigma = blur_radius / 2.0;
         let pad = 3.0 * sigma;
         let qx = sx - pad;

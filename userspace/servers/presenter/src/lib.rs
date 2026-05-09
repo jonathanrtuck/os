@@ -47,19 +47,40 @@ pub const BG_R: u8 = 30;
 pub const BG_G: u8 = 30;
 pub const BG_B: u8 = 32;
 
-pub const TEXT_R: u8 = 230;
-pub const TEXT_G: u8 = 230;
-pub const TEXT_B: u8 = 230;
+pub const TEXT_R: u8 = 30;
+pub const TEXT_G: u8 = 30;
+pub const TEXT_B: u8 = 32;
 
-pub const CURSOR_R: u8 = 200;
-pub const CURSOR_G: u8 = 200;
-pub const CURSOR_B: u8 = 200;
+pub const CURSOR_R: u8 = 30;
+pub const CURSOR_G: u8 = 30;
+pub const CURSOR_B: u8 = 30;
 
 pub const CURSOR_WIDTH: u32 = 2;
 
 pub const SEL_R: u8 = 44;
 pub const SEL_G: u8 = 80;
 pub const SEL_B: u8 = 132;
+
+// ── Chrome / page geometry ────────────────────────────────────────
+
+pub const TITLE_BAR_H: u32 = 36;
+pub const PAGE_MARGIN_V: u32 = 16;
+pub const PAGE_PADDING: u32 = 24;
+
+pub const CHROME_TITLE_R: u8 = 255;
+pub const CHROME_TITLE_G: u8 = 255;
+pub const CHROME_TITLE_B: u8 = 255;
+
+pub const CHROME_CLOCK_R: u8 = 160;
+pub const CHROME_CLOCK_G: u8 = 160;
+pub const CHROME_CLOCK_B: u8 = 160;
+
+pub const PAGE_BG_R: u8 = 255;
+pub const PAGE_BG_G: u8 = 255;
+pub const PAGE_BG_B: u8 = 255;
+
+pub const SHADOW_BLUR_RADIUS: u8 = 64;
+pub const SHADOW_SPREAD: i8 = 36;
 
 // ── SETUP reply ─────────────────────────────────────────────────
 
