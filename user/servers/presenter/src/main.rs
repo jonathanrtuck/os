@@ -900,15 +900,9 @@ impl Presenter {
         }
 
         // Space 2: Rendering showcase.
-        build_showcase_nodes(
-            &mut scene,
-            strip,
-            self.display_width,
-            content_h,
-            self.image_content_id,
-            self.image_width,
-            self.image_height,
-        );
+        let now_ns = abi::system::clock_read().unwrap_or(0);
+
+        build_showcase_nodes(&mut scene, strip, self.display_width, content_h, now_ns);
 
         scene.commit();
 
@@ -1826,9 +1820,7 @@ fn build_showcase_nodes(
     strip: scene::NodeId,
     display_width: u32,
     content_h: u32,
-    _image_content_id: u32,
-    _image_width: u16,
-    _image_height: u16,
+    now_ns: u64,
 ) {
     let base_x = (display_width * 2) as i32;
     let container = match scene.alloc_node() {
@@ -1897,7 +1889,7 @@ fn build_showcase_nodes(
         b.shadow_color = Color::rgba(0, 0, 0, 180);
         b.shadow_blur_radius = 16;
         b.shadow_spread = 4;
-        b.corner_radius = 0;
+        b.corner_radius = 60;
         b.opacity = 128;
         b.transform = scene::AffineTransform::scale(0.8, 0.8);
 
@@ -1970,11 +1962,73 @@ fn build_showcase_nodes(
                 color_end: Color::rgb(231, 76, 60),
                 kind: scene::GradientKind::Conical,
                 _pad: 0,
-                angle_fp: scene::angle_to_fp(0.0),
+                angle_fp: scene::angle_to_fp(4.71239),
                 contours: path_ref,
             };
 
             scene.add_child(group, id);
+        }
+    }
+
+    // ── Section: Easing sampler ──
+    //
+    // 5 colored squares travel back and forth horizontally, each with a
+    // different easing curve. 2-second ping-pong cycle.
+    // Inspired by the Phase 1 demo (commit 9f1b04a5).
+    const CYCLE_NS: u64 = 2_000_000_000;
+    const FULL_NS: u64 = CYCLE_NS * 2;
+
+    let phase_ns = now_ns % FULL_NS;
+    let raw_t = if phase_ns < CYCLE_NS {
+        phase_ns as f32 / CYCLE_NS as f32
+    } else {
+        1.0 - (phase_ns - CYCLE_NS) as f32 / CYCLE_NS as f32
+    };
+    let travel = 200i32;
+    let sq = 16u32;
+    let row_h = 22i32;
+    let total_w = travel + sq as i32;
+    let demo_x = 20 + (400 - total_w) / 2;
+    let demo_y = 560i32;
+    let easings: [(animation::Easing, Color); 5] = [
+        (animation::Easing::Linear, Color::rgb(255, 100, 100)),
+        (animation::Easing::EaseOut, Color::rgb(255, 180, 50)),
+        (animation::Easing::EaseInOut, Color::rgb(100, 220, 100)),
+        (animation::Easing::EaseInBack, Color::rgb(80, 160, 255)),
+        (animation::Easing::EaseOutBounce, Color::rgb(220, 80, 220)),
+    ];
+
+    for (i, &(easing, color)) in easings.iter().enumerate() {
+        let y = demo_y + i as i32 * row_h;
+
+        // Track.
+        if let Some(id) = scene.alloc_node() {
+            let n = scene.node_mut(id);
+
+            n.x = pt(demo_x);
+            n.y = pt(y + sq as i32 / 2 - 1);
+            n.width = upt(travel as u32 + sq);
+            n.height = upt(2);
+            n.background = Color::rgba(255, 255, 255, 20);
+
+            scene.add_child(container, id);
+        }
+
+        // Square.
+        let eased = animation::ease(easing, raw_t);
+        let sq_x = demo_x + (eased * travel as f32) as i32;
+
+        if let Some(id) = scene.alloc_node() {
+            let n = scene.node_mut(id);
+
+            n.x = pt(sq_x);
+            n.y = pt(y);
+            n.width = upt(sq);
+            n.height = upt(sq);
+            n.background = color;
+            n.corner_radius = 3;
+
+            scene.add_child(container, id);
         }
     }
 }
@@ -2201,7 +2255,8 @@ extern "C" fn _start() -> ! {
 
     loop {
         let now = abi::system::clock_read().unwrap_or(0);
-        let deadline = if server.slide_animating {
+        let needs_anim = server.slide_animating || server.active_space == 2;
+        let deadline = if needs_anim {
             now + FRAME_NS
         } else {
             let current_sec = now / NS_PER_SEC;
@@ -2243,6 +2298,11 @@ extern "C" fn _start() -> ! {
                         server.frame_stats.report(server.console_ep);
                         server.frame_stats.reset();
                     }
+                }
+
+                if !server.slide_animating && server.active_space == 2 {
+                    server.build_scene();
+                    needs_render = true;
                 }
 
                 if server.update_clock() {
