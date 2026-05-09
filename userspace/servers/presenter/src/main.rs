@@ -183,6 +183,7 @@ struct Presenter {
 
     clock_node_id: scene::NodeId,
     clock_glyph_ref: scene::DataRef,
+    last_clock_secs: u64,
 
     render_ep: Handle,
     editor_ep: Handle,
@@ -640,22 +641,31 @@ impl Presenter {
         self.last_content_len = content_len as u32;
     }
 
-    fn update_clock(&mut self) {
+    fn current_clock_secs(&self) -> u64 {
+        let rtc = read_rtc_seconds(self.rtc_va);
+
+        if rtc > 0 {
+            rtc % 86400
+        } else {
+            let ns = abi::system::clock_read().unwrap_or(0);
+
+            (ns / 1_000_000_000) % 86400
+        }
+    }
+
+    fn update_clock(&mut self) -> bool {
         if self.clock_node_id == scene::NULL {
-            return;
+            return false;
         }
 
-        let clock_secs = {
-            let rtc = read_rtc_seconds(self.rtc_va);
+        let clock_secs = self.current_clock_secs();
 
-            if rtc > 0 {
-                rtc % 86400
-            } else {
-                let ns = abi::system::clock_read().unwrap_or(0);
+        if clock_secs == self.last_clock_secs {
+            return false;
+        }
 
-                (ns / 1_000_000_000) % 86400
-            }
-        };
+        self.last_clock_secs = clock_secs;
+
         let hours = (clock_secs / 3600) % 24;
         let minutes = (clock_secs / 60) % 60;
         let seconds = clock_secs % 60;
@@ -691,6 +701,8 @@ impl Presenter {
 
         scene.write_shaped_glyphs_at(self.clock_glyph_ref, &self.glyphs[..8]);
         scene.commit();
+
+        true
     }
 
     // ── Navigation ─────────────────────────────────────────────
@@ -1238,6 +1250,7 @@ extern "C" fn _start() -> ! {
             offset: 0,
             length: 0,
         },
+        last_clock_secs: u64::MAX,
         render_ep,
         editor_ep,
         rtc_va,
@@ -1259,10 +1272,15 @@ extern "C" fn _start() -> ! {
         let deadline = (current_sec + 1) * NS_PER_SEC;
 
         match ipc::server::serve_one_timed(own_ep, &mut server, deadline) {
-            Ok(()) => {}
+            Ok(()) => {
+                if server.update_clock() {
+                    server.request_render();
+                }
+            }
             Err(abi::types::SyscallError::TimedOut) => {
-                server.update_clock();
-                server.request_render();
+                if server.update_clock() {
+                    server.request_render();
+                }
             }
             Err(_) => break,
         }
