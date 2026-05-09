@@ -30,6 +30,7 @@ const _HANDLE_MANIFEST_VMO: Handle = Handle(3);
 const HANDLE_UART_VMO: Handle = Handle(4);
 const HANDLE_VIRTIO_VMO: Handle = Handle(5);
 const HANDLE_DMA_RESOURCE: Handle = Handle(6);
+const HANDLE_RTC_VMO: Handle = Handle(7);
 
 const PAGE_SIZE: usize = 16384;
 const STACK_SIZE: usize = PAGE_SIZE * 8;
@@ -43,6 +44,7 @@ const CONSOLE_SVC: &[u8] = b"console";
 const INPUT_SVC: &[u8] = b"input";
 const BLK_SVC: &[u8] = b"blk";
 const RENDER_SVC: &[u8] = b"render";
+const PRESENTER_SVC: &[u8] = b"presenter";
 
 fn spawn_from_pack(pack_data: &[u8], ns_ep: Handle, init_ep: Handle) {
     let header = pack::read_header(pack_data);
@@ -76,6 +78,8 @@ fn spawn_from_pack(pack_data: &[u8], ns_ep: Handle, init_ep: Handle) {
             let _ = spawn_service(pack_data, &entry, &[ns_ep, HANDLE_UART_VMO]);
         } else if name == INPUT_SVC || name == BLK_SVC || name == RENDER_SVC {
             let _ = spawn_service(pack_data, &entry, &[ns_ep, HANDLE_VIRTIO_VMO, init_ep]);
+        } else if name == PRESENTER_SVC {
+            let _ = spawn_service(pack_data, &entry, &[ns_ep, HANDLE_RTC_VMO]);
         } else {
             let _ = spawn_service(pack_data, &entry, &[ns_ep]);
         }

@@ -134,9 +134,10 @@ pub fn create_init(init_binary: &[u8], service_pack: &[u8]) -> Result<ThreadId, 
     // Handle 4: UART MMIO VMO (device, PA 0x09000000)
     // Handle 5: Virtio MMIO VMO (device, PA 0x0A000000)
     create_device_vmos(space_idx)?;
-
     // Handle 6: DMA resource (authority token for DMA VMO creation)
     create_dma_resource(space_idx)?;
+    // Handle 7: PL031 RTC MMIO VMO (device, PA 0x09010000)
+    create_rtc_vmo(space_idx)?;
 
     #[cfg(target_os = "none")]
     {
@@ -240,6 +241,22 @@ fn create_dma_resource(space_idx: u32) -> Result<(), SyscallError> {
     Ok(())
 }
 
+fn create_rtc_vmo(space_idx: u32) -> Result<(), SyscallError> {
+    let rtc_vmo = Vmo::new_physical(VmoId(0), RTC_MMIO_PA, config::PAGE_SIZE);
+    let (rtc_idx, rtc_gen) = state::vmos()
+        .alloc_shared(rtc_vmo)
+        .ok_or(SyscallError::OutOfMemory)?;
+
+    state::vmos().write(rtc_idx).unwrap().id = VmoId(rtc_idx);
+    state::spaces()
+        .write(space_idx)
+        .ok_or(SyscallError::InvalidArgument)?
+        .handles_mut()
+        .allocate(ObjectType::Vmo, rtc_idx, Rights::ALL, rtc_gen)?;
+
+    Ok(())
+}
+
 // ── Device manifest constants ─────────────────────────────────
 // Mirror of protocol::bootstrap manifest format. The kernel cannot depend
 // on the userspace protocol crate, so the wire format is duplicated here.
@@ -249,6 +266,7 @@ const DEV_UART: u8 = 0;
 const DEV_VIRTIO: u8 = 1;
 
 const UART_MMIO_PA: usize = 0x0900_0000;
+const RTC_MMIO_PA: usize = 0x0901_0000;
 const VIRTIO_MMIO_PA: usize = 0x0A00_0000;
 
 // Virtio device slots and their IRQ INTIDs (INTID = 48 + slot).
@@ -402,8 +420,8 @@ mod tests {
 
         create_init(fake_init_binary(), &[]).unwrap();
 
-        // code + stack + device manifest + UART MMIO + virtio MMIO = 5
-        assert_eq!(state::vmos().count(), 5);
+        // code + stack + device manifest + UART MMIO + virtio MMIO + RTC MMIO = 6
+        assert_eq!(state::vmos().count(), 6);
 
         crate::invariants::assert_valid();
     }

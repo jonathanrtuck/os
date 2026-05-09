@@ -20,6 +20,7 @@ use ipc::server::{Dispatch, Incoming};
 use scene::{Color, Content, NodeFlags, SCENE_SIZE, SceneWriter, ShapedGlyph, pt, upt};
 
 const HANDLE_NS_EP: Handle = Handle(2);
+const HANDLE_RTC_VMO: Handle = Handle(3);
 
 const PAGE_SIZE: usize = 16384;
 
@@ -38,6 +39,18 @@ const EXIT_RENDER_SETUP: u32 = 0xE20E;
 const EXIT_EDITOR_NOT_FOUND: u32 = 0xE20F;
 
 const MAX_GLYPHS_PER_LINE: usize = 256;
+
+fn read_rtc_seconds(rtc_va: usize) -> u64 {
+    if rtc_va == 0 {
+        return 0;
+    }
+
+    // SAFETY: rtc_va is a valid device VMO mapping of the PL031 RTC.
+    // Register 0 (RTCDR) contains the current time as a Unix epoch.
+    let val = unsafe { core::ptr::read_volatile(rtc_va as *const u32) };
+
+    val as u64
+}
 
 static FONT_DATA: &[u8] = include_bytes!("../../../../assets/jetbrains-mono.ttf");
 
@@ -170,6 +183,8 @@ struct Presenter {
 
     render_ep: Handle,
     editor_ep: Handle,
+
+    rtc_va: usize,
 
     #[allow(dead_code)]
     console_ep: Handle,
@@ -380,8 +395,18 @@ impl Presenter {
         }
 
         // Clock text — right-aligned, HH:MM:SS format.
-        let clock_ns = abi::system::clock_read().unwrap_or(0);
-        let clock_secs = (clock_ns / 1_000_000_000) % 86400;
+        // Use PL031 RTC for wall-clock time; fall back to monotonic uptime.
+        let clock_secs = {
+            let rtc = read_rtc_seconds(self.rtc_va);
+
+            if rtc > 0 {
+                rtc % 86400
+            } else {
+                let ns = abi::system::clock_read().unwrap_or(0);
+
+                (ns / 1_000_000_000) % 86400
+            }
+        };
         let hours = (clock_secs / 3600) % 24;
         let minutes = (clock_secs / 60) % 60;
         let seconds = clock_secs % 60;
@@ -994,6 +1019,8 @@ extern "C" fn _start() -> ! {
 
     console::write(console_ep, b"presenter: starting\n");
 
+    let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
+    let rtc_va = abi::vmo::map(HANDLE_RTC_VMO, 0, rw).unwrap_or(0);
     let doc_ep = match name::watch(HANDLE_NS_EP, b"document") {
         Ok(h) => h,
         Err(_) => {
@@ -1066,7 +1093,6 @@ extern "C" fn _start() -> ! {
     // bytes. The presenter is the sole writer.
     let scene_buf = unsafe { core::slice::from_raw_parts_mut(scene_va as *mut u8, SCENE_SIZE) };
     let _ = SceneWriter::new(scene_buf);
-
     // Connect to compositor — send scene graph VMO so it can read our output.
     let render_ep = match name::watch(HANDLE_NS_EP, b"render") {
         Ok(h) => h,
@@ -1150,6 +1176,7 @@ extern "C" fn _start() -> ! {
         sticky_col: None,
         render_ep,
         editor_ep,
+        rtc_va,
         console_ep,
     };
 
