@@ -266,6 +266,14 @@ fn pack_shadow_params(
     buf
 }
 
+fn srgb_to_linear(s: f32) -> f32 {
+    if s <= 0.04045 {
+        s / 12.92
+    } else {
+        libm::powf((s + 0.055) / 1.055, 2.4)
+    }
+}
+
 // ── Draw list ──────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1303,9 +1311,9 @@ impl Compositor {
 
         self.upload_atlas_dirty();
 
-        let clear_r = bg.r as f32 / 255.0;
-        let clear_g = bg.g as f32 / 255.0;
-        let clear_b = bg.b as f32 / 255.0;
+        let clear_r = srgb_to_linear(bg.r as f32 / 255.0);
+        let clear_g = srgb_to_linear(bg.g as f32 / 255.0);
+        let clear_b = srgb_to_linear(bg.b as f32 / 255.0);
 
         if draws.ops.is_empty() {
             // SAFETY: render_dma.va is a valid DMA allocation of render_buf_size bytes.

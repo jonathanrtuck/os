@@ -10,6 +10,7 @@ baremetal = ["dep:abi", "dep:console", "dep:heap", "dep:init", "dep:ipc", "dep:n
 
 [dependencies]
 abi = { path = "../../../abi", optional = true }
+libm = "0.2"
 animation = { path = "../../../../libraries/animation" }
 console = { path = "../../console", optional = true }
 fonts = { path = "../../../../libraries/fonts" }
