@@ -285,6 +285,53 @@ fn push_quad(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn push_quad_corners(
+    buf: &mut alloc::vec::Vec<u8>,
+    display_w: f32,
+    display_h: f32,
+    corners: [(f32, f32); 4],
+    color: scene::Color,
+    uv0: [f32; 2],
+    uv1: [f32; 2],
+) {
+    let to_ndc = |px: f32, py: f32| -> (f32, f32) {
+        (px / display_w * 2.0 - 1.0, 1.0 - py / display_h * 2.0)
+    };
+    let (x0, y0) = to_ndc(corners[0].0, corners[0].1);
+    let (x1, y1) = to_ndc(corners[1].0, corners[1].1);
+    let (x2, y2) = to_ndc(corners[2].0, corners[2].1);
+    let (x3, y3) = to_ndc(corners[3].0, corners[3].1);
+    let c = [
+        color.r as f32 / 255.0,
+        color.g as f32 / 255.0,
+        color.b as f32 / 255.0,
+        color.a as f32 / 255.0,
+    ];
+    let tcs = [
+        [uv0[0], uv0[1]],
+        [uv0[0], uv1[1]],
+        [uv1[0], uv1[1]],
+        [uv1[0], uv0[1]],
+    ];
+    let positions = [(x0, y0), (x3, y3), (x2, y2), (x0, y0), (x2, y2), (x1, y1)];
+    let tex_idx = [0, 3, 2, 0, 2, 1];
+
+    for i in 0..6 {
+        let (px, py) = positions[i];
+        let tc = tcs[tex_idx[i]];
+
+        buf.extend_from_slice(&px.to_le_bytes());
+        buf.extend_from_slice(&py.to_le_bytes());
+        buf.extend_from_slice(&tc[0].to_le_bytes());
+        buf.extend_from_slice(&tc[1].to_le_bytes());
+        buf.extend_from_slice(&c[0].to_le_bytes());
+        buf.extend_from_slice(&c[1].to_le_bytes());
+        buf.extend_from_slice(&c[2].to_le_bytes());
+        buf.extend_from_slice(&c[3].to_le_bytes());
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn pack_shadow_params(
     rect_min_x: f32,
     rect_min_y: f32,
@@ -378,6 +425,20 @@ impl DrawList {
             self.flush_current();
             self.current_pipe = pipe;
         }
+    }
+
+    fn push_transformed_rect(&mut self, corners: [(f32, f32); 4], color: scene::Color) {
+        self.ensure_pipe(Pipe::Solid);
+
+        push_quad_corners(
+            &mut self.verts,
+            self.display_w,
+            self.display_h,
+            corners,
+            color,
+            [0.0; 2],
+            [0.0; 2],
+        );
     }
 
     fn push_rect(&mut self, px: f32, py: f32, pw: f32, ph: f32, color: scene::Color) {
@@ -802,12 +863,50 @@ fn walk_node(
         );
     }
 
+    let has_transform = !node.transform.is_identity();
+
     if !is_root && node.background.a > 0 {
         let mut bg = node.background;
 
         bg.a = ((bg.a as u16 * effective_opacity as u16) / 255) as u8;
 
-        draws.push_rect(x, y, w, h, bg);
+        if node.corner_radius > 0 {
+            draws.push_shadow(
+                x,
+                y,
+                w,
+                h,
+                0.5,
+                0.0,
+                0.0,
+                0.0,
+                bg,
+                node.corner_radius as f32,
+                ctx.scale as f32,
+            );
+        } else if has_transform {
+            let cx = x + w / 2.0;
+            let cy = y + h / 2.0;
+            let tf = &node.transform;
+            let corners = [
+                tf.transform_point(x - cx, y - cy),
+                tf.transform_point(x + w - cx, y - cy),
+                tf.transform_point(x + w - cx, y + h - cy),
+                tf.transform_point(x - cx, y + h - cy),
+            ];
+
+            draws.push_transformed_rect(
+                [
+                    (corners[0].0 + cx, corners[0].1 + cy),
+                    (corners[1].0 + cx, corners[1].1 + cy),
+                    (corners[2].0 + cx, corners[2].1 + cy),
+                    (corners[3].0 + cx, corners[3].1 + cy),
+                ],
+                bg,
+            );
+        } else {
+            draws.push_rect(x, y, w, h, bg);
+        }
     }
 
     match node.content {
