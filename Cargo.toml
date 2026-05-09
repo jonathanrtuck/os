@@ -11,6 +11,7 @@ members = [
     "user/libraries/store",
     "user/libraries/fonts",
     "user/libraries/render",
+    "user/libraries/png",
 ]
 exclude = ["kernel/fuzz", "user/init", "user/abi", "tools/mkdisk"]
 resolver = "3"

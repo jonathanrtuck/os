@@ -496,6 +496,28 @@ next rendering milestone.
    runs by font, each with the appropriate style_id. Maintains monospace grid
    alignment for fallback glyphs (uses primary font's advance).
 
+### Phase 12 — PNG Decoder (COMPLETE)
+
+1. **PNG library** (`user/libraries/png/`) — DONE. 1,350-line pure Rust PNG
+   decoder ported from v0.6 prototype. No external dependencies, no_std, no
+   alloc. Supports all PNG color types (0, 2, 3, 4, 6) at all valid bit depths
+   (1, 2, 4, 8, 16), Adam7 interlacing, PLTE palettes, tRNS transparency.
+   Self-contained zlib/DEFLATE decompressor with Huffman tables (fixed +
+   dynamic), all 5 PNG filter types (None/Sub/Up/Average/Paeth), CRC32
+   verification on every chunk. Decodes into caller-provided BGRA8888 buffer.
+   66 host-target tests against the PNGSuite fixture set (178 test images):
+   per-color-type decode, interlaced↔non-interlaced pixel-exact equivalence,
+   all filter types, odd dimensions (1×1 through 40×40), tRNS transparency,
+   compression level equivalence, corrupt file rejection.
+
+2. **PNG decoder service** (`user/servers/png-decoder/`) — DONE. Runs as a
+   separate process. Registers as "png-decoder" with name service. IPC protocol:
+   client sends DECODE request with PNG data VMO handle + file size; service
+   maps VMO, decodes via the PNG library, creates output VMO with BGRA pixels,
+   replies with pixel VMO handle + dimensions (width, height, pixel_size).
+   Protocol crate: `src/lib.rs` with DecodeRequest/DecodeReply wire types and
+   round-trip tests. Added to service pack in `kernel/build.rs`.
+
 ## What's Next: v0.6 Parity
 
 The userspace rebuild plan (`design/userspace-rebuild.md`) is complete through
@@ -513,7 +535,7 @@ work to reach full v0.6-pre-rewrite parity is tracked in
 - Phase 10a (pointer interaction — I-beam cursor, click/drag/multi-click):
   COMPLETE
 - Phase 11 (content-type typography): COMPLETE
-- Phase 12 (PNG decoder): NOT STARTED
+- Phase 12 (PNG decoder): COMPLETE
 - Phase 13 (filesystem + virtio-9p): NOT STARTED
 - Phase 14 (document switching — Ctrl+Tab text↔image, slide animation): NOT
   STARTED

@@ -99,6 +99,10 @@ fn build_init(kernel_dir: &std::path::Path) {
     println!("cargo:rerun-if-changed=../user/servers/test-editor/src/main.rs");
     println!("cargo:rerun-if-changed=../user/servers/test-editor/link.ld");
     println!("cargo:rerun-if-changed=../user/servers/test-editor/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/servers/png-decoder/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/servers/png-decoder/src/lib.rs");
+    println!("cargo:rerun-if-changed=../user/servers/png-decoder/link.ld");
+    println!("cargo:rerun-if-changed=../user/servers/png-decoder/Cargo.toml");
 }
 
 fn build_userspace_crate(crate_dir: &std::path::Path, crate_name: &str, output: &std::path::Path) {
@@ -252,6 +256,11 @@ const SERVICES: &[ServiceDef] = &[
         name: "editor.text",
         dir: "../user/editors/text",
         crate_name: "text-editor",
+    },
+    ServiceDef {
+        name: "png-decoder",
+        dir: "../user/servers/png-decoder",
+        crate_name: "png-decoder",
     },
 ];
 
