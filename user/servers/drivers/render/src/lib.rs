@@ -650,6 +650,10 @@ pub mod comp {
 extern crate alloc;
 
 #[cfg(test)]
+#[path = "path.rs"]
+mod path;
+
+#[cfg(test)]
 mod tests {
     use alloc::vec;
 
@@ -1111,5 +1115,237 @@ mod tests {
         w.present_and_commit(0);
 
         assert!(!w.has_overflow());
+    }
+
+    // ── Cursor rasterization tests ────────────────────────────────
+
+    fn rasterize_cursor_test(icon_name: &str, scale: u32) -> (vec::Vec<u8>, u32) {
+        let icon = icons::get(icon_name, None);
+        let viewbox = icon.viewbox;
+        let stroke_w = icon.stroke_width;
+        let display_pt: f32 = 24.0;
+        let px_scale = display_pt * scale as f32 / viewbox;
+        let margin_vb = stroke_w / 2.0 + 1.0 + 10.0;
+        let total_vb = viewbox + 2.0 * margin_vb;
+        let tex_sz = (total_vb * px_scale) as u32;
+
+        if tex_sz == 0 || tex_sz > 256 {
+            return (vec::Vec::new(), 0);
+        }
+
+        fn offset_path_test(src: &[u8], dx: f32, dy: f32) -> vec::Vec<u8> {
+            let mut out = vec::Vec::with_capacity(src.len());
+            let mut off = 0;
+
+            while off + 4 <= src.len() {
+                let tag = u32::from_le_bytes(src[off..off + 4].try_into().unwrap());
+
+                match tag {
+                    scene::PATH_MOVE_TO | scene::PATH_LINE_TO => {
+                        let x = f32::from_le_bytes(src[off + 4..off + 8].try_into().unwrap()) + dx;
+                        let y = f32::from_le_bytes(src[off + 8..off + 12].try_into().unwrap()) + dy;
+
+                        out.extend_from_slice(&src[off..off + 4]);
+                        out.extend_from_slice(&x.to_le_bytes());
+                        out.extend_from_slice(&y.to_le_bytes());
+                        off += scene::PATH_MOVE_TO_SIZE;
+                    }
+                    scene::PATH_CUBIC_TO => {
+                        out.extend_from_slice(&src[off..off + 4]);
+
+                        for i in 0..3 {
+                            let base = off + 4 + i * 8;
+                            let x =
+                                f32::from_le_bytes(src[base..base + 4].try_into().unwrap()) + dx;
+                            let y = f32::from_le_bytes(src[base + 4..base + 8].try_into().unwrap())
+                                + dy;
+
+                            out.extend_from_slice(&x.to_le_bytes());
+                            out.extend_from_slice(&y.to_le_bytes());
+                        }
+
+                        off += scene::PATH_CUBIC_TO_SIZE;
+                    }
+                    scene::PATH_CLOSE => {
+                        out.extend_from_slice(&src[off..off + scene::PATH_CLOSE_SIZE]);
+                        off += scene::PATH_CLOSE_SIZE;
+                    }
+                    _ => break,
+                }
+            }
+
+            out
+        }
+
+        let path_data = offset_path_test(icon.paths[0].commands, margin_vb, margin_vb);
+        let stroke_only = !icon.all_paths_closed();
+
+        let (body, outline) = if stroke_only {
+            let body_exp = scene::stroke::expand_stroke(&path_data, stroke_w);
+            let body = super::path::rasterize_path(
+                &path_data,
+                tex_sz,
+                tex_sz,
+                px_scale,
+                scene::FillRule::Winding,
+                Some(&body_exp),
+            );
+            let outline_exp = scene::stroke::expand_stroke(&path_data, stroke_w + 2.0);
+            let outline = super::path::rasterize_path(
+                &path_data,
+                tex_sz,
+                tex_sz,
+                px_scale,
+                scene::FillRule::Winding,
+                Some(&outline_exp),
+            );
+
+            (body, outline)
+        } else {
+            let fill = super::path::rasterize_path(
+                &path_data,
+                tex_sz,
+                tex_sz,
+                px_scale,
+                scene::FillRule::Winding,
+                None,
+            );
+            let stroke_exp = scene::stroke::expand_stroke(&path_data, stroke_w);
+            let stroke = super::path::rasterize_path(
+                &path_data,
+                tex_sz,
+                tex_sz,
+                px_scale,
+                scene::FillRule::Winding,
+                Some(&stroke_exp),
+            );
+
+            (fill, stroke)
+        };
+
+        let mut bgra = vec![0u8; (tex_sz * tex_sz * 4) as usize];
+
+        for i in 0..(tex_sz * tex_sz) as usize {
+            let body_a = body.get(i).copied().unwrap_or(0) as u16;
+            let outline_a = outline.get(i).copied().unwrap_or(0) as u16;
+            let border_only = outline_a.saturating_sub(body_a);
+            let cursor_a = body_a.max(border_only).min(255);
+            let cursor_lum = if cursor_a > 0 {
+                (255 * border_only / cursor_a.max(1)) as u8
+            } else {
+                0
+            };
+
+            if cursor_a > 0 {
+                bgra[i * 4] = cursor_lum;
+                bgra[i * 4 + 1] = cursor_lum;
+                bgra[i * 4 + 2] = cursor_lum;
+                bgra[i * 4 + 3] = cursor_a as u8;
+            }
+        }
+
+        (bgra, tex_sz)
+    }
+
+    #[test]
+    fn ibeam_cursor_has_dark_body_and_light_outline() {
+        let (bgra, sz) = rasterize_cursor_test("cursor-text", 2);
+
+        assert!(sz > 0, "cursor texture size must be non-zero");
+        assert!(!bgra.is_empty(), "cursor BGRA data must be non-empty");
+
+        let mut dark_count = 0u32;
+        let mut light_count = 0u32;
+        let mut visible_count = 0u32;
+
+        for i in 0..(sz * sz) as usize {
+            let a = bgra[i * 4 + 3] as u32;
+
+            if a < 10 {
+                continue;
+            }
+
+            visible_count += 1;
+
+            let lum = bgra[i * 4] as u32;
+
+            if lum < 80 {
+                dark_count += 1;
+            } else if lum > 180 {
+                light_count += 1;
+            }
+        }
+
+        assert!(
+            visible_count > 50,
+            "cursor must have substantial visible pixels, got {visible_count}"
+        );
+        assert!(
+            dark_count > 20,
+            "I-beam must have dark body pixels for visibility on white, got {dark_count}"
+        );
+        assert!(
+            light_count > 10,
+            "I-beam must have light outline pixels for visibility on dark, got {light_count}"
+        );
+    }
+
+    #[test]
+    fn arrow_cursor_has_dark_body_and_light_outline() {
+        let (bgra, sz) = rasterize_cursor_test("pointer", 2);
+
+        assert!(sz > 0);
+
+        let mut dark_count = 0u32;
+        let mut light_count = 0u32;
+        let mut visible_count = 0u32;
+
+        for i in 0..(sz * sz) as usize {
+            let a = bgra[i * 4 + 3] as u32;
+
+            if a < 10 {
+                continue;
+            }
+
+            visible_count += 1;
+
+            let lum = bgra[i * 4] as u32;
+
+            if lum < 80 {
+                dark_count += 1;
+            } else if lum > 180 {
+                light_count += 1;
+            }
+        }
+
+        assert!(visible_count > 50);
+        assert!(
+            dark_count > 20,
+            "arrow must have dark body pixels, got {dark_count}"
+        );
+        assert!(
+            light_count > 10,
+            "arrow must have light outline pixels, got {light_count}"
+        );
+    }
+
+    #[test]
+    fn cursor_text_icon_is_open_path() {
+        let icon = icons::get("cursor-text", None);
+
+        assert!(
+            !icon.all_paths_closed(),
+            "cursor-text icon must have open paths (stroke-only rendering)"
+        );
+    }
+
+    #[test]
+    fn pointer_icon_is_closed_path() {
+        let icon = icons::get("pointer", None);
+
+        assert!(
+            icon.all_paths_closed(),
+            "pointer icon must have closed paths (fill+stroke rendering)"
+        );
     }
 }
