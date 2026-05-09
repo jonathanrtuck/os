@@ -131,6 +131,7 @@ struct DocumentServer {
     doc_vmo: Handle,
     content_len: usize,
     cursor_pos: usize,
+    sel_anchor: usize,
     generation: u32,
 
     store_ep: Handle,
@@ -158,14 +159,18 @@ impl DocumentServer {
 
             core::ptr::write_volatile(base as *mut u64, self.content_len as u64);
             core::ptr::write_volatile(base.add(8) as *mut u64, self.cursor_pos as u64);
+            core::ptr::write_volatile(
+                base.add(document_service::DOC_OFFSET_SEL_ANCHOR) as *mut u64,
+                self.sel_anchor as u64,
+            );
         }
 
         self.generation = self.generation.wrapping_add(1);
 
         // SAFETY: doc_va + 16 is within the 64-byte header, 4-byte aligned.
         // AtomicU32 Release ordering makes all prior writes (content_len,
-        // cursor_pos, content bytes) visible to readers that Acquire-load
-        // this generation counter.
+        // cursor_pos, sel_anchor, content bytes) visible to readers that
+        // Acquire-load this generation counter.
         unsafe {
             let gen_ptr =
                 (self.doc_va + document_service::DOC_OFFSET_GENERATION) as *const AtomicU32;
@@ -201,6 +206,7 @@ impl DocumentServer {
 
         self.content_len = new_len;
         self.cursor_pos = offset + data.len();
+        self.sel_anchor = self.cursor_pos;
 
         self.write_header();
 
@@ -230,6 +236,8 @@ impl DocumentServer {
         } else if self.cursor_pos > offset {
             self.cursor_pos = offset;
         }
+
+        self.sel_anchor = self.cursor_pos;
 
         self.write_header();
 
@@ -352,6 +360,8 @@ impl DocumentServer {
         if self.cursor_pos > self.content_len {
             self.cursor_pos = self.content_len;
         }
+
+        self.sel_anchor = self.cursor_pos;
 
         self.write_header();
     }
@@ -519,6 +529,34 @@ impl Dispatch for DocumentServer {
                 }
             }
 
+            document_service::REPLACE => {
+                if msg.payload.len() < document_service::ReplaceHeader::SIZE {
+                    let _ = msg.reply_error(ipc::STATUS_INVALID);
+
+                    return;
+                }
+
+                let header = document_service::ReplaceHeader::read_from(msg.payload);
+                let offset = header.offset as usize;
+                let delete_len = header.delete_len as usize;
+                let replacement = &msg.payload[document_service::ReplaceHeader::SIZE..];
+
+                if delete_len > 0 && !self.apply_delete(offset, delete_len) {
+                    let _ = msg.reply_error(ipc::STATUS_INVALID);
+
+                    return;
+                }
+
+                if !replacement.is_empty() && !self.apply_insert(offset, replacement) {
+                    let _ = msg.reply_error(ipc::STATUS_INVALID);
+
+                    return;
+                }
+
+                self.persist_and_snapshot();
+                self.reply_edit(msg);
+            }
+
             document_service::CURSOR_MOVE => {
                 if msg.payload.len() < document_service::CursorMove::SIZE {
                     let _ = msg.reply_error(ipc::STATUS_INVALID);
@@ -531,6 +569,7 @@ impl Dispatch for DocumentServer {
 
                 if pos <= self.content_len {
                     self.cursor_pos = pos;
+                    self.sel_anchor = pos;
 
                     self.write_header();
                     self.reply_edit(msg);
@@ -551,6 +590,7 @@ impl Dispatch for DocumentServer {
                 let cursor = sel.cursor as usize;
 
                 if anchor <= self.content_len && cursor <= self.content_len {
+                    self.sel_anchor = anchor;
                     self.cursor_pos = cursor;
 
                     self.write_header();
@@ -728,6 +768,7 @@ extern "C" fn _start() -> ! {
         doc_vmo,
         content_len: 0,
         cursor_pos: 0,
+        sel_anchor: 0,
         generation: 0,
         store_ep,
         store_shared_va,

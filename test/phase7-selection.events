@@ -1,0 +1,14 @@
+# Phase 7.2 — selection verification.
+# Type "hello", Shift+Left×2 to select "lo", capture with selection,
+# then type "p" to replace selection, capture result.
+0 key h
+1 key e
+2 key l
+3 key l
+4 key o
+5 key shift+left
+6 key shift+left
+7 capture /tmp/os-phase7-sel.png
+7 key p
+8 capture /tmp/os-phase7-replaced.png
+8 exit

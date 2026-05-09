@@ -22,10 +22,17 @@ pub const HID_KEY_RETURN: u16 = 0x28;
 pub const HID_KEY_BACKSPACE: u16 = 0x2A;
 pub const HID_KEY_TAB: u16 = 0x2B;
 pub const HID_KEY_DELETE: u16 = 0x4C;
+pub const HID_KEY_RIGHT: u16 = 0x4F;
+pub const HID_KEY_LEFT: u16 = 0x50;
+pub const HID_KEY_DOWN: u16 = 0x51;
+pub const HID_KEY_UP: u16 = 0x52;
+pub const HID_KEY_HOME: u16 = 0x4A;
+pub const HID_KEY_END: u16 = 0x4D;
 
 // ── Input modifier flags (shared with input protocol) ────────────
 
 pub const MOD_SHIFT: u8 = 1 << 0;
+pub const MOD_SUPER: u8 = 1 << 3;
 
 // ── Key dispatch (presenter → editor) ────────────────────────────
 
@@ -60,6 +67,7 @@ impl KeyDispatch {
 pub const ACTION_NONE: u8 = 0;
 pub const ACTION_INSERTED: u8 = 1;
 pub const ACTION_DELETED: u8 = 2;
+pub const ACTION_REPLACED: u8 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyReply {
@@ -176,6 +184,12 @@ mod tests {
             HID_KEY_BACKSPACE,
             HID_KEY_TAB,
             HID_KEY_DELETE,
+            HID_KEY_RIGHT,
+            HID_KEY_LEFT,
+            HID_KEY_DOWN,
+            HID_KEY_UP,
+            HID_KEY_HOME,
+            HID_KEY_END,
         ];
 
         for i in 0..codes.len() {
@@ -187,8 +201,17 @@ mod tests {
 
     #[test]
     fn action_values_distinct() {
-        assert_ne!(ACTION_NONE, ACTION_INSERTED);
-        assert_ne!(ACTION_NONE, ACTION_DELETED);
-        assert_ne!(ACTION_INSERTED, ACTION_DELETED);
+        let actions = [
+            ACTION_NONE,
+            ACTION_INSERTED,
+            ACTION_DELETED,
+            ACTION_REPLACED,
+        ];
+
+        for i in 0..actions.len() {
+            for j in (i + 1)..actions.len() {
+                assert_ne!(actions[i], actions[j]);
+            }
+        }
     }
 }

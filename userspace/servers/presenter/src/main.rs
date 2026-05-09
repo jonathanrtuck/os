@@ -76,10 +76,71 @@ fn parse_line_at(buf: &[u8], index: usize) -> layout_service::LineInfo {
     layout_service::LineInfo::read_from(&buf[offset..])
 }
 
+// ── Selection geometry ────────────────────────────────────────────
+
+struct SelectionSpan {
+    start: usize,
+    end: usize,
+    color: Color,
+    char_width: f32,
+}
+
+fn build_selection_nodes(
+    scene: &mut SceneWriter,
+    results_buf: &[u8],
+    viewport: scene::NodeId,
+    line_count: usize,
+    sel: &SelectionSpan,
+) {
+    let line_height = presenter_service::LINE_HEIGHT;
+
+    for i in 0..line_count {
+        let line_info = parse_line_at(results_buf, i);
+        let line_byte_start = line_info.byte_offset as usize;
+        let line_byte_end = line_byte_start + line_info.byte_length as usize;
+
+        if sel.end <= line_byte_start || sel.start >= line_byte_end {
+            continue;
+        }
+
+        let col_start = sel.start.saturating_sub(line_byte_start);
+        let col_end = if sel.end < line_byte_end {
+            sel.end - line_byte_start
+        } else {
+            line_info.byte_length as usize
+        };
+
+        if col_start >= col_end {
+            continue;
+        }
+
+        let x = col_start as f32 * sel.char_width;
+        let w = (col_end - col_start) as f32 * sel.char_width;
+        let sel_node = match scene.alloc_node() {
+            Some(id) => id,
+            None => return,
+        };
+
+        {
+            let n = scene.node_mut(sel_node);
+
+            n.x = scene::f32_to_mpt(x);
+            n.y = pt(line_info.y);
+            n.width = scene::f32_to_mpt(w) as u32;
+            n.height = upt(line_height);
+            n.background = sel.color;
+            n.role = scene::ROLE_SELECTION;
+        }
+
+        scene.add_child(viewport, sel_node);
+    }
+}
+
 // ── Presenter server ──────────────────────────────────────────────
 
 struct Presenter {
     doc_va: usize,
+    doc_ep: Handle,
     layout_ep: Handle,
 
     results_reader: ipc::register::Reader,
@@ -141,7 +202,7 @@ impl Presenter {
     fn build_scene(&mut self) {
         let _ = ipc::client::call_simple(self.layout_ep, layout_service::RECOMPUTE, &[]);
         // SAFETY: doc_va is a valid RO mapping of the document buffer.
-        let (content_len, cursor_pos, _) =
+        let (content_len, cursor_pos, sel_anchor, _) =
             unsafe { document_service::read_doc_header(self.doc_va) };
 
         self.results_reader.read(&mut self.results_buf);
@@ -165,6 +226,14 @@ impl Presenter {
             presenter_service::CURSOR_G,
             presenter_service::CURSOR_B,
         );
+        let sel_color = Color::rgb(
+            presenter_service::SEL_R,
+            presenter_service::SEL_G,
+            presenter_service::SEL_B,
+        );
+        let has_selection = sel_anchor != cursor_pos;
+        let sel_start = sel_anchor.min(cursor_pos);
+        let sel_end = sel_anchor.max(cursor_pos);
         let mut scene = SceneWriter::from_existing(self.scene_buf);
 
         scene.clear();
@@ -207,6 +276,18 @@ impl Presenter {
         }
 
         scene.add_child(root, viewport);
+
+        // Selection rectangles — rendered behind text, before glyph nodes.
+        if has_selection && line_count > 0 {
+            let span = SelectionSpan {
+                start: sel_start,
+                end: sel_end,
+                color: sel_color,
+                char_width: self.char_width,
+            };
+
+            build_selection_nodes(&mut scene, &self.results_buf, viewport, line_count, &span);
+        }
 
         // Per-line glyph nodes.
         let mut cursor_line: u32 = 0;
@@ -287,7 +368,8 @@ impl Presenter {
             }
         }
 
-        // Cursor node.
+        // Cursor node — on top of text, with blink animation.
+        // When selection is active, cursor is solid (no blink).
         let cursor_x = cursor_col as f32 * self.char_width;
         let cursor_y = cursor_line as i32 * presenter_service::LINE_HEIGHT as i32;
 
@@ -299,7 +381,11 @@ impl Presenter {
             n.width = upt(presenter_service::CURSOR_WIDTH);
             n.height = upt(presenter_service::LINE_HEIGHT);
             n.background = cursor_color;
-            n.animation = scene::Animation::cursor_blink(self.blink_start);
+
+            if !has_selection {
+                n.animation = scene::Animation::cursor_blink(self.blink_start);
+            }
+
             n.role = scene::ROLE_CARET;
 
             scene.add_child(viewport, cursor_node);
@@ -311,6 +397,104 @@ impl Presenter {
         self.last_cursor_line = cursor_line;
         self.last_cursor_col = cursor_col;
         self.last_content_len = content_len as u32;
+    }
+
+    fn handle_key_event(&mut self, dispatch: text_editor::KeyDispatch) {
+        // SAFETY: doc_va is a valid RO mapping of the document buffer.
+        let (content_len, cursor_pos, sel_anchor, _) =
+            unsafe { document_service::read_doc_header(self.doc_va) };
+        let has_selection = sel_anchor != cursor_pos;
+        let shift = dispatch.modifiers & text_editor::MOD_SHIFT != 0;
+        let cmd = dispatch.modifiers & text_editor::MOD_SUPER != 0;
+        let handled = match dispatch.key_code {
+            text_editor::HID_KEY_LEFT if shift => {
+                let new_cursor = cursor_pos.saturating_sub(1);
+                let anchor = if has_selection {
+                    sel_anchor
+                } else {
+                    cursor_pos
+                };
+
+                self.doc_select(anchor, new_cursor);
+
+                true
+            }
+            text_editor::HID_KEY_RIGHT if shift => {
+                let new_cursor = (cursor_pos + 1).min(content_len);
+                let anchor = if has_selection {
+                    sel_anchor
+                } else {
+                    cursor_pos
+                };
+
+                self.doc_select(anchor, new_cursor);
+
+                true
+            }
+            text_editor::HID_KEY_LEFT if !shift => {
+                if has_selection {
+                    let left = sel_anchor.min(cursor_pos);
+
+                    self.doc_cursor_move(left);
+
+                    true
+                } else {
+                    false
+                }
+            }
+            text_editor::HID_KEY_RIGHT if !shift => {
+                if has_selection {
+                    let right = sel_anchor.max(cursor_pos);
+
+                    self.doc_cursor_move(right);
+
+                    true
+                } else {
+                    false
+                }
+            }
+            _ if cmd && dispatch.character == b'a' => {
+                self.doc_select(0, content_len);
+
+                true
+            }
+            _ => false,
+        };
+
+        if !handled {
+            let mut data = [0u8; text_editor::KeyDispatch::SIZE];
+
+            dispatch.write_to(&mut data);
+
+            let _ = ipc::client::call_simple(self.editor_ep, text_editor::DISPATCH_KEY, &data);
+        }
+
+        self.blink_start = abi::system::clock_read().unwrap_or(0);
+        self.build_scene();
+        self.request_render();
+    }
+
+    fn doc_select(&self, anchor: usize, cursor: usize) {
+        let sel = document_service::Selection {
+            anchor: anchor as u64,
+            cursor: cursor as u64,
+        };
+        let mut data = [0u8; document_service::Selection::SIZE];
+
+        sel.write_to(&mut data);
+
+        let _ = ipc::client::call_simple(self.doc_ep, document_service::SELECT, &data);
+    }
+
+    fn doc_cursor_move(&self, pos: usize) {
+        let req = document_service::CursorMove {
+            position: pos as u64,
+        };
+        let mut data = [0u8; document_service::CursorMove::SIZE];
+
+        req.write_to(&mut data);
+
+        let _ = ipc::client::call_simple(self.doc_ep, document_service::CURSOR_MOVE, &data);
     }
 
     fn request_render(&self) {
@@ -377,16 +561,8 @@ impl Dispatch for Presenter {
             presenter_service::KEY_EVENT => {
                 if msg.payload.len() >= text_editor::KeyDispatch::SIZE {
                     let dispatch = text_editor::KeyDispatch::read_from(msg.payload);
-                    let mut data = [0u8; text_editor::KeyDispatch::SIZE];
 
-                    dispatch.write_to(&mut data);
-
-                    let _ =
-                        ipc::client::call_simple(self.editor_ep, text_editor::DISPATCH_KEY, &data);
-
-                    self.blink_start = abi::system::clock_read().unwrap_or(0);
-                    self.build_scene();
-                    self.request_render();
+                    self.handle_key_event(dispatch);
                 }
 
                 let _ = msg.reply_empty();
@@ -540,6 +716,7 @@ extern "C" fn _start() -> ! {
 
     let mut server = Presenter {
         doc_va,
+        doc_ep,
         layout_ep,
         results_reader,
         results_buf: [0u8; layout_service::RESULTS_VALUE_SIZE],

@@ -53,6 +53,10 @@ pub const CURSOR_B: u8 = 200;
 
 pub const CURSOR_WIDTH: u32 = 2;
 
+pub const SEL_R: u8 = 44;
+pub const SEL_G: u8 = 80;
+pub const SEL_B: u8 = 132;
+
 // ── SETUP reply ─────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

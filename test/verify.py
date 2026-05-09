@@ -176,6 +176,37 @@ def assert_region_variance(img: Image.Image, args: str, tolerance: int) -> bool:
         return False
 
 
+def assert_color_in_region(img: Image.Image, args: str, tolerance: int) -> bool:
+    """Check that a specific color appears at least once in a region.
+
+    Args: X,Y,W,H,R,G,B — region bounds and target color.
+    """
+    parts = args.split(",")
+    if len(parts) != 7:
+        print(f"FAIL: color_in_region expects X,Y,W,H,R,G,B, got '{args}'")
+        return False
+
+    x, y, w, h, er, eg, eb = (int(p) for p in parts)
+    count = 0
+
+    for py in range(y, min(y + h, img.height)):
+        for px in range(x, min(x + w, img.width)):
+            r, g, b = img.getpixel((px, py))[:3]
+            if (abs(r - er) <= tolerance and
+                    abs(g - eg) <= tolerance and
+                    abs(b - eb) <= tolerance):
+                count += 1
+
+    if count > 0:
+        print(f"PASS: found {count} pixels matching ({er},{eg},{eb}) "
+              f"+/-{tolerance} in region ({x},{y},{w},{h})")
+        return True
+    else:
+        print(f"FAIL: no pixels matching ({er},{eg},{eb}) +/-{tolerance} "
+              f"in region ({x},{y},{w},{h})")
+        return False
+
+
 ASSERTIONS = {
     "solid_color": assert_solid_color,
     "uniform": assert_uniform,
@@ -183,6 +214,7 @@ ASSERTIONS = {
     "dimensions": assert_dimensions,
     "pixel_at": assert_pixel_at,
     "region_variance": assert_region_variance,
+    "color_in_region": assert_color_in_region,
 }
 
 

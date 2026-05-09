@@ -80,6 +80,33 @@ fn doc_delete(doc_ep: Handle, offset: u64, len: u64) -> Option<document_service:
     }
 }
 
+fn doc_replace(
+    doc_ep: Handle,
+    offset: u64,
+    delete_len: u64,
+    replacement: &[u8],
+) -> Option<document_service::EditReply> {
+    let header = document_service::ReplaceHeader { offset, delete_len };
+    let mut payload = [0u8; ipc::MAX_PAYLOAD];
+
+    header.write_to(&mut payload);
+
+    let copy_len = replacement
+        .len()
+        .min(document_service::ReplaceHeader::MAX_INLINE);
+
+    payload
+        [document_service::ReplaceHeader::SIZE..document_service::ReplaceHeader::SIZE + copy_len]
+        .copy_from_slice(&replacement[..copy_len]);
+
+    let total = document_service::ReplaceHeader::SIZE + copy_len;
+
+    match ipc::client::call_simple(doc_ep, document_service::REPLACE, &payload[..total]) {
+        Ok((0, reply_data)) => Some(document_service::EditReply::read_from(&reply_data)),
+        _ => None,
+    }
+}
+
 // ── Editor server ────────────────────────────────────────────────
 
 struct TextEditor {
@@ -93,8 +120,13 @@ struct TextEditor {
 impl TextEditor {
     fn handle_key(&mut self, dispatch: text_editor::KeyDispatch) -> text_editor::KeyReply {
         // SAFETY: doc_va is a valid RO mapping of the document buffer.
-        let (content_len, cursor_pos, _) =
+        let (content_len, cursor_pos, sel_anchor, _) =
             unsafe { document_service::read_doc_header(self.doc_va) };
+        let has_selection = sel_anchor != cursor_pos;
+
+        if has_selection {
+            return self.handle_key_with_selection(dispatch, content_len, sel_anchor, cursor_pos);
+        }
 
         match dispatch.key_code {
             text_editor::HID_KEY_BACKSPACE => {
@@ -152,6 +184,87 @@ impl TextEditor {
                 {
                     return text_editor::KeyReply {
                         action: text_editor::ACTION_INSERTED,
+                        _pad: 0,
+                        content_len: reply.content_len,
+                        cursor_pos: reply.cursor_pos,
+                    };
+                }
+
+                self.no_op(content_len, cursor_pos)
+            }
+        }
+    }
+
+    fn handle_key_with_selection(
+        &mut self,
+        dispatch: text_editor::KeyDispatch,
+        content_len: usize,
+        sel_anchor: usize,
+        cursor_pos: usize,
+    ) -> text_editor::KeyReply {
+        let sel_start = sel_anchor.min(cursor_pos);
+        let sel_len = sel_anchor.max(cursor_pos) - sel_start;
+
+        match dispatch.key_code {
+            text_editor::HID_KEY_BACKSPACE | text_editor::HID_KEY_DELETE => {
+                if let Some(reply) = doc_replace(self.doc_ep, sel_start as u64, sel_len as u64, &[])
+                {
+                    text_editor::KeyReply {
+                        action: text_editor::ACTION_DELETED,
+                        _pad: 0,
+                        content_len: reply.content_len,
+                        cursor_pos: reply.cursor_pos,
+                    }
+                } else {
+                    self.no_op(content_len, cursor_pos)
+                }
+            }
+            text_editor::HID_KEY_RETURN => {
+                if let Some(reply) =
+                    doc_replace(self.doc_ep, sel_start as u64, sel_len as u64, b"\n")
+                {
+                    text_editor::KeyReply {
+                        action: text_editor::ACTION_REPLACED,
+                        _pad: 0,
+                        content_len: reply.content_len,
+                        cursor_pos: reply.cursor_pos,
+                    }
+                } else {
+                    self.no_op(content_len, cursor_pos)
+                }
+            }
+            text_editor::HID_KEY_TAB => {
+                let replacement = if dispatch.modifiers & text_editor::MOD_SHIFT != 0 {
+                    &b""[..]
+                } else {
+                    &b"    "[..]
+                };
+
+                if let Some(reply) =
+                    doc_replace(self.doc_ep, sel_start as u64, sel_len as u64, replacement)
+                {
+                    text_editor::KeyReply {
+                        action: text_editor::ACTION_REPLACED,
+                        _pad: 0,
+                        content_len: reply.content_len,
+                        cursor_pos: reply.cursor_pos,
+                    }
+                } else {
+                    self.no_op(content_len, cursor_pos)
+                }
+            }
+            _ => {
+                if dispatch.character != 0
+                    && dispatch.character != 0x08
+                    && let Some(reply) = doc_replace(
+                        self.doc_ep,
+                        sel_start as u64,
+                        sel_len as u64,
+                        &[dispatch.character],
+                    )
+                {
+                    return text_editor::KeyReply {
+                        action: text_editor::ACTION_REPLACED,
                         _pad: 0,
                         content_len: reply.content_len,
                         cursor_pos: reply.cursor_pos,

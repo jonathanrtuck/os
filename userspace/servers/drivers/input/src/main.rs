@@ -68,6 +68,12 @@ const HID_RETURN: u16 = 0x28;
 const HID_BACKSPACE: u16 = 0x2A;
 const HID_TAB: u16 = 0x2B;
 const HID_DELETE: u16 = 0x4C;
+const HID_RIGHT: u16 = 0x4F;
+const HID_LEFT: u16 = 0x50;
+const HID_DOWN: u16 = 0x51;
+const HID_UP: u16 = 0x52;
+const HID_HOME: u16 = 0x4A;
+const HID_END: u16 = 0x4D;
 
 fn evdev_to_key(code: u16, shift: bool) -> (u16, u8) {
     // (hid_key_code, ascii_char) — for printable: hid=0, char=ascii
@@ -129,6 +135,13 @@ fn evdev_to_key(code: u16, shift: bool) -> (u16, u8) {
         28 => (HID_RETURN, 0),
         57 => (0, b' '),
         111 => (HID_DELETE, 0),
+        // Navigation keys
+        102 => (HID_HOME, 0),
+        103 => (HID_UP, 0),
+        105 => (HID_LEFT, 0),
+        106 => (HID_RIGHT, 0),
+        107 => (HID_END, 0),
+        108 => (HID_DOWN, 0),
         _ => (0, 0),
     }
 }

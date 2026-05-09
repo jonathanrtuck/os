@@ -97,7 +97,8 @@ impl LayoutServer {
         }
 
         // SAFETY: doc_va is a valid RO mapping of the document buffer.
-        let (content_len, _, doc_gen) = unsafe { document_service::read_doc_header(self.doc_va) };
+        let (content_len, _, _, doc_gen) =
+            unsafe { document_service::read_doc_header(self.doc_va) };
         let viewport = self.read_viewport();
         let cw = viewport.char_width();
         let lh = viewport.line_height as f32;

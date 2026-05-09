@@ -24,6 +24,7 @@ pub const SELECT: u32 = 5;
 pub const UNDO: u32 = 6;
 pub const REDO: u32 = 7;
 pub const GET_INFO: u32 = 8;
+pub const REPLACE: u32 = 9;
 
 // ── Document buffer header ─────────────────────────────────────────
 
@@ -33,6 +34,7 @@ pub const DOC_OFFSET_LEN: usize = 0;
 pub const DOC_OFFSET_CURSOR: usize = 8;
 pub const DOC_OFFSET_GENERATION: usize = 16;
 pub const DOC_OFFSET_FORMAT: usize = 20;
+pub const DOC_OFFSET_SEL_ANCHOR: usize = 24;
 
 pub const FORMAT_PLAIN: u32 = 0;
 pub const FORMAT_RICH: u32 = 1;
@@ -41,28 +43,32 @@ pub const FORMAT_RICH: u32 = 1;
 
 /// Read the document buffer header using the seqlock protocol.
 ///
-/// Returns `(content_len, cursor_pos, generation)`. Spins until a
-/// consistent snapshot is obtained.
+/// Returns `(content_len, cursor_pos, sel_anchor, generation)`. Spins
+/// until a consistent snapshot is obtained. When no selection is active,
+/// `sel_anchor == cursor_pos`.
 ///
 /// # Safety
 /// `doc_va` must point to a valid mapped document buffer VMO of at
 /// least `DOC_HEADER_SIZE` bytes, 8-byte aligned.
-pub unsafe fn read_doc_header(doc_va: usize) -> (usize, usize, u32) {
+pub unsafe fn read_doc_header(doc_va: usize) -> (usize, usize, usize, u32) {
     loop {
         let ptr = (doc_va + DOC_OFFSET_GENERATION) as *const AtomicU32;
         // SAFETY: ptr is within the document buffer header (offset 16).
         let generation = unsafe { (*ptr).load(Ordering::Acquire) };
-        // SAFETY: doc_va offsets 0..8 and 8..16 are content_len and
-        // cursor_pos. read_volatile prevents the compiler from reordering
-        // or caching these reads across the generation check.
+        // SAFETY: doc_va offsets 0..8, 8..16, 24..32 are content_len,
+        // cursor_pos, sel_anchor. read_volatile prevents the compiler
+        // from reordering or caching reads across the generation check.
         let content_len = unsafe { core::ptr::read_volatile(doc_va as *const u64) as usize };
         let cursor_pos = unsafe {
             core::ptr::read_volatile((doc_va + DOC_OFFSET_CURSOR) as *const u64) as usize
         };
+        let sel_anchor = unsafe {
+            core::ptr::read_volatile((doc_va + DOC_OFFSET_SEL_ANCHOR) as *const u64) as usize
+        };
         let generation2 = unsafe { (*ptr).load(Ordering::Acquire) };
 
         if generation == generation2 {
-            return (content_len, cursor_pos, generation);
+            return (content_len, cursor_pos, sel_anchor, generation);
         }
 
         core::hint::spin_loop();
@@ -159,6 +165,36 @@ impl DeleteRequest {
         Self {
             offset: u64::from_le_bytes(buf[0..8].try_into().unwrap()),
             len: u64::from_le_bytes(buf[8..16].try_into().unwrap()),
+        }
+    }
+}
+
+// ── Replace (atomic delete + insert for selection overwrite) ──────
+
+/// Replace a byte range with new data. Inline replacement follows
+/// after the header. If no replacement data is present, acts as a
+/// pure range delete. Creates a single undo snapshot for both the
+/// delete and insert.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplaceHeader {
+    pub offset: u64,
+    pub delete_len: u64,
+}
+
+impl ReplaceHeader {
+    pub const SIZE: usize = 16;
+    pub const MAX_INLINE: usize = crate::MAX_PAYLOAD - Self::SIZE;
+
+    pub fn write_to(&self, buf: &mut [u8]) {
+        buf[0..8].copy_from_slice(&self.offset.to_le_bytes());
+        buf[8..16].copy_from_slice(&self.delete_len.to_le_bytes());
+    }
+
+    #[must_use]
+    pub fn read_from(buf: &[u8]) -> Self {
+        Self {
+            offset: u64::from_le_bytes(buf[0..8].try_into().unwrap()),
+            delete_len: u64::from_le_bytes(buf[8..16].try_into().unwrap()),
         }
     }
 }
@@ -371,6 +407,24 @@ mod tests {
     }
 
     #[test]
+    fn replace_header_round_trip() {
+        let header = ReplaceHeader {
+            offset: 10,
+            delete_len: 5,
+        };
+        let mut buf = [0u8; ReplaceHeader::SIZE];
+
+        header.write_to(&mut buf);
+
+        assert_eq!(ReplaceHeader::read_from(&buf), header);
+    }
+
+    #[test]
+    fn replace_max_inline_correct() {
+        assert_eq!(ReplaceHeader::MAX_INLINE, 104);
+    }
+
+    #[test]
     fn method_ids_distinct() {
         let methods = [
             SETUP,
@@ -381,6 +435,7 @@ mod tests {
             UNDO,
             REDO,
             GET_INFO,
+            REPLACE,
         ];
 
         for i in 0..methods.len() {
@@ -395,6 +450,7 @@ mod tests {
         assert!(SetupReply::SIZE <= crate::MAX_PAYLOAD);
         assert!(InsertHeader::SIZE <= crate::MAX_PAYLOAD);
         assert!(DeleteRequest::SIZE <= crate::MAX_PAYLOAD);
+        assert!(ReplaceHeader::SIZE <= crate::MAX_PAYLOAD);
         assert!(CursorMove::SIZE <= crate::MAX_PAYLOAD);
         assert!(Selection::SIZE <= crate::MAX_PAYLOAD);
         assert!(EditReply::SIZE <= crate::MAX_PAYLOAD);
