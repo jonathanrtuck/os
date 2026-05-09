@@ -10,12 +10,12 @@ rationale.
 
 ## Kernel
 
-30 syscalls across 5 object types. ~28K LOC Rust. Framekernel discipline: all
+34 syscalls across 5 object types. ~28K LOC Rust. Framekernel discipline: all
 `unsafe` confined to `frame/` module, enforced at compile time.
 
-**Object types:** VMO (8 syscalls), Endpoint (2 + call/recv/reply), Event (5),
-Thread (5), Address Space (2), plus handle_dup/close/info, clock_read,
-system_info.
+**Object types:** VMO (9 syscalls), Endpoint (2 + call/recv/reply/recv_timed),
+Event (6), Thread (6), Address Space (2), plus handle_dup/close/info,
+clock_read, system_info.
 
 **Scheduler:** Multi-core fixed-priority preemptive, 256 levels, per-CPU
 `SpinLock<PerCoreState>` (no global lock). SMP up to 8 cores. Thread creation
@@ -152,7 +152,7 @@ build order, verification strategy).
 
 ### Completed (Layer 0)
 
-- `userspace/abi` — raw syscall wrappers for all 30 syscalls
+- `userspace/abi` — raw syscall wrappers for all 34 syscalls
 - `userspace/ipc` — SPSC ring buffers, seqlock state registers, typed messages
 - `userspace/init` — parses SVPK service pack, spawns services in separate
   address spaces

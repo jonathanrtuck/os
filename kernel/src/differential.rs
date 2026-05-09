@@ -252,7 +252,7 @@ mod tests {
         setup();
 
         // Invalid syscall → InvalidArgument
-        let (e, _) = call(30, &[0; 6]);
+        let (e, _) = call(34, &[0; 6]);
 
         assert_eq!(e, SyscallError::InvalidArgument as u64);
 

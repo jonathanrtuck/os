@@ -326,7 +326,7 @@ mod tests {
     fn every_syscall_number_unknown_rejected() {
         setup();
 
-        for num in 32..=35 {
+        for num in 34..=37 {
             let (err, _) = call(num, &[0; 6]);
 
             assert_eq!(

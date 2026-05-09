@@ -113,6 +113,10 @@ pub fn set_pager(vmo: Handle, endpoint: Handle) -> Result<(), SyscallError> {
     .map(|_| ())
 }
 
+pub fn info(handle: Handle) -> Result<usize, SyscallError> {
+    check(raw::syscall(num::VMO_INFO, handle.0 as u64, 0, 0, 0, 0, 0)).map(|v| v as usize)
+}
+
 /// RAII mapping of a VMO into the current address space.
 ///
 /// Provides safe `&[u8]` / `&mut [u8]` access to mapped memory and

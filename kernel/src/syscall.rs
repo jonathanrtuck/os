@@ -19,8 +19,9 @@ use crate::{
     vmo::{Vmo, VmoFlags},
 };
 
-/// Syscall numbers (30 total).
+/// Syscall numbers (34 total, dense-packed by object group).
 pub mod num {
+    // VMO (0–8)
     pub const VMO_CREATE: u64 = 0;
     pub const VMO_MAP: u64 = 1;
     pub const VMO_MAP_INTO: u64 = 2;
@@ -29,30 +30,38 @@ pub mod num {
     pub const VMO_SEAL: u64 = 5;
     pub const VMO_RESIZE: u64 = 6;
     pub const VMO_SET_PAGER: u64 = 7;
-    pub const ENDPOINT_CREATE: u64 = 8;
-    pub const CALL: u64 = 9;
-    pub const RECV: u64 = 10;
-    pub const REPLY: u64 = 11;
-    pub const EVENT_CREATE: u64 = 12;
-    pub const EVENT_SIGNAL: u64 = 13;
-    pub const EVENT_WAIT: u64 = 14;
-    pub const EVENT_CLEAR: u64 = 15;
-    pub const THREAD_CREATE: u64 = 16;
-    pub const THREAD_CREATE_IN: u64 = 17;
-    pub const THREAD_EXIT: u64 = 18;
-    pub const THREAD_SET_PRIORITY: u64 = 19;
-    pub const THREAD_SET_AFFINITY: u64 = 20;
-    pub const SPACE_CREATE: u64 = 21;
-    pub const SPACE_DESTROY: u64 = 22;
-    pub const HANDLE_DUP: u64 = 23;
-    pub const HANDLE_CLOSE: u64 = 24;
-    pub const HANDLE_INFO: u64 = 25;
-    pub const CLOCK_READ: u64 = 26;
-    pub const SYSTEM_INFO: u64 = 27;
-    pub const EVENT_BIND_IRQ: u64 = 28;
-    pub const ENDPOINT_BIND_EVENT: u64 = 29;
-    pub const EVENT_WAIT_DEADLINE: u64 = 30;
-    pub const RECV_TIMED: u64 = 31;
+    pub const VMO_INFO: u64 = 8;
+    // Endpoint (9–14)
+    pub const ENDPOINT_CREATE: u64 = 9;
+    pub const CALL: u64 = 10;
+    pub const RECV: u64 = 11;
+    pub const REPLY: u64 = 12;
+    pub const ENDPOINT_BIND_EVENT: u64 = 13;
+    pub const RECV_TIMED: u64 = 14;
+    // Event (15–20)
+    pub const EVENT_CREATE: u64 = 15;
+    pub const EVENT_SIGNAL: u64 = 16;
+    pub const EVENT_WAIT: u64 = 17;
+    pub const EVENT_CLEAR: u64 = 18;
+    pub const EVENT_BIND_IRQ: u64 = 19;
+    pub const EVENT_WAIT_DEADLINE: u64 = 20;
+    // Thread (21–26)
+    pub const THREAD_CREATE: u64 = 21;
+    pub const THREAD_CREATE_IN: u64 = 22;
+    pub const THREAD_EXIT: u64 = 23;
+    pub const THREAD_SET_PRIORITY: u64 = 24;
+    pub const THREAD_SET_AFFINITY: u64 = 25;
+    pub const THREAD_YIELD: u64 = 26;
+    // Space (27–28)
+    pub const SPACE_CREATE: u64 = 27;
+    pub const SPACE_DESTROY: u64 = 28;
+    // Handle (29–31)
+    pub const HANDLE_DUP: u64 = 29;
+    pub const HANDLE_CLOSE: u64 = 30;
+    pub const HANDLE_INFO: u64 = 31;
+    // System (32–33)
+    pub const CLOCK_READ: u64 = 32;
+    pub const SYSTEM_INFO: u64 = 33;
 }
 
 struct StagedHandles {
@@ -537,6 +546,7 @@ pub fn dispatch(
     profile::stamp(slot::DISPATCH_ENTER);
 
     let result = match syscall_num {
+        // VMO (0–8)
         num::VMO_CREATE => sys_vmo_create(current, space_id, core_id, args),
         num::VMO_MAP => sys_vmo_map(current, space_id, core_id, args),
         num::VMO_MAP_INTO => sys_vmo_map_into(current, space_id, core_id, args),
@@ -545,30 +555,38 @@ pub fn dispatch(
         num::VMO_SEAL => sys_vmo_seal(current, space_id, core_id, args),
         num::VMO_RESIZE => sys_vmo_resize(current, space_id, core_id, args),
         num::VMO_SET_PAGER => sys_vmo_set_pager(current, space_id, core_id, args),
+        num::VMO_INFO => sys_vmo_info(current, space_id, core_id, args),
+        // Endpoint (9–14)
         num::ENDPOINT_CREATE => sys_endpoint_create(current, space_id, core_id, args),
         num::CALL => sys_call(current, space_id, core_id, args),
         num::RECV => sys_recv(current, space_id, core_id, args),
         num::REPLY => sys_reply(current, space_id, core_id, args),
+        num::ENDPOINT_BIND_EVENT => sys_endpoint_bind_event(current, space_id, core_id, args),
+        num::RECV_TIMED => sys_recv_timed(current, space_id, core_id, args),
+        // Event (15–20)
         num::EVENT_CREATE => sys_event_create(current, space_id, core_id, args),
         num::EVENT_SIGNAL => sys_event_signal(current, space_id, core_id, args),
         num::EVENT_WAIT => sys_event_wait(current, space_id, core_id, args),
         num::EVENT_CLEAR => sys_event_clear(current, space_id, core_id, args),
+        num::EVENT_BIND_IRQ => sys_event_bind_irq(current, space_id, core_id, args),
+        num::EVENT_WAIT_DEADLINE => sys_event_wait_deadline(current, space_id, core_id, args),
+        // Thread (21–26)
         num::THREAD_CREATE => sys_thread_create(current, space_id, core_id, args),
         num::THREAD_CREATE_IN => sys_thread_create_in(current, space_id, core_id, args),
         num::THREAD_EXIT => sys_thread_exit(current, space_id, core_id, args),
         num::THREAD_SET_PRIORITY => sys_thread_set_priority(current, space_id, core_id, args),
         num::THREAD_SET_AFFINITY => sys_thread_set_affinity(current, space_id, core_id, args),
+        num::THREAD_YIELD => sys_thread_yield(current, space_id, core_id, args),
+        // Space (27–28)
         num::SPACE_CREATE => sys_space_create(current, space_id, core_id, args),
         num::SPACE_DESTROY => sys_space_destroy(current, space_id, core_id, args),
+        // Handle (29–31)
         num::HANDLE_DUP => sys_handle_dup(current, space_id, core_id, args),
         num::HANDLE_CLOSE => sys_handle_close(current, space_id, core_id, args),
         num::HANDLE_INFO => sys_handle_info(current, space_id, core_id, args),
+        // System (32–33)
         num::CLOCK_READ => sys_clock_read(current, space_id, core_id, args),
         num::SYSTEM_INFO => sys_system_info(current, space_id, core_id, args),
-        num::EVENT_BIND_IRQ => sys_event_bind_irq(current, space_id, core_id, args),
-        num::ENDPOINT_BIND_EVENT => sys_endpoint_bind_event(current, space_id, core_id, args),
-        num::EVENT_WAIT_DEADLINE => sys_event_wait_deadline(current, space_id, core_id, args),
-        num::RECV_TIMED => sys_recv_timed(current, space_id, core_id, args),
         _ => Err(SyscallError::InvalidArgument),
     };
 
@@ -981,6 +999,32 @@ fn sys_vmo_set_pager(
         .set_pager(EndpointId(ep_handle.object_id))?;
 
     Ok(0)
+}
+
+/// Query a VMO's size in bytes.
+///
+/// Args: [handle, 0, 0, 0, 0, 0]
+/// Returns: size in bytes.
+#[inline(never)]
+fn sys_vmo_info(
+    _current: ThreadId,
+    space_id: Option<AddressSpaceId>,
+    _core_id: usize,
+    args: &[u64; 6],
+) -> Result<u64, SyscallError> {
+    let handle_id = HandleId(args[0] as u32);
+    let space_id = space_id.ok_or(SyscallError::InvalidArgument)?;
+    let handle = lookup_handle(space_id, handle_id)?;
+
+    if handle.object_type != ObjectType::Vmo {
+        return Err(SyscallError::WrongHandleType);
+    }
+
+    let vmo = state::vmos()
+        .read(handle.object_id)
+        .ok_or(SyscallError::InvalidHandle)?;
+
+    Ok(vmo.size() as u64)
 }
 
 // ── Endpoint syscalls ───────────────────────────────────────
@@ -3167,6 +3211,22 @@ fn sys_thread_set_affinity(
         .write(handle.object_id)
         .ok_or(SyscallError::InvalidHandle)?
         .set_affinity(hint);
+
+    Ok(0)
+}
+
+/// Yield the current thread — move to the back of its priority queue and
+/// switch to the next runnable thread.
+///
+/// Args: [0, 0, 0, 0, 0, 0] (no arguments)
+#[inline(never)]
+fn sys_thread_yield(
+    current: ThreadId,
+    _space_id: Option<AddressSpaceId>,
+    core_id: usize,
+    _args: &[u64; 6],
+) -> Result<u64, SyscallError> {
+    crate::sched::yield_current(current, core_id);
 
     Ok(0)
 }

@@ -68,3 +68,7 @@ pub fn set_affinity(handle: Handle, hint: u64) -> Result<(), SyscallError> {
     ))
     .map(|_| ())
 }
+
+pub fn yield_now() -> Result<(), SyscallError> {
+    check(raw::syscall(num::THREAD_YIELD, 0, 0, 0, 0, 0, 0)).map(|_| ())
+}

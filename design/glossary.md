@@ -64,7 +64,7 @@ foundational. See [design/userspace.md § 2.1](userspace.md).
 **Kernel** — manages hardware resources (memory, CPU time, interrupts, process
 isolation). Semantically ignorant — does not know what a document, mimetype, or
 pixel is. Five object types (VMO, Endpoint, Event, Thread, Address Space), each
-accessed via capability handles with rights attenuation. 30 syscalls, SMP with
+accessed via capability handles with rights attenuation. 34 syscalls, SMP with
 per-core fixed-priority preemptive scheduler (4 priority levels), sync IPC
 (call/recv/reply), GICv3, 16 KiB pages, ~28K LOC Rust. Framekernel discipline:
 `unsafe` confined to `frame/` module, enforced at compile time. See

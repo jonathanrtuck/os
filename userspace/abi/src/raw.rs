@@ -3,6 +3,7 @@
 use crate::types::SyscallError;
 
 pub mod num {
+    // VMO (0–8)
     pub const VMO_CREATE: u64 = 0;
     pub const VMO_MAP: u64 = 1;
     pub const VMO_MAP_INTO: u64 = 2;
@@ -11,30 +12,38 @@ pub mod num {
     pub const VMO_SEAL: u64 = 5;
     pub const VMO_RESIZE: u64 = 6;
     pub const VMO_SET_PAGER: u64 = 7;
-    pub const ENDPOINT_CREATE: u64 = 8;
-    pub const CALL: u64 = 9;
-    pub const RECV: u64 = 10;
-    pub const REPLY: u64 = 11;
-    pub const EVENT_CREATE: u64 = 12;
-    pub const EVENT_SIGNAL: u64 = 13;
-    pub const EVENT_WAIT: u64 = 14;
-    pub const EVENT_CLEAR: u64 = 15;
-    pub const THREAD_CREATE: u64 = 16;
-    pub const THREAD_CREATE_IN: u64 = 17;
-    pub const THREAD_EXIT: u64 = 18;
-    pub const THREAD_SET_PRIORITY: u64 = 19;
-    pub const THREAD_SET_AFFINITY: u64 = 20;
-    pub const SPACE_CREATE: u64 = 21;
-    pub const SPACE_DESTROY: u64 = 22;
-    pub const HANDLE_DUP: u64 = 23;
-    pub const HANDLE_CLOSE: u64 = 24;
-    pub const HANDLE_INFO: u64 = 25;
-    pub const CLOCK_READ: u64 = 26;
-    pub const SYSTEM_INFO: u64 = 27;
-    pub const EVENT_BIND_IRQ: u64 = 28;
-    pub const ENDPOINT_BIND_EVENT: u64 = 29;
-    pub const EVENT_WAIT_DEADLINE: u64 = 30;
-    pub const RECV_TIMED: u64 = 31;
+    pub const VMO_INFO: u64 = 8;
+    // Endpoint (9–14)
+    pub const ENDPOINT_CREATE: u64 = 9;
+    pub const CALL: u64 = 10;
+    pub const RECV: u64 = 11;
+    pub const REPLY: u64 = 12;
+    pub const ENDPOINT_BIND_EVENT: u64 = 13;
+    pub const RECV_TIMED: u64 = 14;
+    // Event (15–20)
+    pub const EVENT_CREATE: u64 = 15;
+    pub const EVENT_SIGNAL: u64 = 16;
+    pub const EVENT_WAIT: u64 = 17;
+    pub const EVENT_CLEAR: u64 = 18;
+    pub const EVENT_BIND_IRQ: u64 = 19;
+    pub const EVENT_WAIT_DEADLINE: u64 = 20;
+    // Thread (21–26)
+    pub const THREAD_CREATE: u64 = 21;
+    pub const THREAD_CREATE_IN: u64 = 22;
+    pub const THREAD_EXIT: u64 = 23;
+    pub const THREAD_SET_PRIORITY: u64 = 24;
+    pub const THREAD_SET_AFFINITY: u64 = 25;
+    pub const THREAD_YIELD: u64 = 26;
+    // Space (27–28)
+    pub const SPACE_CREATE: u64 = 27;
+    pub const SPACE_DESTROY: u64 = 28;
+    // Handle (29–31)
+    pub const HANDLE_DUP: u64 = 29;
+    pub const HANDLE_CLOSE: u64 = 30;
+    pub const HANDLE_INFO: u64 = 31;
+    // System (32–33)
+    pub const CLOCK_READ: u64 = 32;
+    pub const SYSTEM_INFO: u64 = 33;
 }
 
 #[inline(always)]
