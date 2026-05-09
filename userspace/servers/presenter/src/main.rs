@@ -362,7 +362,7 @@ impl Presenter {
         if let Some(title_node) = scene.alloc_node() {
             let n = scene.node_mut(title_node);
 
-            n.x = pt(page_x + page_padding as i32);
+            n.x = pt(36);
             n.y = pt(title_text_y as i32);
             n.width = upt((title_glyphs_count as f32 * self.char_width) as u32 + 1);
             n.height = upt(presenter_service::LINE_HEIGHT);
@@ -408,10 +408,7 @@ impl Presenter {
         }
 
         let clock_glyph_ref = scene.push_shaped_glyphs(&self.glyphs[..5]);
-        let clock_x = self
-            .display_width
-            .saturating_sub(page_padding + (5.0 * self.char_width) as u32 + page_margin)
-            as i32;
+        let clock_x = (self.display_width - 12 - 80) as i32;
 
         if let Some(clock_node) = scene.alloc_node() {
             let n = scene.node_mut(clock_node);
