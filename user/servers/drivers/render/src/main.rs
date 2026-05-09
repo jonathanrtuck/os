@@ -198,6 +198,77 @@ fragment float4 fragment_textured(
 ) {
     return tex.sample(s, in.texCoord);
 }
+
+struct GradientParams {
+    float rect_min_x;
+    float rect_min_y;
+    float rect_max_x;
+    float rect_max_y;
+    float4 color0;
+    float4 color1;
+    float angle;
+    float kind;
+    float _pad0;
+    float _pad1;
+};
+
+fragment float4 fragment_gradient(
+    VertexOut in [[stage_in]],
+    constant GradientParams& params [[buffer(0)]]
+) {
+    float2 center = 0.5 * float2(params.rect_min_x + params.rect_max_x,
+                                   params.rect_min_y + params.rect_max_y);
+    float2 half_ext = 0.5 * float2(params.rect_max_x - params.rect_min_x,
+                                     params.rect_max_y - params.rect_min_y);
+    float2 norm = (in.texCoord - center) / max(half_ext, 0.001);
+    int gk = int(params.kind);
+    float t;
+    if (gk == 0) {
+        float2 dir = float2(cos(params.angle), sin(params.angle));
+        t = saturate(0.5 + 0.5 * dot(norm, dir));
+    } else if (gk == 1) {
+        t = saturate(length(norm));
+    } else {
+        float a = atan2(norm.y, norm.x) - params.angle;
+        t = fract(a / 6.28318530718);
+    }
+    float3 c0 = srgb_to_linear(params.color0.rgb);
+    float3 c1 = srgb_to_linear(params.color1.rgb);
+    float a0 = params.color0.a;
+    float a1 = params.color1.a;
+    return float4(mix(c0, c1, t), mix(a0, a1, t));
+}
+
+fragment float4 fragment_gradient_masked(
+    VertexOut in [[stage_in]],
+    constant GradientParams& params [[buffer(0)]],
+    texture2d<float> tex [[texture(0)]],
+    sampler s [[sampler(0)]]
+) {
+    float coverage = tex.sample(s, in.texCoord).r;
+    if (coverage <= 0.0) return float4(0.0);
+    float2 p = in.position.xy;
+    float2 center = 0.5 * float2(params.rect_min_x + params.rect_max_x,
+                                   params.rect_min_y + params.rect_max_y);
+    float2 half_ext = 0.5 * float2(params.rect_max_x - params.rect_min_x,
+                                     params.rect_max_y - params.rect_min_y);
+    float2 norm = (p - center) / max(half_ext, 0.001);
+    int gk = int(params.kind);
+    float t;
+    if (gk == 0) {
+        float2 dir = float2(cos(params.angle), sin(params.angle));
+        t = saturate(0.5 + 0.5 * dot(norm, dir));
+    } else if (gk == 1) {
+        t = saturate(length(norm));
+    } else {
+        float a = atan2(norm.y, norm.x) - params.angle;
+        t = fract(a / 6.28318530718);
+    }
+    float3 c0 = srgb_to_linear(params.color0.rgb);
+    float3 c1 = srgb_to_linear(params.color1.rgb);
+    float alpha = mix(params.color0.a, params.color1.a, t) * coverage;
+    return float4(mix(c0, c1, t), alpha);
+}
 ";
 
 const COLOR_WRITE_ALL: u8 = 0xF;
@@ -208,6 +279,8 @@ const H_FRAG_GLYPH: u32 = 4;
 const H_FRAG_SHADOW: u32 = 5;
 const H_VERTEX_STENCIL: u32 = 6;
 const H_FRAG_TEXTURED: u32 = 7;
+const H_FRAG_GRADIENT: u32 = 8;
+const H_FRAG_GRADIENT_MASKED: u32 = 9;
 const PIPE_SOLID: u32 = 10;
 const PIPE_GLYPH: u32 = 11;
 const PIPE_SHADOW: u32 = 12;
@@ -216,6 +289,8 @@ const PIPE_STENCIL_WRITE: u32 = 13;
 #[allow(dead_code)]
 const PIPE_STENCIL_COVER: u32 = 14;
 const PIPE_TEXTURED: u32 = 15;
+const PIPE_GRADIENT: u32 = 16;
+const PIPE_GRADIENT_MASKED: u32 = 17;
 #[allow(dead_code)]
 const DSS_STENCIL_WRITE: u32 = 40;
 #[allow(dead_code)]
@@ -376,13 +451,15 @@ enum Pipe {
     Glyph,
     Shadow,
     Textured,
+    Gradient,
+    GradientMasked,
 }
 
 struct DrawOp {
     pipe: Pipe,
     vert_offset: usize,
     vert_bytes: usize,
-    shadow_params: [u8; 48],
+    params: [u8; 64],
 }
 
 struct DrawList {
@@ -414,7 +491,7 @@ impl DrawList {
                 pipe: self.current_pipe,
                 vert_offset: self.current_start,
                 vert_bytes: end - self.current_start,
-                shadow_params: [0; 48],
+                params: [0; 64],
             });
             self.current_start = end;
         }
@@ -616,11 +693,167 @@ impl DrawList {
             );
         }
 
+        let mut op_params = [0u8; 64];
+
+        op_params[..48].copy_from_slice(&params);
+
         self.ops.push(DrawOp {
             pipe: Pipe::Shadow,
             vert_offset: start,
             vert_bytes: self.verts.len() - start,
-            shadow_params: params,
+            params: op_params,
+        });
+
+        self.current_start = self.verts.len();
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn push_gradient(
+        &mut self,
+        px: f32,
+        py: f32,
+        pw: f32,
+        ph: f32,
+        color_start: scene::Color,
+        color_end: scene::Color,
+        kind: u8,
+        angle: f32,
+        scale: f32,
+        tf_args: Option<(&scene::AffineTransform, f32, f32)>,
+    ) {
+        self.flush_current();
+
+        let start = self.verts.len();
+        let uv0 = [px * scale, py * scale];
+        let uv1 = [(px + pw) * scale, (py + ph) * scale];
+
+        if let Some((tf, cx, cy)) = tf_args {
+            let corners = Self::transform_corners(tf, cx, cy, px, py, pw, ph);
+
+            push_quad_corners(
+                &mut self.verts,
+                self.display_w,
+                self.display_h,
+                corners,
+                scene::Color::TRANSPARENT,
+                uv0,
+                uv1,
+            );
+        } else {
+            push_quad(
+                &mut self.verts,
+                self.display_w,
+                self.display_h,
+                px,
+                py,
+                pw,
+                ph,
+                scene::Color::TRANSPARENT,
+                uv0,
+                uv1,
+            );
+        }
+
+        let mut params = [0u8; 64];
+
+        params[0..4].copy_from_slice(&(px * scale).to_le_bytes());
+        params[4..8].copy_from_slice(&(py * scale).to_le_bytes());
+        params[8..12].copy_from_slice(&((px + pw) * scale).to_le_bytes());
+        params[12..16].copy_from_slice(&((py + ph) * scale).to_le_bytes());
+        params[16..20].copy_from_slice(&(color_start.r as f32 / 255.0).to_le_bytes());
+        params[20..24].copy_from_slice(&(color_start.g as f32 / 255.0).to_le_bytes());
+        params[24..28].copy_from_slice(&(color_start.b as f32 / 255.0).to_le_bytes());
+        params[28..32].copy_from_slice(&(color_start.a as f32 / 255.0).to_le_bytes());
+        params[32..36].copy_from_slice(&(color_end.r as f32 / 255.0).to_le_bytes());
+        params[36..40].copy_from_slice(&(color_end.g as f32 / 255.0).to_le_bytes());
+        params[40..44].copy_from_slice(&(color_end.b as f32 / 255.0).to_le_bytes());
+        params[44..48].copy_from_slice(&(color_end.a as f32 / 255.0).to_le_bytes());
+        params[48..52].copy_from_slice(&angle.to_le_bytes());
+        params[52..56].copy_from_slice(&(kind as f32).to_le_bytes());
+
+        self.ops.push(DrawOp {
+            pipe: Pipe::Gradient,
+            vert_offset: start,
+            vert_bytes: self.verts.len() - start,
+            params,
+        });
+
+        self.current_start = self.verts.len();
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn push_gradient_masked(
+        &mut self,
+        px: f32,
+        py: f32,
+        pw: f32,
+        ph: f32,
+        grad_w: f32,
+        grad_h: f32,
+        color_start: scene::Color,
+        color_end: scene::Color,
+        kind: u8,
+        angle: f32,
+        opacity: u8,
+        scale: f32,
+        atlas_uv0: [f32; 2],
+        atlas_uv1: [f32; 2],
+        tf_args: Option<(&scene::AffineTransform, f32, f32)>,
+    ) {
+        self.flush_current();
+
+        let start = self.verts.len();
+
+        if let Some((tf, cx, cy)) = tf_args {
+            let corners = Self::transform_corners(tf, cx, cy, px, py, pw, ph);
+
+            push_quad_corners(
+                &mut self.verts,
+                self.display_w,
+                self.display_h,
+                corners,
+                scene::Color::TRANSPARENT,
+                atlas_uv0,
+                atlas_uv1,
+            );
+        } else {
+            push_quad(
+                &mut self.verts,
+                self.display_w,
+                self.display_h,
+                px,
+                py,
+                pw,
+                ph,
+                scene::Color::TRANSPARENT,
+                atlas_uv0,
+                atlas_uv1,
+            );
+        }
+
+        let opa = opacity as f32 / 255.0;
+        let mut params = [0u8; 64];
+
+        params[0..4].copy_from_slice(&(px * scale).to_le_bytes());
+        params[4..8].copy_from_slice(&(py * scale).to_le_bytes());
+        params[8..12].copy_from_slice(&((px + grad_w) * scale).to_le_bytes());
+        params[12..16].copy_from_slice(&((py + grad_h) * scale).to_le_bytes());
+        params[16..20].copy_from_slice(&(color_start.r as f32 / 255.0).to_le_bytes());
+        params[20..24].copy_from_slice(&(color_start.g as f32 / 255.0).to_le_bytes());
+        params[24..28].copy_from_slice(&(color_start.b as f32 / 255.0).to_le_bytes());
+        params[28..32].copy_from_slice(&(color_start.a as f32 / 255.0 * opa).to_le_bytes());
+        params[32..36].copy_from_slice(&(color_end.r as f32 / 255.0).to_le_bytes());
+        params[36..40].copy_from_slice(&(color_end.g as f32 / 255.0).to_le_bytes());
+        params[40..44].copy_from_slice(&(color_end.b as f32 / 255.0).to_le_bytes());
+        params[44..48].copy_from_slice(&(color_end.a as f32 / 255.0 * opa).to_le_bytes());
+        params[48..52].copy_from_slice(&angle.to_le_bytes());
+        params[52..56].copy_from_slice(&(kind as f32).to_le_bytes());
+
+        self.ops.push(DrawOp {
+            pipe: Pipe::GradientMasked,
+            vert_offset: start,
+            vert_bytes: self.verts.len() - start,
+            params,
         });
 
         self.current_start = self.verts.len();
@@ -675,6 +908,12 @@ fn setup_pipeline(
         w.get_function(H_FRAG_SHADOW, H_LIBRARY, b"fragment_shadow");
         w.get_function(H_VERTEX_STENCIL, H_LIBRARY, b"vertex_stencil");
         w.get_function(H_FRAG_TEXTURED, H_LIBRARY, b"fragment_textured");
+        w.get_function(H_FRAG_GRADIENT, H_LIBRARY, b"fragment_gradient");
+        w.get_function(
+            H_FRAG_GRADIENT_MASKED,
+            H_LIBRARY,
+            b"fragment_gradient_masked",
+        );
 
         w.len()
     };
@@ -735,6 +974,26 @@ fn setup_pipeline(
             PIPE_TEXTURED,
             H_VERTEX_FN,
             H_FRAG_TEXTURED,
+            true,
+            COLOR_WRITE_ALL,
+            false,
+            1,
+            render::PIXEL_FORMAT_BGRA8_SRGB,
+        );
+        w.create_render_pipeline(
+            PIPE_GRADIENT,
+            H_VERTEX_FN,
+            H_FRAG_GRADIENT,
+            true,
+            COLOR_WRITE_ALL,
+            false,
+            1,
+            render::PIXEL_FORMAT_BGRA8_SRGB,
+        );
+        w.create_render_pipeline(
+            PIPE_GRADIENT_MASKED,
+            H_VERTEX_FN,
+            H_FRAG_GRADIENT_MASKED,
             true,
             COLOR_WRITE_ALL,
             false,
@@ -1071,6 +1330,88 @@ fn walk_node(
                 [1.0, 1.0],
                 tf_args,
             );
+        }
+        Content::Gradient {
+            color_start,
+            color_end,
+            kind,
+            angle_fp,
+            ..
+        } => {
+            let angle = angle_fp as f32 / 65536.0 * core::f32::consts::TAU;
+
+            draws.push_gradient(
+                x,
+                y,
+                w,
+                h,
+                color_start,
+                color_end,
+                kind as u8,
+                angle,
+                ctx.scale as f32,
+                tf_args,
+            );
+        }
+        Content::GradientPath {
+            color_start,
+            color_end,
+            kind,
+            angle_fp,
+            contours,
+            ..
+        } => {
+            let path_data = reader.data(contours);
+
+            if !path_data.is_empty() {
+                let scale = ctx.scale as f32;
+                let inv_scale = 1.0 / scale;
+                let pw = (w * scale) as u32;
+                let ph = (h * scale) as u32;
+
+                if pw > 0 && ph > 0 && pw <= 512 && ph <= 512 {
+                    let cache_key = node.content_hash | PATH_STYLE_SENTINEL;
+                    let entry = lookup_or_rasterize_path(
+                        ctx,
+                        path_data,
+                        pw,
+                        ph,
+                        scale,
+                        scene::FillRule::Winding,
+                        None,
+                        pw as u16,
+                        cache_key,
+                    );
+
+                    if let Some(e) = entry.filter(|e| e.width > 0 && e.height > 0) {
+                        let angle = angle_fp as f32 / 65536.0 * core::f32::consts::TAU;
+                        let qw = e.width as f32 * inv_scale;
+                        let qh = e.height as f32 * inv_scale;
+                        let u0 = e.u as f32 / ATLAS_W_F;
+                        let v0 = e.v as f32 / ATLAS_H_F;
+                        let u1 = (e.u + e.width) as f32 / ATLAS_W_F;
+                        let v1 = (e.v + e.height) as f32 / ATLAS_H_F;
+
+                        draws.push_gradient_masked(
+                            x,
+                            y,
+                            qw,
+                            qh,
+                            w,
+                            h,
+                            color_start,
+                            color_end,
+                            kind as u8,
+                            angle,
+                            effective_opacity,
+                            scale,
+                            [u0, v0],
+                            [u1, v1],
+                            tf_args,
+                        );
+                    }
+                }
+            }
         }
         _ => {}
     }
@@ -1960,7 +2301,12 @@ impl Compositor {
                         1.0,
                     );
 
-                    if active_pipe != Some(op.pipe) || op.pipe == Pipe::Shadow {
+                    let needs_rebind = active_pipe != Some(op.pipe)
+                        || op.pipe == Pipe::Shadow
+                        || op.pipe == Pipe::Gradient
+                        || op.pipe == Pipe::GradientMasked;
+
+                    if needs_rebind {
                         match op.pipe {
                             Pipe::Solid => {
                                 w.set_render_pipeline(PIPE_SOLID);
@@ -1972,7 +2318,17 @@ impl Compositor {
                             }
                             Pipe::Shadow => {
                                 w.set_render_pipeline(PIPE_SHADOW);
-                                w.set_fragment_bytes(0, &op.shadow_params);
+                                w.set_fragment_bytes(0, &op.params[..48]);
+                            }
+                            Pipe::Gradient => {
+                                w.set_render_pipeline(PIPE_GRADIENT);
+                                w.set_fragment_bytes(0, &op.params);
+                            }
+                            Pipe::GradientMasked => {
+                                w.set_render_pipeline(PIPE_GRADIENT_MASKED);
+                                w.set_fragment_bytes(0, &op.params);
+                                w.set_fragment_texture(TEX_ATLAS, 0);
+                                w.set_fragment_sampler(SAMPLER_NEAREST, 0);
                             }
                             Pipe::Textured => {
                                 w.set_render_pipeline(PIPE_TEXTURED);

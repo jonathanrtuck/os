@@ -1847,6 +1847,34 @@ fn build_showcase_nodes(
 
     scene.add_child(strip, container);
 
+    // Outer group — translated container with a subtle conical gradient bg.
+    let group = match scene.alloc_node() {
+        Some(id) => id,
+        None => return,
+    };
+
+    {
+        let g = scene.node_mut(group);
+
+        g.x = pt(0);
+        g.y = pt(0);
+        g.width = upt(400);
+        g.height = upt(400);
+        g.flags = NodeFlags::VISIBLE.union(NodeFlags::CLIPS_CHILDREN);
+        g.child_offset_x = 48.0;
+        g.child_offset_y = 48.0;
+        g.content = Content::Gradient {
+            color_start: Color::rgba(255, 255, 255, 10),
+            color_end: Color::rgba(255, 255, 255, 0),
+            kind: scene::GradientKind::Radial,
+            _pad: 48,
+            angle_fp: scene::angle_to_fp(0.0),
+        };
+        g.transform = scene::AffineTransform::translate(20.0, 20.0);
+    }
+
+    scene.add_child(container, group);
+
     if let Some(id) = scene.alloc_node() {
         let a = scene.node_mut(id);
 
@@ -1855,9 +1883,8 @@ fn build_showcase_nodes(
         a.width = upt(120);
         a.height = upt(120);
         a.background = Color::rgb(255, 0, 0);
-        a.corner_radius = 4;
 
-        scene.add_child(container, id);
+        scene.add_child(group, id);
     }
     if let Some(id) = scene.alloc_node() {
         let b = scene.node_mut(id);
@@ -1872,8 +1899,9 @@ fn build_showcase_nodes(
         b.shadow_spread = 4;
         b.corner_radius = 0;
         b.opacity = 128;
+        b.transform = scene::AffineTransform::scale(0.8, 0.8);
 
-        scene.add_child(container, id);
+        scene.add_child(group, id);
     }
     if let Some(id) = scene.alloc_node() {
         let c = scene.node_mut(id);
@@ -1888,9 +1916,66 @@ fn build_showcase_nodes(
         c.shadow_spread = 4;
         c.corner_radius = 16;
         c.opacity = 240;
-        c.transform = scene::AffineTransform::rotate(0.6);
+        c.transform = scene::AffineTransform::rotate(0.3);
 
-        scene.add_child(container, id);
+        scene.add_child(group, id);
+    }
+
+    // Star filled with conical gradient.
+    {
+        let mut path_buf = alloc::vec::Vec::new();
+        let cx = 100.0f32;
+        let cy = 100.0;
+        let outer = 90.0;
+        let inner = 38.0;
+
+        const STAR_CS: [(f32, f32); 10] = [
+            (0.0, -1.0),
+            (0.5878, -0.8090),
+            (0.9511, -0.3090),
+            (0.9511, 0.3090),
+            (0.5878, 0.8090),
+            (0.0, 1.0),
+            (-0.5878, 0.8090),
+            (-0.9511, 0.3090),
+            (-0.9511, -0.3090),
+            (-0.5878, -0.8090),
+        ];
+
+        for (i, &(sin_a, cos_a)) in STAR_CS.iter().enumerate() {
+            let r = if i % 2 == 0 { outer } else { inner };
+            let px = cx + r * sin_a;
+            let py = cy + r * cos_a;
+
+            if i == 0 {
+                scene::path_move_to(&mut path_buf, px, py);
+            } else {
+                scene::path_line_to(&mut path_buf, px, py);
+            }
+        }
+
+        scene::path_close(&mut path_buf);
+
+        let path_ref = scene.push_data(&path_buf);
+
+        if let Some(id) = scene.alloc_node() {
+            let n = scene.node_mut(id);
+
+            n.x = pt(80);
+            n.y = pt(300);
+            n.width = upt(200);
+            n.height = upt(200);
+            n.content = Content::GradientPath {
+                color_start: Color::rgb(241, 196, 15),
+                color_end: Color::rgb(231, 76, 60),
+                kind: scene::GradientKind::Conical,
+                _pad: 0,
+                angle_fp: scene::angle_to_fp(0.0),
+                contours: path_ref,
+            };
+
+            scene.add_child(group, id);
+        }
     }
 }
 

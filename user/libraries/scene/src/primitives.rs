@@ -161,6 +161,29 @@ pub enum FillRule {
     EvenOdd = 1,
 }
 
+/// Gradient interpolation layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum GradientKind {
+    /// Color varies along a direction vector defined by `angle` (radians).
+    /// `angle = 0` → left-to-right, `π/2` → top-to-bottom.
+    Linear = 0,
+    /// Color varies from node center outward to the edges.
+    Radial = 1,
+    /// Color sweeps around the node center. `angle` sets the start
+    /// direction (0 = right, increasing counter-clockwise).
+    Conical = 2,
+}
+
+/// Convert an angle in radians to the `angle_fp` fixed-point format
+/// used by `Content::Gradient`. Maps `[0, 2π)` to `0..65535`.
+pub fn angle_to_fp(radians: f32) -> u16 {
+    const TAU: f32 = core::f32::consts::TAU;
+    let normalized = ((radians % TAU) + TAU) % TAU;
+
+    (normalized / TAU * 65536.0) as u16
+}
+
 // ── Path commands ───────────────────────────────────────────────────
 
 /// Path command tags. Commands are variable-size, stored sequentially
@@ -573,6 +596,41 @@ pub enum Content {
         stroke_width: u16,
         /// Reference to serialized path commands in the data buffer
         /// (MoveTo, LineTo, CubicTo, Close). 4-byte aligned.
+        contours: DataRef,
+    },
+    /// GPU-evaluated gradient fill covering the node bounds. The render
+    /// backend evaluates the gradient per-fragment — no CPU rasterization.
+    Gradient {
+        /// Color at the start of the gradient (center for radial,
+        /// start-angle edge for conical, start-direction edge for linear).
+        color_start: Color,
+        /// Color at the end of the gradient.
+        color_end: Color,
+        /// Gradient layout: linear, radial, or conical.
+        kind: GradientKind,
+        /// Padding for alignment.
+        _pad: u8,
+        /// Direction angle as fixed-point: `0..65535` maps to `[0, 2π)`.
+        /// Linear: gradient direction (0 = left→right).
+        /// Conical: start angle. Radial: ignored.
+        /// Convert from radians: `(angle / 2π * 65536.0) as u16`.
+        angle_fp: u16,
+    },
+    /// Path filled with a GPU gradient instead of a solid color.
+    /// The render backend rasterizes path coverage into a mask, then
+    /// evaluates the gradient per-fragment, multiplying by coverage.
+    GradientPath {
+        /// Gradient start color.
+        color_start: Color,
+        /// Gradient end color.
+        color_end: Color,
+        /// Gradient layout.
+        kind: GradientKind,
+        /// Padding.
+        _pad: u8,
+        /// Angle (same encoding as `Content::Gradient`).
+        angle_fp: u16,
+        /// Path contour data.
         contours: DataRef,
     },
     /// A single run of shaped glyphs — one font, one color, one glyph

@@ -4,14 +4,14 @@
 //! Dependencies: `drawing`, `scene`, `fonts`, and the sibling `coords` and
 //! `path_raster` modules.
 
-use drawing::{isqrt_fp, Surface};
+use drawing::{Surface, isqrt_fp};
 use fonts::cache::GlyphCache;
 use scene::{Content, Node, ShapedGlyph};
 
 use super::{
+    RenderCtx, SceneGraph,
     coords::round_f32,
     path_raster::{render_path, render_path_data, scene_to_draw_color},
-    RenderCtx, SceneGraph,
 };
 use crate::LruRasterizer;
 
@@ -123,6 +123,7 @@ pub(super) fn render_content(
                 fb, graph, content_id, src_width, src_height, draw_x, draw_y, nw, nh,
             );
         }
+        Content::Gradient { .. } | Content::GradientPath { .. } => {}
     }
 }
 
