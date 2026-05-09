@@ -358,6 +358,73 @@ def assert_selection_in_region(img: Image.Image, args: str, tolerance: int) -> b
         return False
 
 
+def assert_row_has_text(img: Image.Image, args: str, tolerance: int) -> bool:
+    """Check that a horizontal row band contains text (non-background pixels).
+
+    Scans a horizontal band for pixels significantly different from background.
+    Args: Y,H — row start and height to scan. Background sampled from center.
+    """
+    parts = args.split(",")
+    if len(parts) != 2:
+        print(f"FAIL: row_has_text expects Y,H, got '{args}'")
+        return False
+
+    y_start, band_h = int(parts[0]), int(parts[1])
+    bg_r, bg_g, bg_b = img.getpixel((img.width - 10, img.height // 2))[:3]
+    threshold = 30
+    text_count = 0
+
+    for py in range(y_start, min(y_start + band_h, img.height)):
+        for px in range(img.width):
+            r, g, b = img.getpixel((px, py))[:3]
+            if (abs(r - bg_r) > threshold or
+                    abs(g - bg_g) > threshold or
+                    abs(b - bg_b) > threshold):
+                text_count += 1
+
+    if text_count > 20:
+        print(f"PASS: row band y={y_start}..{y_start+band_h} has {text_count} "
+              f"non-background pixels (text present)")
+        return True
+    else:
+        print(f"FAIL: row band y={y_start}..{y_start+band_h} has only {text_count} "
+              f"non-background pixels (no text found)")
+        return False
+
+
+def assert_row_is_bg(img: Image.Image, args: str, tolerance: int) -> bool:
+    """Check that a horizontal row band is pure background (no text).
+
+    Args: Y,H — row start and height to scan. Background sampled from center.
+    """
+    parts = args.split(",")
+    if len(parts) != 2:
+        print(f"FAIL: row_is_bg expects Y,H, got '{args}'")
+        return False
+
+    y_start, band_h = int(parts[0]), int(parts[1])
+    bg_r, bg_g, bg_b = img.getpixel((img.width - 10, img.height // 2))[:3]
+    threshold = 30
+    text_count = 0
+
+    for py in range(y_start, min(y_start + band_h, img.height)):
+        for px in range(img.width):
+            r, g, b = img.getpixel((px, py))[:3]
+            if (abs(r - bg_r) > threshold or
+                    abs(g - bg_g) > threshold or
+                    abs(b - bg_b) > threshold):
+                text_count += 1
+
+    if text_count <= 20:
+        print(f"PASS: row band y={y_start}..{y_start+band_h} is background "
+              f"({text_count} non-bg pixels)")
+        return True
+    else:
+        print(f"FAIL: row band y={y_start}..{y_start+band_h} has {text_count} "
+              f"non-background pixels (expected pure background)")
+        return False
+
+
 ASSERTIONS = {
     "solid_color": assert_solid_color,
     "uniform": assert_uniform,
@@ -369,6 +436,8 @@ ASSERTIONS = {
     "cursor_col": assert_cursor_col,
     "find_cursor": assert_find_cursor,
     "selection_in_region": assert_selection_in_region,
+    "row_has_text": assert_row_has_text,
+    "row_is_bg": assert_row_is_bg,
 }
 
 

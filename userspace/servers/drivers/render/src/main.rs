@@ -388,11 +388,34 @@ fn evaluate_animation(anim: &scene::Animation, now_ns: u64) -> (u8, u64) {
     (prev_value, 0)
 }
 
+type ClipRect = Option<[f32; 4]>;
+
+fn rects_overlap(ax: f32, ay: f32, aw: f32, ah: f32, clip: &[f32; 4]) -> bool {
+    ax + aw > clip[0] && ax < clip[0] + clip[2] && ay + ah > clip[1] && ay < clip[1] + clip[3]
+}
+
+fn intersect_clip(a: &[f32; 4], b: &[f32; 4]) -> [f32; 4] {
+    let x0 = if a[0] > b[0] { a[0] } else { b[0] };
+    let y0 = if a[1] > b[1] { a[1] } else { b[1] };
+    let x1_a = a[0] + a[2];
+    let x1_b = b[0] + b[2];
+    let y1_a = a[1] + a[3];
+    let y1_b = b[1] + b[3];
+    let x1 = if x1_a < x1_b { x1_a } else { x1_b };
+    let y1 = if y1_a < y1_b { y1_a } else { y1_b };
+    let w = if x1 > x0 { x1 - x0 } else { 0.0 };
+    let h = if y1 > y0 { y1 - y0 } else { 0.0 };
+
+    [x0, y0, w, h]
+}
+
+#[allow(clippy::too_many_arguments)]
 fn walk_node(
     reader: &SceneReader<'_>,
     node_id: NodeId,
     parent_x: f32,
     parent_y: f32,
+    clip: ClipRect,
     frame: &mut FrameBuilder,
     ctx: &mut WalkContext,
     is_root: bool,
@@ -402,6 +425,13 @@ fn walk_node(
     let y = parent_y + scene::mpt_to_f32(node.y);
     let w = scene::umpt_to_f32(node.width);
     let h = scene::umpt_to_f32(node.height);
+
+    if let Some(ref cr) = clip
+        && !rects_overlap(x, y, w, h, cr)
+    {
+        return;
+    }
+
     let effective_opacity =
         if node.animation.is_active() && node.animation.target == scene::AnimationTarget::Opacity {
             let (val, deadline) = evaluate_animation(&node.animation, ctx.now_tick);
@@ -466,10 +496,24 @@ fn walk_node(
         }
     }
 
+    let child_x = x + node.child_offset_x;
+    let child_y = y + node.child_offset_y;
+    let child_clip = if node.clips_children() {
+        let node_clip = [x, y, w, h];
+
+        Some(match clip {
+            Some(ref cr) => intersect_clip(&node_clip, cr),
+            None => node_clip,
+        })
+    } else {
+        clip
+    };
     let mut child = node.first_child;
 
     while child != NULL {
-        walk_node(reader, child, x, y, frame, ctx, false);
+        walk_node(
+            reader, child, child_x, child_y, child_clip, frame, ctx, false,
+        );
 
         child = reader.node(child).next_sibling;
     }
@@ -669,6 +713,7 @@ impl Compositor {
             root,
             0.0,
             0.0,
+            None,
             &mut frame,
             &mut self.walk_ctx,
             true,

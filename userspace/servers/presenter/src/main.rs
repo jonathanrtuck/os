@@ -165,6 +165,7 @@ struct Presenter {
     last_cursor_col: u32,
     last_content_len: u32,
 
+    scroll_y: i32,
     sticky_col: Option<u32>,
 
     render_ep: Handle,
@@ -175,9 +176,41 @@ struct Presenter {
 }
 
 impl Presenter {
+    fn viewport_height(&self) -> i32 {
+        self.display_height
+            .saturating_sub(presenter_service::MARGIN_TOP as u32 * 2) as i32
+    }
+
+    fn ensure_cursor_visible(&mut self, cursor_line: u32) {
+        let line_h = presenter_service::LINE_HEIGHT as i32;
+        let cursor_top = cursor_line as i32 * line_h;
+        let vp_h = self.viewport_height();
+
+        if cursor_top < self.scroll_y {
+            self.scroll_y = cursor_top;
+        } else if cursor_top + line_h > self.scroll_y + vp_h {
+            self.scroll_y = cursor_top + line_h - vp_h;
+        }
+    }
+
+    fn clamp_scroll(&mut self) {
+        let header = parse_layout_header(&self.results_buf);
+        let total_h = header.total_height;
+        let vp_h = self.viewport_height();
+        let max_scroll = if total_h > vp_h { total_h - vp_h } else { 0 };
+
+        if self.scroll_y < 0 {
+            self.scroll_y = 0;
+        }
+
+        if self.scroll_y > max_scroll {
+            self.scroll_y = max_scroll;
+        }
+    }
+
     fn write_viewport(&self) {
         let state = layout_service::ViewportState {
-            scroll_y: 0,
+            scroll_y: self.scroll_y,
             viewport_width: self
                 .display_width
                 .saturating_sub(presenter_service::MARGIN_LEFT as u32 * 2),
@@ -211,6 +244,13 @@ impl Presenter {
 
         let layout_header = parse_layout_header(&self.results_buf);
         let line_count = layout_header.line_count as usize;
+        // Compute cursor line, then auto-scroll to keep it visible.
+        let (cursor_line_idx, cursor_col_in_line) = self.find_cursor_line(cursor_pos, line_count);
+
+        self.ensure_cursor_visible(cursor_line_idx as u32);
+        self.clamp_scroll();
+        self.write_viewport();
+
         // SAFETY: doc_va is valid and content_len comes from read_doc_header.
         let content = unsafe { document_service::doc_content_slice(self.doc_va, content_len) };
         let bg = Color::rgb(
@@ -256,7 +296,7 @@ impl Presenter {
 
         scene.set_root(root);
 
-        // Viewport node — clips children, offset for margins.
+        // Viewport node — clips children, scroll offset.
         let viewport = match scene.alloc_node() {
             Some(id) => id,
             None => return,
@@ -274,6 +314,7 @@ impl Presenter {
                 .display_height
                 .saturating_sub(presenter_service::MARGIN_TOP as u32 * 2));
             n.flags = NodeFlags::VISIBLE.union(NodeFlags::CLIPS_CHILDREN);
+            n.child_offset_y = -(self.scroll_y as f32);
             n.role = scene::ROLE_DOCUMENT;
         }
 
@@ -292,19 +333,14 @@ impl Presenter {
         }
 
         // Per-line glyph nodes.
-        let mut cursor_line: u32 = 0;
-        let mut cursor_col: u32 = 0;
+        let mut cursor_line = cursor_line_idx as u32;
+        let mut cursor_col = cursor_col_in_line as u32;
         let char_advance = (self.char_width * 65536.0) as i32;
 
         for i in 0..line_count.min(scene::MAX_NODES - 4) {
             let line_info = parse_line_at(&self.results_buf, i);
             let line_start = line_info.byte_offset as usize;
             let line_len = line_info.byte_length as usize;
-
-            if cursor_pos >= line_start && cursor_pos <= line_start + line_len {
-                cursor_line = i as u32;
-                cursor_col = (cursor_pos - line_start) as u32;
-            }
 
             if line_len == 0 {
                 continue;
@@ -371,7 +407,6 @@ impl Presenter {
         }
 
         // Cursor node — on top of text, with blink animation.
-        // When selection is active, cursor is solid (no blink).
         let cursor_x = cursor_col as f32 * self.char_width;
         let cursor_y = cursor_line as i32 * presenter_service::LINE_HEIGHT as i32;
 
@@ -684,6 +719,7 @@ impl Presenter {
             cursor_line: self.last_cursor_line,
             cursor_col: self.last_cursor_col,
             content_len: self.last_content_len,
+            scroll_y: self.scroll_y,
         }
     }
 }
@@ -728,7 +764,6 @@ impl Dispatch for Presenter {
 
                 let _ = msg.reply_ok(&data, &[]);
             }
-
             presenter_service::KEY_EVENT => {
                 if msg.payload.len() >= text_editor::KeyDispatch::SIZE {
                     let dispatch = text_editor::KeyDispatch::read_from(msg.payload);
@@ -738,7 +773,19 @@ impl Dispatch for Presenter {
 
                 let _ = msg.reply_empty();
             }
+            presenter_service::SCROLL_EVENT => {
+                if msg.payload.len() >= presenter_service::ScrollEvent::SIZE {
+                    let event = presenter_service::ScrollEvent::read_from(msg.payload);
 
+                    self.scroll_y += event.delta_y;
+                    self.clamp_scroll();
+                    self.write_viewport();
+                    self.build_scene();
+                    self.request_render();
+                }
+
+                let _ = msg.reply_empty();
+            }
             _ => {
                 let _ = msg.reply_error(ipc::STATUS_UNSUPPORTED);
             }
@@ -910,6 +957,7 @@ extern "C" fn _start() -> ! {
         last_cursor_line: 0,
         last_cursor_col: 0,
         last_content_len: 0,
+        scroll_y: 0,
         sticky_col: None,
         render_ep,
         editor_ep,

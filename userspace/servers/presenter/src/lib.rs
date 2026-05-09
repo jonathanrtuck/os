@@ -27,6 +27,10 @@ pub const GET_INFO: u32 = 3;
 /// Presenter forwards to the active editor, rebuilds scene, re-renders.
 pub const KEY_EVENT: u32 = 4;
 
+/// Scroll event from input driver. Payload: ScrollEvent (8 bytes).
+/// Presenter adjusts scroll_y, rebuilds scene, re-renders.
+pub const SCROLL_EVENT: u32 = 5;
+
 // ── Visual constants ────────────────────────────────────────────
 
 pub const DEFAULT_WIDTH: u32 = 1440;
@@ -82,6 +86,31 @@ impl SetupReply {
     }
 }
 
+// ── SCROLL_EVENT payload ────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScrollEvent {
+    pub delta_x: i32,
+    pub delta_y: i32,
+}
+
+impl ScrollEvent {
+    pub const SIZE: usize = 8;
+
+    pub fn write_to(&self, buf: &mut [u8]) {
+        buf[0..4].copy_from_slice(&self.delta_x.to_le_bytes());
+        buf[4..8].copy_from_slice(&self.delta_y.to_le_bytes());
+    }
+
+    #[must_use]
+    pub fn read_from(buf: &[u8]) -> Self {
+        Self {
+            delta_x: i32::from_le_bytes(buf[0..4].try_into().unwrap()),
+            delta_y: i32::from_le_bytes(buf[4..8].try_into().unwrap()),
+        }
+    }
+}
+
 // ── GET_INFO / BUILD reply ──────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,10 +121,11 @@ pub struct InfoReply {
     pub cursor_line: u32,
     pub cursor_col: u32,
     pub content_len: u32,
+    pub scroll_y: i32,
 }
 
 impl InfoReply {
-    pub const SIZE: usize = 22;
+    pub const SIZE: usize = 26;
 
     pub fn write_to(&self, buf: &mut [u8]) {
         buf[0..2].copy_from_slice(&self.node_count.to_le_bytes());
@@ -104,6 +134,7 @@ impl InfoReply {
         buf[10..14].copy_from_slice(&self.cursor_line.to_le_bytes());
         buf[14..18].copy_from_slice(&self.cursor_col.to_le_bytes());
         buf[18..22].copy_from_slice(&self.content_len.to_le_bytes());
+        buf[22..26].copy_from_slice(&self.scroll_y.to_le_bytes());
     }
 
     #[must_use]
@@ -115,6 +146,7 @@ impl InfoReply {
             cursor_line: u32::from_le_bytes(buf[10..14].try_into().unwrap()),
             cursor_col: u32::from_le_bytes(buf[14..18].try_into().unwrap()),
             content_len: u32::from_le_bytes(buf[18..22].try_into().unwrap()),
+            scroll_y: i32::from_le_bytes(buf[22..26].try_into().unwrap()),
         }
     }
 }
@@ -145,6 +177,7 @@ mod tests {
             cursor_line: 5,
             cursor_col: 10,
             content_len: 500,
+            scroll_y: 120,
         };
         let mut buf = [0u8; InfoReply::SIZE];
 
@@ -154,8 +187,21 @@ mod tests {
     }
 
     #[test]
+    fn scroll_event_round_trip() {
+        let event = ScrollEvent {
+            delta_x: 0,
+            delta_y: -40,
+        };
+        let mut buf = [0u8; ScrollEvent::SIZE];
+
+        event.write_to(&mut buf);
+
+        assert_eq!(ScrollEvent::read_from(&buf), event);
+    }
+
+    #[test]
     fn method_ids_distinct() {
-        let methods = [SETUP, BUILD, GET_INFO];
+        let methods = [SETUP, BUILD, GET_INFO, KEY_EVENT, SCROLL_EVENT];
 
         for i in 0..methods.len() {
             for j in (i + 1)..methods.len() {
@@ -168,5 +214,6 @@ mod tests {
     fn all_sizes_fit_payload() {
         assert!(SetupReply::SIZE <= MAX_PAYLOAD);
         assert!(InfoReply::SIZE <= MAX_PAYLOAD);
+        assert!(ScrollEvent::SIZE <= MAX_PAYLOAD);
     }
 }

@@ -419,7 +419,7 @@ work to reach full v0.6-pre-rewrite parity is tracked in
 - Phase 6 (glyph atlas + textured rendering): COMPLETE
 - Phase 7 (cursor blink + selection): COMPLETE
 - Phase 8 (keyboard navigation): COMPLETE
-- Phase 9 (scroll + viewport): NOT STARTED
+- Phase 9 (scroll + viewport): COMPLETE
 - Phase 10 (visual chrome): NOT STARTED
 - Phase 11 (content-type typography): NOT STARTED
 - Phase 12 (PNG decoder): NOT STARTED
