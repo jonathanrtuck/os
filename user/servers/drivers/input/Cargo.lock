@@ -220,6 +220,7 @@ dependencies = [
  "fonts",
  "fs-service",
  "heap",
+ "icons",
  "ipc",
  "layout",
  "layout-service",

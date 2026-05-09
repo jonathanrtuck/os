@@ -123,6 +123,14 @@ fn shape_text(
     (count, total_width)
 }
 
+fn copy_into(dst: &mut [u8], src: &[u8]) -> usize {
+    let len = src.len().min(dst.len());
+
+    dst[..len].copy_from_slice(&src[..len]);
+
+    len
+}
+
 // ── Layout results parsing (from seqlock-read buffer) ────────────
 
 fn parse_layout_header(buf: &[u8]) -> layout_service::LayoutHeader {
@@ -255,11 +263,75 @@ struct Presenter {
     slide_animating: bool,
     last_anim_tick: u64,
 
+    frame_stats: FrameStats,
+
     image_content_id: u32,
     image_width: u16,
     image_height: u16,
 
     console_ep: Handle,
+}
+
+struct FrameStats {
+    frame_count: u32,
+    total_ns: u64,
+    min_ns: u64,
+    max_ns: u64,
+}
+
+impl FrameStats {
+    const fn new() -> Self {
+        Self {
+            frame_count: 0,
+            total_ns: 0,
+            min_ns: u64::MAX,
+            max_ns: 0,
+        }
+    }
+
+    fn record(&mut self, ns: u64) {
+        self.frame_count += 1;
+        self.total_ns += ns;
+
+        if ns < self.min_ns {
+            self.min_ns = ns;
+        }
+        if ns > self.max_ns {
+            self.max_ns = ns;
+        }
+    }
+
+    fn report(&self, console_ep: Handle) {
+        if self.frame_count == 0 {
+            return;
+        }
+
+        let avg_us = (self.total_ns / self.frame_count as u64) / 1000;
+        let min_us = self.min_ns / 1000;
+        let max_us = self.max_ns / 1000;
+        let fps = 1_000_000u64.checked_div(avg_us).unwrap_or(0);
+
+        let mut buf = [0u8; 80];
+        let mut pos = 0;
+
+        pos += copy_into(&mut buf[pos..], b"frame: ");
+        pos += console::format_u32(self.frame_count, &mut buf[pos..]);
+        pos += copy_into(&mut buf[pos..], b"f avg=");
+        pos += console::format_u32(avg_us as u32, &mut buf[pos..]);
+        pos += copy_into(&mut buf[pos..], b"us min=");
+        pos += console::format_u32(min_us as u32, &mut buf[pos..]);
+        pos += copy_into(&mut buf[pos..], b"us max=");
+        pos += console::format_u32(max_us as u32, &mut buf[pos..]);
+        pos += copy_into(&mut buf[pos..], b"us ~");
+        pos += console::format_u32(fps as u32, &mut buf[pos..]);
+        pos += copy_into(&mut buf[pos..], b"fps\n");
+
+        console::write(console_ep, &buf[..pos]);
+    }
+
+    fn reset(&mut self) {
+        *self = Self::new();
+    }
 }
 
 impl Presenter {
@@ -833,7 +905,9 @@ impl Presenter {
             strip,
             self.display_width,
             content_h,
-            &mut self.glyphs,
+            self.image_content_id,
+            self.image_width,
+            self.image_height,
         );
 
         scene.commit();
@@ -1752,7 +1826,9 @@ fn build_showcase_nodes(
     strip: scene::NodeId,
     display_width: u32,
     content_h: u32,
-    glyphs: &mut [ShapedGlyph; MAX_GLYPHS_PER_LINE],
+    image_content_id: u32,
+    image_width: u16,
+    image_height: u16,
 ) {
     let base_x = (display_width * 2) as i32;
     let pad = 24i32;
@@ -2037,39 +2113,272 @@ fn build_showcase_nodes(
         }
     }
 
-    // ── Section: Text in all three fonts ──
+    // ── Section: Nested clipping ──
     cursor_y += 80;
 
-    let font_demos: [(&[u8], &str, u32); 3] = [
-        (FONT_MONO, "JetBrains Mono", STYLE_MONO),
-        (FONT_SANS, "Inter Sans", STYLE_SANS),
-        (FONT_SERIF, "Source Serif 4", STYLE_SERIF),
-    ];
+    if let Some(outer_clip) = scene.alloc_node() {
+        {
+            let n = scene.node_mut(outer_clip);
 
-    for (i, &(font, label, style_id)) in font_demos.iter().enumerate() {
-        let (count, width) = shape_text(font, label, presenter_service::FONT_SIZE, &[], glyphs);
-        let glyph_ref = scene.push_shaped_glyphs(&glyphs[..count]);
+            n.x = pt(pad);
+            n.y = pt(cursor_y);
+            n.width = upt(160);
+            n.height = upt(80);
+            n.flags = NodeFlags::VISIBLE.union(NodeFlags::CLIPS_CHILDREN);
+            n.background = Color::rgb(44, 62, 80);
+            n.corner_radius = 12;
+        }
+
+        scene.add_child(container, outer_clip);
+
+        if let Some(inner_clip) = scene.alloc_node() {
+            {
+                let n = scene.node_mut(inner_clip);
+
+                n.x = pt(30);
+                n.y = pt(15);
+                n.width = upt(120);
+                n.height = upt(60);
+                n.flags = NodeFlags::VISIBLE.union(NodeFlags::CLIPS_CHILDREN);
+                n.background = Color::rgb(39, 174, 96);
+                n.corner_radius = 8;
+            }
+
+            scene.add_child(outer_clip, inner_clip);
+
+            if let Some(deep) = scene.alloc_node() {
+                let n = scene.node_mut(deep);
+
+                n.x = pt(-10);
+                n.y = pt(-10);
+                n.width = upt(80);
+                n.height = upt(80);
+                n.background = Color::rgb(241, 196, 15);
+
+                scene.add_child(inner_clip, deep);
+            }
+        }
+    }
+
+    cursor_y += 100;
+
+    // ── Section: Image content ──
+    if image_content_id != 0 && image_width > 0 && image_height > 0 {
+        if let Some(img_node) = scene.alloc_node() {
+            let n = scene.node_mut(img_node);
+
+            n.x = pt(pad);
+            n.y = pt(cursor_y);
+            n.width = upt(160);
+            n.height = upt(120);
+            n.corner_radius = 8;
+            n.shadow_color = Color::rgba(0, 0, 0, 120);
+            n.shadow_blur_radius = 16;
+            n.shadow_spread = 4;
+            n.content = Content::Image {
+                content_id: image_content_id,
+                src_width: image_width,
+                src_height: image_height,
+            };
+
+            scene.add_child(container, img_node);
+        }
+
+        cursor_y += 140;
+    }
+
+    // ── Section: Scale transforms ──
+    let scales: [(f32, f32); 4] = [(0.5, 0.5), (1.0, 1.5), (1.5, 0.75), (0.75, 1.25)];
+
+    for (i, &(sx, sy)) in scales.iter().enumerate() {
+        if let Some(id) = scene.alloc_node() {
+            let n = scene.node_mut(id);
+
+            n.x = pt(pad + 30 + i as i32 * 80);
+            n.y = pt(cursor_y + 10);
+            n.width = upt(36);
+            n.height = upt(36);
+            n.background = Color::rgb(52, 152, 219);
+            n.corner_radius = 4;
+            n.transform = scene::AffineTransform::scale(sx, sy);
+
+            scene.add_child(container, id);
+        }
+    }
+
+    cursor_y += 70;
+
+    // ── Section: Curved paths (bezier arcs) ──
+    // S-curve
+    {
+        let mut path_buf = alloc::vec::Vec::new();
+
+        scene::path_move_to(&mut path_buf, 0.0, 40.0);
+        scene::path_cubic_to(&mut path_buf, 13.0, 0.0, 27.0, 40.0, 40.0, 0.0);
+
+        let path_ref = scene.push_data(&path_buf);
 
         if let Some(id) = scene.alloc_node() {
             let n = scene.node_mut(id);
 
             n.x = pt(pad);
-            n.y = pt(cursor_y + i as i32 * 28);
-            n.width = upt(width as u32 + 1);
-            n.height = upt(presenter_service::LINE_HEIGHT);
-            n.content = Content::Glyphs {
-                color: Color::rgb(220, 220, 220),
-                glyphs: glyph_ref,
-                glyph_count: count as u16,
-                font_size: presenter_service::FONT_SIZE,
-                style_id,
+            n.y = pt(cursor_y);
+            n.width = upt(40);
+            n.height = upt(40);
+            n.content = Content::Path {
+                color: Color::TRANSPARENT,
+                stroke_color: Color::rgb(231, 76, 60),
+                fill_rule: scene::FillRule::Winding,
+                stroke_width: 0x0180,
+                contours: path_ref,
             };
 
             scene.add_child(container, id);
         }
     }
 
-    cursor_y += 100;
+    // Figure-eight (two cubic loops)
+    {
+        let mut path_buf = alloc::vec::Vec::new();
+
+        scene::path_move_to(&mut path_buf, 20.0, 20.0);
+        scene::path_cubic_to(&mut path_buf, 40.0, -10.0, 40.0, 50.0, 20.0, 20.0);
+        scene::path_cubic_to(&mut path_buf, 0.0, -10.0, 0.0, 50.0, 20.0, 20.0);
+        scene::path_close(&mut path_buf);
+
+        let path_ref = scene.push_data(&path_buf);
+
+        if let Some(id) = scene.alloc_node() {
+            let n = scene.node_mut(id);
+
+            n.x = pt(pad + 60);
+            n.y = pt(cursor_y);
+            n.width = upt(40);
+            n.height = upt(40);
+            n.content = Content::Path {
+                color: Color::rgba(155, 89, 182, 100),
+                stroke_color: Color::rgb(142, 68, 173),
+                fill_rule: scene::FillRule::EvenOdd,
+                stroke_width: 0x0100,
+                contours: path_ref,
+            };
+
+            scene.add_child(container, id);
+        }
+    }
+
+    // Spiral (multiple cubic arcs)
+    {
+        let mut path_buf = alloc::vec::Vec::new();
+        let cx = 20.0f32;
+        let cy = 20.0;
+
+        scene::path_move_to(&mut path_buf, cx, cy);
+
+        let radii = [4.0f32, 8.0, 12.0, 16.0];
+
+        for (i, &r) in radii.iter().enumerate() {
+            let k = r * 0.5522848;
+
+            if i % 2 == 0 {
+                scene::path_cubic_to(&mut path_buf, cx, cy - k, cx + r - k, cy - r, cx + r, cy);
+            } else {
+                scene::path_cubic_to(
+                    &mut path_buf,
+                    cx + r,
+                    cy + k,
+                    cx + k,
+                    cy + r,
+                    cx,
+                    cy + r - (r - radii[0]),
+                );
+            }
+        }
+
+        let path_ref = scene.push_data(&path_buf);
+
+        if let Some(id) = scene.alloc_node() {
+            let n = scene.node_mut(id);
+
+            n.x = pt(pad + 120);
+            n.y = pt(cursor_y);
+            n.width = upt(40);
+            n.height = upt(40);
+            n.content = Content::Path {
+                color: Color::TRANSPARENT,
+                stroke_color: Color::rgb(46, 204, 113),
+                fill_rule: scene::FillRule::Winding,
+                stroke_width: 0x0100,
+                contours: path_ref,
+            };
+
+            scene.add_child(container, id);
+        }
+    }
+
+    cursor_y += 60;
+
+    // ── Section: Compositing (overlapping semitransparent) ──
+    let comp_colors = [
+        Color::rgba(231, 76, 60, 140),
+        Color::rgba(46, 204, 113, 140),
+        Color::rgba(52, 152, 219, 140),
+    ];
+
+    for (i, &color) in comp_colors.iter().enumerate() {
+        if let Some(id) = scene.alloc_node() {
+            let n = scene.node_mut(id);
+
+            n.x = pt(pad + i as i32 * 30);
+            n.y = pt(cursor_y + (i as i32 % 2) * 15);
+            n.width = upt(60);
+            n.height = upt(60);
+            n.background = color;
+            n.corner_radius = 30;
+
+            scene.add_child(container, id);
+        }
+    }
+
+    cursor_y += 90;
+
+    // ── Section: Icons ──
+    let icon_names = ["document", "search", "settings", "alert", "check", "close"];
+
+    for (i, &name) in icon_names.iter().enumerate() {
+        let icon = icons::get(name, None);
+        let icon_size = 32.0f32;
+        let scale = icon_size / icon.viewbox;
+        let mut path_buf = alloc::vec::Vec::new();
+
+        for contour in icon.paths {
+            path_buf.extend_from_slice(contour.commands);
+        }
+
+        let path_ref = scene.push_data(&path_buf);
+
+        if let Some(id) = scene.alloc_node() {
+            let n = scene.node_mut(id);
+
+            n.x = pt(pad + i as i32 * 48);
+            n.y = pt(cursor_y);
+            n.width = upt(icon_size as u32);
+            n.height = upt(icon_size as u32);
+            n.transform = scene::AffineTransform::scale(scale, scale);
+
+            n.content = Content::Path {
+                color: Color::TRANSPARENT,
+                stroke_color: Color::rgb(220, 220, 220),
+                fill_rule: scene::FillRule::Winding,
+                stroke_width: 0x0200,
+                contours: path_ref,
+            };
+
+            scene.add_child(container, id);
+        }
+    }
+
+    cursor_y += 50;
 
     // ── Section: Nested containers with translate ──
     if let Some(outer) = scene.alloc_node() {
@@ -2290,9 +2599,16 @@ extern "C" fn _start() -> ! {
         drag_origin_end: 0,
         active_space: 0,
         num_spaces: 1,
-        slide_spring: animation::Spring::default_preset(0.0),
+        slide_spring: {
+            let mut s = animation::Spring::new(0.0, 600.0, 49.0, 1.0);
+
+            s.set_settle_threshold(0.5);
+
+            s
+        },
         slide_animating: false,
         last_anim_tick: 0,
+        frame_stats: FrameStats::new(),
         image_content_id: 0,
         image_width: 0,
         image_height: 0,
@@ -2330,11 +2646,11 @@ extern "C" fn _start() -> ! {
                 let mut needs_render = false;
 
                 if server.slide_animating {
-                    let now = abi::system::clock_read().unwrap_or(0);
-                    let dt_ns = now.saturating_sub(server.last_anim_tick);
+                    let frame_start = abi::system::clock_read().unwrap_or(0);
+                    let dt_ns = frame_start.saturating_sub(server.last_anim_tick);
                     let dt = (dt_ns as f32 / 1_000_000_000.0).min(0.033);
 
-                    server.last_anim_tick = now;
+                    server.last_anim_tick = frame_start;
 
                     server.slide_spring.tick(dt);
 
@@ -2347,6 +2663,17 @@ extern "C" fn _start() -> ! {
                     server.build_scene();
 
                     needs_render = true;
+
+                    let frame_end = abi::system::clock_read().unwrap_or(0);
+
+                    server
+                        .frame_stats
+                        .record(frame_end.saturating_sub(frame_start));
+
+                    if !server.slide_animating {
+                        server.frame_stats.report(server.console_ep);
+                        server.frame_stats.reset();
+                    }
                 }
 
                 if server.update_clock() {
