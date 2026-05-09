@@ -2265,7 +2265,12 @@ extern "C" fn _start() -> ! {
         };
 
         match ipc::server::serve_one_timed(own_ep, &mut server, deadline) {
-            Ok(()) => {}
+            Ok(()) => {
+                if server.active_space == 2 {
+                    server.build_scene();
+                    server.request_render();
+                }
+            }
             Err(abi::types::SyscallError::TimedOut) => {
                 let mut needs_render = false;
 
