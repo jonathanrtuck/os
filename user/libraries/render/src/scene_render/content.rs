@@ -4,14 +4,14 @@
 //! Dependencies: `drawing`, `scene`, `fonts`, and the sibling `coords` and
 //! `path_raster` modules.
 
-use drawing::{Surface, isqrt_fp};
+use drawing::{isqrt_fp, Surface};
 use fonts::cache::GlyphCache;
 use scene::{Content, Node, ShapedGlyph};
 
 use super::{
-    RenderCtx, SceneGraph,
     coords::round_f32,
     path_raster::{render_path, render_path_data, scene_to_draw_color},
+    RenderCtx, SceneGraph,
 };
 use crate::LruRasterizer;
 
@@ -58,6 +58,7 @@ pub(super) fn render_content(
                 // Decode 8.8 fixed-point stroke width to f32 points.
                 let sw_pt = stroke_width as f32 / 256.0;
                 let expanded = scene::stroke::expand_stroke(data, sw_pt);
+
                 if !expanded.is_empty() {
                     render_path_data(
                         fb,
@@ -87,6 +88,7 @@ pub(super) fn render_content(
             } else {
                 ctx.mono_cache
             };
+
             render_glyphs(
                 fb,
                 graph,
@@ -159,12 +161,10 @@ fn render_glyphs(
         &[]
     };
     let glyph_color = scene_to_draw_color(color);
-
     // Accumulate pen position in f32 pixel space to preserve fractional
     // advances. Snap to integer pixels only for actual drawing. This
     // matches the GPU backends and prevents inter-glyph drift.
     let mut pen_x = draw_x as f32;
-
     // Use the node's font_size from Content::Glyphs if non-zero,
     // otherwise fall back to the backend's physical font size.
     let lru_font_size = if font_size > 0 {
@@ -200,6 +200,7 @@ fn render_glyphs(
             {
                 let px = cx + g.bearing_x;
                 let py = draw_y + (cache.ascent as i32 - g.bearing_y);
+
                 fb.draw_coverage(px, py, &g.coverage, g.width, g.height, glyph_color);
             }
         }
@@ -225,15 +226,16 @@ fn render_image(
     if data.length == 0 || (data.offset as usize + data.length as usize) > graph.data.len() {
         return;
     }
+
     let pixels = &graph.data[data.offset as usize..][..data.length as usize];
     let src_stride = src_width as u32 * 4;
-
     // When source dimensions differ from the node's display size,
     // use bilinear resampling for smooth scaling instead of nearest-
     // neighbor. This produces blended gray for downscaled checker-
     // boards instead of aliased black/white.
     let phys_nw = nw.max(0) as u32;
     let phys_nh = nh.max(0) as u32;
+
     if phys_nw > 0 && phys_nh > 0 && (src_width as u32 != phys_nw || src_height as u32 != phys_nh) {
         let inv_a = src_width as f32 / phys_nw as f32;
         let inv_d = src_height as f32 / phys_nh as f32;
@@ -291,25 +293,27 @@ fn render_content_region_image(
     if graph.content_region.len() < core::mem::size_of::<crate::content::ContentRegionHeader>() {
         return;
     }
+
     // SAFETY: content_region starts at the Content Region base, which is aligned
     // by page allocation. ContentRegionHeader is repr(C) and fits within the region.
-    let header = unsafe {
-        &*(graph.content_region.as_ptr() as *const crate::content::ContentRegionHeader)
-    };
+    let header =
+        unsafe { &*(graph.content_region.as_ptr() as *const crate::content::ContentRegionHeader) };
     let entry = match crate::content::find_entry(header, content_id) {
         Some(e) => e,
         None => return,
     };
     let start = entry.offset as usize;
     let end = start + entry.length as usize;
+
     if end > graph.content_region.len() {
         return;
     }
+
     let pixels = &graph.content_region[start..end];
     let src_stride = src_width as u32 * 4;
-
     let phys_nw = nw.max(0) as u32;
     let phys_nh = nh.max(0) as u32;
+
     if phys_nw > 0 && phys_nh > 0 && (src_width as u32 != phys_nw || src_height as u32 != phys_nh) {
         let inv_a = src_width as f32 / phys_nw as f32;
         let inv_d = src_height as f32 / phys_nh as f32;
@@ -357,6 +361,7 @@ pub(super) fn mask_rounded_rect(buf: &mut [u8], w: u32, h: u32, stride: u32, rad
 
     let max_r = if w < h { w } else { h } / 2;
     let r = if radius < max_r { radius } else { max_r };
+
     if r == 0 {
         return;
     }
@@ -369,20 +374,18 @@ pub(super) fn mask_rounded_rect(buf: &mut [u8], w: u32, h: u32, stride: u32, rad
         let r_sq = (r as u64 * 256) * (r as u64 * 256);
         let x_arc_sq = if r_sq > dy_sq { r_sq - dy_sq } else { 0 };
         let x_arc_fp = isqrt_fp(x_arc_sq);
-
         let x_arc_int = (x_arc_fp >> 8) as u32;
         let x_arc_frac = (x_arc_fp & 0xFF) as u32; // 0..255
-
         let left_solid = r - x_arc_int;
         let right_solid = w - r + x_arc_int;
-
         let rows: [u32; 2] = [arc_row, h - 1 - arc_row];
+
         for &py in &rows {
             if py >= h {
                 continue;
             }
-            let row_off = (py * stride) as usize;
 
+            let row_off = (py * stride) as usize;
             // Clear pixels to the left of the arc (outside the rounded corner).
             let clear_end = if left_solid > 0 {
                 if x_arc_frac > 0 {
@@ -393,8 +396,10 @@ pub(super) fn mask_rounded_rect(buf: &mut [u8], w: u32, h: u32, stride: u32, rad
             } else {
                 0
             };
+
             for px in 0..clear_end {
                 let off = row_off + (px * 4) as usize;
+
                 if off + 4 <= buf.len() {
                     buf[off] = 0;
                     buf[off + 1] = 0;
@@ -407,9 +412,11 @@ pub(super) fn mask_rounded_rect(buf: &mut [u8], w: u32, h: u32, stride: u32, rad
             if left_solid > 0 && x_arc_frac > 0 {
                 let lx = left_solid - 1;
                 let off = row_off + (lx * 4) as usize;
+
                 if off + 4 <= buf.len() {
                     let orig_a = buf[off + 3] as u32;
                     let new_a = (orig_a * x_arc_frac) >> 8;
+
                     buf[off + 3] = if new_a > 255 { 255 } else { new_a as u8 };
                 }
             }
@@ -420,8 +427,10 @@ pub(super) fn mask_rounded_rect(buf: &mut [u8], w: u32, h: u32, stride: u32, rad
             } else {
                 right_solid
             };
+
             for px in right_clear_start..w {
                 let off = row_off + (px * 4) as usize;
+
                 if off + 4 <= buf.len() {
                     buf[off] = 0;
                     buf[off + 1] = 0;
@@ -434,9 +443,11 @@ pub(super) fn mask_rounded_rect(buf: &mut [u8], w: u32, h: u32, stride: u32, rad
             if right_solid < w && x_arc_frac > 0 {
                 let rx = right_solid;
                 let off = row_off + (rx * 4) as usize;
+
                 if off + 4 <= buf.len() {
                     let orig_a = buf[off + 3] as u32;
                     let new_a = (orig_a * x_arc_frac) >> 8;
+
                     buf[off + 3] = if new_a > 255 { 255 } else { new_a as u8 };
                 }
             }

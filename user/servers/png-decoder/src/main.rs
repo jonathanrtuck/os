@@ -50,55 +50,52 @@ impl PngDecoder {
 
         let req = png_decoder::DecodeRequest::read_from(msg.payload);
         let png_vmo = Handle(msg.handles[0]);
-
         let ro = Rights(Rights::READ.0 | Rights::MAP.0);
         let png_va = match abi::vmo::map(png_vmo, 0, ro) {
             Ok(va) => va,
             Err(_) => {
                 let _ = abi::handle::close(png_vmo);
                 let _ = msg.reply_error(ipc::STATUS_INVALID);
+
                 return;
             }
         };
-
         // SAFETY: kernel mapped the VMO at png_va, file_size is within bounds.
         let png_data =
             unsafe { core::slice::from_raw_parts(png_va as *const u8, req.file_size as usize) };
-
         let buf_size = match png::png_decode_buf_size(png_data) {
             Ok(s) => s,
             Err(_) => {
                 let _ = abi::vmo::unmap(png_va);
                 let _ = abi::handle::close(png_vmo);
                 let _ = msg.reply_error(ipc::STATUS_INVALID);
+
                 return;
             }
         };
-
         let header = match png::png_header(png_data) {
             Ok(h) => h,
             Err(_) => {
                 let _ = abi::vmo::unmap(png_va);
                 let _ = abi::handle::close(png_vmo);
                 let _ = msg.reply_error(ipc::STATUS_INVALID);
+
                 return;
             }
         };
-
         let pixel_size = header.width as usize * header.height as usize * 4;
         let decode_buf_vmo_size = buf_size.next_multiple_of(PAGE_SIZE);
         let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
-
         let decode_vmo = match abi::vmo::create(decode_buf_vmo_size, 0) {
             Ok(h) => h,
             Err(_) => {
                 let _ = abi::vmo::unmap(png_va);
                 let _ = abi::handle::close(png_vmo);
                 let _ = msg.reply_error(ipc::STATUS_NO_SPACE);
+
                 return;
             }
         };
-
         let decode_va = match abi::vmo::map(decode_vmo, 0, rw) {
             Ok(va) => va,
             Err(_) => {
@@ -106,15 +103,13 @@ impl PngDecoder {
                 let _ = abi::handle::close(png_vmo);
                 let _ = abi::handle::close(decode_vmo);
                 let _ = msg.reply_error(ipc::STATUS_NO_SPACE);
+
                 return;
             }
         };
-
         // SAFETY: decode_vmo is mapped RW at decode_va with buf_size usable bytes.
         let output = unsafe { core::slice::from_raw_parts_mut(decode_va as *mut u8, buf_size) };
-
         let decode_ok = png::png_decode(png_data, output).is_ok();
-
         // Done with input VMO.
         let _ = abi::vmo::unmap(png_va);
         let _ = abi::handle::close(png_vmo);
@@ -123,6 +118,7 @@ impl PngDecoder {
             let _ = abi::vmo::unmap(decode_va);
             let _ = abi::handle::close(decode_vmo);
             let _ = msg.reply_error(ipc::STATUS_INVALID);
+
             return;
         }
 
@@ -134,10 +130,10 @@ impl PngDecoder {
                 let _ = abi::vmo::unmap(decode_va);
                 let _ = abi::handle::close(decode_vmo);
                 let _ = msg.reply_error(ipc::STATUS_NO_SPACE);
+
                 return;
             }
         };
-
         let pixel_va = match abi::vmo::map(pixel_vmo, 0, rw) {
             Ok(va) => va,
             Err(_) => {
@@ -145,6 +141,7 @@ impl PngDecoder {
                 let _ = abi::handle::close(decode_vmo);
                 let _ = abi::handle::close(pixel_vmo);
                 let _ = msg.reply_error(ipc::STATUS_NO_SPACE);
+
                 return;
             }
         };
@@ -157,16 +154,15 @@ impl PngDecoder {
         // Clean up the decode buffer (scratch + pixels).
         let _ = abi::vmo::unmap(decode_va);
         let _ = abi::handle::close(decode_vmo);
-
         // Unmap the pixel VMO locally — the handle is transferred to the caller.
         let _ = abi::vmo::unmap(pixel_va);
-
         let mut reply_buf = [0u8; png_decoder::DecodeReply::SIZE];
         let reply = png_decoder::DecodeReply {
             width: header.width,
             height: header.height,
             pixel_size: pixel_size as u32,
         };
+
         reply.write_to(&mut reply_buf);
 
         let _ = msg.reply_ok(&reply_buf, &[pixel_vmo.0]);

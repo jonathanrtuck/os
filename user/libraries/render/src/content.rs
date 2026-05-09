@@ -32,13 +32,16 @@ pub struct ContentRegionHeader {
 
 pub fn find_entry(header: &ContentRegionHeader, content_id: u32) -> Option<&ContentEntry> {
     let count = header.entry_count as usize;
+
     if count > MAX_CONTENT_ENTRIES {
         return None;
     }
+
     for i in 0..count {
         if header.entries[i].content_id == content_id {
             return Some(&header.entries[i]);
         }
     }
+
     None
 }

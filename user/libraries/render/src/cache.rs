@@ -62,9 +62,11 @@ impl NodeCache {
     /// allocated until the first `store()` call for each slot.
     pub fn new() -> Self {
         let mut entries = Vec::with_capacity(MAX_NODES);
+
         for _ in 0..MAX_NODES {
             entries.push(CacheEntry::empty());
         }
+
         Self { entries }
     }
 
@@ -75,10 +77,13 @@ impl NodeCache {
     /// on cache miss (invalid entry, hash mismatch, or out-of-bounds ID).
     pub fn get(&self, node_id: u16, content_hash: u32) -> Option<(u32, u32, &[u8])> {
         let idx = node_id as usize;
+
         if idx >= self.entries.len() {
             return None;
         }
+
         let entry = &self.entries[idx];
+
         if entry.valid && entry.content_hash == content_hash {
             Some((entry.width, entry.height, &entry.data))
         } else {
@@ -93,10 +98,13 @@ impl NodeCache {
     /// (no reallocation). Out-of-bounds `node_id` is a no-op.
     pub fn store(&mut self, node_id: u16, content_hash: u32, width: u32, height: u32, data: &[u8]) {
         let idx = node_id as usize;
+
         if idx >= self.entries.len() {
             return;
         }
+
         let entry = &mut self.entries[idx];
+
         entry.content_hash = content_hash;
         entry.width = width;
         entry.height = height;
@@ -117,9 +125,11 @@ impl NodeCache {
     /// the entire `NodeCache`.
     pub fn evict(&mut self, node_id: u16) {
         let idx = node_id as usize;
+
         if idx >= self.entries.len() {
             return;
         }
+
         self.entries[idx].valid = false;
     }
 

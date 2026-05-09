@@ -61,6 +61,7 @@ pub fn bits_per_pixel(color_type: u8, bit_depth: u8) -> usize {
         6 => 4,
         _ => 1,
     };
+
     channels * bit_depth as usize
 }
 
@@ -70,7 +71,12 @@ fn raw_row_bytes(width: usize, color_type: u8, bit_depth: u8) -> usize {
 
 fn filter_bpp(color_type: u8, bit_depth: u8) -> usize {
     let bpp = bits_per_pixel(color_type, bit_depth) / 8;
-    if bpp == 0 { 1 } else { bpp }
+
+    if bpp == 0 {
+        1
+    } else {
+        bpp
+    }
 }
 
 fn validate_format(color_type: u8, bit_depth: u8) -> Result<(), PngError> {
@@ -82,6 +88,7 @@ fn validate_format(color_type: u8, bit_depth: u8) -> Result<(), PngError> {
         6 => matches!(bit_depth, 8 | 16),
         _ => false,
     };
+
     if valid {
         Ok(())
     } else {
@@ -94,48 +101,62 @@ fn validate_format(color_type: u8, bit_depth: u8) -> Result<(), PngError> {
 const CRC32_TABLE: [u32; 256] = {
     let mut table = [0u32; 256];
     let mut i = 0u32;
+
     while i < 256 {
         let mut crc = i;
         let mut j = 0;
+
         while j < 8 {
             if crc & 1 != 0 {
                 crc = (crc >> 1) ^ 0xEDB8_8320;
             } else {
                 crc >>= 1;
             }
+
             j += 1;
         }
+
         table[i as usize] = crc;
         i += 1;
     }
+
     table
 };
 
 pub fn crc32(data: &[u8]) -> u32 {
     let mut crc = 0xFFFF_FFFFu32;
     let mut i = 0;
+
     while i < data.len() {
         let idx = ((crc ^ data[i] as u32) & 0xFF) as usize;
+
         crc = (crc >> 8) ^ CRC32_TABLE[idx];
         i += 1;
     }
+
     crc ^ 0xFFFF_FFFF
 }
 
 pub fn chunk_crc(chunk_type: &[u8], chunk_data: &[u8]) -> u32 {
     let mut crc = 0xFFFF_FFFFu32;
     let mut i = 0;
+
     while i < chunk_type.len() {
         let idx = ((crc ^ chunk_type[i] as u32) & 0xFF) as usize;
+
         crc = (crc >> 8) ^ CRC32_TABLE[idx];
         i += 1;
     }
+
     i = 0;
+
     while i < chunk_data.len() {
         let idx = ((crc ^ chunk_data[i] as u32) & 0xFF) as usize;
+
         crc = (crc >> 8) ^ CRC32_TABLE[idx];
         i += 1;
     }
+
     crc ^ 0xFFFF_FFFF
 }
 
@@ -151,24 +172,31 @@ pub fn png_header(data: &[u8]) -> Result<PngHeader, PngError> {
     if data.len() < 8 + 4 + 4 + 13 + 4 {
         return Err(PngError::Truncated);
     }
+
     let chunk_len = read_be_u32(&data[8..12]) as usize;
     let chunk_type = &data[12..16];
+
     if chunk_type != b"IHDR" || chunk_len != 13 {
         return Err(PngError::MissingIhdr);
     }
+
     let ihdr_data = &data[16..16 + chunk_len];
     let stored_crc = read_be_u32(&data[16 + chunk_len..16 + chunk_len + 4]);
     let computed_crc = chunk_crc(chunk_type, ihdr_data);
+
     if stored_crc != computed_crc {
         return Err(PngError::CrcMismatch);
     }
+
     let width = read_be_u32(&ihdr_data[0..4]);
     let height = read_be_u32(&ihdr_data[4..8]);
     let bit_depth = ihdr_data[8];
     let color_type = ihdr_data[9];
+
     if width == 0 || height == 0 {
         return Err(PngError::ZeroDimensions);
     }
+
     Ok(PngHeader {
         width,
         height,
@@ -215,12 +243,15 @@ fn parse_chunks(data: &[u8], color_type: u8) -> Result<PngChunks, PngError> {
     if data.len() < 29 {
         return Err(PngError::Truncated);
     }
+
     chunks.interlace = data[28];
+
     if chunks.interlace > 1 {
         return Err(PngError::InvalidData);
     }
 
     let mut pos = 33;
+
     while pos + 8 <= data.len() {
         let chunk_len = read_be_u32(&data[pos..pos + 4]) as usize;
         let chunk_type = &data[pos + 4..pos + 8];
@@ -229,13 +260,14 @@ fn parse_chunks(data: &[u8], color_type: u8) -> Result<PngChunks, PngError> {
             if chunk_type == b"IDAT" {
                 return Err(PngError::Truncated);
             }
+
             break;
         }
 
         let chunk_data = &data[pos + 8..pos + 8 + chunk_len];
-
         let stored_crc = read_be_u32(&data[pos + 8 + chunk_len..pos + 8 + chunk_len + 4]);
         let computed_crc = chunk_crc(chunk_type, chunk_data);
+
         if stored_crc != computed_crc {
             return Err(PngError::CrcMismatch);
         }
@@ -248,14 +280,18 @@ fn parse_chunks(data: &[u8], color_type: u8) -> Result<PngChunks, PngError> {
             if chunk_len % 3 != 0 || chunk_len > 768 {
                 return Err(PngError::InvalidData);
             }
+
             chunks.palette_count = chunk_len / 3;
+
             let mut i = 0;
+
             while i < chunks.palette_count {
                 chunks.palette[i] = [
                     chunk_data[i * 3],
                     chunk_data[i * 3 + 1],
                     chunk_data[i * 3 + 2],
                 ];
+
                 i += 1;
             }
         } else if chunk_type == b"tRNS" {
@@ -279,10 +315,12 @@ fn parse_chunks(data: &[u8], color_type: u8) -> Result<PngChunks, PngError> {
                 3 => {
                     let count = chunk_len.min(256);
                     let mut i = 0;
+
                     while i < count {
                         chunks.trns_alpha[i] = chunk_data[i];
                         i += 1;
                     }
+
                     chunks.trns_count = count;
                 }
                 _ => {}
@@ -309,6 +347,7 @@ fn parse_chunks(data: &[u8], color_type: u8) -> Result<PngChunks, PngError> {
 
 pub fn png_decode_buf_size(data: &[u8]) -> Result<usize, PngError> {
     let header = png_header(data)?;
+
     validate_format(header.color_type, header.bit_depth)?;
 
     let w = header.width as usize;
@@ -317,10 +356,10 @@ pub fn png_decode_buf_size(data: &[u8]) -> Result<usize, PngError> {
         .checked_mul(h)
         .and_then(|p| p.checked_mul(4))
         .ok_or(PngError::DimensionOverflow)?;
-
     let interlace = data.get(28).copied().unwrap_or(0);
     let total_raw = if interlace == 0 {
         let rrb = raw_row_bytes(w, header.color_type, header.bit_depth);
+
         (rrb + 1) * h
     } else {
         adam7_total_raw(w, h, header.color_type, header.bit_depth)
@@ -331,6 +370,7 @@ pub fn png_decode_buf_size(data: &[u8]) -> Result<usize, PngError> {
 
 fn adam7_total_raw(w: usize, h: usize, color_type: u8, bit_depth: u8) -> usize {
     let mut total = 0;
+
     for &(xs, ys, xstep, ystep) in &ADAM7 {
         let pw = if xs < w {
             (w - xs + xstep - 1) / xstep
@@ -342,8 +382,10 @@ fn adam7_total_raw(w: usize, h: usize, color_type: u8, bit_depth: u8) -> usize {
         } else {
             0
         };
+
         if pw > 0 && ph > 0 {
             let rrb = raw_row_bytes(pw, color_type, bit_depth);
+
             total += (rrb + 1) * ph;
         }
     }
@@ -352,6 +394,7 @@ fn adam7_total_raw(w: usize, h: usize, color_type: u8, bit_depth: u8) -> usize {
 
 pub fn png_decode(data: &[u8], output: &mut [u8]) -> Result<PngHeader, PngError> {
     let header = png_header(data)?;
+
     validate_format(header.color_type, header.bit_depth)?;
 
     let w = header.width as usize;
@@ -360,7 +403,6 @@ pub fn png_decode(data: &[u8], output: &mut [u8]) -> Result<PngHeader, PngError>
         .checked_mul(h)
         .and_then(|p| p.checked_mul(4))
         .ok_or(PngError::DimensionOverflow)?;
-
     let chunks = parse_chunks(data, header.color_type)?;
 
     if chunks.interlace == 0 {
@@ -415,11 +457,13 @@ fn decode_non_interlaced(
         chunks.first_idat_pos,
         &mut output[raw_start..raw_start + total_raw],
     )?;
+
     if decompressed != total_raw {
         return Err(PngError::DataSizeMismatch);
     }
 
     let bpp = filter_bpp(color_type, bit_depth);
+
     unfilter_scanlines(&mut output[raw_start..], rrb, h, bpp)?;
 
     for y in 0..h {
@@ -451,6 +495,7 @@ fn decode_interlaced(
     }
 
     let mut i = 0;
+
     while i < bgra_size {
         output[i] = 0;
         i += 1;
@@ -462,11 +507,13 @@ fn decode_interlaced(
         chunks.first_idat_pos,
         &mut output[raw_start..raw_start + total_raw],
     )?;
+
     if decompressed != total_raw {
         return Err(PngError::DataSizeMismatch);
     }
 
     let mut pass_offset = 0usize;
+
     for &(xs, ys, xstep, ystep) in &ADAM7 {
         let pw = if xs < w {
             (w - xs + xstep - 1) / xstep
@@ -478,6 +525,7 @@ fn decode_interlaced(
         } else {
             0
         };
+
         if pw == 0 || ph == 0 {
             continue;
         }
@@ -486,8 +534,8 @@ fn decode_interlaced(
         let scanline = rrb + 1;
         let pass_raw = scanline * ph;
         let bpp = filter_bpp(color_type, bit_depth);
-
         let abs_start = raw_start + pass_offset;
+
         unfilter_scanlines(&mut output[abs_start..abs_start + pass_raw], rrb, ph, bpp)?;
 
         for py in 0..ph {
@@ -532,12 +580,14 @@ fn scatter_row(
 ) {
     let mut raw_buf = [0u8; 8192];
     let copy_len = rrb.min(raw_buf.len());
+
     raw_buf[..copy_len].copy_from_slice(&output[raw_row_start..raw_row_start + copy_len]);
 
     for px in 0..pass_width {
         let dest_x = x_start + px * x_step;
         let out_idx = (dest_y * image_width + dest_x) * 4;
         let mut bgra = [0u8; 4];
+
         pixel_to_bgra(
             &raw_buf[..rrb],
             px,
@@ -546,6 +596,7 @@ fn scatter_row(
             chunks,
             &mut bgra,
         );
+
         output[out_idx] = bgra[0];
         output[out_idx + 1] = bgra[1];
         output[out_idx + 2] = bgra[2];
@@ -571,6 +622,7 @@ fn pixel_to_bgra(
             } else {
                 255
             };
+
             *out = [g, g, g, a];
         }
         (0, 16) => {
@@ -581,6 +633,7 @@ fn pixel_to_bgra(
             } else {
                 255
             };
+
             *out = [g, g, g, a];
         }
         (0, bd) => {
@@ -591,6 +644,7 @@ fn pixel_to_bgra(
             } else {
                 255
             };
+
             *out = [g, g, g, a];
         }
         (2, 8) => {
@@ -605,6 +659,7 @@ fn pixel_to_bgra(
             } else {
                 255
             };
+
             *out = [b, g, r, a];
         }
         (2, 16) => {
@@ -621,6 +676,7 @@ fn pixel_to_bgra(
             } else {
                 255
             };
+
             *out = [(b16 >> 8) as u8, (g16 >> 8) as u8, (r16 >> 8) as u8, a];
         }
         (3, 8) => {
@@ -635,6 +691,7 @@ fn pixel_to_bgra(
             } else {
                 255
             };
+
             *out = [b, g, r, a];
         }
         (3, bd) => {
@@ -649,24 +706,29 @@ fn pixel_to_bgra(
             } else {
                 255
             };
+
             *out = [b, g, r, a];
         }
         (4, 8) => {
             let g = raw[x * 2];
             let a = raw[x * 2 + 1];
+
             *out = [g, g, g, a];
         }
         (4, 16) => {
             let g = raw[x * 4];
             let a = raw[x * 4 + 2];
+
             *out = [g, g, g, a];
         }
         (6, 8) => {
             let i = x * 4;
+
             *out = [raw[i + 2], raw[i + 1], raw[i], raw[i + 3]];
         }
         (6, 16) => {
             let i = x * 8;
+
             *out = [raw[i + 4], raw[i + 2], raw[i], raw[i + 6]];
         }
         _ => {
@@ -685,8 +747,11 @@ fn row_to_bgra(
 ) {
     for x in 0..width {
         let mut px = [0u8; 4];
+
         pixel_to_bgra(raw, x, color_type, bit_depth, chunks, &mut px);
+
         let o = x * 4;
+
         bgra[o] = px[0];
         bgra[o + 1] = px[1];
         bgra[o + 2] = px[2];
@@ -700,6 +765,7 @@ fn unpack_sub_byte(raw: &[u8], x: usize, bit_depth: u8) -> u8 {
     let byte_idx = x / pixels_per_byte;
     let bit_offset = (pixels_per_byte - 1 - x % pixels_per_byte) * bd;
     let mask = (1u8 << bd) - 1;
+
     (raw[byte_idx] >> bit_offset) & mask
 }
 
@@ -736,6 +802,7 @@ fn unfilter_scanlines(
             0 => {}
             1 => {
                 let mut i = bpp;
+
                 while i < row_len {
                     data[ps + i] = data[ps + i].wrapping_add(data[ps + i - bpp]);
                     i += 1;
@@ -745,6 +812,7 @@ fn unfilter_scanlines(
                 if y > 0 {
                     let prev_ps = (y - 1) * scanline + 1;
                     let mut i = 0;
+
                     while i < row_len {
                         data[ps + i] = data[ps + i].wrapping_add(data[prev_ps + i]);
                         i += 1;
@@ -754,6 +822,7 @@ fn unfilter_scanlines(
             3 => {
                 let prev_ps = if y > 0 { (y - 1) * scanline + 1 } else { 0 };
                 let mut i = 0;
+
                 while i < row_len {
                     let a = if i >= bpp {
                         data[ps + i - bpp] as u16
@@ -761,6 +830,7 @@ fn unfilter_scanlines(
                         0
                     };
                     let b = if y > 0 { data[prev_ps + i] as u16 } else { 0 };
+
                     data[ps + i] = data[ps + i].wrapping_add(((a + b) / 2) as u8);
                     i += 1;
                 }
@@ -768,6 +838,7 @@ fn unfilter_scanlines(
             4 => {
                 let prev_ps = if y > 0 { (y - 1) * scanline + 1 } else { 0 };
                 let mut i = 0;
+
                 while i < row_len {
                     let a = if i >= bpp {
                         data[ps + i - bpp] as i32
@@ -780,6 +851,7 @@ fn unfilter_scanlines(
                     } else {
                         0
                     };
+
                     data[ps + i] = data[ps + i].wrapping_add(paeth_pred(a, b, c) as u8);
                     i += 1;
                 }
@@ -796,6 +868,7 @@ fn paeth_pred(a: i32, b: i32, c: i32) -> i32 {
     let pa = (p - a).abs();
     let pb = (p - b).abs();
     let pc = (p - c).abs();
+
     if pa <= pb && pa <= pc {
         a
     } else if pb <= pc {
@@ -813,7 +886,6 @@ fn inflate_idat(
     output: &mut [u8],
 ) -> Result<usize, PngError> {
     let mut reader = BitReader::new(file_data, first_idat_pos)?;
-
     let cmf = reader.next_byte().ok_or(PngError::Truncated)?;
     let flg = reader.next_byte().ok_or(PngError::Truncated)?;
 
@@ -846,7 +918,9 @@ impl<'a> BitReader<'a> {
         if first_idat_pos + 8 > data.len() {
             return Err(PngError::Truncated);
         }
+
         let chunk_len = read_be_u32(&data[first_idat_pos..first_idat_pos + 4]) as usize;
+
         Ok(Self {
             data,
             chunk_pos: first_idat_pos,
@@ -861,20 +935,29 @@ impl<'a> BitReader<'a> {
 
     fn advance_chunk(&mut self) {
         let next_pos = self.chunk_data_start + self.chunk_data_len + 4;
+
         if next_pos + 8 > self.data.len() {
             self.exhausted = true;
+
             return;
         }
+
         let chunk_type = &self.data[next_pos + 4..next_pos + 8];
+
         if chunk_type != b"IDAT" {
             self.exhausted = true;
+
             return;
         }
+
         let chunk_len = read_be_u32(&self.data[next_pos..next_pos + 4]) as usize;
+
         if next_pos + 8 + chunk_len + 4 > self.data.len() {
             self.exhausted = true;
+
             return;
         }
+
         self.chunk_pos = next_pos;
         self.chunk_data_start = next_pos + 8;
         self.chunk_data_len = chunk_len;
@@ -886,11 +969,14 @@ impl<'a> BitReader<'a> {
             if self.exhausted {
                 return None;
             }
+
             if self.byte_idx < self.chunk_data_len {
                 let b = self.data[self.chunk_data_start + self.byte_idx];
                 self.byte_idx += 1;
+
                 return Some(b);
             }
+
             self.advance_chunk();
         }
     }
@@ -898,12 +984,16 @@ impl<'a> BitReader<'a> {
     fn read_bits(&mut self, n: u8) -> Result<u32, PngError> {
         while self.nbits < n {
             let b = self.next_byte().ok_or(PngError::Truncated)?;
+
             self.bits |= (b as u32) << self.nbits;
             self.nbits += 8;
         }
+
         let val = self.bits & ((1u32 << n) - 1);
+
         self.bits >>= n;
         self.nbits -= n;
+
         Ok(val)
     }
 
@@ -914,23 +1004,30 @@ impl<'a> BitReader<'a> {
 
     fn read_u16_le(&mut self) -> Result<u16, PngError> {
         self.align();
+
         let lo = self.next_byte().ok_or(PngError::Truncated)?;
         let hi = self.next_byte().ok_or(PngError::Truncated)?;
+
         Ok((hi as u16) << 8 | lo as u16)
     }
 
     fn decode_huffman(&mut self, table: &HuffTable) -> Result<u16, PngError> {
         let mut code: u32 = 0;
+
         for len in 1..=15u8 {
             code = (code << 1) | self.read_bits(1)?;
+
             let start = table.offsets[len as usize] as usize;
             let count = table.counts[len as usize] as usize;
             let first_code = table.first_code[len as usize];
+
             if code >= first_code && (code - first_code) < count as u32 {
                 let idx = start + (code - first_code) as usize;
+
                 return Ok(table.symbols[idx]);
             }
         }
+
         Err(PngError::InvalidData)
     }
 }
@@ -953,6 +1050,7 @@ impl HuffTable {
 
         for i in 0..num_symbols {
             let len = code_lengths[i] as usize;
+
             if len > 15 {
                 return Err(PngError::InvalidData);
             }
@@ -962,12 +1060,14 @@ impl HuffTable {
         }
 
         let mut offset = 0u16;
+
         for i in 1..=15 {
             table.offsets[i] = offset;
             offset += table.counts[i];
         }
 
         let mut code = 0u32;
+
         for i in 1..=15 {
             code = (code + table.counts[i - 1] as u32) << 1;
             table.first_code[i] = code;
@@ -975,17 +1075,22 @@ impl HuffTable {
 
         let mut pos = [0u16; 16];
         let mut i = 0;
+
         while i < 16 {
             pos[i] = table.offsets[i];
             i += 1;
         }
+
         for sym in 0..num_symbols {
             let len = code_lengths[sym] as usize;
+
             if len > 0 {
                 let idx = pos[len] as usize;
+
                 if idx < 320 {
                     table.symbols[idx] = sym as u16;
                 }
+
                 pos[len] += 1;
             }
         }
@@ -1028,13 +1133,16 @@ fn inflate_stream(reader: &mut BitReader, output: &mut [u8]) -> Result<usize, Pn
             0 => {
                 let len = reader.read_u16_le()?;
                 let nlen = reader.read_u16_le()?;
+
                 if len != !nlen {
                     return Err(PngError::InvalidData);
                 }
+
                 for _ in 0..len {
                     if out_pos >= output.len() {
                         return Err(PngError::DataSizeMismatch);
                     }
+
                     output[out_pos] = reader.next_byte().ok_or(PngError::Truncated)?;
                     out_pos += 1;
                 }
@@ -1042,6 +1150,7 @@ fn inflate_stream(reader: &mut BitReader, output: &mut [u8]) -> Result<usize, Pn
             1 => {
                 let mut lit_lens = [0u8; 288];
                 let mut i = 0;
+
                 while i <= 143 {
                     lit_lens[i] = 8;
                     i += 1;
@@ -1060,28 +1169,29 @@ fn inflate_stream(reader: &mut BitReader, output: &mut [u8]) -> Result<usize, Pn
                 }
 
                 let dist_lens = [5u8; 32];
-
                 let lit_table = HuffTable::build(&lit_lens, 288)?;
                 let dist_table = HuffTable::build(&dist_lens, 32)?;
+
                 out_pos = decode_codes(reader, output, out_pos, &lit_table, &dist_table)?;
             }
             2 => {
                 let hlit = reader.read_bits(5)? as usize + 257;
                 let hdist = reader.read_bits(5)? as usize + 1;
                 let hclen = reader.read_bits(4)? as usize + 4;
-
                 let mut cl_lens = [0u8; 19];
+
                 for i in 0..hclen {
                     cl_lens[CL_ORDER[i]] = reader.read_bits(3)? as u8;
                 }
-                let cl_table = HuffTable::build(&cl_lens, 19)?;
 
+                let cl_table = HuffTable::build(&cl_lens, 19)?;
                 let total = hlit + hdist;
                 let mut combined = [0u8; 320];
                 let mut idx = 0;
 
                 while idx < total {
                     let sym = reader.decode_huffman(&cl_table)?;
+
                     match sym {
                         0..=15 => {
                             combined[idx] = sym as u8;
@@ -1091,32 +1201,39 @@ fn inflate_stream(reader: &mut BitReader, output: &mut [u8]) -> Result<usize, Pn
                             if idx == 0 {
                                 return Err(PngError::InvalidData);
                             }
+
                             let rep = reader.read_bits(2)? as usize + 3;
                             let prev = combined[idx - 1];
+
                             for _ in 0..rep {
                                 if idx >= total {
                                     return Err(PngError::InvalidData);
                                 }
+
                                 combined[idx] = prev;
                                 idx += 1;
                             }
                         }
                         17 => {
                             let rep = reader.read_bits(3)? as usize + 3;
+
                             for _ in 0..rep {
                                 if idx >= total {
                                     return Err(PngError::InvalidData);
                                 }
+
                                 combined[idx] = 0;
                                 idx += 1;
                             }
                         }
                         18 => {
                             let rep = reader.read_bits(7)? as usize + 11;
+
                             for _ in 0..rep {
                                 if idx >= total {
                                     return Err(PngError::InvalidData);
                                 }
+
                                 combined[idx] = 0;
                                 idx += 1;
                             }
@@ -1127,6 +1244,7 @@ fn inflate_stream(reader: &mut BitReader, output: &mut [u8]) -> Result<usize, Pn
 
                 let lit_table = HuffTable::build(&combined[..hlit], hlit)?;
                 let dist_table = HuffTable::build(&combined[hlit..hlit + hdist], hdist)?;
+
                 out_pos = decode_codes(reader, output, out_pos, &lit_table, &dist_table)?;
             }
             _ => return Err(PngError::InvalidData),
@@ -1154,21 +1272,25 @@ fn decode_codes(
             if out_pos >= output.len() {
                 return Err(PngError::DataSizeMismatch);
             }
+
             output[out_pos] = sym as u8;
             out_pos += 1;
         } else if sym == 256 {
             break;
         } else {
             let li = (sym - 257) as usize;
+
             if li >= 29 {
                 return Err(PngError::InvalidData);
             }
-            let length = LEN_BASE[li] as usize + reader.read_bits(LEN_EXTRA[li])? as usize;
 
+            let length = LEN_BASE[li] as usize + reader.read_bits(LEN_EXTRA[li])? as usize;
             let di = reader.decode_huffman(dist_table)? as usize;
+
             if di >= 30 {
                 return Err(PngError::InvalidData);
             }
+
             let distance = DIST_BASE[di] as usize + reader.read_bits(DIST_EXTRA[di])? as usize;
 
             if distance > out_pos {
@@ -1179,6 +1301,7 @@ fn decode_codes(
                 if out_pos >= output.len() {
                     return Err(PngError::DataSizeMismatch);
                 }
+
                 output[out_pos] = output[out_pos - distance];
                 out_pos += 1;
             }
@@ -1205,6 +1328,7 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             name
         );
+
         std::fs::read(&path).unwrap_or_else(|e| panic!("failed to read fixture {name}: {e}"))
     }
 
@@ -1214,7 +1338,9 @@ mod tests {
         let mut output = vec![0u8; buf_size];
         let header = png_decode(&data, &mut output).unwrap();
         let pixel_count = header.width as usize * header.height as usize * 4;
+
         output.truncate(pixel_count);
+
         (header, output)
     }
 
@@ -1224,6 +1350,7 @@ mod tests {
     fn header_basn0g08() {
         let data = fixture("basn0g08.png");
         let h = png_header(&data).unwrap();
+
         assert_eq!(h.width, 32);
         assert_eq!(h.height, 32);
         assert_eq!(h.bit_depth, 8);
@@ -1234,6 +1361,7 @@ mod tests {
     fn header_basn2c08() {
         let data = fixture("basn2c08.png");
         let h = png_header(&data).unwrap();
+
         assert_eq!(h.width, 32);
         assert_eq!(h.height, 32);
         assert_eq!(h.bit_depth, 8);
@@ -1244,6 +1372,7 @@ mod tests {
     fn header_basn6a08() {
         let data = fixture("basn6a08.png");
         let h = png_header(&data).unwrap();
+
         assert_eq!(h.width, 32);
         assert_eq!(h.height, 32);
         assert_eq!(h.bit_depth, 8);
@@ -1253,6 +1382,7 @@ mod tests {
     #[test]
     fn header_invalid_signature() {
         let data = [0u8; 100];
+
         assert_eq!(png_header(&data), Err(PngError::InvalidSignature));
     }
 
@@ -1297,6 +1427,7 @@ mod tests {
             (6, 8),
             (6, 16),
         ];
+
         for (ct, bd) in valid {
             assert!(
                 validate_format(ct, bd).is_ok(),
@@ -1318,6 +1449,7 @@ mod tests {
     #[test]
     fn decode_gray_1bit() {
         let (h, pixels) = decode_fixture("basn0g01.png");
+
         assert_eq!((h.width, h.height), (32, 32));
         assert_eq!(h.color_type, 0);
         assert_eq!(h.bit_depth, 1);
@@ -1328,6 +1460,7 @@ mod tests {
     #[test]
     fn decode_gray_2bit() {
         let (h, _) = decode_fixture("basn0g02.png");
+
         assert_eq!((h.width, h.height), (32, 32));
         assert_eq!(h.bit_depth, 2);
     }
@@ -1335,6 +1468,7 @@ mod tests {
     #[test]
     fn decode_gray_4bit() {
         let (h, _) = decode_fixture("basn0g04.png");
+
         assert_eq!((h.width, h.height), (32, 32));
         assert_eq!(h.bit_depth, 4);
     }
@@ -1342,6 +1476,7 @@ mod tests {
     #[test]
     fn decode_gray_8bit() {
         let (h, pixels) = decode_fixture("basn0g08.png");
+
         assert_eq!((h.width, h.height), (32, 32));
         assert_eq!(pixels.len(), 32 * 32 * 4);
         // Gray pixels: B=G=R, A=255
@@ -1353,6 +1488,7 @@ mod tests {
     #[test]
     fn decode_gray_16bit() {
         let (h, pixels) = decode_fixture("basn0g16.png");
+
         assert_eq!((h.width, h.height), (32, 32));
         assert!(!pixels.is_empty());
     }
@@ -1362,6 +1498,7 @@ mod tests {
     #[test]
     fn decode_rgb_8bit() {
         let (h, pixels) = decode_fixture("basn2c08.png");
+
         assert_eq!((h.width, h.height), (32, 32));
         assert_eq!(h.color_type, 2);
         assert_eq!(pixels.len(), 32 * 32 * 4);
@@ -1371,6 +1508,7 @@ mod tests {
     #[test]
     fn decode_rgb_16bit() {
         let (h, pixels) = decode_fixture("basn2c16.png");
+
         assert_eq!((h.width, h.height), (32, 32));
         assert!(!pixels.is_empty());
     }
@@ -1380,6 +1518,7 @@ mod tests {
     #[test]
     fn decode_indexed_1bit() {
         let (h, _) = decode_fixture("basn3p01.png");
+
         assert_eq!((h.width, h.height), (32, 32));
         assert_eq!(h.color_type, 3);
     }
@@ -1387,18 +1526,21 @@ mod tests {
     #[test]
     fn decode_indexed_2bit() {
         let (h, _) = decode_fixture("basn3p02.png");
+
         assert_eq!((h.width, h.height), (32, 32));
     }
 
     #[test]
     fn decode_indexed_4bit() {
         let (h, _) = decode_fixture("basn3p04.png");
+
         assert_eq!((h.width, h.height), (32, 32));
     }
 
     #[test]
     fn decode_indexed_8bit() {
         let (h, pixels) = decode_fixture("basn3p08.png");
+
         assert_eq!((h.width, h.height), (32, 32));
         assert_eq!(pixels.len(), 32 * 32 * 4);
     }
@@ -1408,16 +1550,20 @@ mod tests {
     #[test]
     fn decode_gray_alpha_8bit() {
         let (h, pixels) = decode_fixture("basn4a08.png");
+
         assert_eq!((h.width, h.height), (32, 32));
         assert_eq!(h.color_type, 4);
+
         // Some pixels should have varying alpha
         let has_varying_alpha = pixels.chunks(4).any(|px| px[3] != 255);
+
         assert!(has_varying_alpha);
     }
 
     #[test]
     fn decode_gray_alpha_16bit() {
         let (h, _) = decode_fixture("basn4a16.png");
+
         assert_eq!((h.width, h.height), (32, 32));
     }
 
@@ -1426,6 +1572,7 @@ mod tests {
     #[test]
     fn decode_rgba_8bit() {
         let (h, pixels) = decode_fixture("basn6a08.png");
+
         assert_eq!((h.width, h.height), (32, 32));
         assert_eq!(h.color_type, 6);
         assert_eq!(pixels.len(), 32 * 32 * 4);
@@ -1434,6 +1581,7 @@ mod tests {
     #[test]
     fn decode_rgba_16bit() {
         let (h, _) = decode_fixture("basn6a16.png");
+
         assert_eq!((h.width, h.height), (32, 32));
     }
 
@@ -1442,36 +1590,42 @@ mod tests {
     #[test]
     fn decode_interlaced_gray_1bit() {
         let (h, _) = decode_fixture("basi0g01.png");
+
         assert_eq!((h.width, h.height), (32, 32));
     }
 
     #[test]
     fn decode_interlaced_gray_8bit() {
         let (h, _) = decode_fixture("basi0g08.png");
+
         assert_eq!((h.width, h.height), (32, 32));
     }
 
     #[test]
     fn decode_interlaced_rgb_8bit() {
         let (h, _) = decode_fixture("basi2c08.png");
+
         assert_eq!((h.width, h.height), (32, 32));
     }
 
     #[test]
     fn decode_interlaced_indexed_8bit() {
         let (h, _) = decode_fixture("basi3p08.png");
+
         assert_eq!((h.width, h.height), (32, 32));
     }
 
     #[test]
     fn decode_interlaced_gray_alpha_8bit() {
         let (h, _) = decode_fixture("basi4a08.png");
+
         assert_eq!((h.width, h.height), (32, 32));
     }
 
     #[test]
     fn decode_interlaced_rgba_8bit() {
         let (h, _) = decode_fixture("basi6a08.png");
+
         assert_eq!((h.width, h.height), (32, 32));
     }
 
@@ -1479,6 +1633,7 @@ mod tests {
     fn interlaced_matches_non_interlaced() {
         let (_, ni_pixels) = decode_fixture("basn0g08.png");
         let (_, i_pixels) = decode_fixture("basi0g08.png");
+
         assert_eq!(
             ni_pixels, i_pixels,
             "interlaced and non-interlaced should produce identical output"
@@ -1489,6 +1644,7 @@ mod tests {
     fn interlaced_rgb_matches() {
         let (_, ni) = decode_fixture("basn2c08.png");
         let (_, i) = decode_fixture("basi2c08.png");
+
         assert_eq!(ni, i);
     }
 
@@ -1496,6 +1652,7 @@ mod tests {
     fn interlaced_indexed_matches() {
         let (_, ni) = decode_fixture("basn3p08.png");
         let (_, i) = decode_fixture("basi3p08.png");
+
         assert_eq!(ni, i);
     }
 
@@ -1503,6 +1660,7 @@ mod tests {
     fn interlaced_gray_alpha_matches() {
         let (_, ni) = decode_fixture("basn4a08.png");
         let (_, i) = decode_fixture("basi4a08.png");
+
         assert_eq!(ni, i);
     }
 
@@ -1510,6 +1668,7 @@ mod tests {
     fn interlaced_rgba_matches() {
         let (_, ni) = decode_fixture("basn6a08.png");
         let (_, i) = decode_fixture("basi6a08.png");
+
         assert_eq!(ni, i);
     }
 
@@ -1554,42 +1713,54 @@ mod tests {
     #[test]
     fn decode_1x1() {
         let (h, _) = decode_fixture("s01n3p01.png");
+
         assert_eq!((h.width, h.height), (1, 1));
     }
 
     #[test]
     fn decode_2x2() {
         let (h, _) = decode_fixture("s02n3p01.png");
+
         assert_eq!((h.width, h.height), (2, 2));
     }
 
     #[test]
     fn decode_3x3() {
         let (h, _) = decode_fixture("s03n3p01.png");
+
         assert_eq!((h.width, h.height), (3, 3));
     }
 
     #[test]
     fn decode_4x4() {
         let (h, _) = decode_fixture("s04n3p01.png");
+
         assert_eq!((h.width, h.height), (4, 4));
     }
 
     #[test]
     fn decode_32x32() {
         let (h, _) = decode_fixture("s32n3p04.png");
+
         assert_eq!((h.width, h.height), (32, 32));
     }
 
     #[test]
     fn decode_odd_sizes_interlaced() {
         let (h, _) = decode_fixture("s01i3p01.png");
+
         assert_eq!((h.width, h.height), (1, 1));
+
         let (h, _) = decode_fixture("s02i3p01.png");
+
         assert_eq!((h.width, h.height), (2, 2));
+
         let (h, _) = decode_fixture("s03i3p01.png");
+
         assert_eq!((h.width, h.height), (3, 3));
+
         let (h, _) = decode_fixture("s04i3p01.png");
+
         assert_eq!((h.width, h.height), (4, 4));
     }
 
@@ -1598,6 +1769,7 @@ mod tests {
         for size in 5..=9 {
             let name = format!("s{:02}n3p02.png", size);
             let (h, _) = decode_fixture(&name);
+
             assert_eq!((h.width, h.height), (size, size));
         }
     }
@@ -1607,6 +1779,7 @@ mod tests {
         for size in 32..=40 {
             let name = format!("s{:02}n3p04.png", size);
             let (h, _) = decode_fixture(&name);
+
             assert_eq!((h.width, h.height), (size, size));
         }
     }
@@ -1631,6 +1804,7 @@ mod tests {
     fn decode_trns_gray() {
         let (_, pixels) = decode_fixture("tbwn0g16.png");
         let has_transparent = pixels.chunks(4).any(|px| px[3] == 0);
+
         assert!(
             has_transparent,
             "tRNS gray should produce transparent pixels"
@@ -1641,6 +1815,7 @@ mod tests {
     fn decode_trns_rgb() {
         let (_, pixels) = decode_fixture("tbrn2c08.png");
         let has_transparent = pixels.chunks(4).any(|px| px[3] == 0);
+
         assert!(
             has_transparent,
             "tRNS RGB should produce transparent pixels"
@@ -1651,6 +1826,7 @@ mod tests {
     fn decode_trns_indexed() {
         let (_, pixels) = decode_fixture("tbbn3p08.png");
         let has_transparent = pixels.chunks(4).any(|px| px[3] < 255);
+
         assert!(
             has_transparent,
             "tRNS indexed should produce transparent pixels"
@@ -1665,6 +1841,7 @@ mod tests {
         let (_, z3) = decode_fixture("z03n2c08.png");
         let (_, z6) = decode_fixture("z06n2c08.png");
         let (_, z9) = decode_fixture("z09n2c08.png");
+
         assert_eq!(
             z0, z3,
             "compression level 0 and 3 should decode identically"
@@ -1717,11 +1894,14 @@ mod tests {
             "xs4n0g01.png",
             "xs7n0g01.png",
         ];
+
         for name in corrupt {
             let data = fixture(name);
             let buf_size = png_decode_buf_size(&data);
+
             if let Ok(size) = buf_size {
                 let mut output = vec![0u8; size];
+
                 assert!(
                     png_decode(&data, &mut output).is_err(),
                     "{name} should fail to decode"
@@ -1737,6 +1917,7 @@ mod tests {
     fn buffer_too_small() {
         let data = fixture("basn0g08.png");
         let mut output = [0u8; 10];
+
         assert_eq!(
             png_decode(&data, &mut output),
             Err(PngError::BufferTooSmall)
@@ -1757,6 +1938,7 @@ mod tests {
     #[test]
     fn unpack_1bit() {
         let data = [0b1010_0110u8];
+
         assert_eq!(unpack_sub_byte(&data, 0, 1), 1);
         assert_eq!(unpack_sub_byte(&data, 1, 1), 0);
         assert_eq!(unpack_sub_byte(&data, 2, 1), 1);
@@ -1770,6 +1952,7 @@ mod tests {
     #[test]
     fn unpack_2bit() {
         let data = [0b11_10_01_00u8];
+
         assert_eq!(unpack_sub_byte(&data, 0, 2), 3);
         assert_eq!(unpack_sub_byte(&data, 1, 2), 2);
         assert_eq!(unpack_sub_byte(&data, 2, 2), 1);
@@ -1779,6 +1962,7 @@ mod tests {
     #[test]
     fn unpack_4bit() {
         let data = [0xABu8];
+
         assert_eq!(unpack_sub_byte(&data, 0, 4), 0xA);
         assert_eq!(unpack_sub_byte(&data, 1, 4), 0xB);
     }
@@ -1989,6 +2173,7 @@ mod tests {
             "exif2c08.png",
             "f99n0g04.png",
         ];
+
         for name in valid {
             let data = fixture(name);
             let buf_size = match png_decode_buf_size(&data) {
@@ -1996,6 +2181,7 @@ mod tests {
                 Err(e) => panic!("{name}: buf_size failed: {e:?}"),
             };
             let mut output = vec![0u8; buf_size];
+
             if let Err(e) = png_decode(&data, &mut output) {
                 panic!("{name}: decode failed: {e:?}");
             }

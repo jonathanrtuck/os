@@ -68,7 +68,9 @@ mod tests {
     fn decode_request_round_trip() {
         let req = DecodeRequest { file_size: 65536 };
         let mut buf = [0u8; DecodeRequest::SIZE];
+
         req.write_to(&mut buf);
+
         assert_eq!(DecodeRequest::read_from(&buf), req);
     }
 
@@ -80,7 +82,9 @@ mod tests {
             pixel_size: 1920 * 1080 * 4,
         };
         let mut buf = [0u8; DecodeReply::SIZE];
+
         reply.write_to(&mut buf);
+
         assert_eq!(DecodeReply::read_from(&buf), reply);
     }
 

@@ -504,10 +504,10 @@ next rendering milestone.
    (1, 2, 4, 8, 16), Adam7 interlacing, PLTE palettes, tRNS transparency.
    Self-contained zlib/DEFLATE decompressor with Huffman tables (fixed +
    dynamic), all 5 PNG filter types (None/Sub/Up/Average/Paeth), CRC32
-   verification on every chunk. Decodes into caller-provided BGRA8888 buffer.
-   66 host-target tests against the PNGSuite fixture set (178 test images):
-   per-color-type decode, interlaced↔non-interlaced pixel-exact equivalence,
-   all filter types, odd dimensions (1×1 through 40×40), tRNS transparency,
+   verification on every chunk. Decodes into caller-provided BGRA8888 buffer. 66
+   host-target tests against the PNGSuite fixture set (178 test images):
+   per-color-type decode, interlaced↔non-interlaced pixel-exact equivalence, all
+   filter types, odd dimensions (1×1 through 40×40), tRNS transparency,
    compression level equivalence, corrupt file rejection.
 
 2. **PNG decoder service** (`user/servers/png-decoder/`) — DONE. Runs as a

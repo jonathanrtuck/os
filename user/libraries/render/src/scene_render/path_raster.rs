@@ -37,6 +37,7 @@ fn read_f32_le(data: &[u8], offset: usize) -> f32 {
     if offset + 4 > data.len() {
         return 0.0;
     }
+
     f32::from_le_bytes([
         data[offset],
         data[offset + 1],
@@ -51,6 +52,7 @@ fn read_u32_le(data: &[u8], offset: usize) -> u32 {
     if offset + 4 > data.len() {
         return u32::MAX;
     }
+
     u32::from_le_bytes([
         data[offset],
         data[offset + 1],
@@ -93,6 +95,7 @@ fn flatten_cubic(
     if *num_segments >= segments.len() {
         return;
     }
+
     // Flatness test: maximum deviation of control points from the chord.
     // Uses the distance from each control point to the line (x0,y0)->(x3,y3).
     let dx = x3 - x0;
@@ -123,6 +126,7 @@ fn flatten_cubic(
             };
             *num_segments += 1;
         }
+
         return;
     }
 
@@ -203,12 +207,14 @@ fn path_scanline_fill(
                 } else {
                     (seg.y1, seg.y0, seg.x1, seg.x0, -1i32)
                 };
+
                 if y_top > scan_y || y_bot <= scan_y {
                     continue;
                 }
                 if num_active >= PATH_MAX_ACTIVE {
                     break;
                 }
+
                 let dy = y_bot - y_top;
                 let t = scan_y - y_top;
                 let x = if dy == 0 {
@@ -216,6 +222,7 @@ fn path_scanline_fill(
                 } else {
                     x_top + ((x_bot - x_top) as i64 * t as i64 / dy as i64) as i32
                 };
+
                 active_x[num_active] = x;
                 active_dir[num_active] = dir;
                 num_active += 1;
@@ -226,11 +233,13 @@ fn path_scanline_fill(
                 let key_x = active_x[i];
                 let key_dir = active_dir[i];
                 let mut j = i;
+
                 while j > 0 && active_x[j - 1] > key_x {
                     active_x[j] = active_x[j - 1];
                     active_dir[j] = active_dir[j - 1];
                     j -= 1;
                 }
+
                 active_x[j] = key_x;
                 active_dir[j] = key_dir;
             }
@@ -243,16 +252,22 @@ fn path_scanline_fill(
                     // Winding rule: fill spans where winding != 0.
                     let mut winding: i32 = 0;
                     let mut edge_idx = 0;
+
                     while edge_idx < num_active {
                         let old_winding = winding;
+
                         winding += active_dir[edge_idx];
+
                         if old_winding == 0 && winding != 0 {
                             let x_start = active_x[edge_idx];
                             let mut ei = edge_idx + 1;
+
                             while ei < num_active {
                                 winding += active_dir[ei];
+
                                 if winding == 0 {
                                     let x_end = active_x[ei];
+
                                     path_fill_span(
                                         coverage,
                                         width,
@@ -261,11 +276,15 @@ fn path_scanline_fill(
                                         x_end,
                                         contribution,
                                     );
+
                                     edge_idx = ei + 1;
+
                                     break;
                                 }
+
                                 ei += 1;
                             }
+
                             if winding != 0 {
                                 break;
                             }
@@ -277,10 +296,13 @@ fn path_scanline_fill(
                 scene::FillRule::EvenOdd => {
                     // Even-odd rule: toggle fill at each edge crossing.
                     let mut i = 0;
+
                     while i + 1 < num_active {
                         let x_start = active_x[i];
                         let x_end = active_x[i + 1];
+
                         path_fill_span(coverage, width, row, x_start, x_end, contribution);
+
                         i += 2;
                     }
                 }
@@ -310,28 +332,36 @@ fn path_fill_span(
         px_end as u32
     };
     let row_start = (row * width) as usize;
+
     for px in px_start..px_end {
         let idx = row_start + px as usize;
+
         if idx >= coverage.len() {
             break;
         }
+
         let cov = if px as i32 == (x_start_fp >> PATH_FP_SHIFT)
             && px as i32 == ((x_end_fp - 1) >> PATH_FP_SHIFT)
         {
             let frac = x_end_fp - x_start_fp;
+
             (contribution as i32 * frac / PATH_FP_ONE) as u16
         } else if px as i32 == (x_start_fp >> PATH_FP_SHIFT) {
             let right_edge = ((px + 1) as i32) << PATH_FP_SHIFT;
             let frac = right_edge - x_start_fp;
+
             (contribution as i32 * frac / PATH_FP_ONE) as u16
         } else if px as i32 == ((x_end_fp - 1) >> PATH_FP_SHIFT) {
             let left_edge = (px as i32) << PATH_FP_SHIFT;
             let frac = x_end_fp - left_edge;
+
             (contribution as i32 * frac / PATH_FP_ONE) as u16
         } else {
             contribution
         };
+
         let val = coverage[idx] as u16 + cov;
+
         coverage[idx] = if val > 255 { 255 } else { val as u8 };
     }
 }
@@ -368,22 +398,24 @@ pub fn rasterize_path_to_coverage(
         PATH_MAX_SEGMENTS
     ];
     let mut num_segments = 0usize;
-
     let mut cursor_x = 0i32;
     let mut cursor_y = 0i32;
     let mut contour_start_x = 0i32;
     let mut contour_start_y = 0i32;
-
     let mut offset = 0usize;
+
     while offset < path_data.len() {
         let tag = read_u32_le(path_data, offset);
+
         match tag {
             scene::PATH_MOVE_TO => {
                 if offset + scene::PATH_MOVE_TO_SIZE > path_data.len() {
                     break;
                 }
+
                 let x = read_f32_le(path_data, offset + 4);
                 let y = read_f32_le(path_data, offset + 8);
+
                 cursor_x = f32_to_fp(x);
                 cursor_y = f32_to_fp(y);
                 contour_start_x = cursor_x;
@@ -394,10 +426,12 @@ pub fn rasterize_path_to_coverage(
                 if offset + scene::PATH_LINE_TO_SIZE > path_data.len() {
                     break;
                 }
+
                 let x = read_f32_le(path_data, offset + 4);
                 let y = read_f32_le(path_data, offset + 8);
                 let nx = f32_to_fp(x);
                 let ny = f32_to_fp(y);
+
                 if cursor_y != ny && num_segments < PATH_MAX_SEGMENTS {
                     segments[num_segments] = PathSegment {
                         x0: cursor_x,
@@ -407,6 +441,7 @@ pub fn rasterize_path_to_coverage(
                     };
                     num_segments += 1;
                 }
+
                 cursor_x = nx;
                 cursor_y = ny;
                 offset += scene::PATH_LINE_TO_SIZE;
@@ -415,12 +450,14 @@ pub fn rasterize_path_to_coverage(
                 if offset + scene::PATH_CUBIC_TO_SIZE > path_data.len() {
                     break;
                 }
+
                 let c1x = read_f32_le(path_data, offset + 4);
                 let c1y = read_f32_le(path_data, offset + 8);
                 let c2x = read_f32_le(path_data, offset + 12);
                 let c2y = read_f32_le(path_data, offset + 16);
                 let x = read_f32_le(path_data, offset + 20);
                 let y = read_f32_le(path_data, offset + 24);
+
                 flatten_cubic(
                     cursor_x,
                     cursor_y,
@@ -434,6 +471,7 @@ pub fn rasterize_path_to_coverage(
                     &mut num_segments,
                     0,
                 );
+
                 cursor_x = f32_to_fp(x);
                 cursor_y = f32_to_fp(y);
                 offset += scene::PATH_CUBIC_TO_SIZE;
@@ -448,6 +486,7 @@ pub fn rasterize_path_to_coverage(
                     };
                     num_segments += 1;
                 }
+
                 cursor_x = contour_start_x;
                 cursor_y = contour_start_y;
                 offset += scene::PATH_CLOSE_SIZE;
@@ -479,11 +518,13 @@ pub fn rasterize_path_to_coverage(
     let cov_w = width;
     let cov_h = height;
     let cov_size = cov_w as usize * cov_h as usize;
+
     if cov_size > 4 * 1024 * 1024 {
         return Vec::new();
     }
 
     let mut coverage = vec![0u8; cov_size];
+
     path_scanline_fill(
         &segments,
         num_segments,
@@ -540,7 +581,6 @@ pub fn render_path_data(
     }
 
     let s = scale;
-
     // Parse path commands and build segment list in physical pixel fixed-point.
     let mut segments = vec![
         PathSegment {
@@ -552,22 +592,24 @@ pub fn render_path_data(
         PATH_MAX_SEGMENTS
     ];
     let mut num_segments = 0usize;
-
     let mut cursor_x = 0i32;
     let mut cursor_y = 0i32;
     let mut contour_start_x = 0i32;
     let mut contour_start_y = 0i32;
-
     let mut offset = 0usize;
+
     while offset < data.len() {
         let tag = read_u32_le(data, offset);
+
         match tag {
             scene::PATH_MOVE_TO => {
                 if offset + scene::PATH_MOVE_TO_SIZE > data.len() {
                     break;
                 }
+
                 let x = read_f32_le(data, offset + 4);
                 let y = read_f32_le(data, offset + 8);
+
                 cursor_x = f32_to_fp(x * s);
                 cursor_y = f32_to_fp(y * s);
                 contour_start_x = cursor_x;
@@ -578,10 +620,12 @@ pub fn render_path_data(
                 if offset + scene::PATH_LINE_TO_SIZE > data.len() {
                     break;
                 }
+
                 let x = read_f32_le(data, offset + 4);
                 let y = read_f32_le(data, offset + 8);
                 let nx = f32_to_fp(x * s);
                 let ny = f32_to_fp(y * s);
+
                 if cursor_y != ny && num_segments < PATH_MAX_SEGMENTS {
                     segments[num_segments] = PathSegment {
                         x0: cursor_x,
@@ -591,6 +635,7 @@ pub fn render_path_data(
                     };
                     num_segments += 1;
                 }
+
                 cursor_x = nx;
                 cursor_y = ny;
                 offset += scene::PATH_LINE_TO_SIZE;
@@ -599,12 +644,14 @@ pub fn render_path_data(
                 if offset + scene::PATH_CUBIC_TO_SIZE > data.len() {
                     break;
                 }
+
                 let c1x = read_f32_le(data, offset + 4);
                 let c1y = read_f32_le(data, offset + 8);
                 let c2x = read_f32_le(data, offset + 12);
                 let c2y = read_f32_le(data, offset + 16);
                 let x = read_f32_le(data, offset + 20);
                 let y = read_f32_le(data, offset + 24);
+
                 flatten_cubic(
                     cursor_x,
                     cursor_y,
@@ -618,6 +665,7 @@ pub fn render_path_data(
                     &mut num_segments,
                     0,
                 );
+
                 cursor_x = f32_to_fp(x * s);
                 cursor_y = f32_to_fp(y * s);
                 offset += scene::PATH_CUBIC_TO_SIZE;
@@ -633,6 +681,7 @@ pub fn render_path_data(
                     };
                     num_segments += 1;
                 }
+
                 cursor_x = contour_start_x;
                 cursor_y = contour_start_y;
                 offset += scene::PATH_CLOSE_SIZE;
@@ -664,12 +713,14 @@ pub fn render_path_data(
     let mut min_y = i32::MAX;
     let mut max_x = i32::MIN;
     let mut max_y = i32::MIN;
+
     for i in 0..num_segments {
         let seg = &segments[i];
         let sx0 = seg.x0 >> PATH_FP_SHIFT;
         let sy0 = seg.y0 >> PATH_FP_SHIFT;
         let sx1 = seg.x1 >> PATH_FP_SHIFT;
         let sy1 = seg.y1 >> PATH_FP_SHIFT;
+
         if sx0 < min_x {
             min_x = sx0;
         }
@@ -695,6 +746,7 @@ pub fn render_path_data(
             max_y = sy1;
         }
     }
+
     // Add 1-pixel margin for AA.
     min_x -= 1;
     min_y -= 1;
@@ -708,12 +760,14 @@ pub fn render_path_data(
 
     let cov_w = (max_x - min_x) as u32;
     let cov_h = (max_y - min_y) as u32;
+
     if cov_w == 0 || cov_h == 0 {
         return;
     }
 
     // Cap allocation to prevent OOM.
     let cov_size = cov_w as usize * cov_h as usize;
+
     if cov_size > 4 * 1024 * 1024 {
         return;
     }
@@ -721,6 +775,7 @@ pub fn render_path_data(
     // Translate segments so (min_x, min_y) becomes origin of coverage buffer.
     let off_x = min_x * PATH_FP_ONE;
     let off_y = min_y * PATH_FP_ONE;
+
     for i in 0..num_segments {
         segments[i].x0 -= off_x;
         segments[i].y0 -= off_y;
@@ -730,6 +785,7 @@ pub fn render_path_data(
 
     // Rasterize into coverage buffer.
     let mut coverage = vec![0u8; cov_size];
+
     path_scanline_fill(
         &segments,
         num_segments,
@@ -743,5 +799,6 @@ pub fn render_path_data(
     let path_color = scene_to_draw_color(color);
     let blit_x = draw_x + min_x;
     let blit_y = draw_y + min_y;
+
     fb.draw_coverage(blit_x, blit_y, &coverage, cov_w, cov_h, path_color);
 }

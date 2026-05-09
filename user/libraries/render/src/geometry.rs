@@ -26,6 +26,7 @@ impl ClipRect {
         let y = self.y.max(other.y);
         let r = (self.x + self.w).min(other.x + other.w);
         let b = (self.y + self.h).min(other.y + other.h);
+
         ClipRect {
             x,
             y,
@@ -38,6 +39,7 @@ impl ClipRect {
     pub fn to_pixel_scissor(&self, scale: f32) -> (u16, u16, u16, u16) {
         let w_px = self.w * scale;
         let h_px = self.h * scale;
+
         (
             (self.x * scale) as u16,
             (self.y * scale) as u16,
@@ -83,25 +85,32 @@ impl ImageAtlas {
     /// in pixels, or None if the image doesn't fit.
     pub fn allocate(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
         let dim = self.dimension;
+
         if w > dim || h > dim {
             return None;
         }
+
         // Doesn't fit in current row — start a new one.
         if self.cursor_x + w > dim {
             self.cursor_y += self.row_height;
             self.cursor_x = 0;
             self.row_height = 0;
         }
+
         // Doesn't fit vertically — atlas is full.
         if self.cursor_y + h > dim {
             return None;
         }
+
         let x = self.cursor_x;
         let y = self.cursor_y;
+
         self.cursor_x += w;
+
         if h > self.row_height {
             self.row_height = h;
         }
+
         Some((x, y))
     }
 }
@@ -229,10 +238,12 @@ pub fn emit_transformed_quad(
 ) {
     let corners = [(0.0f32, 0.0f32), (w, 0.0), (0.0, h), (w, h)];
     let mut tc = [(0.0f32, 0.0f32); 4];
+
     for (i, &(lx, ly)) in corners.iter().enumerate() {
         let (tx, ty) = t.transform_point(lx, ly);
         tc[i] = (ox + tx, oy + ty);
     }
+
     let ndc =
         |px: f32, py: f32| -> (f32, f32) { (to_ndc_x(px, scale, vw), to_ndc_y(py, scale, vh)) };
     let (x0, y0) = ndc(tc[0].0, tc[0].1);
@@ -273,7 +284,6 @@ pub fn emit_rounded_rect_quad(
     let r_ndc = to_ndc_x(x + w, scale, vw);
     let t = to_ndc_y(y, scale, vh);
     let b_ndc = to_ndc_y(y + h, scale, vh);
-
     let half_w_px = w * scale * 0.5;
     let half_h_px = h * scale * 0.5;
 
@@ -317,6 +327,7 @@ pub fn emit_transformed_rounded_rect_quad(
         (w, h),           // bottom-right
     ];
     let mut ndc = [(0.0f32, 0.0f32); 4];
+
     for (i, &(lx, ly)) in corners.iter().enumerate() {
         let (tx, ty) = t.transform_point(lx, ly);
         let px = ox + tx;
@@ -359,12 +370,10 @@ pub fn emit_shadow_quad(
     let qy = sy - pad;
     let qw = sw + 2.0 * pad;
     let qh = sh + 2.0 * pad;
-
     let l = to_ndc_x(qx, scale, vw);
     let r = to_ndc_x(qx + qw, scale, vw);
     let t = to_ndc_y(qy, scale, vh);
     let b = to_ndc_y(qy + qh, scale, vh);
-
     // Pixel-space coordinates for the fragment shader's Gaussian evaluation.
     let px_l = qx * scale;
     let px_r = (qx + qw) * scale;
@@ -405,6 +414,7 @@ pub fn pack_shadow_params(
     corner_radius: f32,
 ) -> [u8; 48] {
     let mut buf = [0u8; 48];
+
     buf[0..4].copy_from_slice(&rect_min_x.to_le_bytes());
     buf[4..8].copy_from_slice(&rect_min_y.to_le_bytes());
     buf[8..12].copy_from_slice(&rect_max_x.to_le_bytes());
@@ -433,6 +443,7 @@ pub fn pack_rounded_rect_params(
     border_a: f32,
 ) -> [u8; 32] {
     let mut buf = [0u8; 32];
+
     buf[0..4].copy_from_slice(&half_w.to_le_bytes());
     buf[4..8].copy_from_slice(&half_h.to_le_bytes());
     buf[8..12].copy_from_slice(&radius.to_le_bytes());
@@ -450,6 +461,7 @@ pub fn pack_rounded_rect_params(
 /// (4 × i32 = 16 bytes).
 pub fn pack_blur_params(half_width: i32, region_w: i32, region_h: i32) -> [u8; 16] {
     let mut buf = [0u8; 16];
+
     buf[0..4].copy_from_slice(&half_width.to_le_bytes());
     buf[4..8].copy_from_slice(&region_w.to_le_bytes());
     buf[8..12].copy_from_slice(&region_h.to_le_bytes());
@@ -469,6 +481,7 @@ pub fn pack_copy_params(
     height: i32,
 ) -> [u8; 24] {
     let mut buf = [0u8; 24];
+
     buf[0..4].copy_from_slice(&src_x.to_le_bytes());
     buf[4..8].copy_from_slice(&src_y.to_le_bytes());
     buf[8..12].copy_from_slice(&dst_x.to_le_bytes());
@@ -484,6 +497,7 @@ pub fn pack_copy_params(
 pub fn scale_pointer_coord(coord: u32, max_pixels: u32) -> u32 {
     let result = (coord as u64 * max_pixels as u64) / 32768;
     let r = result as u32;
+
     if r >= max_pixels && max_pixels > 0 {
         max_pixels - 1
     } else {

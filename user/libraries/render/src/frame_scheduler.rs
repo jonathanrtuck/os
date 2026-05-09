@@ -112,6 +112,7 @@ impl FrameScheduler {
 
         if !self.dirty {
             self.idle_skip_count = self.idle_skip_count.wrapping_add(1);
+
             return false;
         }
 
@@ -120,6 +121,7 @@ impl FrameScheduler {
         // back-to-back catch-up renders.
         if now > 0 && self.last_render_end_ns > now {
             self.overrun_skip_count = self.overrun_skip_count.wrapping_add(1);
+
             return false;
         }
 
@@ -153,7 +155,9 @@ impl FrameScheduler {
         if now == 0 || self.last_tick_ns == 0 {
             return false;
         }
+
         let elapsed = now.saturating_sub(self.last_tick_ns);
+
         elapsed > self.period_ns / 2
     }
 

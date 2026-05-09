@@ -49,6 +49,7 @@ impl DirtyRect {
         if other.w == 0 || other.h == 0 {
             return self;
         }
+
         let x0 = if self.x < other.x { self.x } else { other.x };
         let y0 = if self.y < other.y { self.y } else { other.y };
         let self_x1 = self.x as u32 + self.w as u32;
@@ -65,6 +66,7 @@ impl DirtyRect {
         } else {
             other_y1
         };
+
         DirtyRect {
             x: x0,
             y: y0,
@@ -75,9 +77,11 @@ impl DirtyRect {
 
     pub fn union_all(rects: &[DirtyRect]) -> DirtyRect {
         let mut result = DirtyRect::new(0, 0, 0, 0);
+
         for &r in rects {
             result = result.union(r);
         }
+
         result
     }
 }
@@ -89,6 +93,7 @@ impl DirtyRect {
 pub fn scale_size_u16(pt_pos: i32, pt_size: u32, scale: f32) -> u16 {
     let phys_start = round_f32(pt_pos as f32 * scale);
     let phys_end = round_f32((pt_pos as f32 + pt_size as f32) * scale);
+
     (phys_end - phys_start).max(0) as u16
 }
 
@@ -134,9 +139,12 @@ impl LruRasterizer {
         let scratch: Box<fonts::rasterize::RasterScratch> = unsafe {
             let layout = alloc::alloc::Layout::new::<fonts::rasterize::RasterScratch>();
             let ptr = alloc::alloc::alloc_zeroed(layout) as *mut fonts::rasterize::RasterScratch;
+
             assert!(!ptr.is_null(), "RasterScratch allocation failed");
+
             Box::from_raw(ptr)
         };
+
         LruRasterizer {
             cache: fonts::cache::LruGlyphCache::new(capacity),
             font_data: Vec::new(),
@@ -161,12 +169,12 @@ impl LruRasterizer {
         for b in self.raster_buf.iter_mut() {
             *b = 0;
         }
+
         let mut raster = fonts::rasterize::RasterBuffer {
             data: &mut self.raster_buf,
             width: GLYPH_MAX_W as u32,
             height: GLYPH_MAX_H as u32,
         };
-
         let metrics = fonts::rasterize::rasterize_with_axes(
             &self.font_data,
             glyph_id,
@@ -176,16 +184,13 @@ impl LruRasterizer {
             &self.axes,
             self.scale_factor,
         );
-
         let m = match metrics {
             Some(m) => m,
             None => return None,
         };
-
         // Copy coverage data into an owned Vec for the LRU cache entry.
         let pixel_count = (m.width * m.height) as usize;
         let coverage = Vec::from(&self.raster_buf[..pixel_count]);
-
         let cached = fonts::cache::LruCachedGlyph {
             width: m.width,
             height: m.height,

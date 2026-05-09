@@ -63,8 +63,8 @@ impl ClipMaskCache {
         cache_key: u64,
     ) -> Option<&[u8]> {
         self.generation = self.generation.wrapping_add(1);
-        let current_gen = self.generation;
 
+        let current_gen = self.generation;
         // Look for a matching slot by index (avoids holding a borrow across
         // the mutable store below).
         let hit_idx = self.find_hit(cache_key, width, height);
@@ -74,17 +74,20 @@ impl ClipMaskCache {
             if let Some(ref mut m) = self.masks[idx] {
                 m.last_used = current_gen;
             }
+
             return self.masks[idx].as_ref().map(|m| m.data.as_slice());
         }
 
         // Cache miss: rasterize.
         let coverage = rasterize_path_to_coverage(path_data, width, height, fill_rule);
+
         if coverage.is_empty() {
             return None;
         }
 
         // Find an empty slot or the LRU slot.
         let target_idx = self.find_eviction_slot();
+
         self.masks[target_idx] = Some(CachedMask {
             key: cache_key,
             data: coverage,
@@ -106,6 +109,7 @@ impl ClipMaskCache {
                 }
             }
         }
+
         None
     }
 
@@ -122,6 +126,7 @@ impl ClipMaskCache {
         // All full: evict LRU.
         let mut lru_idx = 0;
         let mut lru_gen = u32::MAX;
+
         for (i, slot) in self.masks.iter().enumerate() {
             if let Some(ref m) = slot {
                 if m.last_used < lru_gen {
@@ -130,6 +135,7 @@ impl ClipMaskCache {
                 }
             }
         }
+
         lru_idx
     }
 }

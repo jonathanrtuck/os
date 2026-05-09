@@ -105,11 +105,12 @@ impl SurfacePool {
         }
 
         let needed = (width as usize) * (height as usize) * (BPP as usize);
-
         // First, look for a free entry of the exact same size.
         let mut reuse_idx: Option<usize> = None;
+
         for i in 0..self.entries.len() {
             let e = &self.entries[i];
+
             if !e.in_use && e.width == width && e.height == height {
                 reuse_idx = Some(i);
                 break;
@@ -118,9 +119,12 @@ impl SurfacePool {
 
         if let Some(i) = reuse_idx {
             let entry = &mut self.entries[i];
+
             clear_buffer(&mut entry.data);
+
             entry.in_use = true;
             entry.used_this_frame = true;
+
             return Some((PoolHandle(i), &mut entry.data));
         }
 
@@ -130,11 +134,13 @@ impl SurfacePool {
         }
 
         let data = alloc::vec![0u8; needed];
+
         self.total_bytes += needed;
         self.alloc_count += 1;
 
         // Reuse a cleared slot (from end_frame) to keep indices stable.
         let mut reuse_slot: Option<usize> = None;
+
         for i in 0..self.entries.len() {
             if self.entries[i].width == 0 && !self.entries[i].in_use {
                 reuse_slot = Some(i);
@@ -144,6 +150,7 @@ impl SurfacePool {
 
         let idx = if let Some(i) = reuse_slot {
             let entry = &mut self.entries[i];
+
             entry.width = width;
             entry.height = height;
             entry.data = data;
@@ -156,7 +163,9 @@ impl SurfacePool {
                 self.alloc_count -= 1;
                 return None;
             }
+
             let i = self.entries.len();
+
             self.entries.push(PoolEntry {
                 width,
                 height,
@@ -196,6 +205,7 @@ impl SurfacePool {
                 entry.width = 0;
                 entry.height = 0;
             }
+
             entry.used_this_frame = false;
         }
     }

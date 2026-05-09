@@ -7,14 +7,14 @@
 use alloc::{vec, vec::Vec};
 
 use drawing::{Color, PixelFormat, Surface};
-use scene::{Content, NULL, Node, NodeId};
+use scene::{Content, Node, NodeId, NULL};
 
 use super::{
-    RenderCtx, SceneGraph,
     coords::{round_f32, scale_coord, scale_size, snap_border},
     path_raster::scene_to_draw_color,
+    RenderCtx, SceneGraph,
 };
-use crate::{ClipMaskCache, LruRasterizer, cache::NodeCache, surface_pool::SurfacePool};
+use crate::{cache::NodeCache, surface_pool::SurfacePool, ClipMaskCache, LruRasterizer};
 
 /// Axis-aligned clip rectangle in absolute (framebuffer) coordinates.
 /// Uses i32 for physical pixel math. virgil-render has an independent f32
@@ -126,11 +126,9 @@ fn render_node_transformed(
     }
 
     let s = ctx.scale;
-
     // Compose the world transform: parent x local.
     let local_xform = node.transform;
     let world_xform = parent_world.compose(local_xform);
-
     // If the world transform is a pure translation (no rotation, scale, or
     // skew), apply it as a simple pixel offset. Otherwise, compute the AABB
     // of the transformed node and render into an offscreen buffer.
@@ -138,6 +136,7 @@ fn render_node_transformed(
         && world_xform.b == 0.0
         && world_xform.c == 0.0
         && world_xform.d == 1.0;
+
     if is_simple_translation {
         // Pure translation: shift the node's position by the transform's tx, ty.
         let tx_px = round_f32(world_xform.tx * s);
@@ -156,7 +155,6 @@ fn render_node_transformed(
             Some(v) => v,
             None => return,
         };
-
         // Compute shadow geometry for damage/overflow.
         let has_shadow = node.has_shadow();
 
@@ -165,6 +163,7 @@ fn render_node_transformed(
             if nw <= 0 || nh <= 0 {
                 return;
             }
+
             let (sh_left, sh_top, sh_right, sh_bottom) = if has_shadow {
                 shadow_overflow(node, s)
             } else {
@@ -182,9 +181,11 @@ fn render_node_transformed(
                     stride: ostride,
                     format: PixelFormat::Bgra8888,
                 };
+
                 if has_shadow {
                     render_shadow(&mut off_fb, node, sh_left, sh_top, nw, nh, s);
                 }
+
                 render_node_content_translated(
                     &mut off_fb,
                     graph,
@@ -206,8 +207,10 @@ fn render_node_transformed(
                     clip_cache,
                 );
             }
+
             let blit_x = (nx - sh_left).max(0) as u32;
             let blit_y = (ny - sh_top).max(0) as u32;
+
             fb.blit_blend_with_opacity(
                 &offscreen_buf,
                 total_w,
@@ -217,6 +220,7 @@ fn render_node_transformed(
                 blit_y,
                 node.opacity,
             );
+
             return;
         }
 
@@ -224,6 +228,7 @@ fn render_node_transformed(
         if has_shadow {
             render_shadow(fb, node, nx, ny, nw, nh, s);
         }
+
         render_node_content_translated(
             fb,
             graph,
@@ -255,6 +260,7 @@ fn render_node_transformed(
         let base_ny = abs_y + scale_coord(node.y, s);
         let nw = scale_size(node.x, node.width as i32, s);
         let nh = scale_size(node.y, node.height as i32, s);
+
         if nw <= 0 || nh <= 0 {
             return;
         }
@@ -278,30 +284,25 @@ fn render_node_transformed(
         } else {
             (0i32, 0i32, 0i32, 0i32)
         };
-
         // Expanded AABB includes shadow.
         let exp_aabb_xi = aabb_xi - sh_left;
         let exp_aabb_yi = aabb_yi - sh_top;
         let exp_aabb_wi = aabb_wi + sh_left + sh_right;
         let exp_aabb_hi = aabb_hi + sh_top + sh_bottom;
-
         let aabb_rect = ClipRect {
             x: exp_aabb_xi,
             y: exp_aabb_yi,
             w: exp_aabb_wi,
             h: exp_aabb_hi,
         };
-
         // Cull if the AABB doesn't intersect the clip rect.
         let clipped_aabb = match clip.intersect(aabb_rect) {
             Some(c) => c,
             None => return,
         };
-
         // Render the node's content axis-aligned to a temporary buffer.
         let _render_w = nw as u32;
         let _render_h = nh as u32;
-
         // Account for shadow in the offscreen buffer size.
         let total_w = (sh_left + nw + sh_right).max(nw) as u32;
         let total_h = (sh_top + nh + sh_bottom).max(nh) as u32;
@@ -335,6 +336,7 @@ fn render_node_transformed(
                 w: total_w as i32,
                 h: total_h as i32,
             };
+
             render_node_content_translated(
                 &mut render_fb,
                 graph,
@@ -359,7 +361,6 @@ fn render_node_transformed(
             Some(inv) => inv,
             None => return, // Singular transform -- nothing to render.
         };
-
         // The offscreen buffer's coordinate system:
         // - (sh_left, sh_top) in the buffer corresponds to node origin (0, 0)
         //   in the node's local physical space.
@@ -374,12 +375,10 @@ fn render_node_transformed(
         // Combine these offsets into the inverse transform's translation.
         let _inv_tx_adj = inv.tx + sh_left as f32;
         let _inv_ty_adj = inv.ty + sh_top as f32;
-
         // Compute the adjusted inverse translation that maps from
         // expanded-AABB-local pixel coords (col, row) to buffer coords.
         let adj_aabb_x = aabb_x - sh_left as f32;
         let adj_aabb_y = aabb_y - sh_top as f32;
-
         // The clipped AABB may be smaller than the expanded AABB.
         // Adjust the inverse translation to account for the clip offset.
         let clip_dx = (clipped_aabb.x - exp_aabb_xi) as f32;
@@ -392,7 +391,6 @@ fn render_node_transformed(
             + inv.d * (adj_aabb_y + clip_dy)
             + inv.ty
             + sh_top as f32;
-
         let eff_opacity = node.opacity;
 
         fb.blit_transformed_bilinear(
@@ -425,7 +423,6 @@ fn shadow_overflow(node: &Node, scale: f32) -> (i32, i32, i32, i32) {
     let spread = round_f32(node.shadow_spread as f32 * scale);
     let off_x = round_f32(node.shadow_offset_x as f32 * scale);
     let off_y = round_f32(node.shadow_offset_y as f32 * scale);
-
     // Shadow extends by spread + blur on each side, shifted by offset.
     let extent = spread + blur;
     let left = (extent - off_x).max(0);
@@ -458,25 +455,24 @@ fn render_shadow(
     let spread = round_f32(node.shadow_spread as f32 * scale);
     let off_x = round_f32(node.shadow_offset_x as f32 * scale);
     let off_y = round_f32(node.shadow_offset_y as f32 * scale);
-
     // Shadow rect: node bounds expanded by spread, shifted by offset.
     // Use saturating arithmetic to prevent overflow with extreme values.
     let sw = (nw as i32).saturating_add(spread.saturating_mul(2)).max(0) as u32;
     let sh = (nh as i32).saturating_add(spread.saturating_mul(2)).max(0) as u32;
+
     if sw == 0 || sh == 0 {
         return;
     }
 
     let sx = draw_x.saturating_add(off_x).saturating_sub(spread).max(0) as u32;
     let sy = draw_y.saturating_add(off_y).saturating_sub(spread).max(0) as u32;
-
     let shadow_color = scene_to_draw_color(node.shadow_color);
-
     // Physical corner radius for the shadow shape.
     let phys_radius = if node.corner_radius > 0 {
         let r = round_f32(node.corner_radius as f32 * scale);
         let max_r = (sw.min(sh) / 2) as i32;
         let sr = r + spread; // Spread expands the radius too.
+
         if sr < 0 {
             0u32
         } else {
@@ -550,12 +546,12 @@ fn render_shadow_blurred(
             stride: buf_stride,
             format: PixelFormat::Bgra8888,
         };
+
         fill_shadow_shape(&mut src_fb, pad, pad, sw, sh, phys_radius, shadow_color);
     }
 
     let mut tmp_buf = vec![0u8; buf_size * 2]; // 2× for ping-pong
     let mut dst_buf = vec![0u8; buf_size];
-
     let src_read = drawing::ReadSurface {
         data: &src_buf,
         width: buf_w,
@@ -575,6 +571,7 @@ fn render_shadow_blurred(
 
     let blit_x = sx.saturating_sub(pad);
     let blit_y = sy.saturating_sub(pad);
+
     fb.blit_blend(&dst_buf, buf_w, buf_h, buf_stride, blit_x, blit_y);
 }
 
@@ -599,13 +596,13 @@ fn apply_backdrop_blur(
     scale: f32,
 ) {
     let blur_px = ((blur_radius_pt as f32 * scale) as u32).min(MAX_BACKDROP_BLUR_PX);
+
     if blur_px == 0 {
         return;
     }
 
     let sigma = blur_px as f32 / 2.0;
     let pad = drawing::box_blur_pad(sigma);
-
     // Node region in FB coordinates, clamped.
     let nx0 = (draw_x.max(0) as u32).min(fb.width);
     let ny0 = (draw_y.max(0) as u32).min(fb.height);
@@ -613,6 +610,7 @@ fn apply_backdrop_blur(
     let ny1 = ((draw_y + nh).max(0) as u32).min(fb.height);
     let node_w = nx1 - nx0;
     let node_h = ny1 - ny0;
+
     if node_w == 0 || node_h == 0 {
         return;
     }
@@ -624,7 +622,6 @@ fn apply_backdrop_blur(
     let cy1 = (ny1 + pad).min(fb.height);
     let cap_w = cx1 - cx0;
     let cap_h = cy1 - cy0;
-
     let cap_stride = cap_w * 4;
     let buf_size = (cap_stride * cap_h) as usize;
 
@@ -635,10 +632,12 @@ fn apply_backdrop_blur(
 
     // 1. Extract padded region from the framebuffer.
     let mut src_buf = vec![0u8; buf_size];
+
     for row in 0..cap_h {
         let fb_offset = ((cy0 + row) * fb.stride + cx0 * 4) as usize;
         let src_offset = (row * cap_stride) as usize;
         let row_bytes = (cap_w * 4) as usize;
+
         if fb_offset + row_bytes <= fb.data.len() && src_offset + row_bytes <= src_buf.len() {
             src_buf[src_offset..src_offset + row_bytes]
                 .copy_from_slice(&fb.data[fb_offset..fb_offset + row_bytes]);
@@ -648,7 +647,6 @@ fn apply_backdrop_blur(
     // 2. Three-pass box blur (converges to Gaussian, CLT).
     let mut tmp_buf = vec![0u8; buf_size * 2];
     let mut dst_buf = vec![0u8; buf_size];
-
     let src_read = drawing::ReadSurface {
         data: &src_buf,
         width: cap_w,
@@ -669,10 +667,12 @@ fn apply_backdrop_blur(
     // 3. Write back only the center (node) portion — padding is discarded.
     let pad_left = nx0 - cx0;
     let pad_top = ny0 - cy0;
+
     for row in 0..node_h {
         let fb_offset = ((ny0 + row) * fb.stride + nx0 * 4) as usize;
         let dst_offset = ((pad_top + row) * cap_stride + pad_left * 4) as usize;
         let row_bytes = (node_w * 4) as usize;
+
         if fb_offset + row_bytes <= fb.data.len() && dst_offset + row_bytes <= dst_buf.len() {
             fb.data[fb_offset..fb_offset + row_bytes]
                 .copy_from_slice(&dst_buf[dst_offset..dst_offset + row_bytes]);
@@ -715,11 +715,15 @@ fn render_node_content_translated(
         w: nw,
         h: nh,
     };
-
     // Scale corner radius from points to physical pixels.
     let phys_radius = if node.corner_radius > 0 {
         let r = round_f32(node.corner_radius as f32 * s);
-        if r < 0 { 0u32 } else { r as u32 }
+
+        if r < 0 {
+            0u32
+        } else {
+            r as u32
+        }
     } else {
         0u32
     };
@@ -794,6 +798,7 @@ fn render_background(
     if node.background.a == 0 {
         return;
     }
+
     let bg = scene_to_draw_color(node.background);
 
     if phys_radius > 0 {
@@ -842,6 +847,7 @@ fn render_borders(
     if node.border.width == 0 || node.border.color.a == 0 {
         return;
     }
+
     let bc = scene_to_draw_color(node.border.color);
     let bw = snap_border(node.border.width as u32, scale);
 
@@ -908,8 +914,8 @@ fn render_straight_border(
 
     // Bottom edge.
     let bot_y = (draw_y + nh) as u32 - bw;
-    fb.fill_rect_blend(draw_x as u32, bot_y, nw as u32, bw, bc);
 
+    fb.fill_rect_blend(draw_x as u32, bot_y, nw as u32, bw, bc);
     // Left edge.
     fb.fill_rect_blend(
         draw_x as u32,
@@ -921,6 +927,7 @@ fn render_straight_border(
 
     // Right edge.
     let right_x = (draw_x + nw) as u32 - bw;
+
     fb.fill_rect_blend(
         right_x,
         draw_y as u32 + bw,
@@ -952,6 +959,7 @@ fn render_content(
     mut cache: Option<&mut NodeCache>,
 ) {
     let has_content = !matches!(node.content, Content::None);
+
     if !has_content {
         return;
     }
@@ -1010,7 +1018,6 @@ fn try_render_cached(
 ) -> bool {
     let nw_u32 = nw.max(0) as u32;
     let nh_u32 = nh.max(0) as u32;
-
     // Cache lookup: check (node_id, content_hash) and dimension match.
     let is_hit = nc
         .get(node_id, node.content_hash)
@@ -1058,10 +1065,12 @@ fn try_render_cached(
             lru.as_deref_mut(),
         );
     }
+
     // Blit offscreen to framebuffer at the node's position.
     blit_cached_content(fb, &offscreen, nw_u32, nh_u32, draw_x, draw_y, visible);
     // Store in cache for future frames.
     nc.store(node_id, node.content_hash, nw_u32, nh_u32, &offscreen);
+
     true
 }
 
@@ -1072,6 +1081,7 @@ fn try_render_cached(
 /// cache's key+dimensions check.
 fn compute_clip_cache_key(clip_path: scene::DataRef, width: u32, height: u32) -> u64 {
     let mut key = clip_path.offset as u64;
+
     key = key
         .wrapping_mul(0x517c_c1b7_2722_0a95)
         .wrapping_add(clip_path.length as u64);
@@ -1102,6 +1112,7 @@ fn apply_coverage_mask(
         for x in 0..width {
             let px_offset = (y * stride + x * 4) as usize;
             let mask_offset = (y * mask_width + x) as usize;
+
             if px_offset + 3 < offscreen.len() && mask_offset < mask.len() {
                 let coverage = mask[mask_offset] as u32;
                 // Multiply all BGRA channels by coverage/255.
@@ -1141,7 +1152,6 @@ fn render_clip_path_children(
 ) {
     let ow = nw as u32;
     let oh = nh as u32;
-
     // Get the clip path data from the scene graph data buffer.
     let clip_start = node.clip_path.offset as usize;
     let clip_end = clip_start + node.clip_path.length as usize;
@@ -1161,9 +1171,11 @@ fn render_clip_path_children(
         };
         let child_ox = draw_x + round_f32(node.child_offset_x * scale);
         let child_oy = draw_y + round_f32(node.child_offset_y * scale);
+
         traverse_children(
             fb, graph, ctx, node, child_ox, child_oy, child_clip, scale, lru, cache, clip_cache,
         );
+
         return;
     }
 
@@ -1186,10 +1198,12 @@ fn render_clip_path_children(
                 };
                 let child_ox = draw_x + round_f32(node.child_offset_x * scale);
                 let child_oy = draw_y + round_f32(node.child_offset_y * scale);
+
                 traverse_children(
                     fb, graph, ctx, node, child_ox, child_oy, child_clip, scale, lru, cache,
                     clip_cache,
                 );
+
                 return;
             }
         };
@@ -1213,6 +1227,7 @@ fn render_clip_path_children(
         };
         let child_ox = round_f32(node.child_offset_x * scale);
         let child_oy = round_f32(node.child_offset_y * scale);
+
         traverse_children(
             &mut off_fb,
             graph,
@@ -1230,7 +1245,6 @@ fn render_clip_path_children(
 
     // 2. Apply the clip mask: multiply each pixel by mask coverage.
     apply_coverage_mask(&mut offscreen_buf, ow, oh, ostride, &mask_coverage, ow);
-
     // 3. Blit masked result onto the main framebuffer.
     fb.blit_blend(
         &offscreen_buf,
@@ -1275,7 +1289,6 @@ fn render_rounded_clip_children(
             stride: ostride,
             format: PixelFormat::Bgra8888,
         };
-
         // Children are rendered relative to this node's origin. The
         // offscreen buffer's (0,0) corresponds to (draw_x, draw_y) in the
         // framebuffer.
@@ -1371,8 +1384,8 @@ fn traverse_children(
         if (child as usize) >= graph.nodes.len() {
             break;
         }
-        let child_node = &graph.nodes[child as usize];
 
+        let child_node = &graph.nodes[child as usize];
         let cx = child_origin_x + scale_coord(child_node.x, scale);
         let cy = child_origin_y + scale_coord(child_node.y, scale);
         let cw = scale_size(child_node.x, child_node.width as i32, scale);
@@ -1430,7 +1443,6 @@ fn blit_cached_content(
         Some(c) => c,
         None => return,
     };
-
     // Offset within the cached bitmap to start reading from.
     let src_x = (clipped.x - draw_x).max(0) as u32;
     let src_y = (clipped.y - draw_y).max(0) as u32;
@@ -1444,24 +1456,30 @@ fn blit_cached_content(
     for row in 0..blit_h {
         let sy = src_y + row;
         let dy = dst_y + row;
+
         if dy >= fb.height || sy >= ch {
             break;
         }
+
         let src_off = (sy * src_stride + src_x * bpp) as usize;
         let dst_off = (dy * fb.stride + dst_x * bpp) as usize;
 
         for col in 0..blit_w {
             let dx = dst_x + col;
+
             if dx >= fb.width {
                 break;
             }
+
             let si = src_off + (col * bpp) as usize;
             let di = dst_off + (col * bpp) as usize;
+
             if si + 4 > pixels.len() || di + 4 > fb.data.len() {
                 break;
             }
 
             let sa = pixels[si + 3] as u32;
+
             if sa == 0 {
                 continue; // Fully transparent — skip.
             }
@@ -1478,6 +1496,7 @@ fn blit_cached_content(
                 let dg = fb.data[di + 1] as u32;
                 let dr = fb.data[di + 2] as u32;
                 let da = fb.data[di + 3] as u32;
+
                 fb.data[di] = ((pixels[si] as u32 * sa + db * inv_sa + 127) / 255) as u8;
                 fb.data[di + 1] = ((pixels[si + 1] as u32 * sa + dg * inv_sa + 127) / 255) as u8;
                 fb.data[di + 2] = ((pixels[si + 2] as u32 * sa + dr * inv_sa + 127) / 255) as u8;
@@ -1499,8 +1518,8 @@ pub fn render_scene(fb: &mut Surface, graph: &SceneGraph, ctx: &RenderCtx) {
         w: fb.width as i32,
         h: fb.height as i32,
     };
-
     let mut clip_cache = ClipMaskCache::new();
+
     render_node(
         fb,
         graph,
@@ -1533,8 +1552,8 @@ pub fn render_scene_with_pool(
         w: fb.width as i32,
         h: fb.height as i32,
     };
-
     let mut clip_cache = ClipMaskCache::new();
+
     render_node(
         fb,
         graph,
@@ -1607,8 +1626,8 @@ pub fn render_scene_clipped(
         w: dirty.w as i32,
         h: dirty.h as i32,
     };
-
     let mut clip_cache = ClipMaskCache::new();
+
     render_node(
         fb,
         graph,
@@ -1642,8 +1661,8 @@ pub fn render_scene_clipped_with_pool(
         w: dirty.w as i32,
         h: dirty.h as i32,
     };
-
     let mut clip_cache = ClipMaskCache::new();
+
     render_node(
         fb,
         graph,

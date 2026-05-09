@@ -5,7 +5,7 @@
 //! dirty bitmap from the scene header is compared against previous state to
 //! produce a minimal set of dirty rectangles for partial repaint.
 
-use scene::{DIRTY_BITMAP_WORDS, MAX_NODES, NULL, Node, NodeId, abs_bounds, build_parent_map};
+use scene::{abs_bounds, build_parent_map, Node, NodeId, DIRTY_BITMAP_WORDS, MAX_NODES, NULL};
 
 use crate::damage::DamageTracker;
 
@@ -86,11 +86,13 @@ impl IncrementalState {
                 // Deleted: was visible, now invisible. Damage = old bounds.
                 (true, false) => {
                     let (ox, oy, ow, oh) = self.prev_bounds[i];
+
                     add_rect_clamped(&mut tracker, ox, oy, ow, oh, fb_width, fb_height);
                 }
                 // New: was not visible, now visible. Damage = current bounds.
                 (false, true) => {
                     let (cx, cy, cw, ch) = abs_bounds(nodes, &parent_map, i);
+
                     add_rect_clamped(&mut tracker, cx, cy, cw, ch, fb_width, fb_height);
                 }
                 // Updated: both visible. Damage = union of old and new bounds.
@@ -98,6 +100,7 @@ impl IncrementalState {
                     let (ox, oy, ow, oh) = self.prev_bounds[i];
                     let (cx, cy, cw, ch) = abs_bounds(nodes, &parent_map, i);
                     let (ux, uy, uw, uh) = union_bounds(ox, oy, ow, oh, cx, cy, cw, ch);
+
                     add_rect_clamped(&mut tracker, ux, uy, uw, uh, fb_width, fb_height);
                     // Note: when a container moves, the union of old + new
                     // bounds already covers all children — no extra rect needed.
@@ -130,13 +133,16 @@ impl IncrementalState {
             if i >= nodes.len() {
                 break;
             }
+
             let node = &nodes[i];
             let (prev_x, prev_y) = self.prev_child_offset[i];
+
             if node.first_child != NULL
                 && (node.child_offset_x != prev_x || node.child_offset_y != prev_y)
             {
                 let delta_x = node.child_offset_x - prev_x;
                 let delta_y = node.child_offset_y - prev_y;
+
                 return Some((i as NodeId, delta_x, delta_y));
             }
         }
@@ -163,6 +169,7 @@ impl IncrementalState {
             } else {
                 self.prev_bounds[i] = (0, 0, 0, 0);
             }
+
             self.prev_child_offset[i] = (nodes[i].child_offset_x, nodes[i].child_offset_y);
             self.prev_content_hash[i] = nodes[i].content_hash;
         }
@@ -185,6 +192,7 @@ impl IncrementalState {
 fn bit_is_set(bitmap: &[u64; DIRTY_BITMAP_WORDS], i: usize) -> bool {
     let word = i / 64;
     let bit = i % 64;
+
     if word < DIRTY_BITMAP_WORDS {
         bitmap[word] & (1u64 << bit) != 0
     } else {
@@ -196,6 +204,7 @@ fn bit_is_set(bitmap: &[u64; DIRTY_BITMAP_WORDS], i: usize) -> bool {
 fn set_bit(bitmap: &mut [u64; DIRTY_BITMAP_WORDS], i: usize) {
     let word = i / 64;
     let bit = i % 64;
+
     if word < DIRTY_BITMAP_WORDS {
         bitmap[word] |= 1u64 << bit;
     }
@@ -209,9 +218,11 @@ pub fn all_bits_zero(bits: &[u64; DIRTY_BITMAP_WORDS]) -> bool {
 /// Are all bits set for node indices 0..node_count?
 fn all_bits_set(bits: &[u64; DIRTY_BITMAP_WORDS], node_count: u16) -> bool {
     let count = node_count as usize;
+
     if count == 0 {
         return false;
     }
+
     let full_words = count / 64;
     let remaining = count % 64;
 
@@ -220,12 +231,15 @@ fn all_bits_set(bits: &[u64; DIRTY_BITMAP_WORDS], node_count: u16) -> bool {
             return false;
         }
     }
+
     if remaining > 0 && full_words < DIRTY_BITMAP_WORDS {
         let mask = (1u64 << remaining) - 1;
+
         if bits[full_words] & mask != mask {
             return false;
         }
     }
+
     true
 }
 
@@ -254,10 +268,13 @@ impl Iterator for SetBitIter<'_> {
                 self.remaining &= self.remaining - 1; // Clear lowest set bit
                 return Some(self.word_idx * 64 + bit);
             }
+
             self.word_idx += 1;
+
             if self.word_idx >= DIRTY_BITMAP_WORDS {
                 return None;
             }
+
             self.remaining = self.bits[self.word_idx];
         }
     }
@@ -318,7 +335,6 @@ pub fn compute_scroll_blit(
     let cy = crate::round_f32(bounds.1 as f32 / 1024.0 * scale).max(0) as u32;
     let cw = crate::scale_size(bounds.0, bounds.2 as i32, scale).max(0) as u32;
     let raw_ch = crate::scale_size(bounds.1, bounds.3 as i32, scale).max(0) as u32;
-
     // Clip container to framebuffer bounds.
     let fb_w = fb_width as u32;
     let fb_h = fb_height as u32;
@@ -332,6 +348,7 @@ pub fn compute_scroll_blit(
     }
 
     let abs_dy = (dy_px as i32).unsigned_abs();
+
     if abs_dy >= ch {
         return None;
     }
@@ -385,6 +402,7 @@ pub fn blit_shift_vertical(
     }
 
     let abs_dy = dy.unsigned_abs();
+
     if abs_dy >= ch {
         return;
     }
@@ -466,6 +484,7 @@ pub fn compute_scroll_damage(
     // Copy non-container rects from the original tracker.
     for i in 0..original.count {
         let r = &original.rects[i];
+
         if r.w == 0 || r.h == 0 {
             continue;
         }
@@ -508,6 +527,7 @@ fn union_bounds(
         .max(by.saturating_add(bh.min(i32::MAX as u32) as i32));
     let w = (max_x - min_x).max(0) as u32;
     let h = (max_y - min_y).max(0) as u32;
+
     (min_x, min_y, w, h)
 }
 
@@ -534,7 +554,6 @@ fn add_rect_clamped(
     let y0 = y.max(0);
     let x1 = (x + w as i32).min(fb_width as i32).max(0);
     let y1 = (y + h as i32).min(fb_height as i32).max(0);
-
     let cw = (x1 - x0).max(0);
     let ch = (y1 - y0).max(0);
 
