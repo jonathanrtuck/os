@@ -47,17 +47,17 @@ pub const LINE_HEIGHT: u32 = 20;
 pub const MARGIN_LEFT: i32 = 16;
 pub const MARGIN_TOP: i32 = 12;
 
-pub const BG_R: u8 = 30;
-pub const BG_G: u8 = 30;
-pub const BG_B: u8 = 32;
+pub const BG_R: u8 = 0x20;
+pub const BG_G: u8 = 0x20;
+pub const BG_B: u8 = 0x20;
 
-pub const TEXT_R: u8 = 30;
-pub const TEXT_G: u8 = 30;
-pub const TEXT_B: u8 = 32;
+pub const TEXT_R: u8 = 0x20;
+pub const TEXT_G: u8 = 0x20;
+pub const TEXT_B: u8 = 0x20;
 
-pub const CURSOR_R: u8 = 30;
-pub const CURSOR_G: u8 = 30;
-pub const CURSOR_B: u8 = 30;
+pub const CURSOR_R: u8 = 0x20;
+pub const CURSOR_G: u8 = 0x20;
+pub const CURSOR_B: u8 = 0x20;
 
 pub const CURSOR_WIDTH: u32 = 2;
 
@@ -75,9 +75,9 @@ pub const CHROME_TITLE_R: u8 = 255;
 pub const CHROME_TITLE_G: u8 = 255;
 pub const CHROME_TITLE_B: u8 = 255;
 
-pub const CHROME_CLOCK_R: u8 = 160;
-pub const CHROME_CLOCK_G: u8 = 160;
-pub const CHROME_CLOCK_B: u8 = 160;
+pub const CHROME_CLOCK_R: u8 = 255;
+pub const CHROME_CLOCK_G: u8 = 255;
+pub const CHROME_CLOCK_B: u8 = 255;
 
 pub const PAGE_BG_R: u8 = 255;
 pub const PAGE_BG_G: u8 = 255;
