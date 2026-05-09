@@ -190,6 +190,14 @@ fragment float4 fragment_shadow(
 
     return float4(color_lin, params.color_a * alpha);
 }
+
+fragment float4 fragment_textured(
+    VertexOut in [[stage_in]],
+    texture2d<float> tex [[texture(0)]],
+    sampler s [[sampler(0)]]
+) {
+    return tex.sample(s, in.texCoord);
+}
 ";
 
 const COLOR_WRITE_ALL: u8 = 0xF;
@@ -199,6 +207,7 @@ const H_FRAG_SOLID: u32 = 3;
 const H_FRAG_GLYPH: u32 = 4;
 const H_FRAG_SHADOW: u32 = 5;
 const H_VERTEX_STENCIL: u32 = 6;
+const H_FRAG_TEXTURED: u32 = 7;
 const PIPE_SOLID: u32 = 10;
 const PIPE_GLYPH: u32 = 11;
 const PIPE_SHADOW: u32 = 12;
@@ -206,6 +215,7 @@ const PIPE_SHADOW: u32 = 12;
 const PIPE_STENCIL_WRITE: u32 = 13;
 #[allow(dead_code)]
 const PIPE_STENCIL_COVER: u32 = 14;
+const PIPE_TEXTURED: u32 = 15;
 #[allow(dead_code)]
 const DSS_STENCIL_WRITE: u32 = 40;
 #[allow(dead_code)]
@@ -213,14 +223,17 @@ const DSS_STENCIL_TEST: u32 = 41;
 const TEX_ATLAS: u32 = 20;
 #[allow(dead_code)]
 const TEX_STENCIL: u32 = 21;
+const TEX_IMAGE: u32 = 22;
 const SAMPLER_NEAREST: u32 = 30;
+const SAMPLER_LINEAR: u32 = 31;
 
 const FILTER_NEAREST: u8 = 0;
+const FILTER_LINEAR: u8 = 1;
 
 const ATLAS_WIDTH: u16 = 2048;
 const ATLAS_HEIGHT: u16 = 2048;
 
-const SETUP_BUF_PAGES: usize = 2;
+const SETUP_BUF_PAGES: usize = 8;
 const RENDER_BUF_PAGES: usize = 4;
 
 // ── Vertex data ─────────────────────────────────────────────────────
@@ -315,6 +328,7 @@ enum Pipe {
     Solid,
     Glyph,
     Shadow,
+    Textured,
 }
 
 struct DrawOp {
@@ -405,6 +419,31 @@ impl DrawList {
             pw,
             ph,
             color,
+            uv0,
+            uv1,
+        );
+    }
+
+    fn push_textured_quad(
+        &mut self,
+        px: f32,
+        py: f32,
+        pw: f32,
+        ph: f32,
+        uv0: [f32; 2],
+        uv1: [f32; 2],
+    ) {
+        self.ensure_pipe(Pipe::Textured);
+
+        push_quad(
+            &mut self.verts,
+            self.display_w,
+            self.display_h,
+            px,
+            py,
+            pw,
+            ph,
+            scene::Color::rgba(255, 255, 255, 255),
             uv0,
             uv1,
         );
@@ -528,6 +567,7 @@ fn setup_pipeline(
         w.get_function(H_FRAG_GLYPH, H_LIBRARY, b"fragment_glyph");
         w.get_function(H_FRAG_SHADOW, H_LIBRARY, b"fragment_shadow");
         w.get_function(H_VERTEX_STENCIL, H_LIBRARY, b"vertex_stencil");
+        w.get_function(H_FRAG_TEXTURED, H_LIBRARY, b"fragment_textured");
 
         w.len()
     };
@@ -584,7 +624,18 @@ fn setup_pipeline(
             1,
             render::TEX_USAGE_SHADER_READ,
         );
+        w.create_render_pipeline(
+            PIPE_TEXTURED,
+            H_VERTEX_FN,
+            H_FRAG_TEXTURED,
+            true,
+            COLOR_WRITE_ALL,
+            false,
+            1,
+            render::PIXEL_FORMAT_BGRA8_SRGB,
+        );
         w.create_sampler(SAMPLER_NEAREST, FILTER_NEAREST, FILTER_NEAREST);
+        w.create_sampler(SAMPLER_LINEAR, FILTER_LINEAR, FILTER_LINEAR);
 
         w.len()
     };
@@ -616,6 +667,7 @@ struct WalkContext {
     atlas_dirty: bool,
     now_tick: u64,
     next_deadline: u64,
+    image_content_id: u32,
 }
 
 fn evaluate_animation(anim: &scene::Animation, now_ns: u64) -> (u8, u64) {
@@ -823,6 +875,29 @@ fn walk_node(
                     ctx,
                 );
             }
+        }
+        Content::Image {
+            content_id,
+            src_width,
+            src_height,
+        } if ctx.image_content_id == content_id
+            && content_id != 0
+            && src_width > 0
+            && src_height > 0 =>
+        {
+            let fit_scale_w = w / src_width as f32;
+            let fit_scale_h = h / src_height as f32;
+            let fit_scale = if fit_scale_w < fit_scale_h {
+                fit_scale_w
+            } else {
+                fit_scale_h
+            };
+            let draw_w = src_width as f32 * fit_scale;
+            let draw_h = src_height as f32 * fit_scale;
+            let draw_x = x + (w - draw_w) / 2.0;
+            let draw_y = y + (h - draw_h) / 2.0;
+
+            draws.push_textured_quad(draw_x, draw_y, draw_w, draw_h, [0.0, 0.0], [1.0, 1.0]);
         }
         _ => {}
     }
@@ -1362,6 +1437,12 @@ struct Compositor {
     cursor_uploaded: bool,
     cursor_visible: bool,
     cursor_shape: u8,
+
+    image_va: usize,
+    image_w: u16,
+    image_h: u16,
+    image_pixel_size: u32,
+    image_tex_created: bool,
 }
 
 impl Compositor {
@@ -1502,6 +1583,90 @@ impl Compositor {
         );
     }
 
+    fn upload_image(&mut self) {
+        if self.image_va == 0 || self.image_w == 0 || self.image_h == 0 {
+            return;
+        }
+
+        // SAFETY: setup_dma.va is a valid DMA allocation of setup_buf_size bytes.
+        let dma_buf = unsafe {
+            core::slice::from_raw_parts_mut(self.setup_dma.va as *mut u8, self.setup_buf_size)
+        };
+
+        if !self.image_tex_created {
+            let len = {
+                let mut w = CommandWriter::new(dma_buf);
+
+                w.create_texture(
+                    TEX_IMAGE,
+                    self.image_w,
+                    self.image_h,
+                    render::PIXEL_FORMAT_BGRA8_SRGB,
+                    0,
+                    1,
+                    render::TEX_USAGE_SHADER_READ,
+                );
+
+                w.len()
+            };
+
+            submit_and_wait(
+                &self.device,
+                &mut self.setup_vq,
+                self.irq_event,
+                render::VIRTQ_SETUP,
+                self.setup_dma.pa,
+                len,
+            );
+
+            self.image_tex_created = true;
+        }
+
+        let row_bytes = self.image_w as usize * 4;
+        let cmd_overhead = render::HEADER_SIZE + 16;
+        let max_data_per_submit = self.setup_buf_size - cmd_overhead;
+        let max_rows_per_submit = (max_data_per_submit / row_bytes).max(1);
+        let total_rows = self.image_h as usize;
+        // SAFETY: image_va is a valid RO mapping of the pixel VMO.
+        let pixels = unsafe {
+            core::slice::from_raw_parts(self.image_va as *const u8, self.image_pixel_size as usize)
+        };
+        let mut y: usize = 0;
+
+        while y < total_rows {
+            let rows = (total_rows - y).min(max_rows_per_submit);
+            let src_offset = y * row_bytes;
+            let pixel_count = rows * row_bytes;
+            let pixel_data = &pixels[src_offset..src_offset + pixel_count];
+            let len = {
+                let mut w = CommandWriter::new(dma_buf);
+
+                w.upload_texture_region(
+                    TEX_IMAGE,
+                    0,
+                    y as u16,
+                    self.image_w,
+                    rows as u16,
+                    row_bytes as u32,
+                    pixel_data,
+                );
+
+                w.len()
+            };
+
+            submit_and_wait(
+                &self.device,
+                &mut self.setup_vq,
+                self.irq_event,
+                render::VIRTQ_SETUP,
+                self.setup_dma.pa,
+                len,
+            );
+
+            y += rows;
+        }
+    }
+
     fn render_frame(&mut self) -> u64 {
         if self.scene_va == 0 {
             return 0;
@@ -1631,6 +1796,11 @@ impl Compositor {
                                 w.set_render_pipeline(PIPE_SHADOW);
                                 w.set_fragment_bytes(0, &op.shadow_params);
                             }
+                            Pipe::Textured => {
+                                w.set_render_pipeline(PIPE_TEXTURED);
+                                w.set_fragment_texture(TEX_IMAGE, 0);
+                                w.set_fragment_sampler(SAMPLER_LINEAR, 0);
+                            }
                         }
                         active_pipe = Some(op.pipe);
                     }
@@ -1732,6 +1902,28 @@ impl Dispatch for Compositor {
                         self.cursor_shape = shape;
                         self.cursor_uploaded = false;
                         self.upload_cursor();
+                    }
+                }
+
+                let _ = msg.reply_empty();
+            }
+            render::comp::UPLOAD_IMAGE => {
+                if msg.payload.len() >= render::comp::UploadImageRequest::SIZE
+                    && !msg.handles.is_empty()
+                {
+                    let req = render::comp::UploadImageRequest::read_from(msg.payload);
+                    let vmo = Handle(msg.handles[0]);
+
+                    if let Ok(va) = abi::vmo::map(vmo, 0, Rights::READ_MAP) {
+                        self.image_va = va;
+                        self.image_w = req.width;
+                        self.image_h = req.height;
+                        self.image_pixel_size = req.pixel_size;
+                        self.image_tex_created = false;
+                        self.walk_ctx.image_content_id = req.content_id;
+                        self.upload_image();
+
+                        console::write(self.console_ep, b"render: image uploaded\n");
                     }
                 }
 
@@ -1875,6 +2067,7 @@ extern "C" fn _start() -> ! {
         atlas_dirty: false,
         now_tick: 0,
         next_deadline: 0,
+        image_content_id: 0,
     };
 
     console::write(console_ep, b"render: atlas ready\n");
@@ -1907,6 +2100,11 @@ extern "C" fn _start() -> ! {
         cursor_uploaded: false,
         cursor_visible: false,
         cursor_shape: scene::CURSOR_POINTER,
+        image_va: 0,
+        image_w: 0,
+        image_h: 0,
+        image_pixel_size: 0,
+        image_tex_created: false,
     };
     let mut next_deadline: u64 = 0;
 

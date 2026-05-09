@@ -34,6 +34,7 @@ pub const HID_KEY_UP: u16 = 0x52;
 // ── Input modifier flags (shared with input protocol) ────────────
 
 pub const MOD_SHIFT: u8 = 1 << 0;
+pub const MOD_CONTROL: u8 = 1 << 1;
 pub const MOD_ALT: u8 = 1 << 2;
 pub const MOD_SUPER: u8 = 1 << 3;
 

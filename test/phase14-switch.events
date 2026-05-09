@@ -1,0 +1,11 @@
+# Phase 14 — document switching test.
+# Type "hello", then Ctrl+Tab to switch to image space.
+0 text hello
+6 capture /tmp/phase14-text.png
+# Ctrl+Tab to switch to image space. Spring animation takes ~30 frames.
+7 key ctrl+tab
+40 capture /tmp/phase14-image.png
+# Ctrl+Tab back to text space.
+41 key ctrl+tab
+75 capture /tmp/phase14-back.png
+75 exit

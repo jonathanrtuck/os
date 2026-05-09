@@ -248,7 +248,15 @@ struct Presenter {
     drag_origin_start: usize,
     drag_origin_end: usize,
 
-    #[allow(dead_code)]
+    active_space: u8,
+    slide_spring: animation::Spring,
+    slide_animating: bool,
+    last_anim_tick: u64,
+
+    image_content_id: u32,
+    image_width: u16,
+    image_height: u16,
+
     console_ep: Handle,
 }
 
@@ -526,7 +534,24 @@ impl Presenter {
 
         scene.add_child(root, content_area);
 
-        // Page surface — white, centered, with shadow.
+        // Strip node — holds both document spaces side by side.
+        // child_offset_x slides to reveal space 0 or 1.
+        let strip = match scene.alloc_node() {
+            Some(id) => id,
+            None => return,
+        };
+
+        {
+            let n = scene.node_mut(strip);
+
+            n.width = upt(self.display_width * 2);
+            n.height = upt(content_h);
+            n.child_offset_x = -self.slide_spring.value();
+        }
+
+        scene.add_child(content_area, strip);
+
+        // Space 0: Page surface — white, centered, with shadow.
         let page = match scene.alloc_node() {
             Some(id) => id,
             None => return,
@@ -546,7 +571,7 @@ impl Presenter {
             n.cursor_shape = scene::CURSOR_TEXT;
         }
 
-        scene.add_child(content_area, page);
+        scene.add_child(strip, page);
 
         // Viewport node — clips children, scroll offset, inside page.
         let viewport = match scene.alloc_node() {
@@ -755,6 +780,49 @@ impl Presenter {
             n.role = scene::ROLE_CARET;
 
             scene.add_child(viewport, cursor_node);
+        }
+
+        // Space 1: Image document node — positioned at x=display_width within the strip.
+        if self.image_content_id != 0 && self.image_width > 0 && self.image_height > 0 {
+            let max_w = self.display_width.saturating_sub(48);
+            let max_h = content_h.saturating_sub(48);
+            let src_w = self.image_width as u32;
+            let src_h = self.image_height as u32;
+            let scale_w = max_w as f32 / src_w as f32;
+            let scale_h = max_h as f32 / src_h as f32;
+            let fit_scale = if scale_w < scale_h { scale_w } else { scale_h };
+            let img_display_w = if fit_scale < 1.0 {
+                (src_w as f32 * fit_scale) as u32
+            } else {
+                src_w
+            };
+            let img_display_h = if fit_scale < 1.0 {
+                (src_h as f32 * fit_scale) as u32
+            } else {
+                src_h
+            };
+            let img_x = self.display_width as i32
+                + ((self.display_width as i32 - img_display_w as i32) / 2);
+            let img_y = ((content_h as i32 - img_display_h as i32) / 2).max(0);
+
+            if let Some(image_node) = scene.alloc_node() {
+                let n = scene.node_mut(image_node);
+
+                n.x = pt(img_x);
+                n.y = pt(img_y);
+                n.width = upt(img_display_w);
+                n.height = upt(img_display_h);
+                n.content = Content::Image {
+                    content_id: self.image_content_id,
+                    src_width: self.image_width,
+                    src_height: self.image_height,
+                };
+                n.shadow_color = Color::rgba(0, 0, 0, 255);
+                n.shadow_blur_radius = presenter_service::SHADOW_BLUR_RADIUS;
+                n.shadow_spread = presenter_service::SHADOW_SPREAD;
+
+                scene.add_child(strip, image_node);
+            }
         }
 
         scene.commit();
@@ -991,6 +1059,29 @@ impl Presenter {
     }
 
     fn handle_key_event(&mut self, dispatch: text_editor::KeyDispatch) {
+        let ctrl = dispatch.modifiers & text_editor::MOD_CONTROL != 0;
+
+        if dispatch.key_code == text_editor::HID_KEY_TAB && ctrl && self.image_content_id != 0 {
+            let new_space = if self.active_space == 0 { 1u8 } else { 0u8 };
+
+            self.active_space = new_space;
+
+            let target = new_space as f32 * self.display_width as f32;
+
+            self.slide_spring.set_target(target);
+            self.slide_animating = true;
+            self.last_anim_tick = abi::system::clock_read().unwrap_or(0);
+            self.blink_start = self.last_anim_tick;
+            self.build_scene();
+            self.request_render();
+
+            return;
+        }
+
+        if self.active_space != 0 {
+            return;
+        }
+
         // SAFETY: doc_va is a valid RO mapping of the document buffer.
         let (content_len, cursor_pos, sel_anchor, _) =
             unsafe { document_service::read_doc_header(self.doc_va) };
@@ -1533,6 +1624,195 @@ impl Dispatch for Presenter {
     }
 }
 
+// ── Image loading ────────────────────────────────────────────────
+
+const IMAGE_CONTENT_ID: u32 = 1;
+
+fn try_load_image(server: &mut Presenter, render_ep: Handle) {
+    let fs_ep = match name::lookup(HANDLE_NS_EP, b"fs") {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+
+    console::write(server.console_ep, b"presenter: fs found, loading image\n");
+
+    let mut reply_buf = [0u8; ipc::message::MSG_SIZE];
+    let mut recv_handles = [0u32; 4];
+    let read_req = fs_service::ReadFileRequest::new(b"demo.png");
+    let mut read_buf = [0u8; fs_service::ReadFileRequest::SIZE];
+
+    read_req.write_to(&mut read_buf);
+
+    let (png_vmo, bytes_read) = match ipc::client::call(
+        fs_ep,
+        fs_service::READ_FILE,
+        &read_buf,
+        &[],
+        &mut recv_handles,
+        &mut reply_buf,
+    ) {
+        Ok(reply)
+            if !reply.is_error()
+                && reply.payload.len() >= fs_service::ReadFileReply::SIZE
+                && reply.handle_count > 0 =>
+        {
+            let rr = fs_service::ReadFileReply::read_from(reply.payload);
+
+            (Handle(recv_handles[0]), rr.bytes_read)
+        }
+        _ => return,
+    };
+
+    if bytes_read == 0 {
+        let _ = abi::handle::close(png_vmo);
+
+        return;
+    }
+
+    console::write(
+        server.console_ep,
+        b"presenter: image read, decoding in-process\n",
+    );
+
+    // Decode in-process: map the file VMO, decode PNG, create pixel VMO.
+    // Avoids cross-process VMO permission faults in the kernel.
+    let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
+    let src_va = match abi::vmo::map(png_vmo, 0, rw) {
+        Ok(va) => va,
+        Err(_) => {
+            let _ = abi::handle::close(png_vmo);
+
+            return;
+        }
+    };
+    // SAFETY: src_va is a valid mapping of at least bytes_read bytes.
+    let png_data = unsafe { core::slice::from_raw_parts(src_va as *const u8, bytes_read as usize) };
+    let header = match png_lib::png_header(png_data) {
+        Ok(h) => h,
+        Err(_) => {
+            let _ = abi::vmo::unmap(src_va);
+            let _ = abi::handle::close(png_vmo);
+
+            return;
+        }
+    };
+    let buf_size = match png_lib::png_decode_buf_size(png_data) {
+        Ok(s) => s,
+        Err(_) => {
+            let _ = abi::vmo::unmap(src_va);
+            let _ = abi::handle::close(png_vmo);
+
+            return;
+        }
+    };
+    let decode_vmo_size = buf_size.next_multiple_of(PAGE_SIZE);
+    let decode_vmo = match abi::vmo::create(decode_vmo_size, 0) {
+        Ok(h) => h,
+        Err(_) => {
+            let _ = abi::vmo::unmap(src_va);
+            let _ = abi::handle::close(png_vmo);
+
+            return;
+        }
+    };
+    let decode_va = match abi::vmo::map(decode_vmo, 0, rw) {
+        Ok(va) => va,
+        Err(_) => {
+            let _ = abi::vmo::unmap(src_va);
+            let _ = abi::handle::close(png_vmo);
+            let _ = abi::handle::close(decode_vmo);
+
+            return;
+        }
+    };
+    // SAFETY: decode_va is a valid RW mapping of at least buf_size bytes.
+    let output = unsafe { core::slice::from_raw_parts_mut(decode_va as *mut u8, buf_size) };
+
+    if png_lib::png_decode(png_data, output).is_err() {
+        let _ = abi::vmo::unmap(src_va);
+        let _ = abi::handle::close(png_vmo);
+        let _ = abi::vmo::unmap(decode_va);
+        let _ = abi::handle::close(decode_vmo);
+
+        console::write(server.console_ep, b"presenter: decode failed\n");
+
+        return;
+    }
+
+    let _ = abi::vmo::unmap(src_va);
+    let _ = abi::handle::close(png_vmo);
+
+    let width = header.width as u16;
+    let height = header.height as u16;
+    let pixel_size = header.width as u32 * header.height as u32 * 4;
+    let pixel_vmo_size = (pixel_size as usize).next_multiple_of(PAGE_SIZE);
+    let pixel_vmo = match abi::vmo::create(pixel_vmo_size, 0) {
+        Ok(h) => h,
+        Err(_) => {
+            let _ = abi::vmo::unmap(decode_va);
+            let _ = abi::handle::close(decode_vmo);
+
+            return;
+        }
+    };
+    let pixel_va = match abi::vmo::map(pixel_vmo, 0, rw) {
+        Ok(va) => va,
+        Err(_) => {
+            let _ = abi::vmo::unmap(decode_va);
+            let _ = abi::handle::close(decode_vmo);
+            let _ = abi::handle::close(pixel_vmo);
+
+            return;
+        }
+    };
+
+    // SAFETY: both mappings are valid and non-overlapping.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            decode_va as *const u8,
+            pixel_va as *mut u8,
+            pixel_size as usize,
+        );
+    }
+
+    let _ = abi::vmo::unmap(decode_va);
+    let _ = abi::handle::close(decode_vmo);
+
+    console::write(server.console_ep, b"presenter: image decoded, uploading\n");
+
+    // Keep pixel_va mapped — the compositor will map a dup of the handle.
+    let _ = abi::vmo::unmap(pixel_va);
+
+    let pixel_dup = match abi::handle::dup(pixel_vmo, Rights::READ_MAP) {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+    let upload_req = render::comp::UploadImageRequest {
+        content_id: IMAGE_CONTENT_ID,
+        width,
+        height,
+        pixel_size,
+    };
+    let mut upload_buf = [0u8; render::comp::UploadImageRequest::SIZE];
+
+    upload_req.write_to(&mut upload_buf);
+
+    let _ = ipc::client::call(
+        render_ep,
+        render::comp::UPLOAD_IMAGE,
+        &upload_buf,
+        &[pixel_dup.0],
+        &mut recv_handles,
+        &mut reply_buf,
+    );
+
+    server.image_content_id = IMAGE_CONTENT_ID;
+    server.image_width = width;
+    server.image_height = height;
+
+    console::write(server.console_ep, b"presenter: image ready\n");
+}
+
 // ── Entry point ───────────────────────────────────────────────────
 
 #[unsafe(no_mangle)]
@@ -1720,8 +2000,18 @@ extern "C" fn _start() -> ! {
         dragging: false,
         drag_origin_start: 0,
         drag_origin_end: 0,
+        active_space: 0,
+        slide_spring: animation::Spring::default_preset(0.0),
+        slide_animating: false,
+        last_anim_tick: 0,
+        image_content_id: 0,
+        image_width: 0,
+        image_height: 0,
         console_ep,
     };
+
+    // Try to load an image from the host filesystem (non-blocking).
+    try_load_image(&mut server, render_ep);
 
     // Initial render: write viewport, build scene graph, tell compositor.
     server.write_viewport();
@@ -1731,16 +2021,48 @@ extern "C" fn _start() -> ! {
     console::write(console_ep, b"presenter: ready\n");
 
     const NS_PER_SEC: u64 = 1_000_000_000;
+    const FRAME_NS: u64 = 16_666_667;
 
     loop {
         let now = abi::system::clock_read().unwrap_or(0);
-        let current_sec = now / NS_PER_SEC;
-        let deadline = (current_sec + 1) * NS_PER_SEC;
+        let deadline = if server.slide_animating {
+            now + FRAME_NS
+        } else {
+            let current_sec = now / NS_PER_SEC;
+
+            (current_sec + 1) * NS_PER_SEC
+        };
 
         match ipc::server::serve_one_timed(own_ep, &mut server, deadline) {
             Ok(()) => {}
             Err(abi::types::SyscallError::TimedOut) => {
+                let mut needs_render = false;
+
+                if server.slide_animating {
+                    let now = abi::system::clock_read().unwrap_or(0);
+                    let dt_ns = now.saturating_sub(server.last_anim_tick);
+                    let dt = (dt_ns as f32 / 1_000_000_000.0).min(0.033);
+
+                    server.last_anim_tick = now;
+
+                    server.slide_spring.tick(dt);
+
+                    if server.slide_spring.settled() {
+                        server.slide_animating = false;
+
+                        server.slide_spring.reset_to(server.slide_spring.target());
+                    }
+
+                    server.build_scene();
+
+                    needs_render = true;
+                }
+
                 if server.update_clock() {
+                    needs_render = true;
+                }
+
+                if needs_render {
                     server.request_render();
                 }
             }

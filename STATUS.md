@@ -548,12 +548,48 @@ next rendering milestone.
    Boots with `--share /path` (9P2000.L negotiated, fs ready). All 558 kernel
    tests + 556 library tests pass. Visual regression screenshot passes.
 
-## What's Next: v0.6 Parity
+### Phase 14 — Document Switching (COMPLETE)
 
-The userspace rebuild plan (`design/userspace-rebuild.md`) is complete through
-all 5 phases. The full document editing pipeline works end-to-end. Remaining
-work to reach full v0.6-pre-rewrite parity is tracked in
-`design/v06-parity-plan.md` (Phases 6–14).
+1. **Image texture rendering** — DONE. `fragment_textured` MSL shader samples
+   BGRA8_sRGB textures directly. `PIPE_TEXTURED` pipeline with bilinear
+   `SAMPLER_LINEAR` filtering. `Pipe::Textured` draw list variant. Compositor
+   handles `Content::Image` in scene walk: looks up uploaded image by
+   content_id, aspect-preserving scale-to-fit within node bounds.
+
+2. **Image upload pipeline** — DONE. `comp::UPLOAD_IMAGE` IPC method: presenter
+   sends BGRA pixel VMO handle + content_id/dimensions. Compositor maps VMO,
+   creates Metal texture (`TEX_IMAGE`, BGRA8_sRGB), uploads pixels in strips
+   (row-by-row through setup DMA buffer, same pattern as glyph atlas upload).
+   Setup buffer increased from 2 to 8 pages (128 KiB) for faster image uploads.
+
+3. **In-process PNG decode** — DONE. Presenter loads `demo.png` from host via
+   filesystem service, decodes in-process using the `png` library (avoids a
+   kernel bug with cross-process VMO permission faults). Reads file data VMO,
+   maps it locally, calls `png_decode` directly, creates pixel VMO, uploads to
+   compositor.
+
+4. **Two-space scene graph** — DONE. Strip container node holds both document
+   spaces side-by-side (width = 2 \* display_width). `child_offset_x` on the
+   strip slides to reveal space 0 (text) or space 1 (image). Image node uses
+   `Content::Image` with shadow, centered and aspect-fit within viewport.
+
+5. **Ctrl+Tab switching + spring animation** — DONE. `MOD_CONTROL` added to text
+   editor protocol. Ctrl+Tab toggles `active_space` (0/1), sets spring target to
+   `active_space * display_width`. Spring physics from the animation library
+   drives smooth slide transitions. Animation ticks at ~60fps via shortened recv
+   timeout (16ms). Editor key dispatch suppressed in image space.
+
+   Verified: Ctrl+Tab slides from text to image space and back. Spring animation
+   is smooth. Editor keys suppressed in image space. All 584 kernel tests +
+   1,114 library tests pass. Visual regression (Phase 5) passes.
+
+## v0.6 Parity: COMPLETE
+
+All 14 phases of the v0.6 parity plan are complete. The userspace rebuild
+matches the v0.6-pre-rewrite prototype's functionality: text editing, glyph
+rendering, cursor blink, selection, keyboard navigation, scroll, visual chrome,
+pointer interaction, content-type typography, PNG decoding, host filesystem
+access, and document switching with spring animation.
 
 ### v0.6 Parity Progress
 
@@ -567,11 +603,9 @@ work to reach full v0.6-pre-rewrite parity is tracked in
 - Phase 11 (content-type typography): COMPLETE
 - Phase 12 (PNG decoder): COMPLETE
 - Phase 13 (filesystem + virtio-9p): COMPLETE
-- Phase 14 (document switching — Ctrl+Tab text↔image, slide animation): NOT
-  STARTED
+- Phase 14 (document switching — Ctrl+Tab text↔image, slide animation): COMPLETE
 
 ## Session Resume
 
-To resume work: read this file and `design/v06-parity-plan.md`, check
-`git log --oneline -20` for recent commits, identify the current phase from the
-progress tracker above, and continue.
+To resume work: read this file, check `git log --oneline -20` for recent
+commits, and review what's next beyond v0.6 parity.

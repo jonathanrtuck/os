@@ -547,6 +547,39 @@ pub mod comp {
     /// Change cursor shape. Payload: icon name bytes (e.g. b"pointer", b"cursor-text").
     pub const SET_CURSOR_SHAPE: u32 = 5;
 
+    /// Upload decoded image pixels. Payload: UploadImageRequest (12 bytes).
+    /// Handle[0]: BGRA8 pixel VMO (mapped RO by compositor).
+    pub const UPLOAD_IMAGE: u32 = 6;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct UploadImageRequest {
+        pub content_id: u32,
+        pub width: u16,
+        pub height: u16,
+        pub pixel_size: u32,
+    }
+
+    impl UploadImageRequest {
+        pub const SIZE: usize = 12;
+
+        pub fn write_to(&self, buf: &mut [u8]) {
+            buf[0..4].copy_from_slice(&self.content_id.to_le_bytes());
+            buf[4..6].copy_from_slice(&self.width.to_le_bytes());
+            buf[6..8].copy_from_slice(&self.height.to_le_bytes());
+            buf[8..12].copy_from_slice(&self.pixel_size.to_le_bytes());
+        }
+
+        #[must_use]
+        pub fn read_from(buf: &[u8]) -> Self {
+            Self {
+                content_id: u32::from_le_bytes(buf[0..4].try_into().unwrap()),
+                width: u16::from_le_bytes(buf[4..6].try_into().unwrap()),
+                height: u16::from_le_bytes(buf[6..8].try_into().unwrap()),
+                pixel_size: u32::from_le_bytes(buf[8..12].try_into().unwrap()),
+            }
+        }
+    }
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct SetupReply {
         pub display_width: u32,
@@ -629,7 +662,14 @@ pub mod comp {
 
         #[test]
         fn method_ids_distinct() {
-            let methods = [SETUP, RENDER, GET_INFO, POINTER, SET_CURSOR_SHAPE];
+            let methods = [
+                SETUP,
+                RENDER,
+                GET_INFO,
+                POINTER,
+                SET_CURSOR_SHAPE,
+                UPLOAD_IMAGE,
+            ];
 
             for i in 0..methods.len() {
                 for j in (i + 1)..methods.len() {
@@ -639,9 +679,25 @@ pub mod comp {
         }
 
         #[test]
+        fn upload_image_request_round_trip() {
+            let req = UploadImageRequest {
+                content_id: 1,
+                width: 800,
+                height: 600,
+                pixel_size: 800 * 600 * 4,
+            };
+            let mut buf = [0u8; UploadImageRequest::SIZE];
+
+            req.write_to(&mut buf);
+
+            assert_eq!(UploadImageRequest::read_from(&buf), req);
+        }
+
+        #[test]
         fn sizes_fit_payload() {
             assert!(SetupReply::SIZE <= MAX_PAYLOAD);
             assert!(InfoReply::SIZE <= MAX_PAYLOAD);
+            assert!(UploadImageRequest::SIZE <= MAX_PAYLOAD);
         }
     }
 }
