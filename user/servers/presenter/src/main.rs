@@ -91,6 +91,36 @@ fn compute_char_advance(font_data: &[u8]) -> f32 {
     presenter_service::CHAR_WIDTH_F32
 }
 
+fn shape_text(
+    font_data: &[u8],
+    text: &str,
+    font_size: u16,
+    out: &mut [ShapedGlyph],
+) -> (usize, f32) {
+    let upem = fonts::metrics::font_metrics(font_data)
+        .map(|m| m.units_per_em)
+        .unwrap_or(1000) as f32;
+    let scale = font_size as f32 / upem * 65536.0;
+    let shaped = fonts::shape(font_data, text, &[]);
+    let count = shaped.len().min(out.len());
+    let mut total_width = 0.0f32;
+
+    for (i, sg) in shaped.iter().take(count).enumerate() {
+        let adv = sg.x_advance as f32 * scale;
+
+        out[i] = ShapedGlyph {
+            glyph_id: sg.glyph_id,
+            _pad: 0,
+            x_advance: adv as i32,
+            x_offset: (sg.x_offset as f32 * scale) as i32,
+            y_offset: (sg.y_offset as f32 * scale) as i32,
+        };
+        total_width += adv / 65536.0;
+    }
+
+    (count, total_width)
+}
+
 // ── Layout results parsing (from seqlock-read buffer) ────────────
 
 fn parse_layout_header(buf: &[u8]) -> layout_service::LayoutHeader {
@@ -185,7 +215,6 @@ struct Presenter {
     cmap_mono: [u16; 128],
     cmap_sans: [u16; 128],
     char_width: f32,
-    sans_char_width: f32,
 
     blink_start: u64,
 
@@ -383,28 +412,14 @@ impl Presenter {
 
         scene.set_root(root);
 
-        // Title bar text — "untitled" label.
-        let title_label = b"untitled";
+        // Title bar text — "untitled" label, shaped with Inter.
         let title_text_y = (title_bar_h.saturating_sub(presenter_service::LINE_HEIGHT)) / 2;
-        let title_glyphs_count = title_label.len().min(MAX_GLYPHS_PER_LINE);
-        let sans_advance = (self.sans_char_width * 65536.0) as i32;
-
-        for (j, &byte) in title_label.iter().enumerate().take(title_glyphs_count) {
-            let gid = if byte < 128 {
-                self.cmap_sans[byte as usize]
-            } else {
-                0
-            };
-
-            self.glyphs[j] = ShapedGlyph {
-                glyph_id: gid,
-                _pad: 0,
-                x_advance: sans_advance,
-                x_offset: 0,
-                y_offset: 0,
-            };
-        }
-
+        let (title_glyphs_count, title_width) = shape_text(
+            FONT_SANS,
+            "untitled",
+            presenter_service::FONT_SIZE,
+            &mut self.glyphs,
+        );
         let title_glyph_ref = scene.push_shaped_glyphs(&self.glyphs[..title_glyphs_count]);
 
         if let Some(title_node) = scene.alloc_node() {
@@ -412,7 +427,7 @@ impl Presenter {
 
             n.x = pt(36);
             n.y = pt(title_text_y as i32);
-            n.width = upt((title_glyphs_count as f32 * self.sans_char_width) as u32 + 1);
+            n.width = upt(title_width as u32 + 1);
             n.height = upt(presenter_service::LINE_HEIGHT);
             n.content = Content::Glyphs {
                 color: title_color,
@@ -453,24 +468,19 @@ impl Presenter {
             b'0' + (seconds % 10) as u8,
         ];
 
-        for (j, &byte) in clock_chars.iter().enumerate() {
-            let gid = if byte < 128 {
-                self.cmap_sans[byte as usize]
-            } else {
-                0
-            };
+        let mut clock_str = [0u8; 8];
 
-            self.glyphs[j] = ShapedGlyph {
-                glyph_id: gid,
-                _pad: 0,
-                x_advance: sans_advance,
-                x_offset: 0,
-                y_offset: 0,
-            };
-        }
+        clock_str.copy_from_slice(&clock_chars);
 
-        let clock_glyph_ref = scene.push_shaped_glyphs(&self.glyphs[..8]);
-        let clock_text_w = (8.0 * self.sans_char_width) as u32 + 1;
+        let clock_text = core::str::from_utf8(&clock_str).unwrap_or("00:00:00");
+        let (clock_count, clock_width) = shape_text(
+            FONT_SANS,
+            clock_text,
+            presenter_service::FONT_SIZE,
+            &mut self.glyphs,
+        );
+        let clock_glyph_ref = scene.push_shaped_glyphs(&self.glyphs[..clock_count]);
+        let clock_text_w = clock_width as u32 + 1;
         let clock_x = (self.display_width - 12 - clock_text_w) as i32;
 
         if let Some(clock_node) = scene.alloc_node() {
@@ -483,7 +493,7 @@ impl Presenter {
             n.content = Content::Glyphs {
                 color: clock_color,
                 glyphs: clock_glyph_ref,
-                glyph_count: 8,
+                glyph_count: clock_count as u16,
                 font_size: presenter_service::FONT_SIZE,
                 style_id: STYLE_SANS,
             };
@@ -586,7 +596,6 @@ impl Presenter {
                 continue;
             };
             let glyph_count = line_len.min(MAX_GLYPHS_PER_LINE);
-
             let mut needs_fallback = false;
 
             for (j, &byte) in line_bytes.iter().enumerate().take(glyph_count) {
@@ -685,7 +694,6 @@ impl Presenter {
                         Some(id) => id,
                         None => break,
                     };
-
                     let run_x = line_info.x + run_start as f32 * self.char_width;
 
                     {
@@ -706,6 +714,7 @@ impl Presenter {
                     }
 
                     scene.add_child(viewport, run_node);
+
                     run_start = run_end;
                 }
             }
@@ -790,24 +799,14 @@ impl Presenter {
             b'0' + (seconds / 10) as u8,
             b'0' + (seconds % 10) as u8,
         ];
-        let sans_advance = (self.sans_char_width * 65536.0) as i32;
-
-        for (j, &byte) in clock_chars.iter().enumerate() {
-            let gid = if byte < 128 {
-                self.cmap_sans[byte as usize]
-            } else {
-                0
-            };
-
-            self.glyphs[j] = ShapedGlyph {
-                glyph_id: gid,
-                _pad: 0,
-                x_advance: sans_advance,
-                x_offset: 0,
-                y_offset: 0,
-            };
-        }
-
+        let clock_text = core::str::from_utf8(&clock_chars).unwrap_or("00:00:00");
+        let (clock_count, _) = shape_text(
+            FONT_SANS,
+            clock_text,
+            presenter_service::FONT_SIZE,
+            &mut self.glyphs,
+        );
+        let _ = clock_count;
         let mut scene = SceneWriter::from_existing(self.scene_buf);
 
         scene.write_shaped_glyphs_at(self.clock_glyph_ref, &self.glyphs[..8]);
@@ -1689,7 +1688,6 @@ extern "C" fn _start() -> ! {
         cmap_mono: build_cmap_table(FONT_MONO),
         cmap_sans: build_cmap_table(FONT_SANS),
         char_width: compute_char_advance(FONT_MONO),
-        sans_char_width: compute_char_advance(FONT_SANS),
         blink_start: abi::system::clock_read().unwrap_or(0),
         last_line_count: 0,
         last_cursor_line: 0,

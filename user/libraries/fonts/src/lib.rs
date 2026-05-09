@@ -440,4 +440,32 @@ mod tests {
     fn glyph_id_invalid_font() {
         assert!(metrics::glyph_id_for_char(&[], 'A').is_none());
     }
+
+    #[test]
+    fn inter_shape_proportional_advances() {
+        static INTER: &[u8] = include_bytes!("../../../../assets/inter.ttf");
+
+        let fm = metrics::font_metrics(INTER).unwrap();
+
+        assert_eq!(fm.units_per_em, 2048);
+
+        let shaped = shape(INTER, "untitled", &[]);
+
+        assert_eq!(shaped.len(), 8);
+
+        let advances: Vec<i32> = shaped.iter().map(|g| g.x_advance).collect();
+
+        assert!(
+            advances.windows(2).any(|w| w[0] != w[1]),
+            "Inter advances should vary for 'untitled', got {advances:?}"
+        );
+
+        let total_fu: i32 = advances.iter().sum();
+        let total_pt = total_fu as f32 * 18.0 / fm.units_per_em as f32;
+
+        assert!(
+            total_pt > 40.0 && total_pt < 120.0,
+            "total width {total_pt:.1}pt out of range for 'untitled' at 18pt, advances={advances:?}"
+        );
+    }
 }
