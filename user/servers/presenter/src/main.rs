@@ -513,6 +513,7 @@ impl Presenter {
             n.shadow_color = Color::rgba(0, 0, 0, 255);
             n.shadow_blur_radius = presenter_service::SHADOW_BLUR_RADIUS;
             n.shadow_spread = presenter_service::SHADOW_SPREAD;
+            n.cursor_shape = scene::CURSOR_TEXT;
         }
 
         scene.add_child(content_area, page);
@@ -533,7 +534,6 @@ impl Presenter {
             n.flags = NodeFlags::VISIBLE.union(NodeFlags::CLIPS_CHILDREN);
             n.child_offset_y = -(self.scroll_y as f32);
             n.role = scene::ROLE_DOCUMENT;
-            n.cursor_shape = scene::CURSOR_TEXT;
         }
 
         scene.add_child(page, viewport);
@@ -1086,18 +1086,30 @@ impl Presenter {
 
     // ── Pixel-to-byte hit testing ────────────────────────────────
 
-    fn text_origin(&self) -> (u32, u32) {
+    fn page_rect(&self) -> (u32, u32, u32, u32) {
         let title_bar_h = presenter_service::TITLE_BAR_H;
         let page_margin = presenter_service::PAGE_MARGIN_V;
-        let page_padding = presenter_service::PAGE_PADDING;
         let content_h = self.display_height.saturating_sub(title_bar_h);
         let page_h = content_h.saturating_sub(2 * page_margin);
         let page_w = ((page_h as u64 * 210 / 297) as u32)
             .min(self.display_width.saturating_sub(2 * page_margin));
         let page_x = (self.display_width - page_w) / 2;
-        let page_y_abs = title_bar_h + page_margin;
+        let page_y = title_bar_h + page_margin;
 
-        (page_x + page_padding, page_y_abs + page_padding)
+        (page_x, page_y, page_w, page_h)
+    }
+
+    fn is_on_page(&self, px: u32, py: u32) -> bool {
+        let (page_x, page_y, page_w, page_h) = self.page_rect();
+
+        px >= page_x && px < page_x + page_w && py >= page_y && py < page_y + page_h
+    }
+
+    fn text_origin(&self) -> (u32, u32) {
+        let (page_x, page_y, _, _) = self.page_rect();
+        let page_padding = presenter_service::PAGE_PADDING;
+
+        (page_x + page_padding, page_y + page_padding)
     }
 
     fn xy_to_byte(&self, px: u32, py: u32, content_len: usize) -> usize {
@@ -1153,7 +1165,7 @@ impl Presenter {
         let click_x = (btn.abs_x as u64 * self.display_width as u64 / 32768) as u32;
         let click_y = (btn.abs_y as u64 * self.display_height as u64 / 32768) as u32;
 
-        if click_y < presenter_service::TITLE_BAR_H {
+        if !self.is_on_page(click_x, click_y) {
             return;
         }
 
@@ -1241,7 +1253,7 @@ impl Presenter {
         let drag_x = (abs_x as u64 * self.display_width as u64 / 32768) as u32;
         let drag_y = (abs_y as u64 * self.display_height as u64 / 32768) as u32;
 
-        if drag_y < presenter_service::TITLE_BAR_H {
+        if !self.is_on_page(drag_x, drag_y) {
             return;
         }
 
