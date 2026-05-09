@@ -1738,11 +1738,7 @@ extern "C" fn _start() -> ! {
         let deadline = (current_sec + 1) * NS_PER_SEC;
 
         match ipc::server::serve_one_timed(own_ep, &mut server, deadline) {
-            Ok(()) => {
-                if server.update_clock() {
-                    server.request_render();
-                }
-            }
+            Ok(()) => {}
             Err(abi::types::SyscallError::TimedOut) => {
                 if server.update_clock() {
                     server.request_render();
