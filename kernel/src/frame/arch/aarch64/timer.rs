@@ -1,20 +1,19 @@
-//! ARM generic timer — one-shot deadline support.
+//! ARM generic timer — one-shot deadline support with per-core queue.
 //!
-//! Provides deadline-based timing for the kernel. The timer fires only when
-//! explicitly armed with [`set_deadline`] and does not re-arm itself — this
-//! matches the spec's event-driven scheduler model where `event_wait`
-//! timeouts and preemption quanta are one-shot deadlines, not periodic ticks.
+//! Multiple threads per core can have concurrent deadlines. The queue
+//! stores up to [`MAX_DEADLINES`] entries per core. The hardware timer
+//! is always armed to the earliest pending deadline. When it fires,
+//! [`drain_expired`] returns all entries whose deadlines have passed
+//! and rearms the timer for the next.
 //!
 //! ## HVF interaction
 //!
 //! When the virtual timer fires, Apple's Hypervisor.framework masks the timer
 //! (sets IMASK in CNTV_CTL_EL0) and injects an IRQ to the guest. Writing
-//! CNTV_TVAL_EL0 via [`set_deadline`] re-arms the timer — HVF detects the
+//! CNTV_TVAL_EL0 via [`rearm_earliest`] re-arms the timer — HVF detects the
 //! CNTV_CVAL change and unmasks automatically.
 
-#[cfg(miri)]
-use core::sync::atomic::AtomicU64;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 #[cfg(not(miri))]
 use super::sysreg;
@@ -24,17 +23,15 @@ use super::sysreg;
 /// multiply-shift (saves ~24 cycles per clock_read).
 pub const TIMER_FREQ_HZ: u64 = 24_000_000;
 
-/// Per-core deadline-expired flags. The virtual timer (INTID 27) is a PPI —
-/// each core has its own instance. The expired flag must be per-core to
-/// prevent one core from stealing another's timer expiry.
-static DEADLINE_EXPIRED: [AtomicBool; crate::config::MAX_CORES] =
-    [const { AtomicBool::new(false) }; crate::config::MAX_CORES];
+const MAX_DEADLINES: usize = 4;
 
-/// Per-core tracking of which thread armed the deadline timer.
-/// `u32::MAX` means no thread. Set by `set_deadline_thread`, consumed by
-/// `take_deadline_thread` in the timer ISR to know who to wake on timeout.
-static DEADLINE_THREAD: [AtomicU32; crate::config::MAX_CORES] =
-    [const { AtomicU32::new(u32::MAX) }; crate::config::MAX_CORES];
+/// Per-core deadline queue — thread IDs. `u32::MAX` marks an empty slot.
+static DQ_TID: [[AtomicU32; MAX_DEADLINES]; crate::config::MAX_CORES] =
+    [const { [const { AtomicU32::new(u32::MAX) }; MAX_DEADLINES] }; crate::config::MAX_CORES];
+
+/// Per-core deadline queue — absolute tick values (paired with DQ_TID).
+static DQ_TICK: [[AtomicU64; MAX_DEADLINES]; crate::config::MAX_CORES] =
+    [const { [const { AtomicU64::new(u64::MAX) }; MAX_DEADLINES] }; crate::config::MAX_CORES];
 
 /// Monotonic counter for Miri — increments on each `now()` call so clock
 /// reads are always non-decreasing.
@@ -44,8 +41,8 @@ static MIRI_COUNTER: AtomicU64 = AtomicU64::new(1000);
 /// Ensure the timer starts in a known disarmed state.
 ///
 /// The GIC must be initialized before calling this — INTID 27 (virtual timer
-/// PPI) must be enabled in the redistributor so that future [`set_deadline`]
-/// calls can deliver interrupts.
+/// PPI) must be enabled in the redistributor so that future timer arms
+/// can deliver interrupts.
 #[cfg(not(miri))]
 pub fn init() {
     sysreg::set_cntv_ctl_el0(0);
@@ -90,14 +87,96 @@ pub const fn frequency() -> u64 {
     TIMER_FREQ_HZ
 }
 
-/// Arm a one-shot deadline `ticks_from_now` timer ticks in the future.
-///
-/// The timer will fire exactly once (INTID 27), calling [`handle_deadline`]
-/// through the IRQ handler. After firing, the timer remains disarmed until
-/// explicitly re-armed.
-pub fn set_deadline(core_id: usize, _ticks_from_now: u64) {
-    DEADLINE_EXPIRED[core_id].store(false, Ordering::Relaxed);
+// ── Deadline queue ──────────────────────────────────────────────────
 
+/// Insert a deadline for a thread on this core. Arms the hardware timer
+/// to the earliest pending deadline (which may be this one or an existing
+/// earlier entry).
+pub fn insert_deadline(core_id: usize, thread_id: crate::types::ThreadId, deadline_tick: u64) {
+    let q = &DQ_TID[core_id];
+    let t = &DQ_TICK[core_id];
+
+    for i in 0..MAX_DEADLINES {
+        if q[i].load(Ordering::Relaxed) == u32::MAX {
+            t[i].store(deadline_tick, Ordering::Relaxed);
+            q[i].store(thread_id.0, Ordering::Release);
+            rearm_earliest(core_id);
+
+            return;
+        }
+    }
+}
+
+/// Remove a thread's deadline entry. Called when a thread is woken by
+/// something other than the timer (IPC message, event signal, etc.)
+/// so the stale entry doesn't fire later.
+pub fn remove_deadline(core_id: usize, thread_id: crate::types::ThreadId) {
+    let q = &DQ_TID[core_id];
+
+    for slot in q.iter() {
+        if slot.load(Ordering::Relaxed) == thread_id.0 {
+            slot.store(u32::MAX, Ordering::Release);
+
+            return;
+        }
+    }
+}
+
+/// Drain all expired deadline entries from this core's queue. Returns
+/// up to `MAX_DEADLINES` thread IDs whose deadlines have passed.
+/// Rearms the hardware timer for the next pending deadline (if any).
+pub fn drain_expired(core_id: usize) -> [Option<crate::types::ThreadId>; MAX_DEADLINES] {
+    let current = now();
+    let q = &DQ_TID[core_id];
+    let t = &DQ_TICK[core_id];
+    let mut result = [None; MAX_DEADLINES];
+    let mut count = 0;
+
+    for i in 0..MAX_DEADLINES {
+        let tid = q[i].load(Ordering::Acquire);
+
+        if tid != u32::MAX && t[i].load(Ordering::Relaxed) <= current {
+            q[i].store(u32::MAX, Ordering::Release);
+            result[count] = Some(crate::types::ThreadId(tid));
+            count += 1;
+        }
+    }
+
+    rearm_earliest(core_id);
+
+    result
+}
+
+/// Rearm the hardware timer to the earliest pending deadline on this
+/// core, or push it far into the future if no deadlines remain.
+fn rearm_earliest(core_id: usize) {
+    let q = &DQ_TID[core_id];
+    let t = &DQ_TICK[core_id];
+    let mut earliest = u64::MAX;
+
+    for i in 0..MAX_DEADLINES {
+        if q[i].load(Ordering::Relaxed) != u32::MAX {
+            let tick = t[i].load(Ordering::Relaxed);
+
+            if tick < earliest {
+                earliest = tick;
+            }
+        }
+    }
+
+    if earliest == u64::MAX {
+        clear_deadline();
+    } else {
+        let delta = earliest.saturating_sub(now()).max(1);
+
+        arm_timer(delta);
+    }
+}
+
+// ── Hardware timer control ──────────────────────────────────────────
+
+/// Arm the hardware timer to fire `ticks_from_now` ticks in the future.
+fn arm_timer(_ticks_from_now: u64) {
     #[cfg(not(miri))]
     {
         sysreg::set_cntv_tval_el0(_ticks_from_now);
@@ -118,51 +197,17 @@ pub fn clear_deadline() {
 
 /// Handle a timer deadline expiry. Called from the IRQ handler on INTID 27.
 ///
-/// Masks the timer interrupt (one-shot: does not re-arm) and sets the
-/// expired flag for the scheduler to consume via [`deadline_elapsed`].
-pub fn handle_deadline(core_id: usize) {
+/// Masks the timer interrupt (one-shot: does not re-arm). The caller
+/// must follow with [`drain_expired`] to process the queue and rearm.
+pub fn handle_deadline(_core_id: usize) {
     #[cfg(not(miri))]
     {
         sysreg::set_cntv_ctl_el0(0b11); // ENABLE=1, IMASK=1 (HVF detects re-arm via CVAL change)
         sysreg::isb();
     }
-
-    DEADLINE_EXPIRED[core_id].store(true, Ordering::Release);
 }
 
-/// Check and clear the deadline-expired flag for this core.
-///
-/// Returns `true` exactly once after each deadline expiry. The scheduler
-/// calls this to decide whether to preempt or wake a timed-out thread.
-pub fn deadline_elapsed(core_id: usize) -> bool {
-    DEADLINE_EXPIRED[core_id].swap(false, Ordering::Acquire)
-}
-
-/// Record which thread armed the timer on this core. Called by
-/// `block_with_deadline` before arming the timer.
-pub fn set_deadline_thread(core_id: usize, thread_id: crate::types::ThreadId) {
-    DEADLINE_THREAD[core_id].store(thread_id.0, Ordering::Release);
-}
-
-/// Atomically take the deadline thread for this core. Returns `Some` exactly
-/// once per `set_deadline_thread` call. The timer ISR calls this to find
-/// which thread to wake on timeout.
-pub fn take_deadline_thread(core_id: usize) -> Option<crate::types::ThreadId> {
-    let id = DEADLINE_THREAD[core_id].swap(u32::MAX, Ordering::Acquire);
-
-    if id == u32::MAX {
-        None
-    } else {
-        Some(crate::types::ThreadId(id))
-    }
-}
-
-/// Clear the deadline thread for this core without returning it. Called
-/// when a thread wakes normally (event signal) to prevent the stale timer
-/// from waking the wrong thread.
-pub fn clear_deadline_thread(core_id: usize) {
-    DEADLINE_THREAD[core_id].store(u32::MAX, Ordering::Release);
-}
+// ── Deferred timer wakeup (ISR → idle loop handoff) ─────────────────
 
 /// Per-core deferred timer wakeup: thread ID + priority to enqueue.
 /// The ISR cannot safely call `sched::wake` (scheduler lock may be held

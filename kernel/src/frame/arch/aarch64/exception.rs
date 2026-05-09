@@ -181,16 +181,18 @@ fn irq_handler(_frame: &mut TrapFrame) {
 
             super::timer::handle_deadline(core);
 
-            if super::timer::deadline_elapsed(core)
-                && let Some(tid) = super::timer::take_deadline_thread(core)
-                && let Some(mut t) = crate::frame::state::threads().write(tid.0)
-                && t.state() == crate::thread::ThreadRunState::Blocked
-            {
-                t.set_wakeup_error(crate::types::SyscallError::TimedOut);
+            for entry in super::timer::drain_expired(core) {
+                let Some(tid) = entry else { break };
 
-                drop(t);
+                if let Some(mut t) = crate::frame::state::threads().write(tid.0)
+                    && t.state() == crate::thread::ThreadRunState::Blocked
+                {
+                    t.set_wakeup_error(crate::types::SyscallError::TimedOut);
 
-                crate::sched::wake(tid, core);
+                    drop(t);
+
+                    crate::sched::wake(tid, core);
+                }
             }
 
             #[cfg(all(debug_assertions, target_os = "none"))]

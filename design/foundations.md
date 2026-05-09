@@ -433,7 +433,7 @@ The persistence layer is two separate libraries with a clean boundary:
 
 ```text
 Core ──[IPC]──→ Document Service ──→ store library ──→ fs library ──→ disk
-                 (services/document/)   (userspace/libraries/store/)  (userspace/libraries/fs/)
+                 (services/document/)   (user/libraries/store/)  (user/libraries/fs/)
 ```
 
 The **fs library** is generic infrastructure — a COW filesystem useful to anyone

@@ -1,18 +1,18 @@
 [workspace]
 members = [
     "kernel",
-    "userspace/libraries/scene",
-    "userspace/libraries/drawing",
-    "userspace/libraries/piecetable",
-    "userspace/libraries/animation",
-    "userspace/libraries/layout",
-    "userspace/libraries/fs",
-    "userspace/libraries/icons",
-    "userspace/libraries/store",
-    "userspace/libraries/fonts",
-    "userspace/libraries/render",
+    "user/libraries/scene",
+    "user/libraries/drawing",
+    "user/libraries/piecetable",
+    "user/libraries/animation",
+    "user/libraries/layout",
+    "user/libraries/fs",
+    "user/libraries/icons",
+    "user/libraries/store",
+    "user/libraries/fonts",
+    "user/libraries/render",
 ]
-exclude = ["kernel/fuzz", "userspace/init", "userspace/abi", "tools/mkdisk"]
+exclude = ["kernel/fuzz", "user/init", "user/abi", "tools/mkdisk"]
 resolver = "3"
 
 [profile.dev]

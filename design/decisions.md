@@ -1306,9 +1306,9 @@ approximation) and expanding shorthand commands (h/v → lineto, s → cubic, q 
 cubic via degree elevation). The converter runs during `build.rs`.
 
 **Path commands stored as compiled-in `const` arrays** in a new
-`userspace/libraries/icons/` library. Icons are small (~200 bytes of path
-commands each); a curated set of ~50 icons is under 10 KB total. No runtime I/O,
-no failure modes, no boot-time loading. This matches the pattern of the pointer
+`user/libraries/icons/` library. Icons are small (~200 bytes of path commands
+each); a curated set of ~50 icons is under 10 KB total. No runtime I/O, no
+failure modes, no boot-time loading. This matches the pattern of the pointer
 cursor (hand-built path data in core) and generalizes it.
 
 ### Source set
@@ -1320,8 +1320,8 @@ available for future expansion.
 
 ### Mimetype → icon mapping
 
-The `userspace/libraries/icons/` library provides a lookup function: mimetype
-string → icon path data, with a three-level fallback chain:
+The `user/libraries/icons/` library provides a lookup function: mimetype string
+→ icon path data, with a three-level fallback chain:
 
 1. **Specific:** `image/png` → `file-type-png` icon
 2. **Category:** `image/*` → `photo` icon

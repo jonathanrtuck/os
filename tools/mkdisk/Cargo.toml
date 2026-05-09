@@ -5,7 +5,7 @@ edition = "2024"
 license = "Unlicense"
 
 [dependencies]
-fs = { path = "../../userspace/libraries/fs" }
-store = { path = "../../userspace/libraries/store" }
+fs = { path = "../../user/libraries/fs" }
+store = { path = "../../user/libraries/store" }
 
 [workspace]

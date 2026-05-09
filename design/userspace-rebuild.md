@@ -23,17 +23,16 @@ Six layers, built bottom-up. Each layer depends only on layers below it.
 
 Already built during kernel development:
 
-- `userspace/abi` — raw syscall wrappers for all 30 syscalls
-- `userspace/ipc` — SPSC ring buffers, seqlock state registers, typed messages
-- `userspace/init` — skeleton: parses device manifest, spawns processes
+- `user/abi` — raw syscall wrappers for all 30 syscalls
+- `user/ipc` — SPSC ring buffers, seqlock state registers, typed messages
+- `user/init` — skeleton: parses device manifest, spawns processes
 
 ### Layer 1: Service infrastructure
 
-- **Protocol crate** (`userspace/protocol`) — message type definitions for every
-  IPC boundary. Single source of truth for message layouts. One module per
-  boundary.
-- **Name service** (`userspace/servers/name`) — first service init spawns. Holds
-  a table of (name → endpoint capability). Services register on boot, discover
+- **Protocol crate** (`user/protocol`) — message type definitions for every IPC
+  boundary. Single source of truth for message layouts. One module per boundary.
+- **Name service** (`user/servers/name`) — first service init spawns. Holds a
+  table of (name → endpoint capability). Services register on boot, discover
   dependencies by name.
 - **Init completion** — init as service manager: creates endpoints, spawns
   services in dependency order, passes capability handles.
@@ -60,49 +59,47 @@ Adapted from the old prototype (`git show v0.6-pre-rewrite:<path>`). These are
 kernel-agnostic — pure algorithms and data structures. Update imports to use the
 new `abi`/`ipc` crates, run old tests against new code.
 
-- **Scene graph** (`userspace/libraries/scene`) — shared-memory node tree.
+- **Scene graph** (`user/libraries/scene`) — shared-memory node tree.
   First-child / next-sibling encoding. Double-buffered with generation counter.
-- **Fonts** (`userspace/libraries/fonts`) — font table parsing, glyph metrics,
+- **Fonts** (`user/libraries/fonts`) — font table parsing, glyph metrics,
   shaping, rasterization. Used by layout (metrics only) and compositor
   (rasterization).
-- **Drawing** (`userspace/libraries/drawing`) — 2D primitives: blending, blur,
-  fill, line, gradient, NEON SIMD paths.
-- **Render** (`userspace/libraries/render`) — scene graph rendering, clip masks,
+- **Drawing** (`user/libraries/drawing`) — 2D primitives: blending, blur, fill,
+  line, gradient, NEON SIMD paths.
+- **Render** (`user/libraries/render`) — scene graph rendering, clip masks,
   damage tracking, surface pool, frame scheduling.
-- **Layout lib** (`userspace/libraries/layout`) — line breaking, text wrapping,
-  glyph positioning.
-- **Piece table** (`userspace/libraries/piecetable`) — text buffer with
-  efficient insert/delete.
-- **Animation** (`userspace/libraries/animation`) — timing curves, easing
-  functions.
-- **Filesystem** (`userspace/libraries/fs`) — COW block filesystem with
-  snapshots.
-- **Icons** (`userspace/libraries/icons`) — build-time SVG → vector path data.
-- **Store** (`userspace/libraries/store`) — catalog serialization format.
+- **Layout lib** (`user/libraries/layout`) — line breaking, text wrapping, glyph
+  positioning.
+- **Piece table** (`user/libraries/piecetable`) — text buffer with efficient
+  insert/delete.
+- **Animation** (`user/libraries/animation`) — timing curves, easing functions.
+- **Filesystem** (`user/libraries/fs`) — COW block filesystem with snapshots.
+- **Icons** (`user/libraries/icons`) — build-time SVG → vector path data.
+- **Store** (`user/libraries/store`) — catalog serialization format.
 
 ### Layer 4: Core services
 
-- **Document service** (`userspace/servers/document`) — sole writer to the
-  document buffer. Applies edit requests from editors. Manages undo ring via COW
+- **Document service** (`user/servers/document`) — sole writer to the document
+  buffer. Applies edit requests from editors. Manages undo ring via COW
   snapshots. Communicates with store service for persistence.
-- **Layout service** (`userspace/servers/layout`) — pure function: (document
+- **Layout service** (`user/servers/layout`) — pure function: (document
   content + viewport state + font metrics) → positioned text runs. Reads
   document buffer (RO). Reads viewport state via seqlock register. Writes layout
   results to a dedicated VMO.
-- **Presenter** (`userspace/servers/presenter`) — the OS service from
+- **Presenter** (`user/servers/presenter`) — the OS service from
   `architecture.md`. Event loop, input routing, view state (cursor, selection,
   scroll, blink, animation), scene graph builder. Sole writer to the scene graph
   VMO.
 
 ### Layer 5: Leaf nodes
 
-- **Text editor** (`userspace/editors/text`) — content-type leaf node. Receives
+- **Text editor** (`user/editors/text`) — content-type leaf node. Receives
   editing key events, translates into write requests via sync IPC to the
   document service. Read-only shared memory mapping of the document buffer.
-- **Store service** (`userspace/servers/store`) — COW filesystem over the block
+- **Store service** (`user/servers/store`) — COW filesystem over the block
   device. Provides persistence for the document service.
-- **PNG decoder** (`userspace/servers/png-decoder`) — content-type decoder. Sync
-  IPC: receives decode request, returns decoded pixel buffer.
+- **PNG decoder** (`user/servers/png-decoder`) — content-type decoder. Sync IPC:
+  receives decode request, returns decoded pixel buffer.
 
 ### Layer 6: Integration
 
@@ -116,7 +113,7 @@ baseline comparison via hypervisor screenshots.
 ### Three transport patterns
 
 Every IPC boundary in the system uses one of three patterns. These map directly
-to the primitives in `userspace/ipc`:
+to the primitives in `user/ipc`:
 
 1. **Sync call/reply** (via kernel endpoints) — for transactional operations
    where the caller needs a result. Client calls, blocks until server replies.
@@ -220,7 +217,7 @@ Spawn order (respects dependency chains):
 ### Protocol crate structure
 
 ```text
-userspace/protocol/
+user/protocol/
   src/
     lib.rs            — re-exports, common types, message type range constants
     name_service.rs   — Register, Lookup, Unregister payloads
@@ -258,22 +255,22 @@ bootstrap.
 
 ## Reuse vs. Rewrite
 
-| Component             | Decision                         | Rationale                                                                                                                 |
-| --------------------- | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `sys` (syscalls)      | **Rewritten** as `userspace/abi` | New kernel ABI. Complete.                                                                                                 |
-| `ipc` (ring buffers)  | **Rewritten** as `userspace/ipc` | New kernel primitives. Complete.                                                                                          |
-| `protocol` (messages) | **Rewrite**                      | Transport model changed (sync call/reply + shared memory, no async channels). Message payloads similar but not identical. |
-| `virtio`              | **Rewrite**                      | Thin, tightly coupled to old MMIO abstractions and old sys crate.                                                         |
-| `scene`               | **Adapt**                        | Data structures are kernel-agnostic. Adjust buffer management for new VMO model.                                          |
-| `fonts`               | **Adapt**                        | Pure font parsing, metrics, rasterization. No kernel dependency. Solid code.                                              |
-| `drawing`             | **Adapt**                        | Pure 2D math, NEON SIMD. Zero kernel dependency.                                                                          |
-| `render`              | **Adapt**                        | Scene rendering, clip masks, damage tracking. Adjust for new scene graph format.                                          |
-| `layout` (lib)        | **Adapt**                        | Line breaking, shaping. Pure computation.                                                                                 |
-| `piecetable`          | **Adapt**                        | Text buffer data structure. No external dependencies.                                                                     |
-| `animation`           | **Adapt**                        | Timing/easing. Trivial, no kernel dependency.                                                                             |
-| `fs`                  | **Adapt**                        | COW filesystem. Block-level, kernel-agnostic.                                                                             |
-| `icons`               | **Keep**                         | Build-time SVG → path data. Pure data generation.                                                                         |
-| `store`               | **Adapt**                        | Catalog serialization. May improve but algorithmically sound.                                                             |
+| Component             | Decision                    | Rationale                                                                                                                 |
+| --------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `sys` (syscalls)      | **Rewritten** as `user/abi` | New kernel ABI. Complete.                                                                                                 |
+| `ipc` (ring buffers)  | **Rewritten** as `user/ipc` | New kernel primitives. Complete.                                                                                          |
+| `protocol` (messages) | **Rewrite**                 | Transport model changed (sync call/reply + shared memory, no async channels). Message payloads similar but not identical. |
+| `virtio`              | **Rewrite**                 | Thin, tightly coupled to old MMIO abstractions and old sys crate.                                                         |
+| `scene`               | **Adapt**                   | Data structures are kernel-agnostic. Adjust buffer management for new VMO model.                                          |
+| `fonts`               | **Adapt**                   | Pure font parsing, metrics, rasterization. No kernel dependency. Solid code.                                              |
+| `drawing`             | **Adapt**                   | Pure 2D math, NEON SIMD. Zero kernel dependency.                                                                          |
+| `render`              | **Adapt**                   | Scene rendering, clip masks, damage tracking. Adjust for new scene graph format.                                          |
+| `layout` (lib)        | **Adapt**                   | Line breaking, shaping. Pure computation.                                                                                 |
+| `piecetable`          | **Adapt**                   | Text buffer data structure. No external dependencies.                                                                     |
+| `animation`           | **Adapt**                   | Timing/easing. Trivial, no kernel dependency.                                                                             |
+| `fs`                  | **Adapt**                   | COW filesystem. Block-level, kernel-agnostic.                                                                             |
+| `icons`               | **Keep**                    | Build-time SVG → path data. Pure data generation.                                                                         |
+| `store`               | **Adapt**                   | Catalog serialization. May improve but algorithmically sound.                                                             |
 
 "Adapt" means: copy from `v0.6-pre-rewrite` tag, update imports to use new
 `abi`/`ipc` crates, fix interface mismatches, verify with old tests ported to
@@ -346,31 +343,31 @@ Cargo workspace with cross-compilation. Userspace crates target
 Cargo.toml (workspace root)
   members:
     kernel/
-    userspace/abi/
-    userspace/ipc/
-    userspace/protocol/
-    userspace/init/
-    userspace/servers/name/
-    userspace/servers/document/
-    userspace/servers/layout/
-    userspace/servers/presenter/
-    userspace/servers/store/
-    userspace/servers/png-decoder/
-    userspace/drivers/console/
-    userspace/drivers/input/
-    userspace/drivers/blk/
-    userspace/drivers/metal-render/
-    userspace/editors/text/
-    userspace/libraries/scene/
-    userspace/libraries/fonts/
-    userspace/libraries/drawing/
-    userspace/libraries/render/
-    userspace/libraries/layout/
-    userspace/libraries/piecetable/
-    userspace/libraries/animation/
-    userspace/libraries/fs/
-    userspace/libraries/icons/
-    userspace/libraries/store/
+    user/abi/
+    user/ipc/
+    user/protocol/
+    user/init/
+    user/servers/name/
+    user/servers/document/
+    user/servers/layout/
+    user/servers/presenter/
+    user/servers/store/
+    user/servers/png-decoder/
+    user/drivers/console/
+    user/drivers/input/
+    user/drivers/blk/
+    user/drivers/metal-render/
+    user/editors/text/
+    user/libraries/scene/
+    user/libraries/fonts/
+    user/libraries/drawing/
+    user/libraries/render/
+    user/libraries/layout/
+    user/libraries/piecetable/
+    user/libraries/animation/
+    user/libraries/fs/
+    user/libraries/icons/
+    user/libraries/store/
     tools/mkservices/
 ```
 

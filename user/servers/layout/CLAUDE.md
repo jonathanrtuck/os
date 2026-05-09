@@ -61,7 +61,7 @@ console, document-service (protocol only)
 
 ```sh
 # Protocol round-trip tests (host target, no service deps)
-cd userspace/servers/layout
+cd user/servers/layout
 cargo test --lib --no-default-features --target aarch64-apple-darwin
 
 # Integration test: runs as test-layout service under hypervisor with disk

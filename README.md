@@ -11,20 +11,14 @@ The primary artifact is a coherent OS design, not a shipping product. See
 
 Key ideas:
 
-- **Document-centric:** OS -> Document -> Tool. No apps own file types.
-- **Content-aware:** The OS natively understands content types (mimetypes as
+- **document-centric:** OS → Document → Tool. No apps own file types.
+- **content-aware:** The OS natively understands content types (mimetypes as
   fundamental metadata).
-- **View-first:** Viewing is default, editing is deliberate. Editors are modal
+- **view-first:** Viewing is default, editing is deliberate. Editors are modal
   plugins.
-- **No POSIX:** Clean-slate APIs built on established standards (mimetypes,
+- **no POSIX:** Clean-slate APIs built on established standards (mimetypes,
   URIs, Unicode, arm64).
-- **Microkernel:** 5 kernel objects, 25 syscalls, capability-based security.
-
-## status
-
-Kernel rewrite in progress. See `STATUS.md` for details.
-
-Previous prototype (v0.1-v0.6) preserved at tag `v0.6-pre-rewrite`.
+- **microkernel:** 5 kernel objects, 34 syscalls, capability-based security.
 
 ## prerequisites
 

@@ -152,17 +152,17 @@ build order, verification strategy).
 
 ### Completed (Layer 0)
 
-- `userspace/abi` — raw syscall wrappers for all 34 syscalls
-- `userspace/ipc` — SPSC ring buffers, seqlock state registers, typed messages
-- `userspace/init` — parses SVPK service pack, spawns services in separate
-  address spaces
-- `userspace/servers/hello` — test service (Phase 1.3 verification)
+- `user/abi` — raw syscall wrappers for all 34 syscalls
+- `user/ipc` — SPSC ring buffers, seqlock state registers, typed messages
+- `user/init` — parses SVPK service pack, spawns services in separate address
+  spaces
+- `user/servers/hello` — test service (Phase 1.3 verification)
 
 ### Phase 1 — Protocol + Service Infrastructure (COMPLETE)
 
 1. **Protocol crate** — DONE. 7 modules, 17 message types, 56 tests. Covers all
    IPC boundaries: name service, bootstrap, input, edit, store, view, decode.
-   `userspace/protocol/`
+   `user/protocol/`
 2. **Service pack tool** — DONE. Host tool packs flat binaries into a
    page-aligned archive (SVPK format). 18 tests. `tools/mkservices/`
 3. **Init completion** — DONE. Init parses SVPK pack, creates address spaces,
@@ -199,18 +199,18 @@ or extend existing ones, never break the existing interface.
 **Drivers:**
 
 1. **Console driver (PL011)** — DONE. Maps UART device VMO, registers with name
-   service, prints "console: ready" on boot. `userspace/drivers/console/`
+   service, prints "console: ready" on boot. `user/drivers/console/`
 2. **virtio-input** — DONE (skeleton). Probes MMIO for input devices, requests
    DMA from init, sets up virtqueue, binds IRQ, event loop reads EV_KEY/EV_ABS
    with modifier tracking. Event output to presenter not yet wired (Phase 4).
-   Now in service pack. `userspace/drivers/input/`
+   Now in service pack. `user/drivers/input/`
 3. **virtio-blk** — DONE. Probes MMIO for block device (ID 2), negotiates FLUSH
    feature, reads capacity, allocates DMA for virtqueue + data buffer, runs
    self-test (write/read/verify 16 KiB block + flush), registers with name
    service as "blk", enters IPC serve loop. Protocol: shared data VMO for bulk
    transfer, read_block/write_block/flush/get_info methods. Verified end-to-end:
    hypervisor provides file-backed block device, driver reports capacity,
-   write+read 16K: OK, flush: OK. `userspace/drivers/blk/`
+   write+read 16K: OK, flush: OK. `user/drivers/blk/`
 4. **Metal render driver** — DONE. Probes MMIO for Metal GPU (device ID 22),
    negotiates features, sets up 2 virtqueues (setup + render), reads display
    config from device config space (width/height/refresh). Compiles MSL shaders,
@@ -218,7 +218,7 @@ or extend existing ones, never break the existing interface.
    DRAWABLE_HANDLE. Registers with name service as "render", enters IPC serve
    loop. Wire format: `protocol::metal::CommandWriter` (no_std, no alloc).
    Verified: hypervisor `--capture 0` produces uniform (101,101,105) screenshot
-   across all ~11M pixels. `userspace/drivers/metal-render/`
+   across all ~11M pixels. `user/drivers/metal-render/`
 
 **Phase 2.2 infrastructure (DONE):**
 
@@ -226,7 +226,7 @@ or extend existing ones, never break the existing interface.
   requests via sync IPC. Driver sends size → init calls `vmo_create_dma` with
   DMA Resource → returns VMO handle via reply.
   `protocol::bootstrap::DmaAllocRequest`.
-- **Virtio library** (`userspace/drivers/virtio/`) — MMIO transport + split
+- **Virtio library** (`user/drivers/virtio/`) — MMIO transport + split
   virtqueue. Adapted from v0.6 prototype, 16 KiB pages, pure no_std, no deps.
 - **ABI extension** — `vmo::create_dma(size, resource)` wraps vmo_create with
   DMA flag and Resource handle argument.
@@ -293,7 +293,7 @@ new library tests (1,045 total workspace tests).
    loop. Handles CREATE, READ, WRITE, TRUNCATE, COMMIT, SNAPSHOT, RESTORE,
    DELETE_SNAPSHOT, GET_INFO. Shared VMO for bulk data transfer. Integration
    test (test-store): write/read round-trip, snapshot/restore, commit.
-   `userspace/servers/store/`
+   `user/servers/store/`
 
 2. **Document service** — DONE. Sole writer to the document buffer. Receives
    edit requests (INSERT, DELETE, CURSOR_MOVE, SELECT, UNDO, REDO) from editors
@@ -306,7 +306,7 @@ new library tests (1,045 total workspace tests).
    Integration test (test-document): SETUP + VMO mapping, two inserts verified
    via shared memory, delete verified, undo×2 verified (restores through
    snapshot chain), redo verified, cursor move + GET_INFO verified.
-   `userspace/servers/document/`
+   `user/servers/document/`
 
 3. **Layout service** — DONE. Pure function: (document content + viewport
    state - font metrics) → positioned text runs. Reads the document buffer (RO
@@ -328,7 +328,7 @@ new library tests (1,045 total workspace tests).
    document, inserts multi-line text ("Hello world\nSecond line\nThird"),
    verifies 3-line layout (byte offsets, positions, widths). Appends text,
    re-layouts, verifies 4-line layout. Verifies GET_INFO metadata.
-   `userspace/servers/layout/`
+   `user/servers/layout/`
 
 4. **Presenter** — DONE. Compiles document state + layout results into a scene
    graph. Reads document buffer (RO VMO), writes viewport state (seqlock) to the
@@ -345,7 +345,7 @@ new library tests (1,045 total workspace tests).
    document, inserts 3-line text, calls BUILD, verifies: root node (background),
    viewport node (clips_children), 3 Glyphs nodes with non-zero glyph counts,
    cursor node (ROLE_CARET with background color), GET_INFO metadata.
-   `userspace/servers/presenter/`
+   `user/servers/presenter/`
 
 5. **Text editor** — DONE. Content-type leaf node: receives key events from the
    presenter via sync call/reply, translates into document edit operations.
@@ -360,7 +360,7 @@ new library tests (1,045 total workspace tests).
    Integration test (test-editor): 7 test cases — character insert, backspace,
    multi-character sequence, return/newline, tab, shift+tab dedent, forward
    delete with cursor positioning. All verified via shared memory document
-   buffer reads. `userspace/editors/text/`
+   buffer reads. `user/editors/text/`
 
 **Infrastructure improvements (Phase 4.5):**
 
@@ -383,7 +383,7 @@ new library tests (1,045 total workspace tests).
    `comp::SETUP`, walks the node tree depth-first, generates Metal vertex data
    (backgrounds, per-glyph rectangles, cursor). Heap-allocated vertex buffer
    (`Vec<u8>`) avoids the 128 KiB stack limit. `comp::RENDER` triggers a full
-   frame from the current scene graph state. `userspace/servers/drivers/render/`
+   frame from the current scene graph state. `user/servers/drivers/render/`
 
 3. **Presenter active mode** — DONE. On boot: connects to document, layout,
    compositor (sends scene graph VMO, receives display dimensions), and text

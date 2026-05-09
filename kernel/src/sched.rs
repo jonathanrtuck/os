@@ -36,9 +36,10 @@ pub fn block_current(current: ThreadId, core_id: usize) {
     switch_away(current, core_id);
 }
 
-/// Block with a deadline — same as `block_current`, but arms the per-core
-/// timer. If `deadline_tick` arrives before any other wake, the timer ISR
-/// sets `wakeup_error = TimedOut` and wakes the thread.
+/// Block with a deadline — same as `block_current`, but inserts an entry
+/// in the per-core deadline queue. If `deadline_tick` arrives before any
+/// other wake, the timer ISR sets `wakeup_error = TimedOut` and wakes the
+/// thread. Multiple threads on the same core can have concurrent deadlines.
 ///
 /// `deadline_tick` is an absolute counter value from `clock_read`. If the
 /// deadline has already passed, the thread is woken immediately with TimedOut.
@@ -65,12 +66,11 @@ pub fn block_with_deadline(current: ThreadId, core_id: usize, deadline_tick: u64
         thread.set_state(ThreadRunState::Blocked);
     }
 
-    timer::set_deadline_thread(core_id, current);
-    timer::set_deadline(core_id, deadline_tick.saturating_sub(timer::now()).max(1));
+    timer::insert_deadline(core_id, current, deadline_tick);
 
     switch_away(current, core_id);
 
-    timer::clear_deadline_thread(core_id);
+    timer::remove_deadline(core_id, current);
 }
 
 /// Wake a blocked thread by marking it Ready and enqueuing it.

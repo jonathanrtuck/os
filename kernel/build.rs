@@ -20,16 +20,16 @@ fn build_init(kernel_dir: &std::path::Path) {
     let bench_el0 = env::var("CARGO_FEATURE_BENCH_EL0").is_ok();
     let bench_smp = env::var("CARGO_FEATURE_BENCH_SMP").is_ok();
     let (init_dir, crate_name) = if bench_smp {
-        (kernel_dir.join("../userspace/bench-smp"), "bench-smp")
+        (kernel_dir.join("../user/bench-smp"), "bench-smp")
     } else if bench_el0 {
-        (kernel_dir.join("../userspace/bench"), "bench")
+        (kernel_dir.join("../user/bench"), "bench")
     } else if integration {
         (
-            kernel_dir.join("../userspace/integration-tests"),
+            kernel_dir.join("../user/integration-tests"),
             "integration-tests",
         )
     } else {
-        (kernel_dir.join("../userspace/servers/init"), "init")
+        (kernel_dir.join("../user/servers/init"), "init")
     };
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let init_bin = out_dir.join("init.bin");
@@ -42,63 +42,63 @@ fn build_init(kernel_dir: &std::path::Path) {
         write_empty_service_pack(&out_dir);
     }
 
-    println!("cargo:rerun-if-changed=../userspace/servers/init/src/main.rs");
-    println!("cargo:rerun-if-changed=../userspace/servers/init/src/manifest.rs");
-    println!("cargo:rerun-if-changed=../userspace/servers/init/link.ld");
-    println!("cargo:rerun-if-changed=../userspace/servers/init/Cargo.toml");
-    println!("cargo:rerun-if-changed=../userspace/integration-tests/src/main.rs");
-    println!("cargo:rerun-if-changed=../userspace/integration-tests/link.ld");
-    println!("cargo:rerun-if-changed=../userspace/integration-tests/Cargo.toml");
-    println!("cargo:rerun-if-changed=../userspace/bench/src/main.rs");
-    println!("cargo:rerun-if-changed=../userspace/bench/link.ld");
-    println!("cargo:rerun-if-changed=../userspace/bench/Cargo.toml");
-    println!("cargo:rerun-if-changed=../userspace/bench-smp/src/main.rs");
-    println!("cargo:rerun-if-changed=../userspace/bench-smp/link.ld");
-    println!("cargo:rerun-if-changed=../userspace/bench-smp/Cargo.toml");
-    println!("cargo:rerun-if-changed=../userspace/servers/hello/src/main.rs");
-    println!("cargo:rerun-if-changed=../userspace/servers/hello/link.ld");
-    println!("cargo:rerun-if-changed=../userspace/servers/hello/Cargo.toml");
-    println!("cargo:rerun-if-changed=../userspace/servers/console/src/main.rs");
-    println!("cargo:rerun-if-changed=../userspace/servers/console/link.ld");
-    println!("cargo:rerun-if-changed=../userspace/servers/console/Cargo.toml");
-    println!("cargo:rerun-if-changed=../userspace/servers/drivers/input/src/main.rs");
-    println!("cargo:rerun-if-changed=../userspace/servers/drivers/input/link.ld");
-    println!("cargo:rerun-if-changed=../userspace/servers/drivers/input/Cargo.toml");
-    println!("cargo:rerun-if-changed=../userspace/servers/drivers/blk/src/main.rs");
-    println!("cargo:rerun-if-changed=../userspace/servers/drivers/blk/link.ld");
-    println!("cargo:rerun-if-changed=../userspace/servers/drivers/blk/Cargo.toml");
-    println!("cargo:rerun-if-changed=../userspace/servers/drivers/render/src/main.rs");
-    println!("cargo:rerun-if-changed=../userspace/servers/drivers/render/link.ld");
-    println!("cargo:rerun-if-changed=../userspace/servers/drivers/render/Cargo.toml");
-    println!("cargo:rerun-if-changed=../userspace/servers/store/src/main.rs");
-    println!("cargo:rerun-if-changed=../userspace/servers/store/src/lib.rs");
-    println!("cargo:rerun-if-changed=../userspace/servers/store/link.ld");
-    println!("cargo:rerun-if-changed=../userspace/servers/store/Cargo.toml");
-    println!("cargo:rerun-if-changed=../userspace/servers/document/src/main.rs");
-    println!("cargo:rerun-if-changed=../userspace/servers/document/src/lib.rs");
-    println!("cargo:rerun-if-changed=../userspace/servers/document/link.ld");
-    println!("cargo:rerun-if-changed=../userspace/servers/document/Cargo.toml");
-    println!("cargo:rerun-if-changed=../userspace/servers/layout/src/main.rs");
-    println!("cargo:rerun-if-changed=../userspace/servers/layout/src/lib.rs");
-    println!("cargo:rerun-if-changed=../userspace/servers/layout/link.ld");
-    println!("cargo:rerun-if-changed=../userspace/servers/layout/Cargo.toml");
-    println!("cargo:rerun-if-changed=../userspace/servers/test-layout/src/main.rs");
-    println!("cargo:rerun-if-changed=../userspace/servers/test-layout/link.ld");
-    println!("cargo:rerun-if-changed=../userspace/servers/test-layout/Cargo.toml");
-    println!("cargo:rerun-if-changed=../userspace/servers/presenter/src/main.rs");
-    println!("cargo:rerun-if-changed=../userspace/servers/presenter/src/lib.rs");
-    println!("cargo:rerun-if-changed=../userspace/servers/presenter/link.ld");
-    println!("cargo:rerun-if-changed=../userspace/servers/presenter/Cargo.toml");
-    println!("cargo:rerun-if-changed=../userspace/servers/test-presenter/src/main.rs");
-    println!("cargo:rerun-if-changed=../userspace/servers/test-presenter/link.ld");
-    println!("cargo:rerun-if-changed=../userspace/servers/test-presenter/Cargo.toml");
-    println!("cargo:rerun-if-changed=../userspace/editors/text/src/main.rs");
-    println!("cargo:rerun-if-changed=../userspace/editors/text/src/lib.rs");
-    println!("cargo:rerun-if-changed=../userspace/editors/text/link.ld");
-    println!("cargo:rerun-if-changed=../userspace/editors/text/Cargo.toml");
-    println!("cargo:rerun-if-changed=../userspace/servers/test-editor/src/main.rs");
-    println!("cargo:rerun-if-changed=../userspace/servers/test-editor/link.ld");
-    println!("cargo:rerun-if-changed=../userspace/servers/test-editor/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/servers/init/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/servers/init/src/manifest.rs");
+    println!("cargo:rerun-if-changed=../user/servers/init/link.ld");
+    println!("cargo:rerun-if-changed=../user/servers/init/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/integration-tests/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/integration-tests/link.ld");
+    println!("cargo:rerun-if-changed=../user/integration-tests/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/bench/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/bench/link.ld");
+    println!("cargo:rerun-if-changed=../user/bench/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/bench-smp/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/bench-smp/link.ld");
+    println!("cargo:rerun-if-changed=../user/bench-smp/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/servers/hello/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/servers/hello/link.ld");
+    println!("cargo:rerun-if-changed=../user/servers/hello/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/servers/console/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/servers/console/link.ld");
+    println!("cargo:rerun-if-changed=../user/servers/console/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/servers/drivers/input/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/servers/drivers/input/link.ld");
+    println!("cargo:rerun-if-changed=../user/servers/drivers/input/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/servers/drivers/blk/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/servers/drivers/blk/link.ld");
+    println!("cargo:rerun-if-changed=../user/servers/drivers/blk/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/servers/drivers/render/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/servers/drivers/render/link.ld");
+    println!("cargo:rerun-if-changed=../user/servers/drivers/render/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/servers/store/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/servers/store/src/lib.rs");
+    println!("cargo:rerun-if-changed=../user/servers/store/link.ld");
+    println!("cargo:rerun-if-changed=../user/servers/store/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/servers/document/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/servers/document/src/lib.rs");
+    println!("cargo:rerun-if-changed=../user/servers/document/link.ld");
+    println!("cargo:rerun-if-changed=../user/servers/document/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/servers/layout/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/servers/layout/src/lib.rs");
+    println!("cargo:rerun-if-changed=../user/servers/layout/link.ld");
+    println!("cargo:rerun-if-changed=../user/servers/layout/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/servers/test-layout/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/servers/test-layout/link.ld");
+    println!("cargo:rerun-if-changed=../user/servers/test-layout/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/servers/presenter/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/servers/presenter/src/lib.rs");
+    println!("cargo:rerun-if-changed=../user/servers/presenter/link.ld");
+    println!("cargo:rerun-if-changed=../user/servers/presenter/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/servers/test-presenter/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/servers/test-presenter/link.ld");
+    println!("cargo:rerun-if-changed=../user/servers/test-presenter/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/editors/text/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/editors/text/src/lib.rs");
+    println!("cargo:rerun-if-changed=../user/editors/text/link.ld");
+    println!("cargo:rerun-if-changed=../user/editors/text/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/servers/test-editor/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/servers/test-editor/link.ld");
+    println!("cargo:rerun-if-changed=../user/servers/test-editor/Cargo.toml");
 }
 
 fn build_userspace_crate(crate_dir: &std::path::Path, crate_name: &str, output: &std::path::Path) {
@@ -205,52 +205,52 @@ struct ServiceDef {
 const SERVICES: &[ServiceDef] = &[
     ServiceDef {
         name: "name",
-        dir: "../userspace/servers/name",
+        dir: "../user/servers/name",
         crate_name: "name",
     },
     ServiceDef {
         name: "console",
-        dir: "../userspace/servers/console",
+        dir: "../user/servers/console",
         crate_name: "console",
     },
     ServiceDef {
         name: "input",
-        dir: "../userspace/servers/drivers/input",
+        dir: "../user/servers/drivers/input",
         crate_name: "input",
     },
     ServiceDef {
         name: "blk",
-        dir: "../userspace/servers/drivers/blk",
+        dir: "../user/servers/drivers/blk",
         crate_name: "blk",
     },
     ServiceDef {
         name: "render",
-        dir: "../userspace/servers/drivers/render",
+        dir: "../user/servers/drivers/render",
         crate_name: "render",
     },
     ServiceDef {
         name: "store",
-        dir: "../userspace/servers/store",
+        dir: "../user/servers/store",
         crate_name: "store-service",
     },
     ServiceDef {
         name: "document",
-        dir: "../userspace/servers/document",
+        dir: "../user/servers/document",
         crate_name: "document-service",
     },
     ServiceDef {
         name: "layout",
-        dir: "../userspace/servers/layout",
+        dir: "../user/servers/layout",
         crate_name: "layout-service",
     },
     ServiceDef {
         name: "presenter",
-        dir: "../userspace/servers/presenter",
+        dir: "../user/servers/presenter",
         crate_name: "presenter-service",
     },
     ServiceDef {
         name: "editor.text",
-        dir: "../userspace/editors/text",
+        dir: "../user/editors/text",
         crate_name: "text-editor",
     },
 ];

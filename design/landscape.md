@@ -417,7 +417,7 @@ not reshape the architecture. But until then, the OS is an island.
 **Our approach:** Cargo workspace with kernel and userspace crates.
 `cargo build -p kernel` cross-compiles the kernel to `aarch64-unknown-none`;
 `cargo test -p kernel --lib` runs 704 host-side tests on the build machine. A
-separate `userspace/integration-tests` crate builds bare-metal init binaries for
+separate `user/integration-tests` crate builds bare-metal init binaries for
 hypervisor boot. Makefile provides verification targets: `make test`,
 `make miri`, `make fuzz`, `make bench-check`, `make nightly`. Configuration via
 `kernel/src/config.rs` (capacity limits, page size) and `.cargo/config.toml`
