@@ -384,89 +384,249 @@ scroll support:
 
 ## Phase 10 — Visual Chrome
 
+### What exists now
+
+- Scene library (`libraries/scene/`) — `Node` struct has generic shadow fields:
+  `shadow_color` (RGBA8), `shadow_offset_x/y` (i16), `shadow_blur_radius` (u8),
+  `shadow_spread` (i8). `has_shadow()` returns true when any shadow parameter is
+  non-default. `Content::Path` variant stores fill/stroke colors, fill rule,
+  stroke width, and path command data. `CursorShape` enum
+  (Inherit/Pointer/Text). Path command parsing and stroke expansion in
+  `stroke.rs`.
+- Render library (`libraries/render/`) — `emit_shadow_quad` (6-vertex quad with
+  3σ padding), `pack_shadow_params` (48-byte uniform), `render_shadow` and
+  `shadow_overflow` in CPU scene walker. No GPU pipeline support yet.
+- Icons library (`libraries/icons/`) — Tabler icon path data, 1,080 LOC, 37
+  tests. Compile-time SVG path extraction.
+- Compositor (`userspace/servers/drivers/render/`) — walks scene graph, emits
+  solid-color backgrounds and glyph atlas quads. Two pipelines: `PIPE_SOLID`,
+  `PIPE_GLYPH`. No shadow, stencil, or path rendering.
+
 ### What v0.6 had
 
-- Title bar with document name and clock
-- Document shadow (box blur behind content area)
-- Content area with margins/padding
-- Icon rendering (Tabler SVG icons as vector paths)
-- Loading spinner during boot (animated arc)
-- Well-known node indices for chrome elements (N_ROOT, N_TITLE_BAR,
-  N_TITLE_TEXT, N_CLOCK_TEXT, N_CONTENT, N_CURSOR, etc.)
+- `PIPE_SHADOW` — analytical Gaussian fragment shader using separable erf()
+  integrals for rectangles, SDF-based erfc for rounded rects. Single-pass, no
+  offscreen render targets.
+- Stencil-cover path rendering — stencil buffer on render target, stencil write
+  pass rasterizes path geometry, cover pass draws bounding quad with stencil
+  test. Fill and stroke support.
+- Hardware cursor — vector path cursor rendered to dedicated GPU textures
+  (MSAA + stencil + resolve + blur + sRGB). Separate hypervisor layer via
+  `CMD_SET_CURSOR_FROM_TEXTURE`. Independent position updates via
+  `CMD_SET_CURSOR_POSITION`.
+- Title bar — full-width bar with document name, clock, mimetype icon.
+- Document page — A4-proportioned white surface with box shadow (blur=64,
+  spread=36), centered in viewport.
 
 ### Implementation
 
-#### 10.1 — Title bar
+#### 10.1 — Analytical shadow pipeline
 
-Add chrome nodes to the presenter's scene graph build:
+Add `PIPE_SHADOW` to the compositor's Metal shader and pipeline setup. The
+shadow system is generic — any scene node with `has_shadow()` gets a shadow. The
+document shadow is one consumer; cursor shadows and future UI elements reuse the
+same pipeline.
 
-- Title bar: full-width rectangle at top, distinct background color
-- Title text: document name or "untitled" (shaped with Inter font, sans-serif)
-- Clock text: current time from `clock_read`, updated periodically
+Fragment shader (`fragment_shadow`):
 
-Requires the presenter to use the `fonts` library for shaping chrome text (Inter
-for UI, separate from the document font).
+- Receives shadow parameters as vertex attributes or uniform buffer: rect bounds
+  (min/max in pixels), color (linear RGBA), sigma (pixels), corner radius
+  (pixels)
+- Sharp rectangles: separable 1D Gaussian integral —
+  `alpha = shadow_1d(p.x, min_x, max_x, inv_s2) * shadow_1d(p.y, min_y, max_y, inv_s2)`
+  where
+  `shadow_1d(p, lo, hi, inv_s2) = 0.5 * (erf((hi-p)*inv_s2) - erf((lo-p)*inv_s2))`
+- Rounded rectangles: SDF from `sd_rounded_rect()`, then
+  `alpha = 0.5 * (1.0 - erf(dist * inv_s2))`
+- `erf_approx`: Abramowitz & Stegun 7.1.26 (max error 1.5×10⁻⁷)
+- Sigma conversion: `sigma_pt = blur_radius / 2.0` (W3C convention),
+  `sigma_px = sigma_pt * scale`
 
-#### 10.2 — Document shadow
+Port `erf_approx` and `fragment_shadow` from
+`v0.6-pre-rewrite:services/drivers/metal-render/shaders.rs`.
 
-Port the document shadow from v0.6:
+Compositor scene walk changes:
 
-- `DOCUMENT_SHADOW_BLUR_RADIUS = 64`, offset (0, 0), spread 36
-- Rendered as a shadow node with `BoxShadow` content type in the scene graph
-- Compositor implements box shadow rendering (either via blur shader passes or
-  pre-computed shadow texture)
+- Before rendering a node's background, check `has_shadow()`
+- If true: flush current solid vertices, switch to `PIPE_SHADOW`, emit shadow
+  quad with 3σ padding via `emit_shadow_quad`, flush, switch back to
+  `PIPE_SOLID`
+- Shadow opacity: `shadow_color.a * node_opacity`
 
-For initial implementation: use a simple solid dark border instead of a blurred
-shadow. The blur pipeline is complex (two-pass Gaussian blur with offscreen
-render targets). Add it as a polish step after everything else works.
-
-#### 10.3 — Content margins and layout
-
-- Content area inset from window edges (left/right/top margins)
-- Title bar height defines the top inset
-- Content width determines line wrapping in the layout service
-
-These are already partially in place (the presenter sets viewport_width in the
-layout VMO). Ensure margins are consistent.
-
-#### 10.4 — Icon rendering
-
-Port `libraries/icons/` data into the compositor:
-
-- Tabler icons as static SVG path data (built at compile time by
-  `build_icons.rs`)
-- Scene graph `Content::Path` nodes for icons
-- Compositor renders paths via stencil-then-cover or CPU rasterization
-
-For initial implementation: skip complex path rendering. Use text glyphs or omit
-icons. The stencil pipeline requires Metal depth/stencil state and a stencil
-write pass — defer unless it's simple to port.
-
-#### 10.5 — Loading spinner
-
-Port the loading scene from
-`v0.6-pre-rewrite:services/presenter/scene/loading.rs`:
-
-- Spinner icon (Tabler `loader-2`: 270° arc)
-- CPU-rasterized to BGRA pixels each frame, displayed as `Content::InlineImage`
-- Rotating animation driven by frame count
-
-This provides visual feedback during boot while services are still connecting.
+Metal setup: create `PIPE_SHADOW` render pipeline with `vertex_main` +
+`fragment_shadow`, alpha blending enabled (premultiplied).
 
 **Verification:**
 
-- Boot shows a loading spinner, transitions to text editor
-- Title bar visible with document name
-- Clock displays and updates
-- Content area has margins
-- Screenshot comparison against v0.6 baseline
+- Set shadow fields on any scene node, verify soft shadow renders
+- Compare shadow appearance against v0.6 baseline screenshot
+- Test: blur_radius=0 produces hard shadow (solid offset quad)
+- Test: spread > 0 expands shadow rect correctly
+- Test: corner_radius > 0 produces rounded shadow
+
+#### 10.2 — Stencil-cover path rendering
+
+Add stencil buffer and path rendering pipeline to the compositor.
+
+Metal setup:
+
+- Create a stencil texture (same dimensions as render target, pixel format
+  Stencil8)
+- Attach as `stencilAttachment` on the render pass descriptor
+- Create `PIPE_STENCIL` pipeline: vertex shader only (no fragment), stencil
+  write enabled (increment on front-face, decrement on back-face)
+- Create `PIPE_COVER` pipeline: vertex + fragment_solid, stencil test (pass when
+  stencil ≠ 0), stencil op = zero (reset for next path)
+
+Rendering a `Content::Path` node:
+
+1. Parse path commands from scene data buffer
+2. Flatten cubic Béziers to triangle fans (stencil fill) — use the scene
+   library's `stroke::flatten_path` for stroke expansion
+3. Stencil write pass: draw triangle fan with `PIPE_STENCIL`
+4. Cover pass: draw bounding quad with `PIPE_COVER` (fragment reads vertex color
+   = fill_color or stroke_color)
+5. Clear stencil via stencil op (no separate clear)
+
+Port the stencil-cover rendering from
+`v0.6-pre-rewrite:services/drivers/metal-render/scene_walk.rs`
+(`draw_path_stencil_cover`).
+
+For stroke: use the scene library's `stroke::expand_stroke()` to convert stroke
+to filled geometry, then render as fill.
+
+**Verification:**
+
+- Render a Tabler icon as a `Content::Path` node — visible vector icon
+- Test both fill and stroke rendering
+- Test multiple icons in the same frame (stencil resets correctly)
+- Screenshot: icon appearance matches v0.6 (clean edges, correct shape)
+
+#### 10.3 — Mouse pointer
+
+The mouse pointer renders to dedicated GPU textures and is sent to the
+hypervisor as a separate hardware cursor layer — no compositing with the main
+scene.
+
+**Protocol additions** (`protocol::metal`):
+
+- `CMD_SET_CURSOR_FROM_TEXTURE` (0x0F13) — texture handle, width, height,
+  hotspot_x, hotspot_y
+- `CMD_SET_CURSOR_POSITION` (0x0F11) — x, y (framebuffer pixels)
+- `CMD_SET_CURSOR_VISIBLE` (0x0F12) — visible flag
+
+**CursorState shared memory** (40 bytes + path data):
+
+- `shape_generation: u32` — atomic, bumped when cursor shape changes
+- `opacity: u32` — 0=hidden, 255=visible
+- `viewbox: f32` — icon viewbox size (24.0 for Tabler)
+- `stroke_width: f32` — stroke width in viewbox units
+- `hotspot_x: f32`, `hotspot_y: f32` — in viewbox units
+- `fill_color: u32`, `stroke_color: u32` — packed RGBA
+- `data_len: u32` — path command byte count
+- `flags: u32` — bit 0: FLAG_STROKE_ONLY
+- Path command bytes follow at offset 40
+
+**Compositor cursor pipeline:**
+
+1. Allocate 6 cursor textures: MSAA render target (4× RGBA16Float, 96×96), MSAA
+   stencil (4×), resolve (1×, RGBA16Float), sRGB output (1×, BGRA8_sRGB), two
+   blur ping-pong (1×, RGBA16Float)
+2. On `shape_generation` change (check each frame): a. Render cursor shadow:
+   draw path offset by (1.5, 1.5) viewbox units in shadow color (black @25%) via
+   stencil-cover to MSAA target, resolve, copy to blur buffer b. Blur shadow:
+   3-pass box blur via compute shaders (`blur_h`/`blur_v`), sigma=4.0px,
+   ping-pong between blur buffers c. Composite: new render pass — draw blurred
+   shadow as textured quad, then draw crisp cursor paths on top (fill + stroke
+   colors) d. Resolve MSAA → resolve texture e. Dither to sRGB:
+   `fragment_dither` with 4×4 Bayer matrix → sRGB texture f. Send
+   `CMD_SET_CURSOR_FROM_TEXTURE` with sRGB texture handle and hotspot
+3. On pointer position change: send `CMD_SET_CURSOR_POSITION`
+
+**Default cursor:** Arrow shape (Tabler `arrow-pointer` or custom path data).
+
+**Input driver changes:**
+
+- Forward `EV_ABS` pointer position to presenter (already partially wired)
+- Presenter writes position to `CursorState`, sends position update to
+  compositor
+
+Port cursor rendering from
+`v0.6-pre-rewrite:services/drivers/metal-render/main.rs` (cursor texture setup,
+rasterization pipeline, `CMD_SET_CURSOR_FROM_TEXTURE`).
+
+**Verification:**
+
+- Mouse pointer visible on screen, follows trackpad/mouse movement
+- Cursor has soft drop shadow
+- Cursor appears on a separate layer (verify via hypervisor: cursor doesn't
+  composite into the main framebuffer capture)
+- Test: hide cursor (opacity=0), verify `CMD_SET_CURSOR_VISIBLE(false)` sent
+- Screenshot of main framebuffer should NOT contain the cursor
+
+#### 10.4 — Title bar + clock + title icon
+
+Add chrome nodes to the presenter's scene graph:
+
+- `N_TITLE_BAR`: full-width rectangle, height = `title_bar_h`, background =
+  `chrome_bg`, 1px bottom border = `chrome_border`
+- `N_TITLE_ICON`: mimetype-aware Tabler icon to the left of title text.
+  `Content::Path` with stroke rendering (from 10.2). Size = `line_height + 2`
+  points, vertically centered. Icon selected by document content type
+  (`icon_lib::get("document", mimetype)`)
+- `N_TITLE_TEXT`: document name or "untitled". Inter font (sans-serif), shaped
+  via `fonts::shape()`. Position: right of icon with 8pt gap. Color =
+  `chrome_title_color`
+- `N_CLOCK_TEXT`: current time from `clock_read`. Right-aligned at
+  `fb_width - 12 - 80`. Inter font. Updated periodically (on each input event or
+  timer tick — reuse the blink timer from Phase 7)
+
+The presenter already uses the `fonts` library for document text shaping. Chrome
+text (title, clock) uses the same shaping path with Inter as the font.
+
+**Verification:**
+
+- Title bar visible at top of screen with distinct background
+- Document name displayed next to mimetype icon
+- Clock shows current time, updates on keypress
+- Screenshot: title bar layout matches v0.6 (icon + text + clock positions)
+
+#### 10.5 — Page geometry + document shadow
+
+The text content sits on a white page surface with a soft shadow, centered in
+the viewport. This uses the generic shadow system from 10.1.
+
+- `N_PAGE`: white background rectangle, A4 proportions, centered horizontally
+  and vertically within the content area. Shadow fields:
+  `shadow_blur_radius = 64`, `shadow_spread = 36`, `shadow_offset_x = 0`,
+  `shadow_offset_y = 0`, `shadow_color = rgba(0, 0, 0, 255)`
+- Content area: begins at `y = title_bar_h`, clips children
+  (`NodeFlags::CLIPS_CHILDREN`). Width = framebuffer width, height =
+  `fb_height - title_bar_h`
+- Text inset: `text_inset_x` padding on left/right within the page
+- Page dimensions: derive from framebuffer size with A4 aspect ratio, or use
+  v0.6's page sizing logic
+
+Port page geometry from `v0.6-pre-rewrite:services/presenter/scene/document.rs`
+(N_PAGE setup, margin calculations, page centering).
+
+**Verification:**
+
+- White page visible with soft shadow behind it
+- Text renders within page margins, not edge-to-edge
+- Page centered in viewport
+- Shadow matches v0.6: soft Gaussian blur, visible on all sides
+- Screenshot comparison: page + shadow appearance matches v0.6 baseline
 
 ### Phase 10 done when
 
-- Title bar with document name and clock
-- Content area with margins
-- Loading spinner on boot
-- Visual output recognizably matches v0.6 layout
+- Analytical Gaussian shadow renders on any node with shadow fields set
+- Vector icons render via stencil-cover path pipeline
+- Mouse pointer visible on separate hardware cursor layer with drop shadow
+- Title bar with document icon, name, and clock
+- White document page with soft shadow, centered, with proper margins
+- All existing tests still pass
+- Screenshot comparison matches v0.6 chrome appearance
 
 ---
 
