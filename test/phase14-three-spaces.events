@@ -1,0 +1,11 @@
+# Phase 14 — three-space document switching test.
+# Space 0 = text, Space 1 = image, Space 2 = showcase.
+0 text hi
+6 capture /tmp/p14-space0.png
+7 key ctrl+tab
+40 capture /tmp/p14-space1.png
+41 key ctrl+tab
+75 capture /tmp/p14-space2.png
+76 key ctrl+tab
+110 capture /tmp/p14-back.png
+110 exit

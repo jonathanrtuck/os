@@ -67,6 +67,7 @@ static FONT_MONO: &[u8] = include_bytes!("../../../../assets/jetbrains-mono.ttf"
 static FONT_SANS: &[u8] = include_bytes!("../../../../assets/inter.ttf");
 #[allow(dead_code)]
 static FONT_SERIF: &[u8] = include_bytes!("../../../../assets/source-serif-4.ttf");
+static TEST_PNG: &[u8] = include_bytes!("../../../../assets/test.png");
 
 fn build_cmap_table(font_data: &[u8]) -> [u16; 128] {
     let mut table = [0u16; 128];
@@ -249,6 +250,7 @@ struct Presenter {
     drag_origin_end: usize,
 
     active_space: u8,
+    num_spaces: u8,
     slide_spring: animation::Spring,
     slide_animating: bool,
     last_anim_tick: u64,
@@ -534,8 +536,8 @@ impl Presenter {
 
         scene.add_child(root, content_area);
 
-        // Strip node — holds both document spaces side by side.
-        // child_offset_x slides to reveal space 0 or 1.
+        // Strip node — holds all document spaces side by side.
+        // child_offset_x slides to reveal the active space.
         let strip = match scene.alloc_node() {
             Some(id) => id,
             None => return,
@@ -544,7 +546,7 @@ impl Presenter {
         {
             let n = scene.node_mut(strip);
 
-            n.width = upt(self.display_width * 2);
+            n.width = upt(self.display_width * self.num_spaces as u32);
             n.height = upt(content_h);
             n.child_offset_x = -self.slide_spring.value();
         }
@@ -825,6 +827,15 @@ impl Presenter {
             }
         }
 
+        // Space 2: Rendering showcase.
+        build_showcase_nodes(
+            &mut scene,
+            strip,
+            self.display_width,
+            content_h,
+            &mut self.glyphs,
+        );
+
         scene.commit();
 
         self.last_line_count = line_count as u32;
@@ -1062,10 +1073,11 @@ impl Presenter {
         let ctrl = dispatch.modifiers & text_editor::MOD_CONTROL != 0;
 
         if dispatch.key_code == text_editor::HID_KEY_TAB && ctrl {
-            if self.image_content_id == 0 {
+            if self.num_spaces <= 1 {
                 return;
             }
-            let new_space = if self.active_space == 0 { 1u8 } else { 0u8 };
+
+            let new_space = (self.active_space + 1) % self.num_spaces;
 
             self.active_space = new_space;
 
@@ -1627,102 +1639,28 @@ impl Dispatch for Presenter {
     }
 }
 
-// ── Image loading ────────────────────────────────────────────────
+// ── Embedded image decode + upload ───────────────────────────────
 
 const IMAGE_CONTENT_ID: u32 = 1;
 
-fn try_load_image(server: &mut Presenter, render_ep: Handle) {
-    let fs_ep = match name::lookup(HANDLE_NS_EP, b"fs") {
+fn decode_embedded_image(server: &mut Presenter, render_ep: Handle) {
+    let header = match png_lib::png_header(TEST_PNG) {
         Ok(h) => h,
         Err(_) => return,
     };
-
-    console::write(server.console_ep, b"presenter: fs found, loading image\n");
-
-    let mut reply_buf = [0u8; ipc::message::MSG_SIZE];
-    let mut recv_handles = [0u32; 4];
-    let read_req = fs_service::ReadFileRequest::new(b"demo.png");
-    let mut read_buf = [0u8; fs_service::ReadFileRequest::SIZE];
-
-    read_req.write_to(&mut read_buf);
-
-    let (png_vmo, bytes_read) = match ipc::client::call(
-        fs_ep,
-        fs_service::READ_FILE,
-        &read_buf,
-        &[],
-        &mut recv_handles,
-        &mut reply_buf,
-    ) {
-        Ok(reply)
-            if !reply.is_error()
-                && reply.payload.len() >= fs_service::ReadFileReply::SIZE
-                && reply.handle_count > 0 =>
-        {
-            let rr = fs_service::ReadFileReply::read_from(reply.payload);
-
-            (Handle(recv_handles[0]), rr.bytes_read)
-        }
-        _ => return,
-    };
-
-    if bytes_read == 0 {
-        let _ = abi::handle::close(png_vmo);
-
-        return;
-    }
-
-    console::write(
-        server.console_ep,
-        b"presenter: image read, decoding in-process\n",
-    );
-
-    // Decode in-process: map the file VMO, decode PNG, create pixel VMO.
-    // Avoids cross-process VMO permission faults in the kernel.
-    let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
-    let src_va = match abi::vmo::map(png_vmo, 0, rw) {
-        Ok(va) => va,
-        Err(_) => {
-            let _ = abi::handle::close(png_vmo);
-
-            return;
-        }
-    };
-    // SAFETY: src_va is a valid mapping of at least bytes_read bytes.
-    let png_data = unsafe { core::slice::from_raw_parts(src_va as *const u8, bytes_read as usize) };
-    let header = match png_lib::png_header(png_data) {
-        Ok(h) => h,
-        Err(_) => {
-            let _ = abi::vmo::unmap(src_va);
-            let _ = abi::handle::close(png_vmo);
-
-            return;
-        }
-    };
-    let buf_size = match png_lib::png_decode_buf_size(png_data) {
+    let buf_size = match png_lib::png_decode_buf_size(TEST_PNG) {
         Ok(s) => s,
-        Err(_) => {
-            let _ = abi::vmo::unmap(src_va);
-            let _ = abi::handle::close(png_vmo);
-
-            return;
-        }
+        Err(_) => return,
     };
+    let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
     let decode_vmo_size = buf_size.next_multiple_of(PAGE_SIZE);
     let decode_vmo = match abi::vmo::create(decode_vmo_size, 0) {
         Ok(h) => h,
-        Err(_) => {
-            let _ = abi::vmo::unmap(src_va);
-            let _ = abi::handle::close(png_vmo);
-
-            return;
-        }
+        Err(_) => return,
     };
     let decode_va = match abi::vmo::map(decode_vmo, 0, rw) {
         Ok(va) => va,
         Err(_) => {
-            let _ = abi::vmo::unmap(src_va);
-            let _ = abi::handle::close(png_vmo);
             let _ = abi::handle::close(decode_vmo);
 
             return;
@@ -1731,19 +1669,12 @@ fn try_load_image(server: &mut Presenter, render_ep: Handle) {
     // SAFETY: decode_va is a valid RW mapping of at least buf_size bytes.
     let output = unsafe { core::slice::from_raw_parts_mut(decode_va as *mut u8, buf_size) };
 
-    if png_lib::png_decode(png_data, output).is_err() {
-        let _ = abi::vmo::unmap(src_va);
-        let _ = abi::handle::close(png_vmo);
+    if png_lib::png_decode(TEST_PNG, output).is_err() {
         let _ = abi::vmo::unmap(decode_va);
         let _ = abi::handle::close(decode_vmo);
 
-        console::write(server.console_ep, b"presenter: decode failed\n");
-
         return;
     }
-
-    let _ = abi::vmo::unmap(src_va);
-    let _ = abi::handle::close(png_vmo);
 
     let width = header.width as u16;
     let height = header.height as u16;
@@ -1780,10 +1711,6 @@ fn try_load_image(server: &mut Presenter, render_ep: Handle) {
 
     let _ = abi::vmo::unmap(decode_va);
     let _ = abi::handle::close(decode_vmo);
-
-    console::write(server.console_ep, b"presenter: image decoded, uploading\n");
-
-    // Keep pixel_va mapped — the compositor will map a dup of the handle.
     let _ = abi::vmo::unmap(pixel_va);
 
     let pixel_dup = match abi::handle::dup(pixel_vmo, Rights::READ_MAP) {
@@ -1800,6 +1727,8 @@ fn try_load_image(server: &mut Presenter, render_ep: Handle) {
 
     upload_req.write_to(&mut upload_buf);
 
+    let mut reply_buf = [0u8; ipc::message::MSG_SIZE];
+    let mut recv_handles = [0u32; 4];
     let _ = ipc::client::call(
         render_ep,
         render::comp::UPLOAD_IMAGE,
@@ -1813,7 +1742,363 @@ fn try_load_image(server: &mut Presenter, render_ep: Handle) {
     server.image_width = width;
     server.image_height = height;
 
-    console::write(server.console_ep, b"presenter: image ready\n");
+    console::write(server.console_ep, b"presenter: embedded image ready\n");
+}
+
+// ── Showcase scene (space 2) ────────────────────────────────────
+
+fn build_showcase_nodes(
+    scene: &mut SceneWriter,
+    strip: scene::NodeId,
+    display_width: u32,
+    content_h: u32,
+    glyphs: &mut [ShapedGlyph; MAX_GLYPHS_PER_LINE],
+) {
+    let base_x = (display_width * 2) as i32;
+    let pad = 24i32;
+    // Showcase container
+    let container = match scene.alloc_node() {
+        Some(id) => id,
+        None => return,
+    };
+
+    {
+        let n = scene.node_mut(container);
+
+        n.x = pt(base_x);
+        n.width = upt(display_width);
+        n.height = upt(content_h);
+        n.flags = NodeFlags::VISIBLE.union(NodeFlags::CLIPS_CHILDREN);
+    }
+
+    scene.add_child(strip, container);
+
+    let mut cursor_y = pad;
+    // ── Section: Solid rects with colors ──
+    let colors = [
+        Color::rgb(231, 76, 60),
+        Color::rgb(46, 204, 113),
+        Color::rgb(52, 152, 219),
+        Color::rgb(155, 89, 182),
+        Color::rgb(241, 196, 15),
+    ];
+
+    for (i, &color) in colors.iter().enumerate() {
+        if let Some(id) = scene.alloc_node() {
+            let n = scene.node_mut(id);
+
+            n.x = pt(pad + i as i32 * 56);
+            n.y = pt(cursor_y);
+            n.width = upt(48);
+            n.height = upt(48);
+            n.background = color;
+
+            scene.add_child(container, id);
+        }
+    }
+
+    cursor_y += 64;
+
+    // ── Section: Rounded corners ──
+    let radii: [u8; 4] = [4, 8, 16, 24];
+
+    for (i, &r) in radii.iter().enumerate() {
+        if let Some(id) = scene.alloc_node() {
+            let n = scene.node_mut(id);
+
+            n.x = pt(pad + i as i32 * 72);
+            n.y = pt(cursor_y);
+            n.width = upt(60);
+            n.height = upt(60);
+            n.background = Color::rgb(52, 73, 94);
+            n.corner_radius = r;
+
+            scene.add_child(container, id);
+        }
+    }
+
+    cursor_y += 80;
+
+    // ── Section: Shadows ──
+    let shadow_configs: [(u8, i8, u8); 3] = [(16, 4, 0), (32, 12, 0), (64, 24, 8)];
+
+    for (i, &(blur, spread, radius)) in shadow_configs.iter().enumerate() {
+        if let Some(id) = scene.alloc_node() {
+            let n = scene.node_mut(id);
+
+            n.x = pt(pad + i as i32 * 120);
+            n.y = pt(cursor_y);
+            n.width = upt(80);
+            n.height = upt(60);
+            n.background = Color::rgb(255, 255, 255);
+            n.shadow_color = Color::rgba(0, 0, 0, 180);
+            n.shadow_blur_radius = blur;
+            n.shadow_spread = spread;
+            n.corner_radius = radius;
+
+            scene.add_child(container, id);
+        }
+    }
+
+    cursor_y += 100;
+
+    // ── Section: Opacity ──
+    for i in 0..5i32 {
+        if let Some(id) = scene.alloc_node() {
+            let opacity = (255 - i * 50) as u8;
+            let n = scene.node_mut(id);
+
+            n.x = pt(pad + i * 56);
+            n.y = pt(cursor_y);
+            n.width = upt(48);
+            n.height = upt(48);
+            n.background = Color::rgb(231, 76, 60);
+            n.opacity = opacity;
+
+            scene.add_child(container, id);
+        }
+    }
+
+    cursor_y += 64;
+
+    // ── Section: Transforms (rotation) ──
+    let angles: [f32; 4] = [0.1, 0.3, 0.6, 1.0];
+
+    for (i, &angle) in angles.iter().enumerate() {
+        if let Some(id) = scene.alloc_node() {
+            let n = scene.node_mut(id);
+
+            n.x = pt(pad + 30 + i as i32 * 80);
+            n.y = pt(cursor_y + 10);
+            n.width = upt(40);
+            n.height = upt(40);
+            n.background = Color::rgb(46, 204, 113);
+            n.transform = scene::AffineTransform::rotate(angle);
+
+            scene.add_child(container, id);
+        }
+    }
+
+    cursor_y += 80;
+
+    // ── Section: Paths (fill + stroke) ──
+    // Triangle (filled)
+    {
+        let mut path_buf = alloc::vec::Vec::new();
+
+        scene::path_move_to(&mut path_buf, 0.0, 40.0);
+        scene::path_line_to(&mut path_buf, 20.0, 0.0);
+        scene::path_line_to(&mut path_buf, 40.0, 40.0);
+        scene::path_close(&mut path_buf);
+
+        let path_ref = scene.push_data(&path_buf);
+
+        if let Some(id) = scene.alloc_node() {
+            let n = scene.node_mut(id);
+
+            n.x = pt(pad);
+            n.y = pt(cursor_y);
+            n.width = upt(40);
+            n.height = upt(40);
+            n.content = Content::Path {
+                color: Color::rgb(231, 76, 60),
+                stroke_color: Color::TRANSPARENT,
+                fill_rule: scene::FillRule::Winding,
+                stroke_width: 0,
+                contours: path_ref,
+            };
+
+            scene.add_child(container, id);
+        }
+    }
+
+    // Circle (stroked) — approximated with 4 cubic beziers
+    {
+        let mut path_buf = alloc::vec::Vec::new();
+        let cx = 20.0f32;
+        let cy = 20.0;
+        let r = 18.0;
+        let k = r * 0.5522848;
+
+        scene::path_move_to(&mut path_buf, cx + r, cy);
+        scene::path_cubic_to(&mut path_buf, cx + r, cy + k, cx + k, cy + r, cx, cy + r);
+        scene::path_cubic_to(&mut path_buf, cx - k, cy + r, cx - r, cy + k, cx - r, cy);
+        scene::path_cubic_to(&mut path_buf, cx - r, cy - k, cx - k, cy - r, cx, cy - r);
+        scene::path_cubic_to(&mut path_buf, cx + k, cy - r, cx + r, cy - k, cx + r, cy);
+        scene::path_close(&mut path_buf);
+
+        let path_ref = scene.push_data(&path_buf);
+
+        if let Some(id) = scene.alloc_node() {
+            let n = scene.node_mut(id);
+
+            n.x = pt(pad + 60);
+            n.y = pt(cursor_y);
+            n.width = upt(40);
+            n.height = upt(40);
+            n.content = Content::Path {
+                color: Color::TRANSPARENT,
+                stroke_color: Color::rgb(52, 152, 219),
+                fill_rule: scene::FillRule::Winding,
+                stroke_width: 0x0200,
+                contours: path_ref,
+            };
+
+            scene.add_child(container, id);
+        }
+    }
+
+    // Star (filled + stroked)
+    {
+        let mut path_buf = alloc::vec::Vec::new();
+        let cx = 20.0f32;
+        let cy = 20.0;
+        let outer = 18.0;
+        let inner = 8.0;
+
+        // Precomputed (cos, sin) for 10 points of a 5-pointed star.
+        const STAR_CS: [(f32, f32); 10] = [
+            (0.0, 1.0),
+            (0.5878, 0.8090),
+            (0.9511, 0.3090),
+            (0.9511, -0.3090),
+            (0.5878, -0.8090),
+            (0.0, -1.0),
+            (-0.5878, -0.8090),
+            (-0.9511, -0.3090),
+            (-0.9511, 0.3090),
+            (-0.5878, 0.8090),
+        ];
+
+        for (i, &(cos_a, sin_a)) in STAR_CS.iter().enumerate() {
+            let r = if i % 2 == 0 { outer } else { inner };
+            let px = cx + r * cos_a;
+            let py = cy - r * sin_a;
+
+            if i == 0 {
+                scene::path_move_to(&mut path_buf, px, py);
+            } else {
+                scene::path_line_to(&mut path_buf, px, py);
+            }
+        }
+
+        scene::path_close(&mut path_buf);
+
+        let path_ref = scene.push_data(&path_buf);
+
+        if let Some(id) = scene.alloc_node() {
+            let n = scene.node_mut(id);
+
+            n.x = pt(pad + 120);
+            n.y = pt(cursor_y);
+            n.width = upt(40);
+            n.height = upt(40);
+            n.content = Content::Path {
+                color: Color::rgba(241, 196, 15, 180),
+                stroke_color: Color::rgb(243, 156, 18),
+                fill_rule: scene::FillRule::EvenOdd,
+                stroke_width: 0x0100,
+                contours: path_ref,
+            };
+
+            scene.add_child(container, id);
+        }
+    }
+
+    cursor_y += 60;
+
+    // ── Section: Clipping ──
+    if let Some(clip_container) = scene.alloc_node() {
+        {
+            let n = scene.node_mut(clip_container);
+
+            n.x = pt(pad);
+            n.y = pt(cursor_y);
+            n.width = upt(80);
+            n.height = upt(60);
+            n.flags = NodeFlags::VISIBLE.union(NodeFlags::CLIPS_CHILDREN);
+            n.background = Color::rgb(236, 240, 241);
+            n.corner_radius = 8;
+        }
+
+        scene.add_child(container, clip_container);
+
+        // Oversized child that gets clipped
+        if let Some(child) = scene.alloc_node() {
+            let n = scene.node_mut(child);
+
+            n.x = pt(-20);
+            n.y = pt(-10);
+            n.width = upt(120);
+            n.height = upt(80);
+            n.background = Color::rgb(155, 89, 182);
+
+            scene.add_child(clip_container, child);
+        }
+    }
+
+    // ── Section: Text in all three fonts ──
+    cursor_y += 80;
+
+    let font_demos: [(&[u8], &str, u32); 3] = [
+        (FONT_MONO, "JetBrains Mono", STYLE_MONO),
+        (FONT_SANS, "Inter Sans", STYLE_SANS),
+        (FONT_SERIF, "Source Serif 4", STYLE_SERIF),
+    ];
+
+    for (i, &(font, label, style_id)) in font_demos.iter().enumerate() {
+        let (count, width) = shape_text(font, label, presenter_service::FONT_SIZE, &[], glyphs);
+        let glyph_ref = scene.push_shaped_glyphs(&glyphs[..count]);
+
+        if let Some(id) = scene.alloc_node() {
+            let n = scene.node_mut(id);
+
+            n.x = pt(pad);
+            n.y = pt(cursor_y + i as i32 * 28);
+            n.width = upt(width as u32 + 1);
+            n.height = upt(presenter_service::LINE_HEIGHT);
+            n.content = Content::Glyphs {
+                color: Color::rgb(220, 220, 220),
+                glyphs: glyph_ref,
+                glyph_count: count as u16,
+                font_size: presenter_service::FONT_SIZE,
+                style_id,
+            };
+
+            scene.add_child(container, id);
+        }
+    }
+
+    cursor_y += 100;
+
+    // ── Section: Nested containers with translate ──
+    if let Some(outer) = scene.alloc_node() {
+        {
+            let n = scene.node_mut(outer);
+
+            n.x = pt(pad);
+            n.y = pt(cursor_y);
+            n.width = upt(200);
+            n.height = upt(80);
+            n.background = Color::rgba(52, 152, 219, 40);
+            n.corner_radius = 12;
+            n.child_offset_x = 10.0;
+            n.child_offset_y = 10.0;
+        }
+
+        scene.add_child(container, outer);
+
+        if let Some(inner) = scene.alloc_node() {
+            let n = scene.node_mut(inner);
+
+            n.width = upt(120);
+            n.height = upt(40);
+            n.background = Color::rgba(46, 204, 113, 120);
+            n.corner_radius = 6;
+
+            scene.add_child(outer, inner);
+        }
+    }
 }
 
 // ── Entry point ───────────────────────────────────────────────────
@@ -2004,6 +2289,7 @@ extern "C" fn _start() -> ! {
         drag_origin_start: 0,
         drag_origin_end: 0,
         active_space: 0,
+        num_spaces: 1,
         slide_spring: animation::Spring::default_preset(0.0),
         slide_animating: false,
         last_anim_tick: 0,
@@ -2013,8 +2299,10 @@ extern "C" fn _start() -> ! {
         console_ep,
     };
 
-    // Try to load an image from the host filesystem (non-blocking).
-    try_load_image(&mut server, render_ep);
+    decode_embedded_image(&mut server, render_ep);
+
+    // Space 0 = text, 1 = image, 2 = showcase.
+    server.num_spaces = 3;
 
     // Initial render: write viewport, build scene graph, tell compositor.
     server.write_viewport();
