@@ -29,9 +29,9 @@ Previous prototype (v0.1-v0.6) preserved at tag `v0.6-pre-rewrite`.
 ## prerequisites
 
 - **Rust nightly** with `aarch64-unknown-none` target (handled automatically by
-  `rust-toolchain.toml` — just [install Rust](https://rustup.rs/))
+  `rust-toolchain.toml`. just [install Rust](https://rustup.rs/))
 - **[hypervisor](https://github.com/jonathanrtuck/hypervisor)** (`make install`
-  from that repo) — native Metal GPU rendering on macOS
+  from that repo) - native Metal GPU rendering on macOS
 
 ## build
 
