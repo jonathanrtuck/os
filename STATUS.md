@@ -518,12 +518,42 @@ next rendering milestone.
    Protocol crate: `src/lib.rs` with DecodeRequest/DecodeReply wire types and
    round-trip tests. Added to service pack in `kernel/build.rs`.
 
+### Phase 13 — Filesystem + virtio-9p (COMPLETE)
+
+1. **virtio-9p driver** (`user/servers/drivers/9p/`) — DONE. Probes MMIO for
+   virtio 9P device (device ID 9). Negotiates MOUNT_TAG feature, allocates DMA
+   for virtqueue + T/R message buffers, binds IRQ. Implements 9P2000.L client:
+   version, attach, walk, lopen, read, clunk. Registers as "9p" with name
+   service. IPC serve loop: SETUP (shared VMO for bulk transfer), READ_FILE
+   (walk+open+read host file, data written to shared VMO), STAT (file size via
+   read-to-EOF). Exits cleanly (code 0) when no 9P device present. Protocol
+   crate: `src/lib.rs` with ReadFileRequest/ReadFileReply/StatRequest/StatReply
+   wire types and 8 round-trip tests.
+
+2. **Filesystem service** (`user/servers/fs/`) — DONE. VFS multiplexer over the
+   9p driver. Looks up "9p" via name service (non-blocking retry with timeout —
+   graceful exit if no 9P device). Sets up shared VMO with 9p driver for bulk
+   data transfer. Registers as "fs" with name service. IPC serve loop: READ_FILE
+   (reads host file via 9p, creates output VMO with file data, returns VMO
+   handle + bytes_read), STAT (forwards to 9p, returns size + exists). Protocol
+   crate: `src/lib.rs` with ReadFileRequest/ReadFileReply/StatRequest/ StatReply
+   wire types and 7 round-trip tests.
+
+3. **Infrastructure** — DONE. `DEVICE_9P = 9` added to virtio library.
+   `SERVICE_9P` and `SERVICE_FS` IDs added to init protocol. Init spawns 9p
+   driver with `[ns_ep, virtio_vmo, init_ep]` bootstrap handles. Both services
+   added to service pack in `kernel/build.rs`.
+
+   Verified: boots cleanly without `--share` (9p exits, fs exits, no hang).
+   Boots with `--share /path` (9P2000.L negotiated, fs ready). All 558 kernel
+   tests + 556 library tests pass. Visual regression screenshot passes.
+
 ## What's Next: v0.6 Parity
 
 The userspace rebuild plan (`design/userspace-rebuild.md`) is complete through
 all 5 phases. The full document editing pipeline works end-to-end. Remaining
 work to reach full v0.6-pre-rewrite parity is tracked in
-`design/v06-parity-plan.md` (Phases 6–13).
+`design/v06-parity-plan.md` (Phases 6–14).
 
 ### v0.6 Parity Progress
 
@@ -536,7 +566,7 @@ work to reach full v0.6-pre-rewrite parity is tracked in
   COMPLETE
 - Phase 11 (content-type typography): COMPLETE
 - Phase 12 (PNG decoder): COMPLETE
-- Phase 13 (filesystem + virtio-9p): NOT STARTED
+- Phase 13 (filesystem + virtio-9p): COMPLETE
 - Phase 14 (document switching — Ctrl+Tab text↔image, slide animation): NOT
   STARTED
 

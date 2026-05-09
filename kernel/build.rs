@@ -103,6 +103,14 @@ fn build_init(kernel_dir: &std::path::Path) {
     println!("cargo:rerun-if-changed=../user/servers/png-decoder/src/lib.rs");
     println!("cargo:rerun-if-changed=../user/servers/png-decoder/link.ld");
     println!("cargo:rerun-if-changed=../user/servers/png-decoder/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/servers/drivers/9p/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/servers/drivers/9p/src/lib.rs");
+    println!("cargo:rerun-if-changed=../user/servers/drivers/9p/link.ld");
+    println!("cargo:rerun-if-changed=../user/servers/drivers/9p/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/servers/fs/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/servers/fs/src/lib.rs");
+    println!("cargo:rerun-if-changed=../user/servers/fs/link.ld");
+    println!("cargo:rerun-if-changed=../user/servers/fs/Cargo.toml");
 }
 
 fn build_userspace_crate(crate_dir: &std::path::Path, crate_name: &str, output: &std::path::Path) {
@@ -261,6 +269,16 @@ const SERVICES: &[ServiceDef] = &[
         name: "png-decoder",
         dir: "../user/servers/png-decoder",
         crate_name: "png-decoder",
+    },
+    ServiceDef {
+        name: "9p",
+        dir: "../user/servers/drivers/9p",
+        crate_name: "virtio-9p",
+    },
+    ServiceDef {
+        name: "fs",
+        dir: "../user/servers/fs",
+        crate_name: "fs-service",
     },
 ];
 

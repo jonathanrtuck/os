@@ -44,6 +44,7 @@ const CONSOLE_SVC: &[u8] = b"console";
 const INPUT_SVC: &[u8] = b"input";
 const BLK_SVC: &[u8] = b"blk";
 const RENDER_SVC: &[u8] = b"render";
+const NINEP_SVC: &[u8] = b"9p";
 const PRESENTER_SVC: &[u8] = b"presenter";
 
 fn spawn_from_pack(pack_data: &[u8], ns_ep: Handle, init_ep: Handle) {
@@ -76,7 +77,7 @@ fn spawn_from_pack(pack_data: &[u8], ns_ep: Handle, init_ep: Handle) {
 
         if name == CONSOLE_SVC {
             let _ = spawn_service(pack_data, &entry, &[ns_ep, HANDLE_UART_VMO]);
-        } else if name == INPUT_SVC || name == BLK_SVC || name == RENDER_SVC {
+        } else if name == INPUT_SVC || name == BLK_SVC || name == RENDER_SVC || name == NINEP_SVC {
             let _ = spawn_service(pack_data, &entry, &[ns_ep, HANDLE_VIRTIO_VMO, init_ep]);
         } else if name == PRESENTER_SVC {
             let _ = spawn_service(pack_data, &entry, &[ns_ep, HANDLE_RTC_VMO]);
