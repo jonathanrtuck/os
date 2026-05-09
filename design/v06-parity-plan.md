@@ -445,7 +445,22 @@ Fragment shader (`fragment_shadow`):
 Port `erf_approx` and `fragment_shadow` from
 `v0.6-pre-rewrite:services/drivers/metal-render/shaders.rs`.
 
-Compositor scene walk changes:
+Compositor architecture change — **streaming vertex submission:**
+
+The current compositor accumulates all vertices into unbounded `Vec<u8>`
+buffers, then batch-submits after the scene walk. This wastes memory
+proportional to visible content (3MB+ at Retina resolution with dense text).
+Phase 10 requires mid-walk pipeline switches (solid → shadow → solid → glyph →
+...), which is incompatible with the accumulate-then-submit model anyway.
+
+Refactor to v0.6's streaming model: flush vertices to the GPU during the walk
+whenever the buffer exceeds a threshold or the pipeline changes. The vertex
+buffer becomes fixed-size and recycled. This bounds memory usage regardless of
+content density and naturally supports multi-pipeline rendering.
+
+This is prerequisite work for shadow and path rendering, not optional cleanup.
+
+Scene walk changes:
 
 - Before rendering a node's background, check `has_shadow()`
 - If true: flush current solid vertices, switch to `PIPE_SHADOW`, emit shadow

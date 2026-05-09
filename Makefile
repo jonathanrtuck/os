@@ -3,7 +3,7 @@ HOST := aarch64-apple-darwin
 
 .PHONY: test build check clippy fmt bench bench-el0 bench-smp clean integration-test \
         miri asan fuzz mutants coverage gate nightly \
-        stress bench-check bench-baseline audit integration-release
+        stress bench-check bench-baseline audit integration-release visual-test
 
 # -- Core targets --
 
@@ -37,6 +37,10 @@ bench-smp:
 
 integration-test:
 	@scripts/integration-test
+
+visual-test:
+	@cargo build --release 2>&1 | tail -1
+	@test/visual-regression.sh
 
 clean:
 	cargo clean
@@ -81,5 +85,5 @@ audit:
 gate: clippy test build
 	@echo "Gate passed: clippy + tests + build"
 
-nightly: gate miri asan fuzz coverage mutants integration-test integration-release stress bench-check audit
+nightly: gate miri asan fuzz coverage mutants integration-test integration-release stress bench-check audit visual-test
 	@echo "Nightly gate passed: all verification targets"
