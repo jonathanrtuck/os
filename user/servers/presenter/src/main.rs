@@ -1061,7 +1061,10 @@ impl Presenter {
     fn handle_key_event(&mut self, dispatch: text_editor::KeyDispatch) {
         let ctrl = dispatch.modifiers & text_editor::MOD_CONTROL != 0;
 
-        if dispatch.key_code == text_editor::HID_KEY_TAB && ctrl && self.image_content_id != 0 {
+        if dispatch.key_code == text_editor::HID_KEY_TAB && ctrl {
+            if self.image_content_id == 0 {
+                return;
+            }
             let new_space = if self.active_space == 0 { 1u8 } else { 0u8 };
 
             self.active_space = new_space;
