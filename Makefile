@@ -1,7 +1,7 @@
 # Host target for verification tools that can't run on bare metal.
 HOST := aarch64-apple-darwin
 
-.PHONY: test build check clippy fmt bench bench-el0 bench-smp clean integration-test \
+.PHONY: test test-all build check clippy fmt bench bench-el0 bench-smp clean integration-test \
         miri asan fuzz mutants coverage gate nightly \
         stress bench-check bench-baseline audit integration-release visual-test
 
@@ -9,6 +9,8 @@ HOST := aarch64-apple-darwin
 
 test:
 	cargo t
+	cargo test --manifest-path userspace/servers/drivers/render/Cargo.toml \
+		--lib --no-default-features --target $(HOST)
 
 build:
 	cargo build -p kernel
@@ -82,8 +84,11 @@ audit:
 
 # -- Gates --
 
-gate: clippy test build
-	@echo "Gate passed: clippy + tests + build"
+gate: clippy test build visual-test
+	@echo "Gate passed: clippy + tests + build + visual"
+
+test-all: gate
+	@echo "All tests passed"
 
 nightly: gate miri asan fuzz coverage mutants integration-test integration-release stress bench-check audit visual-test
 	@echo "Nightly gate passed: all verification targets"

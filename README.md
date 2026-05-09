@@ -33,12 +33,6 @@ Previous prototype (v0.1-v0.6) preserved at tag `v0.6-pre-rewrite`.
 - **[hypervisor](https://github.com/jonathanrtuck/hypervisor)** (`make install`
   from that repo) — native Metal GPU rendering on macOS
 
-## test
-
-```sh
-cargo t
-```
-
 ## build
 
 ```sh
@@ -53,3 +47,9 @@ cargo r
 
 This builds the kernel and launches it in the hypervisor with Metal GPU
 rendering. Close the window or Cmd+Q to exit.
+
+## test
+
+```sh
+make test-all
+```
