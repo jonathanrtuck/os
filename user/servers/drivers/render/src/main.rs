@@ -1111,7 +1111,13 @@ fn rasterize_cursor_icon(icon_name: &str, scale: u32) -> (alloc::vec::Vec<u8>, u
         return (alloc::vec::Vec::new(), 0, 0, 0);
     }
 
-    let path_data = offset_path(icon.paths[0].commands, margin_vb, margin_vb);
+    let mut combined_path = alloc::vec::Vec::new();
+
+    for path in icon.paths {
+        combined_path.extend_from_slice(path.commands);
+    }
+
+    let path_data = offset_path(&combined_path, margin_vb, margin_vb);
     let raster_scale = px_scale;
     let stroke_only = !icon.all_paths_closed();
 

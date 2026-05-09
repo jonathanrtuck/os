@@ -1177,7 +1177,13 @@ mod tests {
             out
         }
 
-        let path_data = offset_path_test(icon.paths[0].commands, margin_vb, margin_vb);
+        let mut combined = vec::Vec::new();
+
+        for path in icon.paths {
+            combined.extend_from_slice(path.commands);
+        }
+
+        let path_data = offset_path_test(&combined, margin_vb, margin_vb);
         let stroke_only = !icon.all_paths_closed();
 
         let (body, outline) = if stroke_only {
@@ -1247,25 +1253,92 @@ mod tests {
         (bgra, tex_sz)
     }
 
+    fn visible_pixel(bgra: &[u8], x: u32, y: u32, sz: u32) -> bool {
+        let i = (y * sz + x) as usize;
+
+        bgra[i * 4 + 3] > 10
+    }
+
+    fn row_visible_span(bgra: &[u8], y: u32, sz: u32) -> (u32, u32, u32) {
+        let mut min_x = sz;
+        let mut max_x = 0u32;
+        let mut count = 0u32;
+
+        for x in 0..sz {
+            if visible_pixel(bgra, x, y, sz) {
+                min_x = min_x.min(x);
+                max_x = max_x.max(x);
+                count += 1;
+            }
+        }
+
+        (min_x, max_x, count)
+    }
+
     #[test]
-    fn ibeam_cursor_has_dark_body_and_light_outline() {
+    fn ibeam_cursor_shape_is_vertical_bar() {
         let (bgra, sz) = rasterize_cursor_test("cursor-text", 2);
 
         assert!(sz > 0, "cursor texture size must be non-zero");
-        assert!(!bgra.is_empty(), "cursor BGRA data must be non-empty");
 
+        // Structural shape check: the I-beam is a tall narrow vertical bar
+        // with small horizontal serifs at top and bottom.
+        //
+        // Verify:
+        // 1. The vertical middle rows are narrow (< 25% of texture width)
+        // 2. The shape is taller than it is wide
+        // 3. Dark body and light outline both present
+
+        // Find the vertical extent of the shape.
+        let mut top_row = sz;
+        let mut bottom_row = 0u32;
+
+        for y in 0..sz {
+            let (_, _, count) = row_visible_span(&bgra, y, sz);
+
+            if count > 0 {
+                top_row = top_row.min(y);
+                bottom_row = bottom_row.max(y);
+            }
+        }
+
+        let shape_height = bottom_row - top_row + 1;
+
+        assert!(
+            shape_height > sz / 3,
+            "I-beam must be tall: height {shape_height} in {sz}px texture"
+        );
+
+        // Sample the middle rows (away from serifs) — they should be narrow.
+        let mid_y = (top_row + bottom_row) / 2;
+        let mut narrow_row_count = 0u32;
+
+        for y in (mid_y - 3)..=(mid_y + 3) {
+            let (min_x, max_x, count) = row_visible_span(&bgra, y, sz);
+
+            if count > 0 {
+                let span = max_x - min_x + 1;
+
+                if span < sz / 4 {
+                    narrow_row_count += 1;
+                }
+            }
+        }
+
+        assert!(
+            narrow_row_count >= 4,
+            "I-beam middle rows must be narrow (vertical bar), \
+             only {narrow_row_count}/7 rows were narrow"
+        );
+
+        // Verify both dark body and light outline pixels exist.
         let mut dark_count = 0u32;
         let mut light_count = 0u32;
-        let mut visible_count = 0u32;
 
         for i in 0..(sz * sz) as usize {
-            let a = bgra[i * 4 + 3] as u32;
-
-            if a < 10 {
+            if bgra[i * 4 + 3] < 10 {
                 continue;
             }
-
-            visible_count += 1;
 
             let lum = bgra[i * 4] as u32;
 
@@ -1276,10 +1349,6 @@ mod tests {
             }
         }
 
-        assert!(
-            visible_count > 50,
-            "cursor must have substantial visible pixels, got {visible_count}"
-        );
         assert!(
             dark_count > 20,
             "I-beam must have dark body pixels for visibility on white, got {dark_count}"
@@ -1336,6 +1405,73 @@ mod tests {
         assert!(
             !icon.all_paths_closed(),
             "cursor-text icon must have open paths (stroke-only rendering)"
+        );
+
+        assert!(
+            !icon.paths.is_empty(),
+            "cursor-text icon must have at least one path"
+        );
+        assert!(
+            icon.paths[0].commands.len() > 12,
+            "cursor-text path data must be non-trivial, got {} bytes",
+            icon.paths[0].commands.len()
+        );
+        assert!(icon.viewbox > 0.0, "cursor-text viewbox must be positive");
+        assert!(
+            icon.stroke_width > 0.0,
+            "cursor-text stroke_width must be positive"
+        );
+    }
+
+    #[test]
+    fn ibeam_rasterization_covers_viewbox() {
+        let icon = icons::get("cursor-text", None);
+        let stroke_w = icon.stroke_width;
+
+        let mut combined = vec::Vec::new();
+
+        for path in icon.paths {
+            combined.extend_from_slice(path.commands);
+        }
+
+        let sz = icon.viewbox as u32;
+        let stroke_exp = scene::stroke::expand_stroke(&combined, stroke_w);
+        let body = super::path::rasterize_path(
+            &combined,
+            sz,
+            sz,
+            1.0,
+            scene::FillRule::Winding,
+            Some(&stroke_exp),
+        );
+
+        let visible = body.iter().filter(|&&a| a > 10).count();
+
+        assert!(
+            visible > 20,
+            "stroke rasterization at 1:1 must produce visible pixels, got {visible} \
+             (sz={sz}, path_len={}, stroke_w={stroke_w})",
+            combined.len()
+        );
+
+        // Check vertical extent: I-beam should span most of the viewbox height.
+        let mut top = sz;
+        let mut bottom = 0u32;
+
+        for y in 0..sz {
+            for x in 0..sz {
+                if body[(y * sz + x) as usize] > 10 {
+                    top = top.min(y);
+                    bottom = bottom.max(y);
+                }
+            }
+        }
+
+        let height = if bottom >= top { bottom - top + 1 } else { 0 };
+
+        assert!(
+            height > sz / 2,
+            "I-beam stroke must span >50% of viewbox height: height={height} in {sz}px"
         );
     }
 
