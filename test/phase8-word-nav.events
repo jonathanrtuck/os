@@ -1,0 +1,22 @@
+# Phase 8 — word boundary navigation (Opt+arrow).
+# Type "ab cd" then test Opt+Left/Right.
+0 key a
+1 key b
+2 key space
+3 key c
+4 key d
+# Frame 5: cursor at col 5 (after "ab cd").
+5 capture /tmp/os-p8w-end.png
+# Opt+Left: word boundary backward → col 3 (start of "cd")
+5 key alt+left
+6 capture /tmp/os-p8w-optl1.png
+# Opt+Left: word boundary backward → col 0 (start of "ab")
+6 key alt+left
+7 capture /tmp/os-p8w-optl2.png
+# Opt+Right: word boundary forward → col 3 (past "ab ")
+7 key alt+right
+8 capture /tmp/os-p8w-optr1.png
+# Shift+Alt+Right: select to end of "cd" → col 5
+8 key shift+alt+right
+9 capture /tmp/os-p8w-selw.png
+9 exit

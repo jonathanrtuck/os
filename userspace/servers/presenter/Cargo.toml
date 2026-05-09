@@ -12,6 +12,7 @@ service = [
     "dep:document-service",
     "dep:fonts",
     "dep:heap",
+    "dep:layout",
     "dep:layout-service",
     "dep:name",
     "dep:render",
@@ -28,6 +29,7 @@ console = { path = "../console", optional = true }
 document-service = { path = "../document", optional = true }
 fonts = { path = "../../../libraries/fonts", optional = true }
 heap = { path = "../../heap", optional = true }
+layout = { path = "../../../libraries/layout", optional = true }
 layout-service = { path = "../layout", optional = true }
 name = { path = "../name", optional = true }
 render = { path = "../drivers/render", optional = true }

@@ -25,6 +25,7 @@ const PAGE_SIZE: usize = virtio::PAGE_SIZE;
 
 const EV_KEY: u16 = 1;
 const EV_ABS: u16 = 3;
+const EV_TEXT: u16 = 0x10;
 const ABS_X: u16 = 0x00;
 const ABS_Y: u16 = 0x01;
 const BTN_LEFT: u16 = 0x110;
@@ -73,7 +74,9 @@ const HID_LEFT: u16 = 0x50;
 const HID_DOWN: u16 = 0x51;
 const HID_UP: u16 = 0x52;
 const HID_HOME: u16 = 0x4A;
+const HID_PAGE_UP: u16 = 0x4B;
 const HID_END: u16 = 0x4D;
+const HID_PAGE_DOWN: u16 = 0x4E;
 
 fn evdev_to_key(code: u16, shift: bool) -> (u16, u8) {
     // (hid_key_code, ascii_char) — for printable: hid=0, char=ascii
@@ -138,10 +141,12 @@ fn evdev_to_key(code: u16, shift: bool) -> (u16, u8) {
         // Navigation keys
         102 => (HID_HOME, 0),
         103 => (HID_UP, 0),
+        104 => (HID_PAGE_UP, 0),
         105 => (HID_LEFT, 0),
         106 => (HID_RIGHT, 0),
         107 => (HID_END, 0),
         108 => (HID_DOWN, 0),
+        109 => (HID_PAGE_DOWN, 0),
         _ => (0, 0),
     }
 }
@@ -266,7 +271,19 @@ extern "C" fn _start() -> ! {
             let event: VirtioInputEvent =
                 unsafe { core::ptr::read_volatile(buf_va as *const VirtioInputEvent) };
 
-            if event.event_type == EV_KEY && event.value <= 1 {
+            if event.event_type == EV_TEXT && event.value > 0 {
+                let codepoint = event.value;
+
+                if codepoint < 128 {
+                    if presenter_ep.is_none() {
+                        presenter_ep = name::lookup(HANDLE_NS_EP, b"presenter").ok();
+                    }
+
+                    if let Some(ep) = presenter_ep {
+                        forward_key(ep, 0, modifiers, codepoint as u8);
+                    }
+                }
+            } else if event.event_type == EV_KEY && event.value <= 1 {
                 let pressed = event.value == 1;
 
                 if event.code == BTN_LEFT || event.code == BTN_RIGHT {

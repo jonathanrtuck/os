@@ -21,17 +21,20 @@ pub const DISPATCH_KEY: u32 = 1;
 pub const HID_KEY_RETURN: u16 = 0x28;
 pub const HID_KEY_BACKSPACE: u16 = 0x2A;
 pub const HID_KEY_TAB: u16 = 0x2B;
+pub const HID_KEY_HOME: u16 = 0x4A;
+pub const HID_KEY_PAGE_UP: u16 = 0x4B;
 pub const HID_KEY_DELETE: u16 = 0x4C;
+pub const HID_KEY_END: u16 = 0x4D;
+pub const HID_KEY_PAGE_DOWN: u16 = 0x4E;
 pub const HID_KEY_RIGHT: u16 = 0x4F;
 pub const HID_KEY_LEFT: u16 = 0x50;
 pub const HID_KEY_DOWN: u16 = 0x51;
 pub const HID_KEY_UP: u16 = 0x52;
-pub const HID_KEY_HOME: u16 = 0x4A;
-pub const HID_KEY_END: u16 = 0x4D;
 
 // ── Input modifier flags (shared with input protocol) ────────────
 
 pub const MOD_SHIFT: u8 = 1 << 0;
+pub const MOD_ALT: u8 = 1 << 2;
 pub const MOD_SUPER: u8 = 1 << 3;
 
 // ── Key dispatch (presenter → editor) ────────────────────────────
@@ -183,13 +186,15 @@ mod tests {
             HID_KEY_RETURN,
             HID_KEY_BACKSPACE,
             HID_KEY_TAB,
+            HID_KEY_HOME,
+            HID_KEY_PAGE_UP,
             HID_KEY_DELETE,
+            HID_KEY_END,
+            HID_KEY_PAGE_DOWN,
             HID_KEY_RIGHT,
             HID_KEY_LEFT,
             HID_KEY_DOWN,
             HID_KEY_UP,
-            HID_KEY_HOME,
-            HID_KEY_END,
         ];
 
         for i in 0..codes.len() {

@@ -1,0 +1,51 @@
+# Phase 8 — keyboard navigation verification.
+# Type "ab\ncd\nef" using individual key events, then test navigation.
+# Each key event = 1 frame.
+0 key a
+1 key b
+2 key return
+3 key c
+4 key d
+5 key return
+6 key e
+7 key f
+# Frame 8: cursor at end of "ef" (line 2, col 2).
+8 capture /tmp/os-p8-start.png
+# Left: cursor at col 1
+8 key left
+# Left: cursor at col 0
+9 key left
+# Up: cursor at line 1, col 0 (sticky col 0)
+10 key up
+# End: cursor at end of line 1 (col 2)
+11 key end
+# Home: cursor at start of line 1 (col 0)
+12 key home
+13 capture /tmp/os-p8-home.png
+# Cmd+Right: cursor at end of line 1 (col 2)
+13 key cmd+right
+# Cmd+Left: cursor at start of line 1 (col 0)
+14 key cmd+left
+# Right: cursor at col 1
+15 key right
+# Up: cursor at line 0, col 1 (sticky reset by right arrow)
+16 key up
+17 capture /tmp/os-p8-up.png
+# Down: cursor at line 1, col 1
+17 key down
+# Down: cursor at line 2, col 1
+18 key down
+19 capture /tmp/os-p8-down.png
+# Cmd+Up: cursor at document start (line 0, col 0)
+19 key cmd+up
+20 capture /tmp/os-p8-doc-top.png
+# Cmd+Down: cursor at document end (line 2, col 2)
+20 key cmd+down
+21 capture /tmp/os-p8-doc-bot.png
+# Shift+Home: select from end to start of line 2
+21 key shift+home
+22 capture /tmp/os-p8-sel-home.png
+# Shift+Down: extend selection down (but we're on last line, go to end)
+22 key shift+down
+23 capture /tmp/os-p8-sel-down.png
+23 exit

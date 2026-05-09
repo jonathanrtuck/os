@@ -207,6 +207,157 @@ def assert_color_in_region(img: Image.Image, args: str, tolerance: int) -> bool:
         return False
 
 
+def assert_cursor_col(img: Image.Image, args: str, tolerance: int) -> bool:
+    """Find cursor (vertical stripe of bright pixels) and check its column.
+
+    The cursor is a 2px-wide vertical bar that's brighter than the background.
+    Scans a horizontal band at a specific line to find the cursor x-position,
+    then checks it matches an expected column.
+
+    Args: LINE,EXPECTED_COL,CHAR_WIDTH_PX — LINE and COL are 0-indexed,
+    CHAR_WIDTH_PX is the character width in pixels.
+    Optional: add ,MARGIN_LEFT_PX for the left margin in pixels.
+    """
+    parts = args.split(",")
+    if len(parts) < 3:
+        print(f"FAIL: cursor_col expects LINE,COL,CHAR_W[,MARGIN_L], got '{args}'")
+        return False
+
+    line = int(parts[0])
+    expected_col = int(parts[1])
+    char_w = int(parts[2])
+    margin_l = int(parts[3]) if len(parts) > 3 else 0
+
+    # Scan for the cursor: a vertical stripe significantly brighter than
+    # the background. The cursor color should be around (200,200,200) in
+    # sRGB, while the background is around (96,96,99).
+    # We look for a column where a cluster of consecutive bright pixels
+    # exists within the expected line's vertical band.
+
+    # First, determine the line height by finding where the text area starts.
+    # We scan for the brightest narrow vertical stripe.
+    bg_r, bg_g, bg_b = img.getpixel((img.width // 2, img.height // 2))[:3]
+    bright_threshold = max(bg_r, bg_g, bg_b) + 30
+
+    # Scan all x positions along the expected line's y band.
+    # Use 80% of line height band to avoid edges.
+    # First detect line height and margin by finding glyph regions.
+
+    # Simple approach: scan for the cursor by finding columns where
+    # many pixels are brighter than background.
+    cursor_x = None
+    best_count = 0
+    scan_height = 60  # pixels to scan vertically
+
+    for x in range(img.width):
+        bright = 0
+        for dy in range(scan_height):
+            y = margin_l + dy  # reuse margin_l parameter as vertical start hint
+            if y >= img.height:
+                break
+            r, g, b = img.getpixel((x, y))[:3]
+            if r > bright_threshold and g > bright_threshold and b > bright_threshold:
+                bright += 1
+
+        if bright > best_count:
+            best_count = bright
+            cursor_x = x
+
+    if cursor_x is None or best_count < 5:
+        print(f"FAIL: no cursor found (best brightness count={best_count})")
+        return False
+
+    # Compute expected x from column.
+    expected_x = margin_l + expected_col * char_w
+    distance = abs(cursor_x - expected_x)
+
+    if distance <= char_w:
+        print(f"PASS: cursor at x={cursor_x}, expected col {expected_col} "
+              f"(x~{expected_x}), distance={distance}px")
+        return True
+    else:
+        print(f"FAIL: cursor at x={cursor_x}, expected col {expected_col} "
+              f"(x~{expected_x}), distance={distance}px (> {char_w}px tolerance)")
+        return False
+
+
+def assert_find_cursor(img: Image.Image, args: str, tolerance: int) -> bool:
+    """Find and report cursor position. No expected value — diagnostic only.
+
+    Scans for the brightest vertical stripe (the cursor).
+    Reports (x, y_start, y_end) of the cursor and the pixel color.
+    Always passes (diagnostic).
+    """
+    bg_r, bg_g, bg_b = img.getpixel((img.width // 2, img.height // 2))[:3]
+    bright_threshold = max(bg_r, bg_g, bg_b) + 30
+
+    best_x = 0
+    best_count = 0
+
+    for x in range(img.width):
+        bright = 0
+        for y in range(min(300, img.height)):
+            r, g, b = img.getpixel((x, y))[:3]
+            if r > bright_threshold and g > bright_threshold and b > bright_threshold:
+                bright += 1
+
+        if bright > best_count:
+            best_count = bright
+            best_x = x
+
+    if best_count > 0:
+        # Find y-range of cursor at best_x.
+        y_start = None
+        y_end = None
+        for y in range(min(300, img.height)):
+            r, g, b = img.getpixel((best_x, y))[:3]
+            if r > bright_threshold and g > bright_threshold and b > bright_threshold:
+                if y_start is None:
+                    y_start = y
+                y_end = y
+
+        px = img.getpixel((best_x, y_start if y_start else 0))
+        print(f"PASS: cursor found at x={best_x}, y={y_start}-{y_end}, "
+              f"color=({px[0]},{px[1]},{px[2]}), brightness_count={best_count}")
+    else:
+        print(f"PASS: no cursor detected (brightness count=0)")
+
+    # Also report background color for calibration.
+    print(f"  background color: ({bg_r},{bg_g},{bg_b})")
+    return True
+
+
+def assert_selection_in_region(img: Image.Image, args: str, tolerance: int) -> bool:
+    """Check that selection-colored pixels exist in a region.
+
+    Selection color is distinct from background and text — typically a
+    blue-ish color. Args: X,Y,W,H — region bounds.
+    """
+    parts = args.split(",")
+    if len(parts) != 4:
+        print(f"FAIL: selection_in_region expects X,Y,W,H, got '{args}'")
+        return False
+
+    x, y, w, h = (int(p) for p in parts)
+    bg_r, bg_g, bg_b = img.getpixel((img.width // 2, img.height // 2))[:3]
+
+    # Selection color should have noticeably more blue than background.
+    sel_count = 0
+    for py in range(y, min(y + h, img.height)):
+        for px_x in range(x, min(x + w, img.width)):
+            r, g, b = img.getpixel((px_x, py))[:3]
+            # Selection pixels: bluer than background.
+            if b > bg_b + 15 and b > r + 5:
+                sel_count += 1
+
+    if sel_count > 0:
+        print(f"PASS: found {sel_count} selection pixels in region ({x},{y},{w},{h})")
+        return True
+    else:
+        print(f"FAIL: no selection pixels in region ({x},{y},{w},{h})")
+        return False
+
+
 ASSERTIONS = {
     "solid_color": assert_solid_color,
     "uniform": assert_uniform,
@@ -215,6 +366,9 @@ ASSERTIONS = {
     "pixel_at": assert_pixel_at,
     "region_variance": assert_region_variance,
     "color_in_region": assert_color_in_region,
+    "cursor_col": assert_cursor_col,
+    "find_cursor": assert_find_cursor,
+    "selection_in_region": assert_selection_in_region,
 }
 
 

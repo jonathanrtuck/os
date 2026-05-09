@@ -165,6 +165,8 @@ struct Presenter {
     last_cursor_col: u32,
     last_content_len: u32,
 
+    sticky_col: Option<u32>,
+
     render_ep: Handle,
     editor_ep: Handle,
 
@@ -399,6 +401,175 @@ impl Presenter {
         self.last_content_len = content_len as u32;
     }
 
+    // ── Navigation ─────────────────────────────────────────────
+
+    fn find_cursor_line(&self, cursor_pos: usize, line_count: usize) -> (usize, usize) {
+        for i in 0..line_count {
+            let line = parse_line_at(&self.results_buf, i);
+            let start = line.byte_offset as usize;
+            let next_start = if i + 1 < line_count {
+                parse_line_at(&self.results_buf, i + 1).byte_offset as usize
+            } else {
+                usize::MAX
+            };
+
+            if cursor_pos < next_start {
+                return (i, cursor_pos.saturating_sub(start));
+            }
+        }
+
+        if line_count > 0 {
+            let last = parse_line_at(&self.results_buf, line_count - 1);
+
+            (
+                line_count - 1,
+                cursor_pos.saturating_sub(last.byte_offset as usize),
+            )
+        } else {
+            (0, 0)
+        }
+    }
+
+    fn line_start_byte(&self, line_idx: usize) -> usize {
+        parse_line_at(&self.results_buf, line_idx).byte_offset as usize
+    }
+
+    fn line_end_byte(&self, line_idx: usize) -> usize {
+        let line = parse_line_at(&self.results_buf, line_idx);
+
+        (line.byte_offset + line.byte_length) as usize
+    }
+
+    fn visible_lines(&self) -> usize {
+        let viewport_height = self
+            .display_height
+            .saturating_sub(presenter_service::MARGIN_TOP as u32 * 2);
+
+        (viewport_height / presenter_service::LINE_HEIGHT).max(1) as usize
+    }
+
+    fn nav_target(
+        &self,
+        key_code: u16,
+        modifiers: u8,
+        cursor_pos: usize,
+        content_len: usize,
+    ) -> Option<usize> {
+        let alt = modifiers & text_editor::MOD_ALT != 0;
+        let cmd = modifiers & text_editor::MOD_SUPER != 0;
+        let header = parse_layout_header(&self.results_buf);
+        let line_count = header.line_count as usize;
+
+        if line_count == 0 {
+            return Some(0);
+        }
+
+        let (cur_line, cur_col) = self.find_cursor_line(cursor_pos, line_count);
+
+        match key_code {
+            text_editor::HID_KEY_LEFT => {
+                if cmd {
+                    Some(self.line_start_byte(cur_line))
+                } else if alt {
+                    // SAFETY: doc_va is a valid RO mapping of the document buffer.
+                    let text =
+                        unsafe { document_service::doc_content_slice(self.doc_va, content_len) };
+
+                    Some(layout::word_boundary_backward(text, cursor_pos))
+                } else {
+                    Some(cursor_pos.saturating_sub(1))
+                }
+            }
+            text_editor::HID_KEY_RIGHT => {
+                if cmd {
+                    Some(self.line_end_byte(cur_line))
+                } else if alt {
+                    let text =
+                        unsafe { document_service::doc_content_slice(self.doc_va, content_len) };
+
+                    Some(layout::word_boundary_forward(text, cursor_pos))
+                } else {
+                    Some((cursor_pos + 1).min(content_len))
+                }
+            }
+            text_editor::HID_KEY_UP => {
+                if cmd {
+                    Some(0)
+                } else {
+                    let col = self.sticky_col.unwrap_or(cur_col as u32) as usize;
+
+                    if cur_line == 0 {
+                        return Some(self.line_start_byte(0));
+                    }
+
+                    let target_line = cur_line - 1;
+                    let target_line_info = parse_line_at(&self.results_buf, target_line);
+                    let target_col = col.min(target_line_info.byte_length as usize);
+
+                    Some(target_line_info.byte_offset as usize + target_col)
+                }
+            }
+            text_editor::HID_KEY_DOWN => {
+                if cmd {
+                    Some(content_len)
+                } else {
+                    let col = self.sticky_col.unwrap_or(cur_col as u32) as usize;
+
+                    if cur_line + 1 >= line_count {
+                        return Some(self.line_end_byte(cur_line));
+                    }
+
+                    let target_line = cur_line + 1;
+                    let target_line_info = parse_line_at(&self.results_buf, target_line);
+                    let target_col = col.min(target_line_info.byte_length as usize);
+
+                    Some(target_line_info.byte_offset as usize + target_col)
+                }
+            }
+            text_editor::HID_KEY_HOME => Some(self.line_start_byte(cur_line)),
+            text_editor::HID_KEY_END => Some(self.line_end_byte(cur_line)),
+            text_editor::HID_KEY_PAGE_UP => {
+                let page = self.visible_lines();
+
+                if cur_line == 0 {
+                    return Some(self.line_start_byte(0));
+                }
+
+                let col = self.sticky_col.unwrap_or(cur_col as u32) as usize;
+                let target_line = cur_line.saturating_sub(page);
+                let target_line_info = parse_line_at(&self.results_buf, target_line);
+                let target_col = col.min(target_line_info.byte_length as usize);
+
+                Some(target_line_info.byte_offset as usize + target_col)
+            }
+            text_editor::HID_KEY_PAGE_DOWN => {
+                let page = self.visible_lines();
+
+                if cur_line + 1 >= line_count {
+                    return Some(self.line_end_byte(cur_line));
+                }
+
+                let col = self.sticky_col.unwrap_or(cur_col as u32) as usize;
+                let target_line = (cur_line + page).min(line_count - 1);
+                let target_line_info = parse_line_at(&self.results_buf, target_line);
+                let target_col = col.min(target_line_info.byte_length as usize);
+
+                Some(target_line_info.byte_offset as usize + target_col)
+            }
+            _ => None,
+        }
+    }
+
+    fn is_vertical_nav(key_code: u16) -> bool {
+        matches!(
+            key_code,
+            text_editor::HID_KEY_UP
+                | text_editor::HID_KEY_DOWN
+                | text_editor::HID_KEY_PAGE_UP
+                | text_editor::HID_KEY_PAGE_DOWN
+        )
+    }
+
     fn handle_key_event(&mut self, dispatch: text_editor::KeyDispatch) {
         // SAFETY: doc_va is a valid RO mapping of the document buffer.
         let (content_len, cursor_pos, sel_anchor, _) =
@@ -406,67 +577,67 @@ impl Presenter {
         let has_selection = sel_anchor != cursor_pos;
         let shift = dispatch.modifiers & text_editor::MOD_SHIFT != 0;
         let cmd = dispatch.modifiers & text_editor::MOD_SUPER != 0;
-        let handled = match dispatch.key_code {
-            text_editor::HID_KEY_LEFT if shift => {
-                let new_cursor = cursor_pos.saturating_sub(1);
+
+        // Cmd+A: select all.
+        if cmd && dispatch.character == b'a' {
+            self.doc_select(0, content_len);
+            self.sticky_col = None;
+            self.blink_start = abi::system::clock_read().unwrap_or(0);
+            self.build_scene();
+            self.request_render();
+
+            return;
+        }
+
+        if let Some(mut target) = self.nav_target(
+            dispatch.key_code,
+            dispatch.modifiers,
+            cursor_pos,
+            content_len,
+        ) {
+            let is_vertical = Self::is_vertical_nav(dispatch.key_code);
+
+            if !shift && has_selection {
+                let sel_start = sel_anchor.min(cursor_pos);
+                let sel_end = sel_anchor.max(cursor_pos);
+
+                match dispatch.key_code {
+                    text_editor::HID_KEY_LEFT => target = sel_start,
+                    text_editor::HID_KEY_RIGHT => target = sel_end,
+                    _ => {}
+                }
+            }
+
+            if shift {
                 let anchor = if has_selection {
                     sel_anchor
                 } else {
                     cursor_pos
                 };
 
-                self.doc_select(anchor, new_cursor);
-
-                true
+                self.doc_select(anchor, target);
+            } else {
+                self.doc_cursor_move(target);
             }
-            text_editor::HID_KEY_RIGHT if shift => {
-                let new_cursor = (cursor_pos + 1).min(content_len);
-                let anchor = if has_selection {
-                    sel_anchor
-                } else {
-                    cursor_pos
-                };
 
-                self.doc_select(anchor, new_cursor);
+            if is_vertical {
+                if self.sticky_col.is_none() {
+                    let header = parse_layout_header(&self.results_buf);
+                    let (_, col) = self.find_cursor_line(cursor_pos, header.line_count as usize);
 
-                true
-            }
-            text_editor::HID_KEY_LEFT if !shift => {
-                if has_selection {
-                    let left = sel_anchor.min(cursor_pos);
-
-                    self.doc_cursor_move(left);
-
-                    true
-                } else {
-                    false
+                    self.sticky_col = Some(col as u32);
                 }
+            } else {
+                self.sticky_col = None;
             }
-            text_editor::HID_KEY_RIGHT if !shift => {
-                if has_selection {
-                    let right = sel_anchor.max(cursor_pos);
-
-                    self.doc_cursor_move(right);
-
-                    true
-                } else {
-                    false
-                }
-            }
-            _ if cmd && dispatch.character == b'a' => {
-                self.doc_select(0, content_len);
-
-                true
-            }
-            _ => false,
-        };
-
-        if !handled {
+        } else {
             let mut data = [0u8; text_editor::KeyDispatch::SIZE];
 
             dispatch.write_to(&mut data);
 
             let _ = ipc::client::call_simple(self.editor_ep, text_editor::DISPATCH_KEY, &data);
+
+            self.sticky_col = None;
         }
 
         self.blink_start = abi::system::clock_read().unwrap_or(0);
@@ -739,6 +910,7 @@ extern "C" fn _start() -> ! {
         last_cursor_line: 0,
         last_cursor_col: 0,
         last_content_len: 0,
+        sticky_col: None,
         render_ep,
         editor_ep,
         console_ep,
