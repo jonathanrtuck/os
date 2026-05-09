@@ -18,6 +18,7 @@ heap = { path = "../../../heap", optional = true }
 init = { path = "../../init", optional = true }
 ipc = { path = "../../../ipc", optional = true }
 name = { path = "../../name", optional = true }
+icons = { path = "../../../../libraries/icons" }
 scene = { path = "../../../../libraries/scene" }
 virtio = { path = "../../../virtio", optional = true }
 

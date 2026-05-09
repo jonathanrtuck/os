@@ -1045,72 +1045,226 @@ fn lookup_or_rasterize_path(
 
 // ── Cursor ─────────────────────────────────────────────────────────
 
-const CURSOR_SIZE: u16 = 32;
-const CURSOR_HOTSPOT_X: u16 = 3;
-const CURSOR_HOTSPOT_Y: u16 = 1;
+const CURSOR_DISPLAY_PT: f32 = 24.0;
+const CURSOR_SHADOW_DX: f32 = 1.5;
+const CURSOR_SHADOW_DY: f32 = 1.5;
+const CURSOR_SHADOW_SIGMA: f32 = 4.0;
+const CURSOR_SHADOW_ALPHA: u8 = 64;
 
-fn build_arrow_path() -> alloc::vec::Vec<u8> {
-    let mut data = alloc::vec::Vec::with_capacity(128);
+fn offset_path(src: &[u8], dx: f32, dy: f32) -> alloc::vec::Vec<u8> {
+    let mut out = alloc::vec::Vec::with_capacity(src.len());
+    let mut off = 0;
 
-    scene::path_move_to(&mut data, 1.0, 0.0);
-    scene::path_line_to(&mut data, 1.0, 21.0);
-    scene::path_line_to(&mut data, 6.0, 16.5);
-    scene::path_line_to(&mut data, 12.0, 23.0);
-    scene::path_line_to(&mut data, 15.0, 21.0);
-    scene::path_line_to(&mut data, 9.0, 14.5);
-    scene::path_line_to(&mut data, 16.0, 14.0);
-    scene::path_close(&mut data);
+    while off < src.len() {
+        let tag = u32::from_le_bytes([src[off], src[off + 1], src[off + 2], src[off + 3]]);
 
-    data
+        match tag {
+            scene::PATH_MOVE_TO | scene::PATH_LINE_TO => {
+                out.extend_from_slice(&src[off..off + 4]);
+
+                let x = f32::from_le_bytes(src[off + 4..off + 8].try_into().unwrap()) + dx;
+                let y = f32::from_le_bytes(src[off + 8..off + 12].try_into().unwrap()) + dy;
+
+                out.extend_from_slice(&x.to_le_bytes());
+                out.extend_from_slice(&y.to_le_bytes());
+                off += 12;
+            }
+            scene::PATH_CUBIC_TO => {
+                out.extend_from_slice(&src[off..off + 4]);
+
+                for i in 0..3 {
+                    let base = off + 4 + i * 8;
+                    let x = f32::from_le_bytes(src[base..base + 4].try_into().unwrap()) + dx;
+                    let y = f32::from_le_bytes(src[base + 4..base + 8].try_into().unwrap()) + dy;
+
+                    out.extend_from_slice(&x.to_le_bytes());
+                    out.extend_from_slice(&y.to_le_bytes());
+                }
+
+                off += 28;
+            }
+            scene::PATH_CLOSE => {
+                out.extend_from_slice(&src[off..off + 4]);
+                off += 4;
+            }
+            _ => break,
+        }
+    }
+
+    out
 }
 
-fn rasterize_cursor(scale: u32) -> alloc::vec::Vec<u8> {
-    let sz = CURSOR_SIZE as u32 * scale;
-    let arrow = build_arrow_path();
-    let coverage = path::rasterize_path(
-        &arrow,
-        sz,
-        sz,
-        scale as f32 * 1.4,
+fn rasterize_cursor(scale: u32) -> (alloc::vec::Vec<u8>, u16, i16, i16) {
+    let icon = icons::get("pointer", None);
+    let viewbox = icon.viewbox;
+    let stroke_w = icon.stroke_width;
+    let px_scale = CURSOR_DISPLAY_PT * scale as f32 / viewbox;
+
+    let stroke_margin = stroke_w / 2.0 + 1.0;
+    let shadow_pad_vb =
+        (CURSOR_SHADOW_DX.max(CURSOR_SHADOW_DY) + CURSOR_SHADOW_SIGMA * 3.0) / px_scale;
+    let margin_vb = stroke_margin + shadow_pad_vb;
+    let total_vb = viewbox + 2.0 * margin_vb;
+    let tex_sz = (total_vb * px_scale) as u32;
+
+    if tex_sz == 0 || tex_sz > 256 {
+        return (alloc::vec::Vec::new(), 0, 0, 0);
+    }
+
+    let path_data = offset_path(icon.paths[0].commands, margin_vb, margin_vb);
+    let raster_scale = px_scale;
+
+    // Rasterize the fill (black body).
+    let fill = path::rasterize_path(
+        &path_data,
+        tex_sz,
+        tex_sz,
+        raster_scale,
         scene::FillRule::Winding,
         None,
     );
-
-    if coverage.is_empty() {
-        return alloc::vec::Vec::new();
-    }
-
-    let mut bgra = alloc::vec![0u8; (sz * sz * 4) as usize];
-    let outline_path = scene::stroke::expand_stroke(&arrow, 1.5);
-    let outline = path::rasterize_path(
-        &arrow,
-        sz,
-        sz,
-        scale as f32 * 1.4,
+    // Rasterize the stroke (white outline).
+    let stroke_expanded = scene::stroke::expand_stroke(&path_data, stroke_w);
+    let stroke = path::rasterize_path(
+        &path_data,
+        tex_sz,
+        tex_sz,
+        raster_scale,
         scene::FillRule::Winding,
-        Some(&outline_path),
+        Some(&stroke_expanded),
     );
 
-    for i in 0..(sz * sz) as usize {
-        let fill_a = coverage[i] as u16;
-        let border_a = if i < outline.len() {
-            outline[i] as u16
+    // Rasterize shadow: same shape at offset, then blur.
+    let shadow_ox = (CURSOR_SHADOW_DX * px_scale) as i32;
+    let shadow_oy = (CURSOR_SHADOW_DY * px_scale) as i32;
+    let mut shadow = alloc::vec![0u8; (tex_sz * tex_sz) as usize];
+
+    // Composite fill+stroke into shadow source at offset.
+    for y in 0..tex_sz as i32 {
+        for x in 0..tex_sz as i32 {
+            let sx = (x - shadow_ox) as usize;
+            let sy = (y - shadow_oy) as usize;
+
+            if sx < tex_sz as usize && sy < tex_sz as usize {
+                let idx = sy * tex_sz as usize + sx;
+                let fa = fill.get(idx).copied().unwrap_or(0) as u16;
+                let sa = stroke.get(idx).copied().unwrap_or(0) as u16;
+                let a = fa.max(sa).min(255) as u8;
+
+                shadow[(y as usize) * tex_sz as usize + (x as usize)] = a;
+            }
+        }
+    }
+
+    // Box blur (3-pass approximation of Gaussian).
+    let sigma = CURSOR_SHADOW_SIGMA * scale as f32;
+    let radius = (sigma * 1.5) as usize;
+
+    for _ in 0..3 {
+        box_blur_1d(&mut shadow, tex_sz as usize, tex_sz as usize, radius, true);
+        box_blur_1d(&mut shadow, tex_sz as usize, tex_sz as usize, radius, false);
+    }
+
+    // Composite: shadow (bottom) + stroke (middle) + fill (top) → BGRA.
+    let mut bgra = alloc::vec![0u8; (tex_sz * tex_sz * 4) as usize];
+
+    for i in 0..(tex_sz * tex_sz) as usize {
+        let fill_a = fill.get(i).copied().unwrap_or(0) as u16;
+        let stroke_a = stroke.get(i).copied().unwrap_or(0) as u16;
+        let shadow_a = shadow[i] as u16;
+        let border_only = stroke_a.saturating_sub(fill_a);
+
+        // Shadow layer: black at reduced alpha.
+        let sha = (shadow_a * CURSOR_SHADOW_ALPHA as u16 / 255).min(255);
+        // Cursor body: black fill + white outline, composited over shadow.
+        let cursor_a = fill_a.max(border_only).min(255);
+        let cursor_lum = if cursor_a > 0 {
+            (255 * border_only / cursor_a.max(1)) as u8
         } else {
             0
         };
-        let outer = border_a.saturating_sub(fill_a).min(255);
-        let r = (255 * outer / outer.max(1).max(fill_a.max(1))) as u8;
-        let g = r;
-        let b = r;
-        let a = fill_a.max(outer).min(255) as u8;
 
-        bgra[i * 4] = b;
-        bgra[i * 4 + 1] = g;
-        bgra[i * 4 + 2] = r;
-        bgra[i * 4 + 3] = a;
+        // Alpha composite cursor over shadow.
+        let out_a = cursor_a + (sha * (255 - cursor_a) / 255);
+        let out_a = out_a.min(255);
+
+        if out_a == 0 {
+            continue;
+        }
+
+        // Shadow is black (lum=0), so only the cursor body contributes luminance.
+        let out_lum = (cursor_lum as u16 * cursor_a / out_a) as u8;
+
+        bgra[i * 4] = out_lum;
+        bgra[i * 4 + 1] = out_lum;
+        bgra[i * 4 + 2] = out_lum;
+        bgra[i * 4 + 3] = out_a as u8;
     }
 
-    bgra
+    let hotspot_x = ((4.0 + margin_vb) * px_scale) as i16;
+    let hotspot_y = ((4.0 + margin_vb) * px_scale) as i16;
+
+    (bgra, tex_sz as u16, hotspot_x, hotspot_y)
+}
+
+fn box_blur_1d(buf: &mut [u8], w: usize, h: usize, radius: usize, horizontal: bool) {
+    if radius == 0 {
+        return;
+    }
+
+    let mut tmp = alloc::vec![0u8; buf.len()];
+
+    if horizontal {
+        for y in 0..h {
+            let mut sum: u32 = 0;
+
+            for x in 0..=radius.min(w - 1) {
+                sum += buf[y * w + x] as u32;
+            }
+
+            for x in 0..w {
+                let right = (x + radius).min(w - 1);
+                let left = (x as isize - radius as isize - 1).max(0) as usize;
+                let count = right - left;
+
+                if x + radius < w {
+                    sum += buf[y * w + x + radius] as u32;
+                }
+
+                tmp[y * w + x] = (sum / count as u32).min(255) as u8;
+
+                if x >= radius {
+                    sum -= buf[y * w + x - radius] as u32;
+                }
+            }
+        }
+    } else {
+        for x in 0..w {
+            let mut sum: u32 = 0;
+
+            for y in 0..=radius.min(h - 1) {
+                sum += buf[y * w + x] as u32;
+            }
+
+            for y in 0..h {
+                let bottom = (y + radius).min(h - 1);
+                let top = (y as isize - radius as isize - 1).max(0) as usize;
+                let count = bottom - top;
+
+                if y + radius < h {
+                    sum += buf[(y + radius) * w + x] as u32;
+                }
+
+                tmp[y * w + x] = (sum / count as u32).min(255) as u8;
+
+                if y >= radius {
+                    sum -= buf[(y - radius) * w + x] as u32;
+                }
+            }
+        }
+    }
+
+    buf.copy_from_slice(&tmp);
 }
 
 struct Compositor {
@@ -1212,15 +1366,11 @@ impl Compositor {
             return;
         }
 
-        let bgra = rasterize_cursor(self.scale);
+        let (bgra, sz, hotspot_x, hotspot_y) = rasterize_cursor(self.scale);
 
         if bgra.is_empty() {
             return;
         }
-
-        let sz = CURSOR_SIZE * self.scale as u16;
-        let hotspot_x = CURSOR_HOTSPOT_X as i16 * self.scale as i16;
-        let hotspot_y = CURSOR_HOTSPOT_Y as i16 * self.scale as i16;
         // SAFETY: render_dma.va is a valid DMA allocation.
         let dma_buf = unsafe {
             core::slice::from_raw_parts_mut(self.render_dma.va as *mut u8, self.render_buf_size)

@@ -452,6 +452,199 @@ def assert_ocr_contains(img: Image.Image, args: str, tolerance: int) -> bool:
         return False
 
 
+def assert_text_height(img: Image.Image, args: str, tolerance: int) -> bool:
+    """Measure the height of a glyph cluster in a region to verify font size.
+
+    Scans a region for non-background pixels (text), measures the vertical
+    extent. Args: X,Y,W,H,MIN_H,MAX_H — region bounds and expected glyph
+    height range in pixels.
+    """
+    parts = args.split(",")
+    if len(parts) != 6:
+        print(f"FAIL: text_height expects X,Y,W,H,MIN_H,MAX_H, got '{args}'")
+        return False
+
+    x, y, w, h, min_h, max_h = (int(p) for p in parts)
+    bg_r, bg_g, bg_b = img.getpixel((img.width - 10, img.height // 2))[:3]
+    threshold = 30
+
+    min_y = img.height
+    max_y = 0
+    found = False
+
+    for py in range(y, min(y + h, img.height)):
+        for px in range(x, min(x + w, img.width)):
+            r, g, b = img.getpixel((px, py))[:3]
+            if (abs(r - bg_r) > threshold or
+                    abs(g - bg_g) > threshold or
+                    abs(b - bg_b) > threshold):
+                found = True
+                if py < min_y:
+                    min_y = py
+                if py > max_y:
+                    max_y = py
+
+    if not found:
+        print(f"FAIL: no text found in region ({x},{y},{w},{h})")
+        return False
+
+    text_h = max_y - min_y + 1
+    if min_h <= text_h <= max_h:
+        print(f"PASS: text height {text_h}px (y={min_y}..{max_y}) in range "
+              f"[{min_h},{max_h}]")
+        return True
+    else:
+        print(f"FAIL: text height {text_h}px (y={min_y}..{max_y}), expected "
+              f"[{min_h},{max_h}]")
+        return False
+
+
+def assert_clock_format(img: Image.Image, args: str, tolerance: int) -> bool:
+    """Check that clock text has HH:MM:SS format (8 chars with colons).
+
+    Scans the top-right region for text columns separated by gaps (colons
+    are narrower). Counts the number of distinct character clusters.
+    Args: MIN_CHARS — minimum number of character clusters expected.
+    """
+    parts = args.split(",")
+    min_chars = int(parts[0]) if parts[0] else 8
+
+    right_x = img.width - int(img.width * 0.15)
+    scan_w = int(img.width * 0.15)
+    scan_y = 0
+    scan_h = int(img.height * 0.06)
+
+    # Sample bg from the title bar (top-right corner, slightly inward).
+    # The clock is white text on dark chrome bg.
+    bg_r, bg_g, bg_b = img.getpixel((img.width - 1, 0))[:3]
+    threshold = 30
+
+    col_has_text = []
+    for px in range(right_x, min(right_x + scan_w, img.width)):
+        text_pixels = 0
+        for py in range(scan_y, min(scan_y + scan_h, img.height)):
+            r, g, b = img.getpixel((px, py))[:3]
+            if (abs(r - bg_r) > threshold or
+                    abs(g - bg_g) > threshold or
+                    abs(b - bg_b) > threshold):
+                text_pixels += 1
+        col_has_text.append(text_pixels > 3)
+
+    in_char = False
+    char_count = 0
+    for has_text in col_has_text:
+        if has_text and not in_char:
+            char_count += 1
+            in_char = True
+        elif not has_text:
+            in_char = False
+
+    if char_count >= min_chars:
+        print(f"PASS: clock region has {char_count} character clusters "
+              f"(>= {min_chars})")
+        return True
+    else:
+        print(f"FAIL: clock region has only {char_count} character clusters "
+              f"(expected >= {min_chars})")
+        return False
+
+
+def assert_right_margin(img: Image.Image, args: str, tolerance: int) -> bool:
+    """Check that text/content ends within a max margin from the right edge.
+
+    Scans the top band for the rightmost non-background pixel. Reports
+    the margin from the right edge. Args: MAX_MARGIN — max gap in pixels
+    from rightmost content to image right edge.
+    """
+    parts = args.split(",")
+    max_margin = int(parts[0])
+    scan_h = int(parts[1]) if len(parts) > 1 else int(img.height * 0.06)
+
+    bg_r, bg_g, bg_b = img.getpixel((img.width // 2, img.height // 2))[:3]
+    threshold = 30
+
+    rightmost_x = 0
+    for py in range(0, min(scan_h, img.height)):
+        for px in range(img.width - 1, img.width // 2, -1):
+            r, g, b = img.getpixel((px, py))[:3]
+            if (abs(r - bg_r) > threshold or
+                    abs(g - bg_g) > threshold or
+                    abs(b - bg_b) > threshold):
+                if px > rightmost_x:
+                    rightmost_x = px
+                break
+
+    margin = img.width - 1 - rightmost_x
+    if margin <= max_margin:
+        print(f"PASS: right margin {margin}px (rightmost content at x={rightmost_x}), "
+              f"max allowed {max_margin}px")
+        return True
+    else:
+        print(f"FAIL: right margin {margin}px (rightmost content at x={rightmost_x}), "
+              f"max allowed {max_margin}px")
+        return False
+
+
+def assert_cursor_colors(img: Image.Image, args: str, tolerance: int) -> bool:
+    """Check mouse cursor has both white-ish fill and dark outline pixels.
+
+    Scans a region for the cursor arrow shape. Expects both bright (fill)
+    and dark (outline) pixels that differ from the background.
+    Args: X,Y,W,H — region to scan for the cursor.
+    """
+    parts = args.split(",")
+    if len(parts) != 4:
+        print(f"FAIL: cursor_colors expects X,Y,W,H, got '{args}'")
+        return False
+
+    x, y, w, h = (int(p) for p in parts)
+    # Sample bg from a corner of the scan region (likely just background).
+    bg_r, bg_g, bg_b = img.getpixel((x, y))[:3]
+
+    white_count = 0
+    dark_count = 0
+    total_non_bg = 0
+
+    for py in range(y, min(y + h, img.height)):
+        for px in range(x, min(x + w, img.width)):
+            r, g, b = img.getpixel((px, py))[:3]
+            diff = abs(r - bg_r) + abs(g - bg_g) + abs(b - bg_b)
+            if diff < 20:
+                continue
+            total_non_bg += 1
+            lum = (r + g + b) / 3
+            if lum > 180:
+                white_count += 1
+            elif lum < bg_r - 10 or (lum < 50 and diff > 30):
+                dark_count += 1
+
+    if total_non_bg < 10:
+        print(f"FAIL: no cursor found in region ({x},{y},{w},{h}), "
+              f"only {total_non_bg} non-bg pixels (bg=({bg_r},{bg_g},{bg_b}))")
+        return False
+
+    has_white = white_count > 5
+    has_dark = dark_count > 5
+
+    if has_white and has_dark:
+        print(f"PASS: cursor in ({x},{y},{w},{h}) has {white_count} white "
+              f"and {dark_count} dark pixels out of {total_non_bg} non-bg "
+              f"(white fill + dark outline)")
+        return True
+    elif has_white and not has_dark:
+        print(f"FAIL: cursor has {white_count} white but only {dark_count} dark "
+              f"pixels out of {total_non_bg} non-bg (missing dark outline)")
+        return False
+    elif has_dark and not has_white:
+        print(f"FAIL: cursor has {dark_count} dark but only {white_count} white "
+              f"pixels out of {total_non_bg} non-bg (missing white fill)")
+        return False
+    else:
+        print(f"FAIL: cursor has {white_count} white and {dark_count} dark pixels "
+              f"out of {total_non_bg} non-bg")
+        return False
+
+
 ASSERTIONS = {
     "solid_color": assert_solid_color,
     "uniform": assert_uniform,
@@ -466,6 +659,10 @@ ASSERTIONS = {
     "row_has_text": assert_row_has_text,
     "row_is_bg": assert_row_is_bg,
     "ocr_contains": assert_ocr_contains,
+    "text_height": assert_text_height,
+    "clock_format": assert_clock_format,
+    "right_margin": assert_right_margin,
+    "cursor_colors": assert_cursor_colors,
 }
 
 

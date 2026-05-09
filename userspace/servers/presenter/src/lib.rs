@@ -40,8 +40,8 @@ pub const POINTER_EVENT: u32 = 6;
 pub const DEFAULT_WIDTH: u32 = 1440;
 pub const DEFAULT_HEIGHT: u32 = 900;
 
-pub const FONT_SIZE: u16 = 14;
-pub const CHAR_WIDTH_F32: f32 = 10.0;
+pub const FONT_SIZE: u16 = 18;
+pub const CHAR_WIDTH_F32: f32 = 10.8;
 pub const LINE_HEIGHT: u32 = 20;
 
 pub const MARGIN_LEFT: i32 = 16;
@@ -61,9 +61,10 @@ pub const CURSOR_B: u8 = 0x20;
 
 pub const CURSOR_WIDTH: u32 = 2;
 
-pub const SEL_R: u8 = 44;
-pub const SEL_G: u8 = 80;
-pub const SEL_B: u8 = 132;
+pub const SEL_R: u8 = 59;
+pub const SEL_G: u8 = 130;
+pub const SEL_B: u8 = 246;
+pub const SEL_A: u8 = 60;
 
 // ── Chrome / page geometry ────────────────────────────────────────
 

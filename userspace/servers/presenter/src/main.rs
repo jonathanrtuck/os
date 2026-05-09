@@ -281,10 +281,11 @@ impl Presenter {
             presenter_service::CURSOR_G,
             presenter_service::CURSOR_B,
         );
-        let sel_color = Color::rgb(
+        let sel_color = Color::rgba(
             presenter_service::SEL_R,
             presenter_service::SEL_G,
             presenter_service::SEL_B,
+            presenter_service::SEL_A,
         );
         let page_bg = Color::rgb(
             presenter_service::PAGE_BG_R,
@@ -378,17 +379,21 @@ impl Presenter {
             scene.add_child(root, title_node);
         }
 
-        // Clock text — right-aligned.
+        // Clock text — right-aligned, HH:MM:SS format.
         let clock_ns = abi::system::clock_read().unwrap_or(0);
         let clock_secs = (clock_ns / 1_000_000_000) % 86400;
         let hours = (clock_secs / 3600) % 24;
         let minutes = (clock_secs / 60) % 60;
-        let clock_chars: [u8; 5] = [
+        let seconds = clock_secs % 60;
+        let clock_chars: [u8; 8] = [
             b'0' + (hours / 10) as u8,
             b'0' + (hours % 10) as u8,
             b':',
             b'0' + (minutes / 10) as u8,
             b'0' + (minutes % 10) as u8,
+            b':',
+            b'0' + (seconds / 10) as u8,
+            b'0' + (seconds % 10) as u8,
         ];
 
         for (j, &byte) in clock_chars.iter().enumerate() {
@@ -407,20 +412,21 @@ impl Presenter {
             };
         }
 
-        let clock_glyph_ref = scene.push_shaped_glyphs(&self.glyphs[..5]);
-        let clock_x = (self.display_width - 12 - 80) as i32;
+        let clock_glyph_ref = scene.push_shaped_glyphs(&self.glyphs[..8]);
+        let clock_text_w = (8.0 * self.char_width) as u32 + 1;
+        let clock_x = (self.display_width - 12 - clock_text_w) as i32;
 
         if let Some(clock_node) = scene.alloc_node() {
             let n = scene.node_mut(clock_node);
 
             n.x = pt(clock_x);
             n.y = pt(title_text_y as i32);
-            n.width = upt((5.0 * self.char_width) as u32 + 1);
+            n.width = upt(clock_text_w);
             n.height = upt(presenter_service::LINE_HEIGHT);
             n.content = Content::Glyphs {
                 color: clock_color,
                 glyphs: clock_glyph_ref,
-                glyph_count: 5,
+                glyph_count: 8,
                 font_size: presenter_service::FONT_SIZE,
                 style_id: 0,
             };
@@ -1154,7 +1160,22 @@ extern "C" fn _start() -> ! {
 
     console::write(console_ep, b"presenter: ready\n");
 
-    ipc::server::serve(own_ep, &mut server);
+    const NS_PER_SEC: u64 = 1_000_000_000;
+
+    loop {
+        let now = abi::system::clock_read().unwrap_or(0);
+        let current_sec = now / NS_PER_SEC;
+        let deadline = (current_sec + 1) * NS_PER_SEC;
+
+        match ipc::server::serve_one_timed(own_ep, &mut server, deadline) {
+            Ok(()) => {}
+            Err(abi::types::SyscallError::TimedOut) => {
+                server.build_scene();
+                server.request_render();
+            }
+            Err(_) => break,
+        }
+    }
 
     abi::thread::exit(0);
 }
