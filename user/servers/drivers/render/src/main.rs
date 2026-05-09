@@ -427,6 +427,28 @@ impl DrawList {
         }
     }
 
+    fn transform_corners(
+        tf: &scene::AffineTransform,
+        cx: f32,
+        cy: f32,
+        px: f32,
+        py: f32,
+        pw: f32,
+        ph: f32,
+    ) -> [(f32, f32); 4] {
+        let tl = tf.transform_point(px - cx, py - cy);
+        let tr = tf.transform_point(px + pw - cx, py - cy);
+        let br = tf.transform_point(px + pw - cx, py + ph - cy);
+        let bl = tf.transform_point(px - cx, py + ph - cy);
+
+        [
+            (tl.0 + cx, tl.1 + cy),
+            (tr.0 + cx, tr.1 + cy),
+            (br.0 + cx, br.1 + cy),
+            (bl.0 + cx, bl.1 + cy),
+        ]
+    }
+
     fn push_transformed_rect(&mut self, corners: [(f32, f32); 4], color: scene::Color) {
         self.ensure_pipe(Pipe::Solid);
 
@@ -459,8 +481,9 @@ impl DrawList {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn push_glyph_quad(
+    fn push_quad_maybe_transformed(
         &mut self,
+        pipe: Pipe,
         px: f32,
         py: f32,
         pw: f32,
@@ -468,49 +491,38 @@ impl DrawList {
         color: scene::Color,
         uv0: [f32; 2],
         uv1: [f32; 2],
+        tf_args: Option<(&scene::AffineTransform, f32, f32)>,
     ) {
-        self.ensure_pipe(Pipe::Glyph);
+        self.ensure_pipe(pipe);
 
-        push_quad(
-            &mut self.verts,
-            self.display_w,
-            self.display_h,
-            px,
-            py,
-            pw,
-            ph,
-            color,
-            uv0,
-            uv1,
-        );
+        if let Some((tf, cx, cy)) = tf_args {
+            let corners = Self::transform_corners(tf, cx, cy, px, py, pw, ph);
+
+            push_quad_corners(
+                &mut self.verts,
+                self.display_w,
+                self.display_h,
+                corners,
+                color,
+                uv0,
+                uv1,
+            );
+        } else {
+            push_quad(
+                &mut self.verts,
+                self.display_w,
+                self.display_h,
+                px,
+                py,
+                pw,
+                ph,
+                color,
+                uv0,
+                uv1,
+            );
+        }
     }
 
-    fn push_textured_quad(
-        &mut self,
-        px: f32,
-        py: f32,
-        pw: f32,
-        ph: f32,
-        uv0: [f32; 2],
-        uv1: [f32; 2],
-    ) {
-        self.ensure_pipe(Pipe::Textured);
-
-        push_quad(
-            &mut self.verts,
-            self.display_w,
-            self.display_h,
-            px,
-            py,
-            pw,
-            ph,
-            scene::Color::rgba(255, 255, 255, 255),
-            uv0,
-            uv1,
-        );
-    }
-
-    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     fn push_shadow_inner(
         &mut self,
@@ -982,7 +994,17 @@ fn walk_node(
                         let u1 = (e.u + e.width) as f32 / ATLAS_W_F;
                         let v1 = (e.v + e.height) as f32 / ATLAS_H_F;
 
-                        draws.push_glyph_quad(px, py, pw, ph, color, [u0, v0], [u1, v1]);
+                        draws.push_quad_maybe_transformed(
+                            Pipe::Glyph,
+                            px,
+                            py,
+                            pw,
+                            ph,
+                            color,
+                            [u0, v0],
+                            [u1, v1],
+                            tf_args,
+                        );
                     }
                 }
 
@@ -1013,6 +1035,7 @@ fn walk_node(
                     effective_opacity,
                     draws,
                     ctx,
+                    tf_args,
                 );
             }
         }
@@ -1037,7 +1060,17 @@ fn walk_node(
             let draw_x = x + (w - draw_w) / 2.0;
             let draw_y = y + (h - draw_h) / 2.0;
 
-            draws.push_textured_quad(draw_x, draw_y, draw_w, draw_h, [0.0, 0.0], [1.0, 1.0]);
+            draws.push_quad_maybe_transformed(
+                Pipe::Textured,
+                draw_x,
+                draw_y,
+                draw_w,
+                draw_h,
+                scene::Color::rgba(255, 255, 255, 255),
+                [0.0, 0.0],
+                [1.0, 1.0],
+                tf_args,
+            );
         }
         _ => {}
     }
@@ -1152,6 +1185,7 @@ fn render_path_node(
     opacity: u8,
     draws: &mut DrawList,
     ctx: &mut WalkContext,
+    tf_args: Option<(&scene::AffineTransform, f32, f32)>,
 ) {
     let scale = ctx.scale as f32;
     let inv_scale = 1.0 / scale;
@@ -1188,7 +1222,8 @@ fn render_path_node(
             let u1 = (e.u + e.width) as f32 / ATLAS_W_F;
             let v1 = (e.v + e.height) as f32 / ATLAS_H_F;
 
-            draws.push_glyph_quad(
+            draws.push_quad_maybe_transformed(
+                Pipe::Glyph,
                 x,
                 y,
                 e.width as f32 * inv_scale,
@@ -1196,6 +1231,7 @@ fn render_path_node(
                 c,
                 [u0, v0],
                 [u1, v1],
+                tf_args,
             );
         }
     }
@@ -1228,7 +1264,8 @@ fn render_path_node(
                 let u1 = (e.u + e.width) as f32 / ATLAS_W_F;
                 let v1 = (e.v + e.height) as f32 / ATLAS_H_F;
 
-                draws.push_glyph_quad(
+                draws.push_quad_maybe_transformed(
+                    Pipe::Glyph,
                     x,
                     y,
                     e.width as f32 * inv_scale,
@@ -1236,6 +1273,7 @@ fn render_path_node(
                     c,
                     [u0, v0],
                     [u1, v1],
+                    tf_args,
                 );
             }
         }
