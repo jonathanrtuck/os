@@ -407,7 +407,7 @@ but not yet wired into the compositor pipeline. The fonts and render libraries
 exist and are tested (Phase 3); connecting them to the Metal compositor is the
 next rendering milestone.
 
-### Phase 10 — Visual Chrome (IN PROGRESS)
+### Phase 10 — Visual Chrome (COMPLETE)
 
 1. **Analytical shadow pipeline** — DONE. `fragment_shadow` MSL shader using
    separable erf integrals for sharp rects and SDF-based erfc for rounded rects.
@@ -438,10 +438,12 @@ next rendering milestone.
    state commands, cursor commands, stencil/MSAA pixel formats added to
    CommandWriter. 21 wire protocol tests.
 
-7. **Hardware cursor (10.3)** — NOT STARTED. Requires pointer event plumbing
-   (input driver → presenter → compositor) and cursor path rasterization to
-   dedicated GPU textures. Wire protocol commands and texture constants are in
-   place.
+7. **Hardware cursor (10.3)** — DONE. End-to-end pointer tracking: input driver
+   discovers both keyboard and tablet virtio-input devices, receives EV_ABS
+   from tablet, forwards to presenter → compositor. Arrow cursor rasterized
+   via CPU path rasterizer (black fill, white anti-aliased outline), uploaded
+   as BGRA pixels to hypervisor hardware cursor layer (NSCursor). Position
+   updates via CMD_SET_CURSOR_POSITION.
 
 ## What's Next: v0.6 Parity
 
@@ -456,7 +458,7 @@ work to reach full v0.6-pre-rewrite parity is tracked in
 - Phase 7 (cursor blink + selection): COMPLETE
 - Phase 8 (keyboard navigation): COMPLETE
 - Phase 9 (scroll + viewport): COMPLETE
-- Phase 10 (visual chrome): IN PROGRESS (10.3 cursor remaining)
+- Phase 10 (visual chrome): COMPLETE
 - Phase 11 (content-type typography): NOT STARTED
 - Phase 12 (PNG decoder): NOT STARTED
 - Phase 13 (filesystem + virtio-9p): NOT STARTED
