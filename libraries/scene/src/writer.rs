@@ -2,8 +2,8 @@
 
 use crate::{
     node::{
-        Node, NodeId, SceneHeader, DATA_BUFFER_SIZE, DATA_OFFSET, DIRTY_BITMAP_WORDS, MAX_NODES,
-        NODES_OFFSET, NULL, SCENE_SIZE,
+        DATA_BUFFER_SIZE, DATA_OFFSET, DIRTY_BITMAP_WORDS, MAX_NODES, NODES_OFFSET, NULL, Node,
+        NodeId, SCENE_SIZE, SceneHeader,
     },
     primitives::{Content, DataRef, ShapedGlyph},
 };
@@ -317,6 +317,19 @@ impl<'a> SceneWriter<'a> {
     /// Push an array of `ShapedGlyph` structs into the data buffer.
     /// Aligns the write offset to `align_of::<ShapedGlyph>()` first.
     /// Returns a `DataRef` covering the glyph data.
+    pub fn write_shaped_glyphs_at(&mut self, data_ref: DataRef, glyphs: &[ShapedGlyph]) {
+        let bytes = unsafe {
+            core::slice::from_raw_parts(
+                glyphs.as_ptr() as *const u8,
+                glyphs.len() * core::mem::size_of::<ShapedGlyph>(),
+            )
+        };
+        let start = DATA_OFFSET + data_ref.offset as usize;
+        let end = start + bytes.len().min(data_ref.length as usize);
+
+        self.buf[start..end].copy_from_slice(&bytes[..end - start]);
+    }
+
     pub fn push_shaped_glyphs(&mut self, glyphs: &[ShapedGlyph]) -> DataRef {
         // Align data_used to ShapedGlyph alignment (2 bytes for i16/u16).
         let align = core::mem::align_of::<ShapedGlyph>();

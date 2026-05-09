@@ -181,6 +181,9 @@ struct Presenter {
     scroll_y: i32,
     sticky_col: Option<u32>,
 
+    clock_node_id: scene::NodeId,
+    clock_glyph_ref: scene::DataRef,
+
     render_ep: Handle,
     editor_ep: Handle,
 
@@ -458,6 +461,9 @@ impl Presenter {
             n.role = scene::ROLE_LABEL;
 
             scene.add_child(root, clock_node);
+
+            self.clock_node_id = clock_node;
+            self.clock_glyph_ref = clock_glyph_ref;
         }
 
         // Content area — below title bar, clips children.
@@ -632,6 +638,59 @@ impl Presenter {
         self.last_cursor_line = cursor_line;
         self.last_cursor_col = cursor_col;
         self.last_content_len = content_len as u32;
+    }
+
+    fn update_clock(&mut self) {
+        if self.clock_node_id == scene::NULL {
+            return;
+        }
+
+        let clock_secs = {
+            let rtc = read_rtc_seconds(self.rtc_va);
+
+            if rtc > 0 {
+                rtc % 86400
+            } else {
+                let ns = abi::system::clock_read().unwrap_or(0);
+
+                (ns / 1_000_000_000) % 86400
+            }
+        };
+        let hours = (clock_secs / 3600) % 24;
+        let minutes = (clock_secs / 60) % 60;
+        let seconds = clock_secs % 60;
+        let clock_chars: [u8; 8] = [
+            b'0' + (hours / 10) as u8,
+            b'0' + (hours % 10) as u8,
+            b':',
+            b'0' + (minutes / 10) as u8,
+            b'0' + (minutes % 10) as u8,
+            b':',
+            b'0' + (seconds / 10) as u8,
+            b'0' + (seconds % 10) as u8,
+        ];
+        let char_advance = (self.char_width * 65536.0) as i32;
+
+        for (j, &byte) in clock_chars.iter().enumerate() {
+            let gid = if byte < 128 {
+                self.cmap[byte as usize]
+            } else {
+                0
+            };
+
+            self.glyphs[j] = ShapedGlyph {
+                glyph_id: gid,
+                _pad: 0,
+                x_advance: char_advance,
+                x_offset: 0,
+                y_offset: 0,
+            };
+        }
+
+        let mut scene = SceneWriter::from_existing(self.scene_buf);
+
+        scene.write_shaped_glyphs_at(self.clock_glyph_ref, &self.glyphs[..8]);
+        scene.commit();
     }
 
     // ── Navigation ─────────────────────────────────────────────
@@ -1174,6 +1233,11 @@ extern "C" fn _start() -> ! {
         last_content_len: 0,
         scroll_y: 0,
         sticky_col: None,
+        clock_node_id: scene::NULL,
+        clock_glyph_ref: scene::DataRef {
+            offset: 0,
+            length: 0,
+        },
         render_ep,
         editor_ep,
         rtc_va,
@@ -1197,7 +1261,7 @@ extern "C" fn _start() -> ! {
         match ipc::server::serve_one_timed(own_ep, &mut server, deadline) {
             Ok(()) => {}
             Err(abi::types::SyscallError::TimedOut) => {
-                server.build_scene();
+                server.update_clock();
                 server.request_render();
             }
             Err(_) => break,
