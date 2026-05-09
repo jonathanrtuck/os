@@ -18,6 +18,7 @@ extern crate alloc;
 extern crate heap;
 
 mod atlas;
+mod path;
 
 use core::panic::PanicInfo;
 
@@ -325,6 +326,7 @@ impl DrawList {
 
     fn push_rect(&mut self, px: f32, py: f32, pw: f32, ph: f32, color: scene::Color) {
         self.ensure_pipe(Pipe::Solid);
+
         push_quad(
             &mut self.verts,
             self.display_w,
@@ -351,6 +353,7 @@ impl DrawList {
         uv1: [f32; 2],
     ) {
         self.ensure_pipe(Pipe::Glyph);
+
         push_quad(
             &mut self.verts,
             self.display_w,
@@ -388,19 +391,16 @@ impl DrawList {
         let sh = ph - 2.0 * spread;
         let sigma = blur_radius / 2.0;
         let pad = 3.0 * sigma;
-
         let qx = sx - pad;
         let qy = sy - pad;
         let qw = sw + 2.0 * pad;
         let qh = sh + 2.0 * pad;
-
         let px_sx = sx * scale;
         let px_sy = sy * scale;
         let px_sw = sw * scale;
         let px_sh = sh * scale;
         let px_sigma = sigma * scale;
         let px_cr = corner_radius * scale;
-
         let params = pack_shadow_params(
             px_sx,
             px_sy,
@@ -413,7 +413,6 @@ impl DrawList {
             px_sigma,
             px_cr,
         );
-
         let start = self.verts.len();
 
         push_quad(
@@ -477,7 +476,6 @@ fn setup_pipeline(
 ) {
     // SAFETY: setup_dma.va is a valid DMA allocation of buf_size bytes.
     let dma_buf = unsafe { core::slice::from_raw_parts_mut(setup_dma.va as *mut u8, buf_size) };
-
     // Batch 1: compile shaders, get functions.
     let len = {
         let mut w = CommandWriter::new(dma_buf);
@@ -535,7 +533,6 @@ fn setup_pipeline(
             1,
             render::PIXEL_FORMAT_BGRA8_SRGB,
         );
-
         w.create_texture(
             TEX_ATLAS,
             ATLAS_WIDTH,
@@ -720,43 +717,72 @@ fn walk_node(
         draws.push_rect(x, y, w, h, bg);
     }
 
-    if let Content::Glyphs {
-        color,
-        glyphs,
-        glyph_count,
-        font_size,
-        style_id,
-    } = node.content
-    {
-        let glyph_data = reader.shaped_glyphs(glyphs, glyph_count);
-        let ascent_pt = ctx.ascent_fu as f32 * font_size as f32 / ctx.upem as f32;
-        let baseline_y = y + ascent_pt;
-        let inv_scale = 1.0 / ctx.scale as f32;
-        let raster_size = font_size.saturating_mul(ctx.scale as u16);
-        let mut gx = x;
+    match node.content {
+        Content::Glyphs {
+            color,
+            glyphs,
+            glyph_count,
+            font_size,
+            style_id,
+        } => {
+            let glyph_data = reader.shaped_glyphs(glyphs, glyph_count);
+            let ascent_pt = ctx.ascent_fu as f32 * font_size as f32 / ctx.upem as f32;
+            let baseline_y = y + ascent_pt;
+            let inv_scale = 1.0 / ctx.scale as f32;
+            let raster_size = font_size.saturating_mul(ctx.scale as u16);
+            let mut gx = x;
 
-        for glyph in glyph_data {
-            let advance = glyph.x_advance as f32 / 65536.0;
+            for glyph in glyph_data {
+                let advance = glyph.x_advance as f32 / 65536.0;
 
-            if glyph.glyph_id > 0 {
-                let entry = lookup_or_rasterize(ctx, glyph.glyph_id, raster_size, style_id);
+                if glyph.glyph_id > 0 {
+                    let entry = lookup_or_rasterize(ctx, glyph.glyph_id, raster_size, style_id);
 
-                if let Some(e) = entry.filter(|e| e.width > 0 && e.height > 0) {
-                    let px = gx + e.bearing_x as f32 * inv_scale;
-                    let py = baseline_y - e.bearing_y as f32 * inv_scale;
-                    let pw = e.width as f32 * inv_scale;
-                    let ph = e.height as f32 * inv_scale;
-                    let u0 = e.u as f32 / ATLAS_W_F;
-                    let v0 = e.v as f32 / ATLAS_H_F;
-                    let u1 = (e.u + e.width) as f32 / ATLAS_W_F;
-                    let v1 = (e.v + e.height) as f32 / ATLAS_H_F;
+                    if let Some(e) = entry.filter(|e| e.width > 0 && e.height > 0) {
+                        let px = gx + e.bearing_x as f32 * inv_scale;
+                        let py = baseline_y - e.bearing_y as f32 * inv_scale;
+                        let pw = e.width as f32 * inv_scale;
+                        let ph = e.height as f32 * inv_scale;
+                        let u0 = e.u as f32 / ATLAS_W_F;
+                        let v0 = e.v as f32 / ATLAS_H_F;
+                        let u1 = (e.u + e.width) as f32 / ATLAS_W_F;
+                        let v1 = (e.v + e.height) as f32 / ATLAS_H_F;
 
-                    draws.push_glyph_quad(px, py, pw, ph, color, [u0, v0], [u1, v1]);
+                        draws.push_glyph_quad(px, py, pw, ph, color, [u0, v0], [u1, v1]);
+                    }
                 }
-            }
 
-            gx += advance;
+                gx += advance;
+            }
         }
+        Content::Path {
+            color,
+            stroke_color,
+            fill_rule,
+            stroke_width,
+            contours,
+        } => {
+            let path_data = reader.data(contours);
+
+            if !path_data.is_empty() {
+                render_path_node(
+                    path_data,
+                    x,
+                    y,
+                    w,
+                    h,
+                    color,
+                    stroke_color,
+                    fill_rule,
+                    stroke_width,
+                    node.content_hash,
+                    effective_opacity,
+                    draws,
+                    ctx,
+                );
+            }
+        }
+        _ => {}
     }
 
     let child_x = x + node.child_offset_x;
@@ -797,7 +823,6 @@ fn lookup_or_rasterize(
         width: 100,
         height: 100,
     };
-
     let metrics = fonts::rasterize::rasterize(
         FONT_DATA,
         glyph_id,
@@ -852,6 +877,162 @@ fn lookup_or_rasterize(
     }
 }
 
+const PATH_STYLE_SENTINEL: u32 = 0x8000_0000;
+
+#[allow(clippy::too_many_arguments)]
+fn render_path_node(
+    path_data: &[u8],
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    fill_color: scene::Color,
+    stroke_color: scene::Color,
+    fill_rule: scene::FillRule,
+    stroke_width: u16,
+    content_hash: u32,
+    opacity: u8,
+    draws: &mut DrawList,
+    ctx: &mut WalkContext,
+) {
+    let scale = ctx.scale as f32;
+    let inv_scale = 1.0 / scale;
+    let pw = (w * scale) as u32;
+    let ph = (h * scale) as u32;
+
+    if pw == 0 || ph == 0 || pw > 512 || ph > 512 {
+        return;
+    }
+
+    let cache_key_size = pw as u16;
+    let cache_key_hash = content_hash | PATH_STYLE_SENTINEL;
+
+    if fill_color.a > 0 {
+        let entry = lookup_or_rasterize_path(
+            ctx,
+            path_data,
+            pw,
+            ph,
+            scale,
+            fill_rule,
+            None,
+            cache_key_size,
+            cache_key_hash,
+        );
+
+        if let Some(e) = entry.filter(|e| e.width > 0 && e.height > 0) {
+            let mut c = fill_color;
+
+            c.a = ((c.a as u16 * opacity as u16) / 255) as u8;
+
+            let u0 = e.u as f32 / ATLAS_W_F;
+            let v0 = e.v as f32 / ATLAS_H_F;
+            let u1 = (e.u + e.width) as f32 / ATLAS_W_F;
+            let v1 = (e.v + e.height) as f32 / ATLAS_H_F;
+
+            draws.push_glyph_quad(
+                x,
+                y,
+                e.width as f32 * inv_scale,
+                e.height as f32 * inv_scale,
+                c,
+                [u0, v0],
+                [u1, v1],
+            );
+        }
+    }
+
+    if stroke_width > 0 && stroke_color.a > 0 {
+        let sw_pt = stroke_width as f32 / 256.0;
+        let stroke_expanded = scene::stroke::expand_stroke(path_data, sw_pt);
+
+        if !stroke_expanded.is_empty() {
+            let stroke_hash = content_hash.wrapping_add(0x1234) | PATH_STYLE_SENTINEL;
+            let entry = lookup_or_rasterize_path(
+                ctx,
+                path_data,
+                pw,
+                ph,
+                scale,
+                scene::FillRule::Winding,
+                Some(&stroke_expanded),
+                cache_key_size,
+                stroke_hash,
+            );
+
+            if let Some(e) = entry.filter(|e| e.width > 0 && e.height > 0) {
+                let mut c = stroke_color;
+
+                c.a = ((c.a as u16 * opacity as u16) / 255) as u8;
+
+                let u0 = e.u as f32 / ATLAS_W_F;
+                let v0 = e.v as f32 / ATLAS_H_F;
+                let u1 = (e.u + e.width) as f32 / ATLAS_W_F;
+                let v1 = (e.v + e.height) as f32 / ATLAS_H_F;
+
+                draws.push_glyph_quad(
+                    x,
+                    y,
+                    e.width as f32 * inv_scale,
+                    e.height as f32 * inv_scale,
+                    c,
+                    [u0, v0],
+                    [u1, v1],
+                );
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lookup_or_rasterize_path(
+    ctx: &mut WalkContext,
+    path_data: &[u8],
+    pw: u32,
+    ph: u32,
+    scale: f32,
+    fill_rule: scene::FillRule,
+    stroke_data: Option<&[u8]>,
+    cache_size: u16,
+    cache_hash: u32,
+) -> Option<atlas::AtlasEntry> {
+    if let Some(entry) = ctx.atlas.lookup(1, cache_size, cache_hash) {
+        return Some(*entry);
+    }
+
+    let coverage = path::rasterize_path(path_data, pw, ph, scale, fill_rule, stroke_data);
+
+    if coverage.is_empty() {
+        ctx.atlas.insert(
+            1,
+            cache_size,
+            cache_hash,
+            atlas::AtlasEntry {
+                u: 0,
+                v: 0,
+                width: 0,
+                height: 0,
+                bearing_x: 0,
+                bearing_y: 0,
+            },
+        );
+
+        return None;
+    }
+
+    let ok = ctx.atlas.pack(
+        1, cache_size, cache_hash, pw as u16, ph as u16, 0, 0, &coverage,
+    );
+
+    if ok {
+        ctx.atlas_dirty = true;
+
+        ctx.atlas.lookup(1, cache_size, cache_hash).copied()
+    } else {
+        None
+    }
+}
+
 // ── Compositor ──────────────────────────────────────────────────────
 
 struct Compositor {
@@ -901,12 +1082,10 @@ impl Compositor {
         let dma_buf = unsafe {
             core::slice::from_raw_parts_mut(self.setup_dma.va as *mut u8, self.setup_buf_size)
         };
-
         let row_bytes = atlas::ATLAS_WIDTH as usize;
         let cmd_overhead = render::HEADER_SIZE + 16;
         let max_data_per_submit = self.setup_buf_size - cmd_overhead;
         let max_rows_per_submit = max_data_per_submit / row_bytes;
-
         let mut y = start_y;
 
         while y < max_y {
@@ -914,7 +1093,6 @@ impl Compositor {
             let src_offset = y as usize * row_bytes;
             let pixel_count = rows as usize * row_bytes;
             let pixel_data = &atlas.pixels[src_offset..src_offset + pixel_count];
-
             let len = {
                 let mut w = CommandWriter::new(dma_buf);
 
@@ -983,6 +1161,7 @@ impl Compositor {
         );
 
         draws.finalize();
+
         self.upload_atlas_dirty();
 
         let clear_r = bg.r as f32 / 255.0;
@@ -1032,7 +1211,6 @@ impl Compositor {
                 let op = &draws.ops[op_idx];
                 let is_last = op_idx == draws.ops.len() - 1;
                 let verts = &draws.verts[op.vert_offset..op.vert_offset + op.vert_bytes];
-
                 // SAFETY: render_dma.va is a valid DMA allocation of render_buf_size bytes.
                 let dma_buf = unsafe {
                     core::slice::from_raw_parts_mut(
