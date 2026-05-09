@@ -340,10 +340,13 @@ impl<'a> CommandWriter<'a> {
 pub mod batch {
     use super::*;
 
-    pub const MAX_VERTEX_BYTES_PER_DRAW: usize = 4096;
     pub const VERTEX_SIZE: usize = 32;
+    const VERTICES_PER_QUAD: usize = 6;
+    const QUAD_SIZE: usize = VERTEX_SIZE * VERTICES_PER_QUAD;
+    const QUADS_PER_DRAW: usize = 4096 / QUAD_SIZE;
+    pub const MAX_VERTEX_BYTES_PER_DRAW: usize = QUADS_PER_DRAW * QUAD_SIZE;
 
-    // Per-draw cost: set_vertex_bytes header (16) + max data (4096) + draw (20).
+    // Per-draw cost: set_vertex_bytes header (16) + max data + draw (20).
     const DRAW_COST: usize = 16 + MAX_VERTEX_BYTES_PER_DRAW + 20;
     // Per-submission framing: begin_render_pass(40) + set_pipeline(12) + end(8) + present(12).
     const FRAMING: usize = 40 + 12 + 8 + 12;
@@ -789,6 +792,57 @@ mod tests {
             };
 
             count_draws_and_check_limits(&buf, written);
+        }
+    }
+
+    #[test]
+    fn max_vertex_bytes_aligned_to_quads() {
+        assert_eq!(
+            batch::MAX_VERTEX_BYTES_PER_DRAW % (batch::VERTEX_SIZE * 6),
+            0,
+            "chunk size must be a multiple of quad size (6 vertices × 32 bytes)"
+        );
+        assert!(batch::MAX_VERTEX_BYTES_PER_DRAW <= 4096);
+        assert!(batch::MAX_VERTEX_BYTES_PER_DRAW > 0);
+    }
+
+    #[test]
+    fn emit_draws_chunks_aligned_to_quads() {
+        let quad_size = batch::VERTEX_SIZE * 6;
+
+        for glyph_count in [22, 43, 100] {
+            let verts = vec![0u8; quad_size * glyph_count];
+            let mut buf = vec![0u8; 1024 * 1024];
+            let written = {
+                let mut w = CommandWriter::new(&mut buf);
+
+                batch::emit_draws(&mut w, &verts);
+
+                w.len()
+            };
+            let mut offset = 0;
+
+            while offset + HEADER_SIZE <= written {
+                let method = u16::from_le_bytes(buf[offset..offset + 2].try_into().unwrap());
+                let payload =
+                    u32::from_le_bytes(buf[offset + 4..offset + 8].try_into().unwrap()) as usize;
+
+                if method == CMD_SET_VERTEX_BYTES && payload >= 8 {
+                    let data_len = u32::from_le_bytes(
+                        buf[offset + HEADER_SIZE + 4..offset + HEADER_SIZE + 8]
+                            .try_into()
+                            .unwrap(),
+                    ) as usize;
+
+                    assert_eq!(
+                        data_len % quad_size,
+                        0,
+                        "chunk of {data_len} bytes not aligned to quad size ({quad_size}) for {glyph_count} glyphs"
+                    );
+                }
+
+                offset += HEADER_SIZE + payload;
+            }
         }
     }
 
