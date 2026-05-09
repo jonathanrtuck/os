@@ -188,6 +188,7 @@ dependencies = [
  "fonts",
  "heap",
  "ipc",
+ "layout",
  "layout-service",
  "name",
  "render",

@@ -26,7 +26,30 @@ Kernel rewrite in progress. See `STATUS.md` for details.
 
 Previous prototype (v0.1-v0.6) preserved at tag `v0.6-pre-rewrite`.
 
-## target
+## prerequisites
 
-ARM64 (Apple Silicon M4 Pro), running under a custom hypervisor
-(`~/Sites/hypervisor`).
+- **Rust nightly** with `aarch64-unknown-none` target (handled automatically by
+  `rust-toolchain.toml` — just [install Rust](https://rustup.rs/))
+- **[hypervisor](https://github.com/jonathanrtuck/hypervisor)** (`make install`
+  from that repo) — native Metal GPU rendering on macOS
+
+## test
+
+```sh
+cargo t
+```
+
+## build
+
+```sh
+cargo b
+```
+
+## run
+
+```sh
+cargo r
+```
+
+This builds the kernel and launches it in the hypervisor with Metal GPU
+rendering. Close the window or Cmd+Q to exit.
