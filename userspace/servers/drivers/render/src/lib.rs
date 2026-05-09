@@ -330,11 +330,73 @@ impl<'a> CommandWriter<'a> {
     }
 }
 
+// ── Vertex batching ───────────────────────────────────────────────
+//
+// Metal's setVertexBytes has a 4 KiB limit. Vertex data must be split
+// into chunks, each submitted as a separate set_vertex_bytes + draw
+// pair. Multiple draws are packed into a single DMA submission when
+// possible (one virtio round-trip).
+
+pub mod batch {
+    use super::*;
+
+    pub const MAX_VERTEX_BYTES_PER_DRAW: usize = 4096;
+    pub const VERTEX_SIZE: usize = 32;
+
+    // Per-draw cost: set_vertex_bytes header (16) + max data (4096) + draw (20).
+    const DRAW_COST: usize = 16 + MAX_VERTEX_BYTES_PER_DRAW + 20;
+    // Per-submission framing: begin_render_pass(40) + set_pipeline(12) + end(8) + present(12).
+    const FRAMING: usize = 40 + 12 + 8 + 12;
+    // Extra framing for glyph draws: set_pipeline(12) + set_fragment_texture(16) + set_fragment_sampler(16).
+    const GLYPH_SETUP: usize = 12 + 16 + 16;
+
+    pub fn emit_draws(w: &mut CommandWriter, verts: &[u8]) {
+        let mut offset = 0;
+
+        while offset < verts.len() {
+            let end = (offset + MAX_VERTEX_BYTES_PER_DRAW).min(verts.len());
+            let chunk = &verts[offset..end];
+            let vc = (chunk.len() / VERTEX_SIZE) as u32;
+
+            w.set_vertex_bytes(0, chunk);
+            w.draw_primitives(PRIM_TRIANGLE, 0, vc);
+
+            offset = end;
+        }
+    }
+
+    pub fn draws_needed(vert_bytes: usize) -> usize {
+        if vert_bytes == 0 {
+            0
+        } else {
+            vert_bytes.div_ceil(MAX_VERTEX_BYTES_PER_DRAW)
+        }
+    }
+
+    pub fn fits_single_submission(
+        solid_bytes: usize,
+        glyph_bytes: usize,
+        dma_buf_size: usize,
+    ) -> bool {
+        let sd = draws_needed(solid_bytes);
+        let gd = draws_needed(glyph_bytes);
+        let glyph_extra = if gd > 0 { GLYPH_SETUP } else { 0 };
+
+        FRAMING + glyph_extra + (sd + gd) * DRAW_COST <= dma_buf_size
+    }
+
+    pub fn max_draws_per_submission(dma_buf_size: usize) -> usize {
+        (dma_buf_size - FRAMING - GLYPH_SETUP) / DRAW_COST
+    }
+}
+
 // ── Compositor IPC protocol ────────────────────────────────────────
 //
 // Sync call/reply between the presenter and the render driver (compositor).
 // The Metal command protocol above is between the compositor and the GPU.
+// Gated behind the baremetal feature because it depends on ipc → abi (inline asm).
 
+#[cfg(feature = "baremetal")]
 pub mod comp {
     pub use ipc::MAX_PAYLOAD;
 
@@ -444,7 +506,12 @@ pub mod comp {
 }
 
 #[cfg(test)]
+extern crate alloc;
+
+#[cfg(test)]
 mod tests {
+    use alloc::vec;
+
     use super::*;
 
     #[test]
@@ -619,5 +686,212 @@ mod tests {
                 assert_ne!(render[i], render[j], "duplicate render cmd");
             }
         }
+    }
+
+    // ── Vertex batching tests ──────────────────────────────────────
+
+    const DMA_BUF_SIZE: usize = 65536;
+
+    #[test]
+    fn emit_draws_empty() {
+        let mut buf = [0u8; 256];
+        let mut w = CommandWriter::new(&mut buf);
+
+        batch::emit_draws(&mut w, &[]);
+
+        assert_eq!(w.len(), 0);
+        assert!(!w.has_overflow());
+    }
+
+    #[test]
+    fn emit_draws_single_quad() {
+        let verts = [0u8; batch::VERTEX_SIZE * 6];
+        let mut buf = [0u8; 512];
+        let mut w = CommandWriter::new(&mut buf);
+
+        batch::emit_draws(&mut w, &verts);
+
+        assert!(!w.has_overflow());
+        assert_eq!(
+            u16::from_le_bytes(buf[0..2].try_into().unwrap()),
+            CMD_SET_VERTEX_BYTES
+        );
+    }
+
+    fn count_draws_and_check_limits(buf: &[u8], written: usize) -> usize {
+        let mut draw_count = 0;
+        let mut offset = 0;
+
+        while offset + HEADER_SIZE <= written {
+            let method = u16::from_le_bytes(buf[offset..offset + 2].try_into().unwrap());
+            let payload =
+                u32::from_le_bytes(buf[offset + 4..offset + 8].try_into().unwrap()) as usize;
+
+            if method == CMD_SET_VERTEX_BYTES && payload >= 8 {
+                let data_len = u32::from_le_bytes(
+                    buf[offset + HEADER_SIZE + 4..offset + HEADER_SIZE + 8]
+                        .try_into()
+                        .unwrap(),
+                ) as usize;
+
+                assert!(
+                    data_len <= batch::MAX_VERTEX_BYTES_PER_DRAW,
+                    "set_vertex_bytes({data_len}) exceeds 4KB limit"
+                );
+            }
+
+            if method == CMD_DRAW_PRIMITIVES {
+                draw_count += 1;
+            }
+
+            offset += HEADER_SIZE + payload;
+        }
+
+        draw_count
+    }
+
+    #[test]
+    fn emit_draws_splits_at_4kb() {
+        let glyphs = 30;
+        let verts = vec![0u8; batch::VERTEX_SIZE * 6 * glyphs];
+
+        assert!(verts.len() > batch::MAX_VERTEX_BYTES_PER_DRAW);
+
+        let expected = verts.len().div_ceil(batch::MAX_VERTEX_BYTES_PER_DRAW);
+        let mut buf = [0u8; 65536];
+        let written = {
+            let mut w = CommandWriter::new(&mut buf);
+
+            batch::emit_draws(&mut w, &verts);
+
+            assert!(!w.has_overflow());
+
+            w.len()
+        };
+        let actual = count_draws_and_check_limits(&buf, written);
+
+        assert_eq!(actual, expected, "wrong number of draw calls");
+    }
+
+    #[test]
+    fn emit_draws_each_chunk_respects_4kb_limit() {
+        for glyph_count in [1, 21, 22, 50, 100, 200, 500] {
+            let verts = vec![0u8; batch::VERTEX_SIZE * 6 * glyph_count];
+            let mut buf = vec![0u8; 1024 * 1024];
+            let written = {
+                let mut w = CommandWriter::new(&mut buf);
+
+                batch::emit_draws(&mut w, &verts);
+
+                assert!(!w.has_overflow(), "overflow with {glyph_count} glyphs");
+
+                w.len()
+            };
+
+            count_draws_and_check_limits(&buf, written);
+        }
+    }
+
+    #[test]
+    fn fits_single_submission_small_content() {
+        let solid = batch::VERTEX_SIZE * 6 * 2;
+        let glyph = batch::VERTEX_SIZE * 6 * 10;
+
+        assert!(batch::fits_single_submission(solid, glyph, DMA_BUF_SIZE));
+    }
+
+    #[test]
+    fn fits_single_submission_rejects_overflow() {
+        let glyph = batch::VERTEX_SIZE * 6 * 500;
+
+        assert!(
+            !batch::fits_single_submission(0, glyph, DMA_BUF_SIZE),
+            "500 glyphs should not fit in 64KB single submission"
+        );
+    }
+
+    #[test]
+    fn fits_single_submission_boundary() {
+        let max_draws = batch::max_draws_per_submission(DMA_BUF_SIZE);
+        let max_bytes = max_draws * batch::MAX_VERTEX_BYTES_PER_DRAW;
+
+        assert!(batch::fits_single_submission(0, max_bytes, DMA_BUF_SIZE));
+        assert!(!batch::fits_single_submission(
+            0,
+            max_bytes + batch::MAX_VERTEX_BYTES_PER_DRAW,
+            DMA_BUF_SIZE,
+        ));
+    }
+
+    #[test]
+    fn draws_needed_matches_emit_draws() {
+        for n in [0, 1, 21, 22, 100, 500] {
+            let verts = vec![0u8; batch::VERTEX_SIZE * 6 * n];
+            let expected = batch::draws_needed(verts.len());
+            let mut buf = vec![0u8; 1024 * 1024];
+            let written = {
+                let mut w = CommandWriter::new(&mut buf);
+
+                batch::emit_draws(&mut w, &verts);
+
+                w.len()
+            };
+            let actual = count_draws_and_check_limits(&buf, written);
+
+            assert_eq!(expected, actual, "draws_needed mismatch for {n} glyphs");
+        }
+    }
+
+    #[test]
+    fn full_frame_no_overflow_at_crash_boundary() {
+        let glyph_count = 400;
+        let glyph_bytes = batch::VERTEX_SIZE * 6 * glyph_count;
+        let solid_bytes = batch::VERTEX_SIZE * 6 * 2;
+
+        assert!(
+            glyph_bytes > DMA_BUF_SIZE,
+            "test must exceed old single-buffer limit"
+        );
+
+        let sd = batch::draws_needed(solid_bytes);
+        let gd = batch::draws_needed(glyph_bytes);
+        let total_draws = sd + gd;
+
+        assert!(total_draws > 0, "must have draws");
+
+        let mut buf = vec![0u8; 1024 * 1024];
+        let mut w = CommandWriter::new(&mut buf);
+
+        w.begin_render_pass(
+            DRAWABLE_HANDLE,
+            0,
+            0,
+            LOAD_CLEAR,
+            STORE_STORE,
+            0,
+            0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+        );
+        w.set_render_pipeline(10);
+
+        let solid = vec![0u8; solid_bytes];
+
+        batch::emit_draws(&mut w, &solid);
+
+        w.set_render_pipeline(11);
+        w.set_fragment_texture(20, 0);
+        w.set_fragment_sampler(30, 0);
+
+        let glyphs = vec![0u8; glyph_bytes];
+
+        batch::emit_draws(&mut w, &glyphs);
+
+        w.end_render_pass();
+        w.present_and_commit(0);
+
+        assert!(!w.has_overflow());
     }
 }

@@ -676,27 +676,6 @@ impl Compositor {
         self.walk_ctx.atlas_dirty = false;
     }
 
-    // Metal's setVertexBytes limit is 4096 bytes. Each draw call gets
-    // at most this many bytes of vertex data. Multiple draws are packed
-    // into a single DMA submission (single render pass, one virtio
-    // round-trip) for performance.
-    const MAX_VERTEX_BYTES_PER_DRAW: usize = 4096;
-
-    fn emit_draws(w: &mut CommandWriter, verts: &[u8]) {
-        let mut offset = 0;
-
-        while offset < verts.len() {
-            let end = (offset + Self::MAX_VERTEX_BYTES_PER_DRAW).min(verts.len());
-            let chunk = &verts[offset..end];
-            let vc = (chunk.len() / VERTEX_SIZE) as u32;
-
-            w.set_vertex_bytes(0, chunk);
-            w.draw_primitives(render::PRIM_TRIANGLE, 0, vc);
-
-            offset = end;
-        }
-    }
-
     fn render_frame(&mut self) -> u64 {
         if self.scene_va == 0 {
             return 0;
@@ -734,25 +713,11 @@ impl Compositor {
 
         self.upload_atlas_dirty();
 
-        // Per-draw overhead: set_vertex_bytes header (16) + draw (20) = 36.
-        // Per-submission framing: begin_render_pass (40) + set_pipeline (12)
-        //   + end_render_pass (8) + present (12) = 72.
-        // Glyph framing adds set_fragment_texture (16) + set_fragment_sampler (16).
-        let draw_cost = 16 + Self::MAX_VERTEX_BYTES_PER_DRAW + 20;
-        let solid_draws = frame
-            .solid_verts
-            .len()
-            .div_ceil(Self::MAX_VERTEX_BYTES_PER_DRAW);
-        let glyph_draws = frame
-            .glyph_verts
-            .len()
-            .div_ceil(Self::MAX_VERTEX_BYTES_PER_DRAW);
-        // Check if everything fits in a single DMA submission.
-        let framing = 40 + 12 + 8 + 12;
-        let glyph_setup = if glyph_draws > 0 { 12 + 16 + 16 } else { 0 };
-        let total_cmd_size = framing + glyph_setup + (solid_draws + glyph_draws) * draw_cost;
-
-        if total_cmd_size <= self.render_buf_size {
+        if render::batch::fits_single_submission(
+            frame.solid_verts.len(),
+            frame.glyph_verts.len(),
+            self.render_buf_size,
+        ) {
             // Fast path: single submission, one virtio round-trip.
             // SAFETY: render_dma.va is a valid DMA allocation of render_buf_size bytes.
             let dma_buf = unsafe {
@@ -778,7 +743,7 @@ impl Compositor {
                 if !frame.solid_verts.is_empty() {
                     w.set_render_pipeline(PIPE_SOLID);
 
-                    Self::emit_draws(&mut w, &frame.solid_verts);
+                    render::batch::emit_draws(&mut w, &frame.solid_verts);
                 }
 
                 if !frame.glyph_verts.is_empty() {
@@ -786,7 +751,7 @@ impl Compositor {
                     w.set_fragment_texture(TEX_ATLAS, 0);
                     w.set_fragment_sampler(SAMPLER_NEAREST, 0);
 
-                    Self::emit_draws(&mut w, &frame.glyph_verts);
+                    render::batch::emit_draws(&mut w, &frame.glyph_verts);
                 }
 
                 w.end_render_pass();
@@ -806,13 +771,15 @@ impl Compositor {
         } else {
             // Slow path: split across multiple submissions.
             // Each submission is a complete render pass.
-            let max_draws_per_submit = (self.render_buf_size - framing - 32) / draw_cost;
+            let max_draws_per_submit =
+                render::batch::max_draws_per_submission(self.render_buf_size);
             let mut first = true;
             // Solid draws.
             let mut offset = 0;
 
             while offset < frame.solid_verts.len() {
-                let batch_end = (offset + max_draws_per_submit * Self::MAX_VERTEX_BYTES_PER_DRAW)
+                let batch_end = (offset
+                    + max_draws_per_submit * render::batch::MAX_VERTEX_BYTES_PER_DRAW)
                     .min(frame.solid_verts.len());
                 let chunk = &frame.solid_verts[offset..batch_end];
                 let load = if first {
@@ -845,7 +812,7 @@ impl Compositor {
                     );
                     w.set_render_pipeline(PIPE_SOLID);
 
-                    Self::emit_draws(&mut w, chunk);
+                    render::batch::emit_draws(&mut w, chunk);
 
                     w.end_render_pass();
 
@@ -873,7 +840,8 @@ impl Compositor {
             offset = 0;
 
             while offset < frame.glyph_verts.len() {
-                let batch_end = (offset + max_draws_per_submit * Self::MAX_VERTEX_BYTES_PER_DRAW)
+                let batch_end = (offset
+                    + max_draws_per_submit * render::batch::MAX_VERTEX_BYTES_PER_DRAW)
                     .min(frame.glyph_verts.len());
                 let chunk = &frame.glyph_verts[offset..batch_end];
                 let load = if first {
@@ -908,7 +876,7 @@ impl Compositor {
                     w.set_fragment_texture(TEX_ATLAS, 0);
                     w.set_fragment_sampler(SAMPLER_NEAREST, 0);
 
-                    Self::emit_draws(&mut w, chunk);
+                    render::batch::emit_draws(&mut w, chunk);
 
                     w.end_render_pass();
 

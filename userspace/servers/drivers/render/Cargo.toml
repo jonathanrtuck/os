@@ -4,16 +4,20 @@ version = "0.1.0"
 edition = "2024"
 license = "Unlicense"
 
+[features]
+default = ["baremetal"]
+baremetal = ["dep:abi", "dep:console", "dep:heap", "dep:init", "dep:ipc", "dep:name", "dep:virtio"]
+
 [dependencies]
-abi = { path = "../../../abi" }
+abi = { path = "../../../abi", optional = true }
 animation = { path = "../../../../libraries/animation" }
-console = { path = "../../console" }
+console = { path = "../../console", optional = true }
 fonts = { path = "../../../../libraries/fonts" }
-heap = { path = "../../../heap" }
-init = { path = "../../init" }
-ipc = { path = "../../../ipc" }
-name = { path = "../../name" }
+heap = { path = "../../../heap", optional = true }
+init = { path = "../../init", optional = true }
+ipc = { path = "../../../ipc", optional = true }
+name = { path = "../../name", optional = true }
 scene = { path = "../../../../libraries/scene" }
-virtio = { path = "../../../virtio" }
+virtio = { path = "../../../virtio", optional = true }
 
 [workspace]
