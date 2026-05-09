@@ -243,9 +243,11 @@ fn submit_and_wait(
     device.notify(queue_index);
 
     let _ = abi::event::wait(&[(irq_event, 0x1)]);
-    let _ = abi::event::clear(irq_event, 0x1);
 
     device.ack_interrupt();
+
+    let _ = abi::event::clear(irq_event, 0x1);
+
     vq.pop_used();
 }
 

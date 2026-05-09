@@ -92,9 +92,11 @@ impl BlkDevice {
         self.device.notify(VIRTQ_REQUEST);
 
         let _ = abi::event::wait(&[(self.irq_event, 0x1)]);
-        let _ = abi::event::clear(self.irq_event, 0x1);
 
         self.device.ack_interrupt();
+
+        let _ = abi::event::clear(self.irq_event, 0x1);
+
         self.vq.pop_used();
 
         // SAFETY: status_offset is within the DMA buffer; device has written the status byte.

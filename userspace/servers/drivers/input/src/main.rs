@@ -233,10 +233,10 @@ extern "C" fn _start() -> ! {
 
     loop {
         let _ = abi::event::wait(&[(irq_event, 0x1)]);
-        let _ = abi::event::clear(irq_event, 0x1);
 
         device.ack_interrupt();
 
+        let _ = abi::event::clear(irq_event, 0x1);
         let mut repost_count = 0u32;
 
         while let Some(used) = vq.pop_used() {
