@@ -113,7 +113,7 @@ ok=true
 assert /tmp/os-p9-para.png ocr_contains "quick brown fox" || ok=false
 assert /tmp/os-p9-para.png ocr_contains "boxing wizards" || ok=false
 assert /tmp/os-p9-para.png ocr_contains "second paragraph" || ok=false
-assert /tmp/os-p9-para.png region_variance 440,60,200,20,5 || ok=false
+assert /tmp/os-p9-para.png region_variance 450,78,400,20,5 || ok=false
 end_test $ok "phase9: paragraphs"
 
 # ── 4. Phase 9: scroll + viewport clipping ───────────────────────
