@@ -58,7 +58,10 @@ pub const TEX_USAGE_SHADER_READ: u8 = 0x01;
 
 // ── Load/store actions ──────────────────────────────────────────────
 
+pub const LOAD_DONT_CARE: u8 = 0;
+pub const LOAD_LOAD: u8 = 1;
 pub const LOAD_CLEAR: u8 = 2;
+pub const STORE_DONT_CARE: u8 = 0;
 pub const STORE_STORE: u8 = 1;
 
 // ── Primitive types ─────────────────────────────────────────────────

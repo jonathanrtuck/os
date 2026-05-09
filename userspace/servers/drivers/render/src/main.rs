@@ -219,14 +219,6 @@ impl FrameBuilder {
             },
         ]
     }
-
-    fn solid_count(&self) -> usize {
-        self.solid_verts.len() / VERTEX_SIZE
-    }
-
-    fn glyph_count(&self) -> usize {
-        self.glyph_verts.len() / VERTEX_SIZE
-    }
 }
 
 // ── Virtqueue submission ────────────────────────────────────────────
@@ -684,6 +676,27 @@ impl Compositor {
         self.walk_ctx.atlas_dirty = false;
     }
 
+    // Metal's setVertexBytes limit is 4096 bytes. Each draw call gets
+    // at most this many bytes of vertex data. Multiple draws are packed
+    // into a single DMA submission (single render pass, one virtio
+    // round-trip) for performance.
+    const MAX_VERTEX_BYTES_PER_DRAW: usize = 4096;
+
+    fn emit_draws(w: &mut CommandWriter, verts: &[u8]) {
+        let mut offset = 0;
+
+        while offset < verts.len() {
+            let end = (offset + Self::MAX_VERTEX_BYTES_PER_DRAW).min(verts.len());
+            let chunk = &verts[offset..end];
+            let vc = (chunk.len() / VERTEX_SIZE) as u32;
+
+            w.set_vertex_bytes(0, chunk);
+            w.draw_primitives(render::PRIM_TRIANGLE, 0, vc);
+
+            offset = end;
+        }
+    }
+
     fn render_frame(&mut self) -> u64 {
         if self.scene_va == 0 {
             return 0;
@@ -721,59 +734,244 @@ impl Compositor {
 
         self.upload_atlas_dirty();
 
-        // SAFETY: render_dma.va is a valid DMA allocation of render_buf_size bytes.
-        let dma_buf = unsafe {
-            core::slice::from_raw_parts_mut(self.render_dma.va as *mut u8, self.render_buf_size)
-        };
-        let len = {
-            let mut w = CommandWriter::new(dma_buf);
+        // Per-draw overhead: set_vertex_bytes header (16) + draw (20) = 36.
+        // Per-submission framing: begin_render_pass (40) + set_pipeline (12)
+        //   + end_render_pass (8) + present (12) = 72.
+        // Glyph framing adds set_fragment_texture (16) + set_fragment_sampler (16).
+        let draw_cost = 16 + Self::MAX_VERTEX_BYTES_PER_DRAW + 20;
+        let solid_draws = frame
+            .solid_verts
+            .len()
+            .div_ceil(Self::MAX_VERTEX_BYTES_PER_DRAW);
+        let glyph_draws = frame
+            .glyph_verts
+            .len()
+            .div_ceil(Self::MAX_VERTEX_BYTES_PER_DRAW);
+        // Check if everything fits in a single DMA submission.
+        let framing = 40 + 12 + 8 + 12;
+        let glyph_setup = if glyph_draws > 0 { 12 + 16 + 16 } else { 0 };
+        let total_cmd_size = framing + glyph_setup + (solid_draws + glyph_draws) * draw_cost;
 
-            w.begin_render_pass(
-                render::DRAWABLE_HANDLE,
-                0,
-                0,
-                render::LOAD_CLEAR,
-                render::STORE_STORE,
-                0,
-                0,
-                bg.r as f32 / 255.0,
-                bg.g as f32 / 255.0,
-                bg.b as f32 / 255.0,
-                1.0,
+        if total_cmd_size <= self.render_buf_size {
+            // Fast path: single submission, one virtio round-trip.
+            // SAFETY: render_dma.va is a valid DMA allocation of render_buf_size bytes.
+            let dma_buf = unsafe {
+                core::slice::from_raw_parts_mut(self.render_dma.va as *mut u8, self.render_buf_size)
+            };
+            let len = {
+                let mut w = CommandWriter::new(dma_buf);
+
+                w.begin_render_pass(
+                    render::DRAWABLE_HANDLE,
+                    0,
+                    0,
+                    render::LOAD_CLEAR,
+                    render::STORE_STORE,
+                    0,
+                    0,
+                    bg.r as f32 / 255.0,
+                    bg.g as f32 / 255.0,
+                    bg.b as f32 / 255.0,
+                    1.0,
+                );
+
+                if !frame.solid_verts.is_empty() {
+                    w.set_render_pipeline(PIPE_SOLID);
+
+                    Self::emit_draws(&mut w, &frame.solid_verts);
+                }
+
+                if !frame.glyph_verts.is_empty() {
+                    w.set_render_pipeline(PIPE_GLYPH);
+                    w.set_fragment_texture(TEX_ATLAS, 0);
+                    w.set_fragment_sampler(SAMPLER_NEAREST, 0);
+
+                    Self::emit_draws(&mut w, &frame.glyph_verts);
+                }
+
+                w.end_render_pass();
+                w.present_and_commit(self.frame_count);
+
+                w.len()
+            };
+
+            submit_and_wait(
+                &self.device,
+                &mut self.render_vq,
+                self.irq_event,
+                render::VIRTQ_RENDER,
+                self.render_dma.pa,
+                len,
             );
+        } else {
+            // Slow path: split across multiple submissions.
+            // Each submission is a complete render pass.
+            let max_draws_per_submit = (self.render_buf_size - framing - 32) / draw_cost;
+            let mut first = true;
+            // Solid draws.
+            let mut offset = 0;
 
-            let sc = frame.solid_count();
+            while offset < frame.solid_verts.len() {
+                let batch_end = (offset + max_draws_per_submit * Self::MAX_VERTEX_BYTES_PER_DRAW)
+                    .min(frame.solid_verts.len());
+                let chunk = &frame.solid_verts[offset..batch_end];
+                let load = if first {
+                    render::LOAD_CLEAR
+                } else {
+                    render::LOAD_LOAD
+                };
+                let is_last = batch_end >= frame.solid_verts.len() && frame.glyph_verts.is_empty();
+                let dma_buf = unsafe {
+                    core::slice::from_raw_parts_mut(
+                        self.render_dma.va as *mut u8,
+                        self.render_buf_size,
+                    )
+                };
+                let len = {
+                    let mut w = CommandWriter::new(dma_buf);
 
-            if sc > 0 {
-                w.set_render_pipeline(PIPE_SOLID);
-                w.set_vertex_bytes(0, &frame.solid_verts);
-                w.draw_primitives(render::PRIM_TRIANGLE, 0, sc as u32);
+                    w.begin_render_pass(
+                        render::DRAWABLE_HANDLE,
+                        0,
+                        0,
+                        load,
+                        render::STORE_STORE,
+                        0,
+                        0,
+                        bg.r as f32 / 255.0,
+                        bg.g as f32 / 255.0,
+                        bg.b as f32 / 255.0,
+                        1.0,
+                    );
+                    w.set_render_pipeline(PIPE_SOLID);
+
+                    Self::emit_draws(&mut w, chunk);
+
+                    w.end_render_pass();
+
+                    if is_last {
+                        w.present_and_commit(self.frame_count);
+                    }
+
+                    w.len()
+                };
+
+                submit_and_wait(
+                    &self.device,
+                    &mut self.render_vq,
+                    self.irq_event,
+                    render::VIRTQ_RENDER,
+                    self.render_dma.pa,
+                    len,
+                );
+
+                first = false;
+                offset = batch_end;
             }
 
-            let gc = frame.glyph_count();
+            // Glyph draws.
+            offset = 0;
 
-            if gc > 0 {
-                w.set_render_pipeline(PIPE_GLYPH);
-                w.set_fragment_texture(TEX_ATLAS, 0);
-                w.set_fragment_sampler(SAMPLER_NEAREST, 0);
-                w.set_vertex_bytes(0, &frame.glyph_verts);
-                w.draw_primitives(render::PRIM_TRIANGLE, 0, gc as u32);
+            while offset < frame.glyph_verts.len() {
+                let batch_end = (offset + max_draws_per_submit * Self::MAX_VERTEX_BYTES_PER_DRAW)
+                    .min(frame.glyph_verts.len());
+                let chunk = &frame.glyph_verts[offset..batch_end];
+                let load = if first {
+                    render::LOAD_CLEAR
+                } else {
+                    render::LOAD_LOAD
+                };
+                let is_last = batch_end >= frame.glyph_verts.len();
+                let dma_buf = unsafe {
+                    core::slice::from_raw_parts_mut(
+                        self.render_dma.va as *mut u8,
+                        self.render_buf_size,
+                    )
+                };
+                let len = {
+                    let mut w = CommandWriter::new(dma_buf);
+
+                    w.begin_render_pass(
+                        render::DRAWABLE_HANDLE,
+                        0,
+                        0,
+                        load,
+                        render::STORE_STORE,
+                        0,
+                        0,
+                        bg.r as f32 / 255.0,
+                        bg.g as f32 / 255.0,
+                        bg.b as f32 / 255.0,
+                        1.0,
+                    );
+                    w.set_render_pipeline(PIPE_GLYPH);
+                    w.set_fragment_texture(TEX_ATLAS, 0);
+                    w.set_fragment_sampler(SAMPLER_NEAREST, 0);
+
+                    Self::emit_draws(&mut w, chunk);
+
+                    w.end_render_pass();
+
+                    if is_last {
+                        w.present_and_commit(self.frame_count);
+                    }
+
+                    w.len()
+                };
+
+                submit_and_wait(
+                    &self.device,
+                    &mut self.render_vq,
+                    self.irq_event,
+                    render::VIRTQ_RENDER,
+                    self.render_dma.pa,
+                    len,
+                );
+
+                first = false;
+                offset = batch_end;
             }
 
-            w.end_render_pass();
-            w.present_and_commit(self.frame_count);
+            // Empty frame — still need to present.
+            if first {
+                let dma_buf = unsafe {
+                    core::slice::from_raw_parts_mut(
+                        self.render_dma.va as *mut u8,
+                        self.render_buf_size,
+                    )
+                };
+                let len = {
+                    let mut w = CommandWriter::new(dma_buf);
 
-            w.len()
-        };
+                    w.begin_render_pass(
+                        render::DRAWABLE_HANDLE,
+                        0,
+                        0,
+                        render::LOAD_CLEAR,
+                        render::STORE_STORE,
+                        0,
+                        0,
+                        bg.r as f32 / 255.0,
+                        bg.g as f32 / 255.0,
+                        bg.b as f32 / 255.0,
+                        1.0,
+                    );
+                    w.end_render_pass();
+                    w.present_and_commit(self.frame_count);
 
-        submit_and_wait(
-            &self.device,
-            &mut self.render_vq,
-            self.irq_event,
-            render::VIRTQ_RENDER,
-            self.render_dma.pa,
-            len,
-        );
+                    w.len()
+                };
+
+                submit_and_wait(
+                    &self.device,
+                    &mut self.render_vq,
+                    self.irq_event,
+                    render::VIRTQ_RENDER,
+                    self.render_dma.pa,
+                    len,
+                );
+            }
+        }
 
         self.frame_count += 1;
 
