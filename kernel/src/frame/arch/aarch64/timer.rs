@@ -100,6 +100,7 @@ pub fn insert_deadline(core_id: usize, thread_id: crate::types::ThreadId, deadli
         if q[i].load(Ordering::Relaxed) == u32::MAX {
             t[i].store(deadline_tick, Ordering::Relaxed);
             q[i].store(thread_id.0, Ordering::Release);
+
             rearm_earliest(core_id);
 
             return;
@@ -137,6 +138,7 @@ pub fn drain_expired(core_id: usize) -> [Option<crate::types::ThreadId>; MAX_DEA
 
         if tid != u32::MAX && t[i].load(Ordering::Relaxed) <= current {
             q[i].store(u32::MAX, Ordering::Release);
+
             result[count] = Some(crate::types::ThreadId(tid));
             count += 1;
         }
