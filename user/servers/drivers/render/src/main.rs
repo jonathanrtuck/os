@@ -1094,8 +1094,8 @@ fn offset_path(src: &[u8], dx: f32, dy: f32) -> alloc::vec::Vec<u8> {
     out
 }
 
-fn rasterize_cursor(scale: u32) -> (alloc::vec::Vec<u8>, u16, i16, i16) {
-    let icon = icons::get("pointer", None);
+fn rasterize_cursor_icon(icon_name: &str, scale: u32) -> (alloc::vec::Vec<u8>, u16, i16, i16) {
+    let icon = icons::get(icon_name, None);
     let viewbox = icon.viewbox;
     let stroke_w = icon.stroke_width;
     let px_scale = CURSOR_DISPLAY_PT * scale as f32 / viewbox;
@@ -1201,8 +1201,12 @@ fn rasterize_cursor(scale: u32) -> (alloc::vec::Vec<u8>, u16, i16, i16) {
         bgra[i * 4 + 3] = out_a as u8;
     }
 
-    let hotspot_x = ((4.0 + margin_vb) * px_scale) as i16;
-    let hotspot_y = ((4.0 + margin_vb) * px_scale) as i16;
+    let (hx_vb, hy_vb) = match icon_name {
+        "cursor-text" => (12.0_f32, 12.0_f32),
+        _ => (4.0_f32, 4.0_f32),
+    };
+    let hotspot_x = ((hx_vb + margin_vb) * px_scale) as i16;
+    let hotspot_y = ((hy_vb + margin_vb) * px_scale) as i16;
 
     (bgra, tex_sz as u16, hotspot_x, hotspot_y)
 }
@@ -1290,6 +1294,7 @@ struct Compositor {
 
     cursor_uploaded: bool,
     cursor_visible: bool,
+    cursor_shape: u8,
 }
 
 impl Compositor {
@@ -1361,12 +1366,20 @@ impl Compositor {
         self.walk_ctx.atlas_dirty = false;
     }
 
+    fn cursor_icon_name(&self) -> &'static str {
+        match self.cursor_shape {
+            scene::CURSOR_TEXT => "cursor-text",
+            _ => "pointer",
+        }
+    }
+
     fn upload_cursor(&mut self) {
         if self.cursor_uploaded {
             return;
         }
 
-        let (bgra, sz, hotspot_x, hotspot_y) = rasterize_cursor(self.scale);
+        let (bgra, sz, hotspot_x, hotspot_y) =
+            rasterize_cursor_icon(self.cursor_icon_name(), self.scale);
 
         if bgra.is_empty() {
             return;
@@ -1644,6 +1657,19 @@ impl Dispatch for Compositor {
 
                 let _ = msg.reply_empty();
             }
+            render::comp::SET_CURSOR_SHAPE => {
+                if !msg.payload.is_empty() {
+                    let shape = msg.payload[0];
+
+                    if shape != self.cursor_shape {
+                        self.cursor_shape = shape;
+                        self.cursor_uploaded = false;
+                        self.upload_cursor();
+                    }
+                }
+
+                let _ = msg.reply_empty();
+            }
             _ => {
                 let _ = msg.reply_error(ipc::STATUS_UNSUPPORTED);
             }
@@ -1815,6 +1841,7 @@ extern "C" fn _start() -> ! {
         atlas_upload_y: 0,
         cursor_uploaded: false,
         cursor_visible: false,
+        cursor_shape: scene::CURSOR_POINTER,
     };
     let mut next_deadline: u64 = 0;
 

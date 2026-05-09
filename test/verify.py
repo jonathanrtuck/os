@@ -341,14 +341,22 @@ def assert_selection_in_region(img: Image.Image, args: str, tolerance: int) -> b
     x, y, w, h = (int(p) for p in parts)
     bg_r, bg_g, bg_b = img.getpixel((img.width // 2, img.height // 2))[:3]
 
-    # Selection color should have noticeably more blue than background.
+    # Selection color should have noticeably more blue than red/green.
+    # On dark bg: blue is brighter than bg. On white bg (255,255,255):
+    # selection is a blue tint that's slightly darker, e.g. (228,233,253).
     sel_count = 0
     for py in range(y, min(y + h, img.height)):
         for px_x in range(x, min(x + w, img.width)):
             r, g, b = img.getpixel((px_x, py))[:3]
-            # Selection pixels: bluer than background.
-            if b > bg_b + 15 and b > r + 5:
-                sel_count += 1
+            if bg_b > 240:
+                # White background: selection pixels are tinted blue
+                # (blue stays high, red/green drop).
+                if b > r + 3 and r < bg_r - 5 and g < bg_g - 5:
+                    sel_count += 1
+            else:
+                # Dark background: selection pixels are bluer than bg.
+                if b > bg_b + 15 and b > r + 5:
+                    sel_count += 1
 
     if sel_count > 0:
         print(f"PASS: found {sel_count} selection pixels in region ({x},{y},{w},{h})")

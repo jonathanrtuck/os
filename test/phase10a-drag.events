@@ -1,0 +1,12 @@
+# Phase 10a — drag selection test.
+# Type text, then drag across part of it.
+# Coordinates are physical framebuffer pixels (4112x2658 at scale=2).
+# Text starts at approx physical (1212, 152).
+# "hello world" chars are ~22px wide each (at scale=2, 10.8pt char width).
+0 text hello world
+# After all 11 chars render (frames 1-11), drag across "llo w" (chars 2-6).
+# Char 2 = 1212 + 2*22 = ~1256px. Char 7 = 1212 + 7*22 = ~1366px.
+13 drag 1260 170 1380 170
+# Drag = 12 frames (press + 10 steps + release). Capture at frame 26.
+26 capture /tmp/os-p10a-drag.png
+26 exit

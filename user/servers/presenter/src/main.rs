@@ -190,6 +190,18 @@ struct Presenter {
 
     rtc_va: usize,
 
+    pointer_x: f32,
+    pointer_y: f32,
+    cursor_shape_name: u8,
+
+    last_click_ms: u64,
+    last_click_x: u32,
+    last_click_y: u32,
+    click_count: u8,
+    dragging: bool,
+    drag_origin_start: usize,
+    drag_origin_end: usize,
+
     #[allow(dead_code)]
     console_ep: Handle,
 }
@@ -521,6 +533,7 @@ impl Presenter {
             n.flags = NodeFlags::VISIBLE.union(NodeFlags::CLIPS_CHILDREN);
             n.child_offset_y = -(self.scroll_y as f32);
             n.role = scene::ROLE_DOCUMENT;
+            n.cursor_shape = scene::CURSOR_TEXT;
         }
 
         scene.add_child(page, viewport);
@@ -976,6 +989,315 @@ impl Presenter {
         let _ = ipc::client::call_simple(self.render_ep, render::comp::RENDER, &[]);
     }
 
+    // ── Cursor shape resolution ──────────────────────────────────
+
+    fn resolve_cursor_shape(&self) -> u8 {
+        let scene = SceneWriter::from_existing(unsafe {
+            core::slice::from_raw_parts_mut(self.scene_buf.as_ptr() as *mut u8, SCENE_SIZE)
+        });
+        let node_count = scene.node_count() as usize;
+
+        if node_count == 0 {
+            return scene::CURSOR_POINTER;
+        }
+
+        let test_x = (self.pointer_x as i64) * (scene::MPT_PER_PT as i64);
+        let test_y = (self.pointer_y as i64) * (scene::MPT_PER_PT as i64);
+        let mut parent = [scene::NULL; 64];
+        let mut hit: scene::NodeId = scene::NULL;
+        let mut stack: [(scene::NodeId, i64, i64); 48] = [(scene::NULL, 0, 0); 48];
+        let mut sp: usize = 0;
+        let root = scene.node(0);
+
+        if root.flags.contains(NodeFlags::VISIBLE) {
+            stack[0] = (0, 0, 0);
+            sp = 1;
+        }
+
+        while sp > 0 {
+            sp -= 1;
+
+            let (id, ox, oy) = stack[sp];
+            let node = scene.node(id);
+            let abs_x = ox + node.x as i64;
+            let abs_y = oy + node.y as i64;
+            let inside = test_x >= abs_x
+                && test_x < abs_x + node.width as i64
+                && test_y >= abs_y
+                && test_y < abs_y + node.height as i64;
+
+            if inside {
+                hit = id;
+            }
+
+            if node.clips_children() && !inside {
+                continue;
+            }
+
+            let child_ox = abs_x - (node.child_offset_x * scene::MPT_PER_PT as f32) as i64;
+            let child_oy = abs_y - (node.child_offset_y * scene::MPT_PER_PT as f32) as i64;
+            let mut children: [scene::NodeId; 16] = [scene::NULL; 16];
+            let mut nc: usize = 0;
+            let mut c = node.first_child;
+
+            while c != scene::NULL && (c as usize) < node_count && nc < 16 {
+                children[nc] = c;
+                parent[c as usize & 63] = id;
+                nc += 1;
+                c = scene.node(c).next_sibling;
+            }
+
+            for i in (0..nc).rev() {
+                let cid = children[i];
+
+                if scene.node(cid).flags.contains(NodeFlags::VISIBLE) && sp < stack.len() {
+                    stack[sp] = (cid, child_ox, child_oy);
+                    sp += 1;
+                }
+            }
+        }
+
+        let mut cursor_node = hit;
+
+        while cursor_node != scene::NULL && (cursor_node as usize) < node_count {
+            let shape = scene.node(cursor_node).cursor_shape;
+
+            if shape != scene::CURSOR_INHERIT {
+                return shape;
+            }
+
+            cursor_node = parent[cursor_node as usize & 63];
+        }
+
+        scene::CURSOR_POINTER
+    }
+
+    fn update_cursor_shape(&mut self) {
+        let shape = self.resolve_cursor_shape();
+
+        if shape != self.cursor_shape_name {
+            self.cursor_shape_name = shape;
+
+            let payload = [shape];
+            let _ =
+                ipc::client::call_simple(self.render_ep, render::comp::SET_CURSOR_SHAPE, &payload);
+        }
+    }
+
+    // ── Pixel-to-byte hit testing ────────────────────────────────
+
+    fn text_origin(&self) -> (u32, u32) {
+        let title_bar_h = presenter_service::TITLE_BAR_H;
+        let page_margin = presenter_service::PAGE_MARGIN_V;
+        let page_padding = presenter_service::PAGE_PADDING;
+        let content_h = self.display_height.saturating_sub(title_bar_h);
+        let page_h = content_h.saturating_sub(2 * page_margin);
+        let page_w = ((page_h as u64 * 210 / 297) as u32)
+            .min(self.display_width.saturating_sub(2 * page_margin));
+        let page_x = (self.display_width - page_w) / 2;
+        let page_y_abs = title_bar_h + page_margin;
+
+        (page_x + page_padding, page_y_abs + page_padding)
+    }
+
+    fn xy_to_byte(&self, px: u32, py: u32, content_len: usize) -> usize {
+        let (text_x, text_y) = self.text_origin();
+        let rel_x = px.saturating_sub(text_x);
+        let rel_y = py.saturating_sub(text_y) as i32 + self.scroll_y;
+
+        if rel_y < 0 {
+            return 0;
+        }
+
+        let header = parse_layout_header(&self.results_buf);
+        let line_count = header.line_count as usize;
+
+        if line_count == 0 {
+            return 0;
+        }
+
+        let line_h = presenter_service::LINE_HEIGHT as i32;
+        let target_line = (rel_y / line_h) as usize;
+        let cw = self.char_width;
+        let target_col = if cw > 0.0 {
+            ((rel_x as f32 + cw * 0.5) / cw) as usize
+        } else {
+            0
+        };
+
+        if target_line >= line_count {
+            return content_len;
+        }
+
+        let line = parse_line_at(&self.results_buf, target_line);
+        let line_start = line.byte_offset as usize;
+        let line_len = line.byte_length as usize;
+        let pos = line_start + target_col.min(line_len);
+
+        pos.min(content_len)
+    }
+
+    // ── Pointer button handling ──────────────────────────────────
+
+    fn handle_pointer_button(&mut self, btn: presenter_service::PointerButton) {
+        if btn.button != 0 {
+            return;
+        }
+
+        if btn.pressed == 0 {
+            self.dragging = false;
+
+            return;
+        }
+
+        let click_x = (btn.abs_x as u64 * self.display_width as u64 / 32768) as u32;
+        let click_y = (btn.abs_y as u64 * self.display_height as u64 / 32768) as u32;
+
+        if click_y < presenter_service::TITLE_BAR_H {
+            return;
+        }
+
+        // SAFETY: doc_va is a valid RO mapping of the document buffer.
+        let (content_len, _cursor_pos, _sel_anchor, _) =
+            unsafe { document_service::read_doc_header(self.doc_va) };
+        let byte_pos = self.xy_to_byte(click_x, click_y, content_len);
+
+        let now_ns = abi::system::clock_read().unwrap_or(0);
+        let now_ms = now_ns / 1_000_000;
+
+        let dx = click_x.abs_diff(self.last_click_x);
+        let dy = click_y.abs_diff(self.last_click_y);
+        let dt = now_ms.saturating_sub(self.last_click_ms);
+        let same_spot = dx <= 4 && dy <= 4 && dt <= 400;
+
+        let click_count = if same_spot {
+            (self.click_count % 3) + 1
+        } else {
+            1
+        };
+
+        self.last_click_ms = now_ms;
+        self.last_click_x = click_x;
+        self.last_click_y = click_y;
+        self.click_count = click_count;
+
+        // SAFETY: doc_va is a valid RO mapping of the document buffer.
+        let content = unsafe { document_service::doc_content_slice(self.doc_va, content_len) };
+
+        match click_count {
+            2 => {
+                let at_word = byte_pos < content_len && !layout::is_whitespace(content[byte_pos]);
+                let back_pos = if at_word { byte_pos + 1 } else { byte_pos };
+                let lo = layout::word_boundary_backward(content, back_pos);
+                let mut hi = byte_pos;
+
+                while hi < content_len && !layout::is_whitespace(content[hi]) {
+                    hi += 1;
+                }
+
+                if hi > lo {
+                    self.doc_select(lo, hi);
+                } else {
+                    self.doc_cursor_move(byte_pos);
+                }
+            }
+            3 => {
+                let header = parse_layout_header(&self.results_buf);
+                let line_count = header.line_count as usize;
+                let (line_idx, _) = self.find_cursor_line(byte_pos, line_count);
+                let lo = self.line_start_byte(line_idx);
+                let mut hi = self.line_end_byte(line_idx);
+
+                if hi < content_len && content[hi] == b'\n' {
+                    hi += 1;
+                }
+
+                self.doc_select(lo, hi);
+            }
+            _ => {
+                self.doc_select(byte_pos, byte_pos);
+            }
+        }
+
+        self.dragging = true;
+        // SAFETY: re-read header after doc_select may have changed it.
+        let (_cl, cursor_pos, sel_anchor, _) =
+            unsafe { document_service::read_doc_header(self.doc_va) };
+        self.drag_origin_start = sel_anchor;
+        self.drag_origin_end = cursor_pos;
+        self.sticky_col = None;
+        self.blink_start = abi::system::clock_read().unwrap_or(0);
+        self.build_scene();
+        self.request_render();
+    }
+
+    fn handle_pointer_drag(&mut self, abs_x: u32, abs_y: u32) {
+        if !self.dragging {
+            return;
+        }
+
+        let drag_x = (abs_x as u64 * self.display_width as u64 / 32768) as u32;
+        let drag_y = (abs_y as u64 * self.display_height as u64 / 32768) as u32;
+
+        if drag_y < presenter_service::TITLE_BAR_H {
+            return;
+        }
+
+        // SAFETY: doc_va is a valid RO mapping.
+        let (content_len, _, _, _) = unsafe { document_service::read_doc_header(self.doc_va) };
+        let byte_pos = self.xy_to_byte(drag_x, drag_y, content_len);
+        let content = unsafe { document_service::doc_content_slice(self.doc_va, content_len) };
+
+        match self.click_count {
+            2 => {
+                if byte_pos < self.drag_origin_start {
+                    let lo = layout::word_boundary_backward(content, byte_pos);
+
+                    self.doc_select(self.drag_origin_end, lo);
+                } else if byte_pos >= self.drag_origin_end {
+                    let mut hi = byte_pos;
+
+                    while hi < content_len && !layout::is_whitespace(content[hi]) {
+                        hi += 1;
+                    }
+
+                    self.doc_select(self.drag_origin_start, hi);
+                } else {
+                    self.doc_select(self.drag_origin_start, self.drag_origin_end);
+                }
+            }
+            3 => {
+                let header = parse_layout_header(&self.results_buf);
+                let line_count = header.line_count as usize;
+
+                if byte_pos < self.drag_origin_start {
+                    let (line_idx, _) = self.find_cursor_line(byte_pos, line_count);
+                    let lo = self.line_start_byte(line_idx);
+
+                    self.doc_select(self.drag_origin_end, lo);
+                } else if byte_pos >= self.drag_origin_end {
+                    let (line_idx, _) = self.find_cursor_line(byte_pos, line_count);
+                    let mut hi = self.line_end_byte(line_idx);
+
+                    if hi < content_len && content[hi] == b'\n' {
+                        hi += 1;
+                    }
+
+                    self.doc_select(self.drag_origin_start, hi);
+                } else {
+                    self.doc_select(self.drag_origin_start, self.drag_origin_end);
+                }
+            }
+            _ => {
+                self.doc_select(self.drag_origin_start, byte_pos);
+            }
+        }
+
+        self.blink_start = abi::system::clock_read().unwrap_or(0);
+        self.build_scene();
+        self.request_render();
+    }
+
     fn make_info_reply(&self) -> presenter_service::InfoReply {
         let scene = SceneWriter::from_existing(unsafe {
             core::slice::from_raw_parts_mut(self.scene_buf.as_ptr() as *mut u8, SCENE_SIZE)
@@ -1060,6 +1382,10 @@ impl Dispatch for Presenter {
                     let event = presenter_service::PointerEvent::read_from(msg.payload);
                     let px = (event.abs_x as u64 * self.display_width as u64 / 32768) as f32;
                     let py = (event.abs_y as u64 * self.display_height as u64 / 32768) as f32;
+
+                    self.pointer_x = px;
+                    self.pointer_y = py;
+
                     let mut payload = [0u8; 8];
 
                     payload[0..4].copy_from_slice(&px.to_le_bytes());
@@ -1067,6 +1393,18 @@ impl Dispatch for Presenter {
 
                     let _ =
                         ipc::client::call_simple(self.render_ep, render::comp::POINTER, &payload);
+
+                    self.update_cursor_shape();
+                    self.handle_pointer_drag(event.abs_x, event.abs_y);
+                }
+
+                let _ = msg.reply_empty();
+            }
+            presenter_service::POINTER_BUTTON => {
+                if msg.payload.len() >= presenter_service::PointerButton::SIZE {
+                    let btn = presenter_service::PointerButton::read_from(msg.payload);
+
+                    self.handle_pointer_button(btn);
                 }
 
                 let _ = msg.reply_empty();
@@ -1254,6 +1592,16 @@ extern "C" fn _start() -> ! {
         render_ep,
         editor_ep,
         rtc_va,
+        pointer_x: 0.0,
+        pointer_y: 0.0,
+        cursor_shape_name: scene::CURSOR_POINTER,
+        last_click_ms: 0,
+        last_click_x: 0,
+        last_click_y: 0,
+        click_count: 0,
+        dragging: false,
+        drag_origin_start: 0,
+        drag_origin_end: 0,
         console_ep,
     };
 

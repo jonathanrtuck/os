@@ -172,6 +172,20 @@ fn forward_pointer(presenter_ep: Handle, abs_x: u32, abs_y: u32) {
     let _ = ipc::client::call_simple(presenter_ep, presenter_service::POINTER_EVENT, &payload);
 }
 
+fn forward_button(presenter_ep: Handle, abs_x: u32, abs_y: u32, button: u8, pressed: u8) {
+    let event = presenter_service::PointerButton {
+        abs_x,
+        abs_y,
+        button,
+        pressed,
+    };
+    let mut payload = [0u8; presenter_service::PointerButton::SIZE];
+
+    event.write_to(&mut payload);
+
+    let _ = ipc::client::call_simple(presenter_ep, presenter_service::POINTER_BUTTON, &payload);
+}
+
 // ── Entry point ─────────────────────────────────────────────────────
 
 #[unsafe(no_mangle)]
@@ -380,7 +394,15 @@ extern "C" fn _start() -> ! {
                 let pressed = event.value == 1;
 
                 if event.code == BTN_LEFT || event.code == BTN_RIGHT {
-                    // Pointer buttons — not forwarded yet.
+                    if presenter_ep.is_none() {
+                        presenter_ep = name::lookup(HANDLE_NS_EP, b"presenter").ok();
+                    }
+
+                    if let Some(ep) = presenter_ep {
+                        let btn_id = if event.code == BTN_LEFT { 0 } else { 1 };
+
+                        forward_button(ep, pointer_x, pointer_y, btn_id, pressed as u8);
+                    }
                 } else {
                     let mod_bit = modifier_bit(event.code);
 
@@ -465,6 +487,19 @@ extern "C" fn _start() -> ! {
                             pointer_dirty = true;
                         }
                         _ => {}
+                    }
+                } else if event.event_type == EV_KEY
+                    && (event.code == BTN_LEFT || event.code == BTN_RIGHT)
+                    && event.value <= 1
+                {
+                    if presenter_ep.is_none() {
+                        presenter_ep = name::lookup(HANDLE_NS_EP, b"presenter").ok();
+                    }
+
+                    if let Some(ep) = presenter_ep {
+                        let btn_id = if event.code == BTN_LEFT { 0 } else { 1 };
+
+                        forward_button(ep, pointer_x, pointer_y, btn_id, event.value as u8);
                     }
                 }
 

@@ -445,6 +445,32 @@ next rendering milestone.
    pixels to hypervisor hardware cursor layer (NSCursor). Position updates via
    CMD_SET_CURSOR_POSITION.
 
+### Phase 10a — Pointer Interaction (COMPLETE)
+
+1. **Cursor shape switching** — DONE. Scene graph hit test
+   (`resolve_cursor_shape`) depth-first walks nodes, inherits `cursor_shape` up
+   the ancestor chain. Viewport (text area) node annotated with `CURSOR_TEXT`.
+   Compositor re-rasterizes cursor icon on `SET_CURSOR_SHAPE` IPC — arrow for
+   `CURSOR_POINTER`, I-beam for `CURSOR_TEXT`.
+
+2. **Click-to-place cursor** — DONE. `POINTER_BUTTON` protocol message from
+   input driver (button press/release with absolute position). `xy_to_byte()`
+   converts pixel coordinates to document byte position via layout line info.
+   Single click places cursor and clears selection.
+
+3. **Double-click word selection** — DONE. Same-spot detection (4px radius,
+   400ms window), click counter cycles 1→2→3→1.
+   `word_boundary_backward`/forward for word edges. Excludes trailing whitespace.
+
+4. **Triple-click line selection** — DONE. Selects entire visual line from
+   layout results. Includes trailing newline.
+
+5. **Drag selection** — DONE. `dragging` flag set on button-down, cleared on
+   button-up. Pointer movement while dragging extends selection. Respects click
+   granularity: single-click drag = character, double-click drag = word-snapped,
+   triple-click drag = line-snapped. `drag_origin_start/end` stores original
+   anchor boundaries for snap calculations.
+
 ## What's Next: v0.6 Parity
 
 The userspace rebuild plan (`design/userspace-rebuild.md`) is complete through
@@ -459,9 +485,13 @@ work to reach full v0.6-pre-rewrite parity is tracked in
 - Phase 8 (keyboard navigation): COMPLETE
 - Phase 9 (scroll + viewport): COMPLETE
 - Phase 10 (visual chrome): COMPLETE
+- Phase 10a (pointer interaction — I-beam cursor, click/drag/multi-click):
+  COMPLETE
 - Phase 11 (content-type typography): NOT STARTED
 - Phase 12 (PNG decoder): NOT STARTED
 - Phase 13 (filesystem + virtio-9p): NOT STARTED
+- Phase 14 (document switching — Ctrl+Tab text↔image, slide animation): NOT
+  STARTED
 
 ## Session Resume
 

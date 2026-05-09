@@ -544,6 +544,9 @@ pub mod comp {
     /// Update pointer position. Payload: x: f32, y: f32 (logical points).
     pub const POINTER: u32 = 4;
 
+    /// Change cursor shape. Payload: icon name bytes (e.g. b"pointer", b"cursor-text").
+    pub const SET_CURSOR_SHAPE: u32 = 5;
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct SetupReply {
         pub display_width: u32,
@@ -626,9 +629,13 @@ pub mod comp {
 
         #[test]
         fn method_ids_distinct() {
-            assert_ne!(SETUP, RENDER);
-            assert_ne!(SETUP, GET_INFO);
-            assert_ne!(RENDER, GET_INFO);
+            let methods = [SETUP, RENDER, GET_INFO, POINTER, SET_CURSOR_SHAPE];
+
+            for i in 0..methods.len() {
+                for j in (i + 1)..methods.len() {
+                    assert_ne!(methods[i], methods[j]);
+                }
+            }
         }
 
         #[test]

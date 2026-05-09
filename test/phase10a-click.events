@@ -1,0 +1,13 @@
+# Phase 10a — pointer interaction test.
+# Coordinates are physical framebuffer pixels (4112x2658, scale=2).
+# Text starts at approx physical (1212, 152). Chars ~22px wide at scale.
+0 text hello world
+# Frame 12: click between "o" and " " in "hello world" (char 5 = 1212+5*22=1322).
+13 click 1322 170
+# Capture: cursor should be placed after "hello" (before space).
+15 capture /tmp/os-p10a-click.png
+# Double-click on "world" (char 6-10, roughly x=1344-1432). Click on "o" in world.
+17 dblclick 1400 170
+# Capture: "world" should be selected.
+20 capture /tmp/os-p10a-dblclick.png
+20 exit

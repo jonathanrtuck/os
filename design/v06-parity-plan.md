@@ -647,6 +647,329 @@ Port page geometry from `v0.6-pre-rewrite:services/presenter/scene/document.rs`
 
 ---
 
+## Phase 10a — Pointer Interaction
+
+Mouse-driven cursor placement, text selection, and cursor shape switching.
+Complements Phase 7 (keyboard selection) and Phase 10.3 (hardware cursor) with
+the pointer-based half of the interaction model.
+
+### What v0.6 had
+
+- `services/presenter/main.rs` — `resolve_cursor_shape()`: depth-first scene
+  graph hit test converting pixel coords to millipoints, finds topmost hit node,
+  walks ancestors for `cursor_shape` inheritance. Returns `"cursor-text"` over
+  text, `"pointer"` everywhere else. Re-evaluated on pointer move AND scene
+  content change (stationary pointer updates when content scrolls underneath).
+- `write_cursor_shape()` — writes icon path data + hotspot to CursorState shared
+  page, bumps `shape_generation` so the compositor re-rasterizes the cursor.
+  I-beam hotspot at (12, 12) center; arrow at (4, 4) tip.
+- `MSG_POINTER_BUTTON` — button press/release from input driver. Button 0 = left
+  click.
+- Click placement — `xy_to_byte()` hit test against layout results to convert
+  pixel position to document byte offset. Accounts for page position, padding,
+  and scroll offset.
+- Double-click — word selection. Same-spot detection (4px radius, 400ms window),
+  click counter cycles 1→2→3→1. Uses `word_boundary_backward/forward` to find
+  word edges. Excludes trailing whitespace from selection.
+- Triple-click — visual line selection via `visual_line_start/end`. Includes
+  trailing newline.
+- Drag selection — `dragging` flag set on button-down, cleared on button-up.
+  Pointer movement while dragging extends selection from anchor. Respects click
+  granularity: single-click drag = character, double-click drag = word-snapped,
+  triple-click drag = line-snapped. Stores `drag_origin_start/end` so snapping
+  uses the original anchor boundaries, matching macOS behavior.
+- `SelectionState` — `anchor: usize`, `last_click_ms: u64`,
+  `last_click_x/y: u32`, `click_count: u8`, `dragging: bool`,
+  `drag_origin_start/end: usize`.
+
+### What exists now
+
+- Hardware cursor renders arrow pointer, tracks movement (Phase 10.3)
+- Scene library has `cursor_shape: u8` on `Node` with `CURSOR_INHERIT` (0),
+  `CURSOR_POINTER` (1), `CURSOR_TEXT` (2) — but nothing reads these values
+- `CursorState` shared page + `write_cursor_shape` infrastructure in compositor
+- Keyboard selection with Shift+arrows and visual highlight (Phase 7)
+- Layout library has `word_boundary_backward/forward`, `byte_to_line_col`,
+  `line_col_to_byte` — but no `xy_to_byte` pixel hit test
+- No `MSG_POINTER_BUTTON` in the current protocol
+- Presenter has no pointer button handling
+
+### Implementation
+
+#### 10a.1 — Cursor shape switching (I-beam on text hover)
+
+**Scene graph annotation:** The presenter must set `cursor_shape = CURSOR_TEXT`
+on text content nodes (the viewport node or individual line nodes). All other
+nodes inherit or use `CURSOR_POINTER`.
+
+**Hit test function:** Port `resolve_cursor_shape()` from
+`v0.6-pre-rewrite:services/presenter/main.rs:474`. Depth-first walk with
+coordinate tracking, bounding box test, path winding-number fine phase, ancestor
+inheritance walk. Fixed-size parent map (64 entries) and stack (48 entries).
+
+**Integration:** On each frame where pointer position OR scene content changed,
+call `resolve_cursor_shape()`. Compare result (pointer identity) with
+`shape_name`. On change: call `write_cursor_shape()` with the new icon name. The
+compositor already re-rasterizes on `shape_generation` change.
+
+**I-beam icon:** The `cursor-text` icon (Tabler) is already in the v0.6 assets
+(`assets/icons/cursor-text.svg`). The icons library should already include it
+(it was ported in Phase 3). Verify it exists; if not, add the path data.
+
+**Hotspot:** Arrow = (4, 4) in 24×24 viewbox (tip). I-beam = (12, 12) (center of
+the beam). Port the hotspot lookup from `write_cursor_shape()`.
+
+**Verification:**
+
+- Move pointer over document text → cursor changes to I-beam
+- Move pointer off document (title bar, background) → cursor changes to arrow
+- Scroll content under stationary pointer → cursor shape updates
+- Screenshot: `cursor_shape_is x=<text_area> shape=cursor-text`
+
+#### 10a.2 — Pointer button protocol + click-to-place cursor
+
+**Protocol addition:** Add `MSG_POINTER_BUTTON` to the presenter service
+protocol. Payload: `PointerButton { button: u8, pressed: u8 }`. The input driver
+sends this on `EV_KEY` events with `BTN_LEFT` / `BTN_TOUCH` codes.
+
+**Input driver change:** The input driver already handles `EV_KEY` for keyboard
+events. Add button event detection: when `ev_type == EV_KEY` and code is
+`BTN_LEFT` (0x110) or `BTN_TOUCH` (0x14A), forward as `MSG_POINTER_BUTTON` to
+the presenter with the current pointer coordinates (already tracked).
+
+**Hit test function:** Add `xy_to_byte()` to the layout library (or the
+presenter). Given pixel coordinates relative to the text origin + scroll offset,
+compute the document byte position:
+
+- `line = (adjusted_y) / line_height`
+- `col = (rel_x) / char_width` (monospace; proportional uses per-glyph x
+  advances from layout results)
+- Clamp to valid byte range
+- Return byte offset
+
+Port from `v0.6-pre-rewrite:services/presenter/main.rs:1986-2002` (the
+`xy_to_byte` call site with page position calculations).
+
+**Click handler:** On `MSG_POINTER_BUTTON` with button 0 pressed:
+
+1. Compute click position relative to text origin (accounting for page position,
+   padding, scroll offset)
+2. Skip if click is in title bar or outside document area
+3. Call `xy_to_byte()` to get byte position
+4. Set `cursor.pos = byte_pos`, `selection.anchor = byte_pos`
+5. Clear any active selection
+6. Write document header (cursor position)
+7. Sync cursor to editor
+
+**Verification:**
+
+- Click on text → cursor moves to clicked position
+- Click at start/middle/end of line → cursor at correct byte offset
+- Click below text → cursor at end of document
+- Typing after click inserts at the clicked position
+
+#### 10a.3 — Double-click word selection + triple-click line selection
+
+**Click counter:** Track `last_click_ms`, `last_click_x`, `last_click_y`,
+`click_count` in the presenter's selection state. On each button-down:
+
+- If within 4px and 400ms of previous click: increment (`click_count % 3 + 1`)
+- Otherwise: reset to 1
+
+Port from `v0.6-pre-rewrite:services/presenter/main.rs:2026-2043`.
+
+**Double-click (click_count == 2):** Select word at click position.
+
+- `lo = word_boundary_backward(text, byte_pos + 1)` (adjust backward search if
+  at word start so it finds THIS word)
+- `hi = scan forward from byte_pos` while not whitespace (exclude trailing
+  whitespace — differs from `word_boundary_forward` which includes it for
+  navigation)
+- Set `anchor = lo`, `cursor.pos = hi`, `selection.active = hi > lo`
+
+Port from `v0.6-pre-rewrite:services/presenter/main.rs:2047-2067`.
+
+**Triple-click (click_count == 3):** Select entire visual line.
+
+- `lo = visual_line_start(text, byte_pos, cols)`
+- `hi = visual_line_end(text, byte_pos, cols)`
+- Include trailing newline if present
+- Set `anchor = lo`, `cursor.pos = hi`
+
+Port from `v0.6-pre-rewrite:services/presenter/main.rs:2068-2098`.
+
+**Visual line helpers:** The layout library may need `visual_line_start` and
+`visual_line_end` if they don't exist. These find the byte offset at the start
+and end of the visual line containing a given byte position, accounting for word
+wrap at `cols` columns.
+
+**Verification:**
+
+- Double-click on word → word highlighted
+- Double-click on whitespace → no selection (or single space)
+- Triple-click → entire visual line highlighted (including newline)
+- Click count cycles: 4th click = single click (reset)
+- Rapid clicks outside 4px radius → single click (no accumulation)
+- Type after word select → replaces selected word
+
+#### 10a.4 — Drag selection
+
+**Drag tracking:** On button-down (after click processing): set
+`dragging = true`, store `drag_origin_start = anchor`,
+`drag_origin_end = cursor.pos`.
+
+On button-up: set `dragging = false`.
+
+**Pointer-move while dragging:** On each pointer position change while
+`dragging` is true:
+
+1. Compute byte position at current pointer coordinates (same `xy_to_byte`)
+2. Extend selection based on `click_count`:
+   - **click_count == 1 (character drag):** `cursor.pos = byte_pos`, anchor
+     stays at original click position. Selection direction determined by whether
+     cursor is before or after anchor.
+   - **click_count == 2 (word drag):** Snap to word boundaries. If dragging
+     before origin word: `anchor = drag_origin_end`,
+     `cursor.pos = word_boundary_backward(byte_pos)`. If dragging after:
+     `anchor = drag_origin_start`, `cursor.pos = scan to word end`.
+   - **click_count == 3 (line drag):** Snap to line boundaries. Same pattern
+     with `visual_line_start/end`.
+
+Port from `v0.6-pre-rewrite:services/presenter/main.rs:2140-2200`.
+
+**Verification:**
+
+- Click and drag across text → characters highlighted
+- Release button → selection persists
+- Double-click-drag → selection extends in word increments
+- Triple-click-drag → selection extends in line increments
+- Drag direction reversal (drag back past anchor) → selection follows
+- Type after drag select → replaces selected text
+
+### Phase 10a done when
+
+- I-beam cursor appears when hovering document text, arrow elsewhere
+- Single click places cursor at correct byte position
+- Double-click selects word, triple-click selects line
+- Click-drag selects character/word/line ranges (matching click count)
+- All modifier interactions compose correctly (click-to-place cancels existing
+  keyboard selection)
+- Existing keyboard selection (Phase 7) still works
+- All existing tests pass
+
+---
+
+## Phase 14 — Document Switching
+
+Switching between document spaces (text ↔ image) with animated transitions.
+
+### What v0.6 had
+
+- `AnimationState.active_space: u8` — 0 = text, 1 = image. When
+  `active_space != 0`, all editor key events are suppressed.
+- `Ctrl+Tab` toggles between spaces. Spring-animated horizontal slide:
+  `slide_offset` in millipoints, driven by `animation::Spring`. Target =
+  `active_space * fb_width`. First-frame clamping to prevent dt spikes.
+- Two-space scene graph: space 0 (text document with page, chrome) and space 1
+  (image document). Root node uses `child_offset_x = -slide_offset` to pan
+  between them. Both spaces are always in the scene graph; the slide reveals
+  space 1 by offsetting left.
+- Image rendering: `Content::Image { content_id, src_width, src_height }` on a
+  scene node. Compositor uploads decoded RGBA pixels as a Metal texture (keyed
+  by `content_id`), renders as textured quad with aspect-preserving scale to fit
+  viewport.
+- `MSG_IMAGE_DECODED` from document/layout pipeline: notifies presenter of a
+  decoded image (content_id, width, height). Presenter stores in
+  `image_content_id`, `image_width`, `image_height`.
+- Image display: A4-proportioned shadow + centered image inside space 1's
+  content area. Scale-to-fit with aspect ratio preservation.
+
+### Dependencies
+
+- Phase 12 (PNG decoder) — decode image bytes to RGBA pixels
+- Phase 13 (filesystem) — load image files from host (or alternatively, embed a
+  test image for initial bring-up)
+- Compositor `PIPE_TEXTURED` pipeline — render RGBA texture quads (may already
+  be partially present from Phase 6 glyph atlas work, but needs extension for
+  full-resolution image textures)
+
+### Implementation
+
+#### 14.1 — Image texture rendering
+
+Add `Content::Image` support to the compositor:
+
+- On scene walk, when encountering an `Image` node: look up or create a Metal
+  texture from the decoded RGBA pixel buffer (keyed by `content_id`)
+- Upload pixels via `update_texture_region` (or `create_texture` + upload)
+- Render as textured quad using `PIPE_TEXTURED` (or create a dedicated image
+  pipeline if needed — linear filtering, no premultiplied alpha)
+- Aspect-preserving scale: fit image within node bounds
+
+The decoded pixel buffer needs to be accessible to the compositor. In v0.6 this
+was communicated via a VMO handle (from the PNG decoder). The compositor maps
+the VMO and uploads pixels to GPU. Protocol: `content_id` is the key; the
+compositor requests the pixel VMO from the presenter or a content cache on first
+encounter.
+
+**Verification:** Embed a small test image, render as `Content::Image` node.
+Screenshot: image visible with correct dimensions and colors.
+
+#### 14.2 — Two-space scene graph
+
+Extend the presenter's scene builder to create two spaces:
+
+- Space 0: existing text document (page + chrome + title bar)
+- Space 1: image document. Centered `Content::Image` node with shadow, title bar
+  updated to show image filename and mimetype icon
+
+Both spaces positioned side-by-side at `x=0` and `x=fb_width`. Root content node
+uses `child_offset_x` to slide between them.
+
+Add `active_space: u8` to presenter state. When `active_space != 0`, suppress
+all editor key dispatch.
+
+**Verification:** Hardcode `active_space = 1`, verify image space renders.
+Switch back to 0, verify text space renders. Both spaces exist in the scene
+graph simultaneously.
+
+#### 14.3 — Ctrl+Tab switching + slide animation
+
+**Key binding:** In the input handler, intercept `Ctrl+Tab`:
+
+- If an image is loaded (`image_content_id != 0`): toggle `active_space`
+- Set spring target to `active_space * fb_width` (in points)
+- Start slide animation (`slide_animating = true`, `slide_first_frame = true`)
+
+**Animation loop:** On each frame while `slide_animating`:
+
+- Step the spring with frame dt (clamp first frame to 16ms to prevent launch
+  spike)
+- Update `slide_offset` from spring position
+- Apply to root node's `child_offset_x`
+- When spring settles (velocity < threshold): stop animation
+
+Port spring slide from `v0.6-pre-rewrite:services/presenter/scene/full.rs:242`
+and `v0.6-pre-rewrite:services/presenter/input.rs:206-221`.
+
+**Verification:**
+
+- `Ctrl+Tab` with image loaded → smooth slide to image space
+- `Ctrl+Tab` again → slide back to text space
+- `Ctrl+Tab` without image → no-op
+- Typing in image space → no effect (keys suppressed)
+- Slide back to text → editing works normally
+
+### Phase 14 done when
+
+- Image renders as textured quad in its own space
+- `Ctrl+Tab` toggles between text and image with spring animation
+- Editor keys suppressed in image space
+- Slide animation is smooth (spring-based, no jitter)
+- All existing tests pass
+
+---
+
 ## Phase 11 — Content-Type Typography
 
 ### What v0.6 had
@@ -845,13 +1168,19 @@ All phases complete when:
 2. Actual glyph rendering (anti-aliased, proportional spacing)
 3. Cursor blinks with eased animation
 4. Text selection with Shift+arrows, visual highlight
-5. Full keyboard navigation (arrows, word/line, Home/End, Page Up/Down)
-6. Scrolling for long documents
-7. Title bar with clock, document margins
-8. PNG decoding works
-9. Host files loadable via 9p
-10. All existing tests pass (557 kernel + 1,045 library)
-11. Screenshot tests verify visual output
+5. Mouse click-to-place cursor, double-click word select, triple-click line
+   select, click-drag selection with granularity snapping
+6. I-beam cursor on text hover, arrow cursor elsewhere
+7. Full keyboard navigation (arrows, word/line, Home/End, Page Up/Down)
+8. Scrolling for long documents
+9. Title bar with clock, document margins
+10. Content-type typography (mono/serif/sans)
+11. PNG decoding works
+12. Host files loadable via 9p
+13. Ctrl+Tab document switching between text and image spaces with spring
+    animation
+14. All existing tests pass (557 kernel + 1,045 library)
+15. Screenshot tests verify visual output
 
 ## Session Resume Protocol
 
@@ -878,7 +1207,11 @@ After completing each phase, append a status line to `STATUS.md` under a new
 - Phase 6: [NOT STARTED | IN PROGRESS step N | COMPLETE]
 - Phase 7: ...
 - ...
+- Phase 10a: ...
+- Phase 11: ...
+- ...
 - Phase 13: ...
+- Phase 14: ...
 ```
 
 This is the primary state signal for session resumption.

@@ -35,6 +35,10 @@ pub const SCROLL_EVENT: u32 = 5;
 /// Presenter forwards to compositor for hardware cursor positioning.
 pub const POINTER_EVENT: u32 = 6;
 
+/// Pointer button press/release from input driver. Payload: PointerButton (12 bytes).
+/// Presenter handles click-to-place, double/triple-click, and drag selection.
+pub const POINTER_BUTTON: u32 = 7;
+
 // ── Visual constants ────────────────────────────────────────────
 
 pub const DEFAULT_WIDTH: u32 = 1440;
@@ -133,6 +137,39 @@ impl PointerEvent {
         Self {
             abs_x: u32::from_le_bytes(buf[0..4].try_into().unwrap()),
             abs_y: u32::from_le_bytes(buf[4..8].try_into().unwrap()),
+        }
+    }
+}
+
+// ── POINTER_BUTTON payload ──────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PointerButton {
+    pub abs_x: u32,
+    pub abs_y: u32,
+    pub button: u8,
+    pub pressed: u8,
+}
+
+impl PointerButton {
+    pub const SIZE: usize = 12;
+
+    pub fn write_to(&self, buf: &mut [u8]) {
+        buf[0..4].copy_from_slice(&self.abs_x.to_le_bytes());
+        buf[4..8].copy_from_slice(&self.abs_y.to_le_bytes());
+        buf[8] = self.button;
+        buf[9] = self.pressed;
+        buf[10] = 0;
+        buf[11] = 0;
+    }
+
+    #[must_use]
+    pub fn read_from(buf: &[u8]) -> Self {
+        Self {
+            abs_x: u32::from_le_bytes(buf[0..4].try_into().unwrap()),
+            abs_y: u32::from_le_bytes(buf[4..8].try_into().unwrap()),
+            button: buf[8],
+            pressed: buf[9],
         }
     }
 }
@@ -251,6 +288,21 @@ mod tests {
     }
 
     #[test]
+    fn pointer_button_round_trip() {
+        let btn = PointerButton {
+            abs_x: 16000,
+            abs_y: 12000,
+            button: 0,
+            pressed: 1,
+        };
+        let mut buf = [0u8; PointerButton::SIZE];
+
+        btn.write_to(&mut buf);
+
+        assert_eq!(PointerButton::read_from(&buf), btn);
+    }
+
+    #[test]
     fn method_ids_distinct() {
         let methods = [
             SETUP,
@@ -259,6 +311,7 @@ mod tests {
             KEY_EVENT,
             SCROLL_EVENT,
             POINTER_EVENT,
+            POINTER_BUTTON,
         ];
 
         for i in 0..methods.len() {
@@ -273,5 +326,6 @@ mod tests {
         assert!(SetupReply::SIZE <= MAX_PAYLOAD);
         assert!(InfoReply::SIZE <= MAX_PAYLOAD);
         assert!(ScrollEvent::SIZE <= MAX_PAYLOAD);
+        assert!(PointerButton::SIZE <= MAX_PAYLOAD);
     }
 }
