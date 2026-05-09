@@ -46,6 +46,12 @@ pub const CMD_SET_FRAGMENT_BYTES: u16 = 0x0123;
 pub const CMD_DRAW_PRIMITIVES: u16 = 0x0130;
 pub const CMD_PRESENT_AND_COMMIT: u16 = 0x0F00;
 
+// ── Blit commands (virtqueue 1) ────────────────────────────────────
+
+pub const CMD_BEGIN_BLIT_PASS: u16 = 0x0300;
+pub const CMD_END_BLIT_PASS: u16 = 0x0301;
+pub const CMD_COPY_TEXTURE_REGION: u16 = 0x0310;
+
 // ── Cursor commands ────────────────────────────────────────────────
 
 pub const CMD_SET_CURSOR_IMAGE: u16 = 0x0F10;
@@ -404,6 +410,36 @@ impl<'a> CommandWriter<'a> {
         self.put_u16(0);
         self.put_u32(data.len() as u32);
         self.put_bytes(data);
+    }
+
+    pub fn begin_blit_pass(&mut self) {
+        self.header(CMD_BEGIN_BLIT_PASS, 0);
+    }
+
+    pub fn end_blit_pass(&mut self) {
+        self.header(CMD_END_BLIT_PASS, 0);
+    }
+
+    pub fn copy_texture_region(
+        &mut self,
+        src: u32,
+        dst: u32,
+        sx: u16,
+        sy: u16,
+        sw: u16,
+        sh: u16,
+        dx: u16,
+        dy: u16,
+    ) {
+        self.header(CMD_COPY_TEXTURE_REGION, 20);
+        self.put_u32(src);
+        self.put_u32(dst);
+        self.put_u16(sx);
+        self.put_u16(sy);
+        self.put_u16(sw);
+        self.put_u16(sh);
+        self.put_u16(dx);
+        self.put_u16(dy);
     }
 
     pub fn set_scissor(&mut self, x: u32, y: u32, w: u32, h: u32) {

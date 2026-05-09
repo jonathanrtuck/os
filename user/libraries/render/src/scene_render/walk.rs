@@ -594,6 +594,7 @@ fn apply_backdrop_blur(
     nh: i32,
     blur_radius_pt: u8,
     scale: f32,
+    corner_radius: u32,
 ) {
     let blur_px = ((blur_radius_pt as f32 * scale) as u32).min(MAX_BACKDROP_BLUR_PX);
 
@@ -664,20 +665,55 @@ fn apply_backdrop_blur(
 
     drawing::box_blur_3pass(&src_read, &mut dst_surface, &mut tmp_buf, sigma);
 
-    // 3. Write back only the center (node) portion — padding is discarded.
+    // 3. Write back only pixels inside the rounded rect boundary.
     let pad_left = nx0 - cx0;
     let pad_top = ny0 - cy0;
+    let cr = corner_radius.min(node_w / 2).min(node_h / 2);
 
     for row in 0..node_h {
         let fb_offset = ((ny0 + row) * fb.stride + nx0 * 4) as usize;
         let dst_offset = ((pad_top + row) * cap_stride + pad_left * 4) as usize;
         let row_bytes = (node_w * 4) as usize;
 
-        if fb_offset + row_bytes <= fb.data.len() && dst_offset + row_bytes <= dst_buf.len() {
+        if fb_offset + row_bytes > fb.data.len() || dst_offset + row_bytes > dst_buf.len() {
+            continue;
+        }
+
+        if cr == 0 || (row >= cr && row < node_h - cr) {
             fb.data[fb_offset..fb_offset + row_bytes]
                 .copy_from_slice(&dst_buf[dst_offset..dst_offset + row_bytes]);
+        } else {
+            for col in 0..node_w {
+                if !inside_rounded_rect(col, row, node_w, node_h, cr) {
+                    continue;
+                }
+
+                let fb_px = fb_offset + (col * 4) as usize;
+                let dst_px = dst_offset + (col * 4) as usize;
+
+                fb.data[fb_px..fb_px + 4].copy_from_slice(&dst_buf[dst_px..dst_px + 4]);
+            }
         }
     }
+}
+
+#[inline]
+fn inside_rounded_rect(px: u32, py: u32, w: u32, h: u32, r: u32) -> bool {
+    let (cx, cy) = if px < r && py < r {
+        (r, r)
+    } else if px >= w - r && py < r {
+        (w - r, r)
+    } else if px < r && py >= h - r {
+        (r, h - r)
+    } else if px >= w - r && py >= h - r {
+        (w - r, h - r)
+    } else {
+        return true;
+    };
+    let dx = if px > cx { px - cx } else { cx - px };
+    let dy = if py > cy { py - cy } else { cy - py };
+
+    dx * dx + dy * dy <= r * r
 }
 
 /// Render a node's background, content, and children into a target surface.
@@ -731,7 +767,16 @@ fn render_node_content_translated(
     // Backdrop blur: blur the framebuffer region behind this node before
     // drawing the node's own background/content on top.
     if node.backdrop_blur_radius > 0 && nw > 0 && nh > 0 {
-        apply_backdrop_blur(fb, draw_x, draw_y, nw, nh, node.backdrop_blur_radius, s);
+        apply_backdrop_blur(
+            fb,
+            draw_x,
+            draw_y,
+            nw,
+            nh,
+            node.backdrop_blur_radius,
+            s,
+            phys_radius,
+        );
     }
 
     render_background(fb, node, draw_x, draw_y, nw, nh, phys_radius, &visible);

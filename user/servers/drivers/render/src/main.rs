@@ -269,6 +269,46 @@ fragment float4 fragment_gradient_masked(
     float alpha = mix(params.color0.a, params.color1.a, t) * coverage;
     return float4(mix(c0, c1, t), alpha);
 }
+
+struct BlurParams {
+    float2 step;
+    float2 rect_center;
+    float2 rect_half_ext;
+    float corner_radius;
+    float _pad;
+    float4 inv_xform;
+};
+
+fragment float4 fragment_blur(
+    VertexOut in [[stage_in]],
+    texture2d<float> tex [[texture(0)]],
+    sampler s [[sampler(0)]],
+    constant BlurParams& params [[buffer(0)]]
+) {
+    float2 uv = in.texCoord;
+    float2 step = params.step;
+    const float sigma = 2.0;
+    const float inv_2s2 = 1.0 / (2.0 * sigma * sigma);
+    float4 sum = tex.sample(s, uv);
+    float wsum = 1.0;
+    for (int i = 1; i <= 6; i++) {
+        float w = exp(-float(i*i) * inv_2s2);
+        float2 off = step * float(i);
+        sum += (tex.sample(s, uv + off) + tex.sample(s, uv - off)) * w;
+        wsum += 2.0 * w;
+    }
+    float4 blurred = sum / wsum;
+    if (params.corner_radius > 0.0) {
+        float2 d = in.position.xy - params.rect_center;
+        float2 local_d = float2(
+            d.x * params.inv_xform.x + d.y * params.inv_xform.z,
+            d.x * params.inv_xform.y + d.y * params.inv_xform.w
+        );
+        float dist = sd_rounded_rect(local_d, params.rect_half_ext, params.corner_radius);
+        if (dist > 0.5) discard_fragment();
+    }
+    return blurred;
+}
 ";
 
 const COLOR_WRITE_ALL: u8 = 0xF;
@@ -299,6 +339,9 @@ const TEX_ATLAS: u32 = 20;
 #[allow(dead_code)]
 const TEX_STENCIL: u32 = 21;
 const TEX_IMAGE: u32 = 22;
+const H_FRAG_BLUR: u32 = 18;
+const PIPE_BLUR: u32 = 19;
+const TEX_BLUR: u32 = 23;
 const SAMPLER_NEAREST: u32 = 30;
 const SAMPLER_LINEAR: u32 = 31;
 
@@ -453,6 +496,7 @@ enum Pipe {
     Textured,
     Gradient,
     GradientMasked,
+    BackdropBlur,
 }
 
 struct DrawOp {
@@ -894,6 +938,8 @@ fn setup_pipeline(
     irq_event: Handle,
     setup_dma: &init::DmaBuf,
     buf_size: usize,
+    phys_w: u16,
+    phys_h: u16,
 ) {
     // SAFETY: setup_dma.va is a valid DMA allocation of buf_size bytes.
     let dma_buf = unsafe { core::slice::from_raw_parts_mut(setup_dma.va as *mut u8, buf_size) };
@@ -914,6 +960,7 @@ fn setup_pipeline(
             H_LIBRARY,
             b"fragment_gradient_masked",
         );
+        w.get_function(H_FRAG_BLUR, H_LIBRARY, b"fragment_blur");
 
         w.len()
     };
@@ -1002,6 +1049,25 @@ fn setup_pipeline(
         );
         w.create_sampler(SAMPLER_NEAREST, FILTER_NEAREST, FILTER_NEAREST);
         w.create_sampler(SAMPLER_LINEAR, FILTER_LINEAR, FILTER_LINEAR);
+        w.create_render_pipeline(
+            PIPE_BLUR,
+            H_VERTEX_FN,
+            H_FRAG_BLUR,
+            false,
+            COLOR_WRITE_ALL,
+            false,
+            1,
+            render::PIXEL_FORMAT_BGRA8_SRGB,
+        );
+        w.create_texture(
+            TEX_BLUR,
+            phys_w,
+            phys_h,
+            render::PIXEL_FORMAT_BGRA8_SRGB,
+            0,
+            1,
+            render::TEX_USAGE_SHADER_READ | render::TEX_USAGE_RENDER_TARGET,
+        );
 
         w.len()
     };
@@ -1154,6 +1220,34 @@ fn walk_node(
     } else {
         None
     };
+
+    if node.backdrop_blur_radius > 0 && w > 0.0 && h > 0.0 {
+        draws.flush_current();
+
+        let corners = if has_transform {
+            DrawList::transform_corners(&node.transform, x + w / 2.0, y + h / 2.0, x, y, w, h)
+        } else {
+            [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
+        };
+        let mut params = [0u8; 64];
+
+        // Pack 4 corners (8 floats = 32 bytes)
+        for (i, &(cx, cy)) in corners.iter().enumerate() {
+            params[i * 8..i * 8 + 4].copy_from_slice(&cx.to_le_bytes());
+            params[i * 8 + 4..i * 8 + 8].copy_from_slice(&cy.to_le_bytes());
+        }
+
+        params[32..36].copy_from_slice(&(node.backdrop_blur_radius as f32).to_le_bytes());
+        params[36..40].copy_from_slice(&(ctx.scale as f32).to_le_bytes());
+        params[40..44].copy_from_slice(&(node.corner_radius as f32).to_le_bytes());
+
+        draws.ops.push(DrawOp {
+            pipe: Pipe::BackdropBlur,
+            vert_offset: 0,
+            vert_bytes: 0,
+            params,
+        });
+    }
 
     if node.has_shadow() {
         let mut sc = node.shadow_color;
@@ -2271,7 +2365,6 @@ impl Compositor {
             for op_idx in 0..draws.ops.len() {
                 let op = &draws.ops[op_idx];
                 let is_last = op_idx == draws.ops.len() - 1;
-                let verts = &draws.verts[op.vert_offset..op.vert_offset + op.vert_bytes];
                 // SAFETY: render_dma.va is a valid DMA allocation of render_buf_size bytes.
                 let dma_buf = unsafe {
                     core::slice::from_raw_parts_mut(
@@ -2279,6 +2372,273 @@ impl Compositor {
                         self.render_buf_size,
                     )
                 };
+
+                if matches!(op.pipe, Pipe::BackdropBlur) {
+                    let mut corners = [(0.0f32, 0.0f32); 4];
+
+                    for (i, corner) in corners.iter_mut().enumerate() {
+                        corner.0 =
+                            f32::from_le_bytes(op.params[i * 8..i * 8 + 4].try_into().unwrap());
+                        corner.1 =
+                            f32::from_le_bytes(op.params[i * 8 + 4..i * 8 + 8].try_into().unwrap());
+                    }
+
+                    let radius_pt = f32::from_le_bytes(op.params[32..36].try_into().unwrap());
+                    let scale = f32::from_le_bytes(op.params[36..40].try_into().unwrap());
+                    let dw = self.logical_w as f32;
+                    let dh = self.logical_h as f32;
+                    let phys_w = dw * scale;
+                    let phys_h = dh * scale;
+                    let sigma_px = radius_pt * scale / 2.0;
+                    let step_px = if sigma_px > 0.0 { sigma_px / 6.0 } else { 1.0 };
+                    // AABB of transformed corners (for blit region).
+                    let mut min_x = corners[0].0;
+                    let mut min_y = corners[0].1;
+                    let mut max_x = corners[0].0;
+                    let mut max_y = corners[0].1;
+
+                    for &(cx, cy) in &corners[1..] {
+                        if cx < min_x {
+                            min_x = cx;
+                        }
+                        if cy < min_y {
+                            min_y = cy;
+                        }
+                        if cx > max_x {
+                            max_x = cx;
+                        }
+                        if cy > max_y {
+                            max_y = cy;
+                        }
+                    }
+
+                    let pad = (6.0 * step_px) as u16 + 1;
+                    let sx = ((min_x * scale) as u16).saturating_sub(pad);
+                    let sy = ((min_y * scale) as u16).saturating_sub(pad);
+                    let sx1 = (max_x * scale) as u16 + pad;
+                    let sy1 = (max_y * scale) as u16 + pad;
+                    let sw = (sx1.min(phys_w as u16)).saturating_sub(sx);
+                    let sh = (sy1.min(phys_h as u16)).saturating_sub(sy);
+                    // Build blur quad with transformed corners and matching UVs.
+                    // TL, BL, BR, TL, BR, TR triangle winding.
+                    let to_ndc = |px: f32, py: f32| (px / dw * 2.0 - 1.0, 1.0 - py / dh * 2.0);
+                    let to_uv = |px: f32, py: f32| (px / dw, py / dh);
+                    // corners: TL=0, TR=1, BR=2, BL=3
+                    let tl = corners[0];
+                    let tr = corners[1];
+                    let br = corners[2];
+                    let bl = corners[3];
+                    let tri_verts: [((f32, f32), (f32, f32)); 6] = [
+                        (to_ndc(tl.0, tl.1), to_uv(tl.0, tl.1)),
+                        (to_ndc(bl.0, bl.1), to_uv(bl.0, bl.1)),
+                        (to_ndc(br.0, br.1), to_uv(br.0, br.1)),
+                        (to_ndc(tl.0, tl.1), to_uv(tl.0, tl.1)),
+                        (to_ndc(br.0, br.1), to_uv(br.0, br.1)),
+                        (to_ndc(tr.0, tr.1), to_uv(tr.0, tr.1)),
+                    ];
+                    let mut quad = [0u8; QUAD_BYTES];
+                    let c = [1.0f32, 1.0, 1.0, 1.0];
+                    let mut off = 0;
+
+                    for &(pos, tc) in &tri_verts {
+                        quad[off..off + 4].copy_from_slice(&pos.0.to_le_bytes());
+                        quad[off + 4..off + 8].copy_from_slice(&pos.1.to_le_bytes());
+                        quad[off + 8..off + 12].copy_from_slice(&tc.0.to_le_bytes());
+                        quad[off + 12..off + 16].copy_from_slice(&tc.1.to_le_bytes());
+                        quad[off + 16..off + 20].copy_from_slice(&c[0].to_le_bytes());
+                        quad[off + 20..off + 24].copy_from_slice(&c[1].to_le_bytes());
+                        quad[off + 24..off + 28].copy_from_slice(&c[2].to_le_bytes());
+                        quad[off + 28..off + 32].copy_from_slice(&c[3].to_le_bytes());
+                        off += VERTEX_SIZE;
+                    }
+
+                    let corner_radius_pt =
+                        f32::from_le_bytes(op.params[40..44].try_into().unwrap());
+                    let phys_cr = corner_radius_pt * scale;
+                    // Derive un-rotated dimensions and inverse transform from
+                    // the 4 corners. For a rotated rectangle, the AABB is larger
+                    // than the actual node — using AABB half-extents for the SDF
+                    // check places the rounded corners at the wrong positions.
+                    let dx_tr = tr.0 - tl.0;
+                    let dy_tr = tr.1 - tl.1;
+                    let dx_bl = bl.0 - tl.0;
+                    let dy_bl = bl.1 - tl.1;
+                    let node_w = libm::sqrtf(dx_tr * dx_tr + dy_tr * dy_tr);
+                    let node_h = libm::sqrtf(dx_bl * dx_bl + dy_bl * dy_bl);
+                    let center_x = (tl.0 + br.0) / 2.0 * scale;
+                    let center_y = (tl.1 + br.1) / 2.0 * scale;
+                    let half_w = node_w / 2.0 * scale;
+                    let half_h = node_h / 2.0 * scale;
+                    // Inverse 2x2 transform: maps screen-space offsets back to
+                    // node-local space for the rounded-rect SDF check.
+                    let (inv_a, inv_b, inv_c, inv_d) = if node_w > 1e-6 && node_h > 1e-6 {
+                        let fwd_a = dx_tr / node_w;
+                        let fwd_b = dy_tr / node_w;
+                        let fwd_c = dx_bl / node_h;
+                        let fwd_d = dy_bl / node_h;
+                        let det = fwd_a * fwd_d - fwd_c * fwd_b;
+
+                        if det.abs() > 1e-6 {
+                            let inv_det = 1.0 / det;
+
+                            (
+                                fwd_d * inv_det,
+                                -fwd_b * inv_det,
+                                -fwd_c * inv_det,
+                                fwd_a * inv_det,
+                            )
+                        } else {
+                            (1.0f32, 0.0f32, 0.0f32, 1.0f32)
+                        }
+                    } else {
+                        (1.0f32, 0.0f32, 0.0f32, 1.0f32)
+                    };
+                    // BlurParams: step(2) + center(2) + half_ext(2) + cr + pad + inv_xform(4)
+                    let h_vals: [f32; 12] = [
+                        step_px / phys_w,
+                        0.0,
+                        center_x,
+                        center_y,
+                        half_w,
+                        half_h,
+                        phys_cr,
+                        0.0,
+                        inv_a,
+                        inv_b,
+                        inv_c,
+                        inv_d,
+                    ];
+                    let v_vals: [f32; 12] = [
+                        0.0,
+                        step_px / phys_h,
+                        center_x,
+                        center_y,
+                        half_w,
+                        half_h,
+                        phys_cr,
+                        0.0,
+                        inv_a,
+                        inv_b,
+                        inv_c,
+                        inv_d,
+                    ];
+                    let mut h_params = [0u8; 48];
+                    let mut v_params = [0u8; 48];
+
+                    for i in 0..12 {
+                        h_params[i * 4..(i + 1) * 4].copy_from_slice(&h_vals[i].to_le_bytes());
+                        v_params[i * 4..(i + 1) * 4].copy_from_slice(&v_vals[i].to_le_bytes());
+                    }
+
+                    // Pass 1: blit drawable → TEX_BLUR, then horizontal blur
+                    let len = {
+                        let mut w = CommandWriter::new(dma_buf);
+
+                        w.begin_blit_pass();
+                        w.copy_texture_region(
+                            render::DRAWABLE_HANDLE,
+                            TEX_BLUR,
+                            sx,
+                            sy,
+                            sw,
+                            sh,
+                            sx,
+                            sy,
+                        );
+                        w.end_blit_pass();
+                        w.begin_render_pass(
+                            render::DRAWABLE_HANDLE,
+                            0,
+                            0,
+                            render::LOAD_LOAD,
+                            render::STORE_STORE,
+                            0,
+                            0,
+                            0.0,
+                            0.0,
+                            0.0,
+                            1.0,
+                        );
+                        w.set_render_pipeline(PIPE_BLUR);
+                        w.set_fragment_texture(TEX_BLUR, 0);
+                        w.set_fragment_sampler(SAMPLER_LINEAR, 0);
+                        w.set_fragment_bytes(0, &h_params);
+                        render::batch::emit_draws(&mut w, &quad);
+                        w.end_render_pass();
+
+                        w.len()
+                    };
+
+                    submit_and_wait(
+                        &self.device,
+                        &mut self.render_vq,
+                        self.irq_event,
+                        render::VIRTQ_RENDER,
+                        self.render_dma.pa,
+                        len,
+                    );
+
+                    // Pass 2: blit H-blurred drawable → TEX_BLUR, then vertical blur
+                    let len = {
+                        let mut w = CommandWriter::new(dma_buf);
+
+                        w.begin_blit_pass();
+                        w.copy_texture_region(
+                            render::DRAWABLE_HANDLE,
+                            TEX_BLUR,
+                            sx,
+                            sy,
+                            sw,
+                            sh,
+                            sx,
+                            sy,
+                        );
+                        w.end_blit_pass();
+                        w.begin_render_pass(
+                            render::DRAWABLE_HANDLE,
+                            0,
+                            0,
+                            render::LOAD_LOAD,
+                            render::STORE_STORE,
+                            0,
+                            0,
+                            0.0,
+                            0.0,
+                            0.0,
+                            1.0,
+                        );
+                        w.set_render_pipeline(PIPE_BLUR);
+                        w.set_fragment_texture(TEX_BLUR, 0);
+                        w.set_fragment_sampler(SAMPLER_LINEAR, 0);
+                        w.set_fragment_bytes(0, &v_params);
+
+                        render::batch::emit_draws(&mut w, &quad);
+
+                        w.end_render_pass();
+
+                        if is_last {
+                            w.present_and_commit(self.frame_count);
+                        }
+
+                        w.len()
+                    };
+
+                    submit_and_wait(
+                        &self.device,
+                        &mut self.render_vq,
+                        self.irq_event,
+                        render::VIRTQ_RENDER,
+                        self.render_dma.pa,
+                        len,
+                    );
+
+                    first = false;
+                    active_pipe = None;
+
+                    continue;
+                }
+
+                let verts = &draws.verts[op.vert_offset..op.vert_offset + op.vert_bytes];
                 let len = {
                     let mut w = CommandWriter::new(dma_buf);
                     let load = if first {
@@ -2335,6 +2695,7 @@ impl Compositor {
                                 w.set_fragment_texture(TEX_IMAGE, 0);
                                 w.set_fragment_sampler(SAMPLER_LINEAR, 0);
                             }
+                            Pipe::BackdropBlur => unreachable!(),
                         }
                         active_pipe = Some(op.pipe);
                     }
@@ -2584,6 +2945,8 @@ extern "C" fn _start() -> ! {
         irq_event,
         &setup_dma,
         setup_buf_size,
+        display_w as u16,
+        display_h as u16,
     );
 
     console::write(console_ep, b"render: pipeline ready\n");

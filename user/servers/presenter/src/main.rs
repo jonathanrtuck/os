@@ -1902,7 +1902,8 @@ fn build_showcase_nodes(
         c.y = pt(140);
         c.width = upt(120);
         c.height = upt(120);
-        c.background = Color::rgb(0, 0, 255);
+        c.background = Color::rgba(0, 0, 255, 128);
+        c.backdrop_blur_radius = 64;
         c.shadow_color = Color::rgba(0, 0, 0, 180);
         c.shadow_blur_radius = 16;
         c.shadow_spread = 4;

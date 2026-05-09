@@ -725,6 +725,148 @@ def assert_font_differs(img: Image.Image, args: str, tolerance: int) -> bool:
         return False
 
 
+def assert_blue_dominant_region(img: Image.Image, args: str, tolerance: int) -> bool:
+    """Check for blue-dominant pixels (B > R+threshold and B > G+threshold) in a region.
+
+    Useful for semi-transparent blue overlays where pure blue won't appear.
+    Args: X,Y,W,H,MIN_COUNT — region bounds and minimum matching pixels.
+    """
+    parts = args.split(",")
+    if len(parts) != 5:
+        print(f"FAIL: blue_dominant_region expects X,Y,W,H,MIN_COUNT, got '{args}'")
+        return False
+
+    x, y, w, h, min_count = (int(p) for p in parts)
+    count = 0
+    threshold_gap = 30
+
+    for py in range(y, min(y + h, img.height)):
+        for px in range(x, min(x + w, img.width)):
+            r, g, b = img.getpixel((px, py))[:3]
+            if b > r + threshold_gap and b > g + threshold_gap:
+                count += 1
+
+    if count >= min_count:
+        print(f"PASS: found {count} blue-dominant pixels in region ({x},{y},{w},{h}) "
+              f"(>= {min_count})")
+        return True
+    else:
+        print(f"FAIL: only {count} blue-dominant pixels in region ({x},{y},{w},{h}) "
+              f"(expected >= {min_count})")
+        return False
+
+
+def assert_no_color_fringe(img: Image.Image, args: str, tolerance: int) -> bool:
+    """Check that an annular ring (outline) around a region has no intermediate
+    color artifacts from blur leaking outside rounded corners.
+
+    Samples pixels on the outer edge of a rect and checks none have an
+    unexpected color component. Used to verify backdrop blur is properly
+    clipped by border radius.
+
+    Args: X,Y,W,H,RING_W,FORBIDDEN_CHANNEL — region center, ring width,
+    and which channel (r/g/b) should not spike. 'b' means no blue-ish
+    artifacts from a blue-background node leaking blur.
+    """
+    parts = args.split(",")
+    if len(parts) != 6:
+        print(f"FAIL: no_color_fringe expects X,Y,W,H,RING_W,CHANNEL, got '{args}'")
+        return False
+
+    cx, cy, cw, ch, ring_w, channel = (
+        int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3]),
+        int(parts[4]), parts[5].strip().lower()
+    )
+
+    # Sample the background color from well outside the region.
+    bg_x = max(0, cx - ring_w * 3)
+    bg_y = max(0, cy - ring_w * 3)
+    if bg_x < img.width and bg_y < img.height:
+        bg_r, bg_g, bg_b = img.getpixel((bg_x, bg_y))[:3]
+    else:
+        bg_r, bg_g, bg_b = 0, 0, 0
+
+    # Check pixels in the outer ring (between the rect edge and ring_w outside).
+    fringe_count = 0
+    total_checked = 0
+    worst_px = None
+    worst_val = 0
+
+    for py in range(max(0, cy - ring_w), min(cy + ch + ring_w, img.height)):
+        for px_x in range(max(0, cx - ring_w), min(cx + cw + ring_w, img.width)):
+            # Skip pixels inside the rect.
+            if cx <= px_x < cx + cw and cy <= py < cy + ch:
+                continue
+            total_checked += 1
+            r, g, b = img.getpixel((px_x, py))[:3]
+
+            if channel == 'b':
+                excess = b - max(bg_b + tolerance * 3, (r + g) // 2 + tolerance * 2)
+            elif channel == 'r':
+                excess = r - max(bg_r + tolerance * 3, (g + b) // 2 + tolerance * 2)
+            else:
+                excess = g - max(bg_g + tolerance * 3, (r + b) // 2 + tolerance * 2)
+
+            if excess > 0:
+                fringe_count += 1
+                if excess > worst_val:
+                    worst_val = excess
+                    worst_px = (px_x, py, r, g, b)
+
+    if fringe_count == 0:
+        print(f"PASS: no {channel}-channel fringe in ring around ({cx},{cy},{cw},{ch}), "
+              f"checked {total_checked} pixels")
+        return True
+    else:
+        pct = fringe_count / max(total_checked, 1) * 100
+        px_info = f" worst at ({worst_px[0]},{worst_px[1]}): ({worst_px[2]},{worst_px[3]},{worst_px[4]})" if worst_px else ""
+        print(f"FAIL: {fringe_count}/{total_checked} ({pct:.1f}%) pixels have "
+              f"{channel}-channel fringe around ({cx},{cy},{cw},{ch}){px_info}")
+        return False
+
+
+def assert_sample_region(img: Image.Image, args: str, tolerance: int) -> bool:
+    """Diagnostic: sample and report colors in a region. Always passes.
+
+    Args: X,Y,W,H — region to sample.
+    Reports min/max/avg of each channel and the 5 most common colors.
+    """
+    parts = args.split(",")
+    if len(parts) != 4:
+        print(f"FAIL: sample_region expects X,Y,W,H, got '{args}'")
+        return False
+
+    x, y, w, h = (int(p) for p in parts)
+    colors = {}
+    r_sum, g_sum, b_sum = 0, 0, 0
+    r_min = g_min = b_min = 255
+    r_max = g_max = b_max = 0
+    count = 0
+
+    for py in range(y, min(y + h, img.height)):
+        for px in range(x, min(x + w, img.width)):
+            r, g, b = img.getpixel((px, py))[:3]
+            count += 1
+            r_sum += r; g_sum += g; b_sum += b
+            r_min = min(r_min, r); g_min = min(g_min, g); b_min = min(b_min, b)
+            r_max = max(r_max, r); g_max = max(g_max, g); b_max = max(b_max, b)
+            key = (r, g, b)
+            colors[key] = colors.get(key, 0) + 1
+
+    if count == 0:
+        print("PASS: empty region (no pixels)")
+        return True
+
+    top5 = sorted(colors.items(), key=lambda x: -x[1])[:5]
+    print(f"PASS: region ({x},{y},{w},{h}): {count} pixels")
+    print(f"  R: [{r_min}..{r_max}] avg={r_sum/count:.0f}")
+    print(f"  G: [{g_min}..{g_max}] avg={g_sum/count:.0f}")
+    print(f"  B: [{b_min}..{b_max}] avg={b_sum/count:.0f}")
+    for c, n in top5:
+        print(f"  ({c[0]},{c[1]},{c[2]}): {n} ({n/count*100:.1f}%)")
+    return True
+
+
 ASSERTIONS = {
     "solid_color": assert_solid_color,
     "uniform": assert_uniform,
@@ -744,6 +886,9 @@ ASSERTIONS = {
     "right_margin": assert_right_margin,
     "cursor_colors": assert_cursor_colors,
     "font_differs": assert_font_differs,
+    "blue_dominant_region": assert_blue_dominant_region,
+    "no_color_fringe": assert_no_color_fringe,
+    "sample_region": assert_sample_region,
 }
 
 
