@@ -39,8 +39,8 @@ cargo b
 cargo r
 ```
 
-This builds the kernel and launches it in the hypervisor with Metal GPU
-rendering. Close the window or Cmd+Q to exit.
+This builds the kernel and launches in the hypervisor with Metal GPU rendering.
+Close the window or `Cmd+Q` to exit.
 
 ## test
 
