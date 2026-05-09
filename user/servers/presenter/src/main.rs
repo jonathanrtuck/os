@@ -1826,13 +1826,11 @@ fn build_showcase_nodes(
     strip: scene::NodeId,
     display_width: u32,
     content_h: u32,
-    image_content_id: u32,
-    image_width: u16,
-    image_height: u16,
+    _image_content_id: u32,
+    _image_width: u16,
+    _image_height: u16,
 ) {
     let base_x = (display_width * 2) as i32;
-    let pad = 24i32;
-    // Showcase container
     let container = match scene.alloc_node() {
         Some(id) => id,
         None => return,
@@ -1849,564 +1847,50 @@ fn build_showcase_nodes(
 
     scene.add_child(strip, container);
 
-    let mut cursor_y = pad;
-    // ── Section: Solid rects with colors ──
-    let colors = [
-        Color::rgb(231, 76, 60),
-        Color::rgb(46, 204, 113),
-        Color::rgb(52, 152, 219),
-        Color::rgb(155, 89, 182),
-        Color::rgb(241, 196, 15),
-    ];
+    if let Some(id) = scene.alloc_node() {
+        let a = scene.node_mut(id);
 
-    for (i, &color) in colors.iter().enumerate() {
-        if let Some(id) = scene.alloc_node() {
-            let n = scene.node_mut(id);
+        a.x = pt(100);
+        a.y = pt(60);
+        a.width = upt(120);
+        a.height = upt(120);
+        a.background = Color::rgb(255, 0, 0);
+        a.corner_radius = 4;
 
-            n.x = pt(pad + i as i32 * 56);
-            n.y = pt(cursor_y);
-            n.width = upt(48);
-            n.height = upt(48);
-            n.background = color;
-
-            scene.add_child(container, id);
-        }
+        scene.add_child(container, id);
     }
+    if let Some(id) = scene.alloc_node() {
+        let b = scene.node_mut(id);
 
-    cursor_y += 64;
+        b.x = pt(60);
+        b.y = pt(100);
+        b.width = upt(120);
+        b.height = upt(120);
+        b.background = Color::rgb(0, 255, 0);
+        b.shadow_color = Color::rgba(0, 0, 0, 180);
+        b.shadow_blur_radius = 16;
+        b.shadow_spread = 4;
+        b.corner_radius = 0;
+        b.opacity = 128;
 
-    // ── Section: Rounded corners ──
-    let radii: [u8; 4] = [4, 8, 16, 24];
-
-    for (i, &r) in radii.iter().enumerate() {
-        if let Some(id) = scene.alloc_node() {
-            let n = scene.node_mut(id);
-
-            n.x = pt(pad + i as i32 * 72);
-            n.y = pt(cursor_y);
-            n.width = upt(60);
-            n.height = upt(60);
-            n.background = Color::rgb(52, 73, 94);
-            n.corner_radius = r;
-
-            scene.add_child(container, id);
-        }
+        scene.add_child(container, id);
     }
-
-    cursor_y += 80;
-
-    // ── Section: Shadows ──
-    let shadow_configs: [(u8, i8, u8); 3] = [(16, 4, 0), (32, 12, 0), (64, 24, 8)];
-
-    for (i, &(blur, spread, radius)) in shadow_configs.iter().enumerate() {
-        if let Some(id) = scene.alloc_node() {
-            let n = scene.node_mut(id);
-
-            n.x = pt(pad + i as i32 * 120);
-            n.y = pt(cursor_y);
-            n.width = upt(80);
-            n.height = upt(60);
-            n.background = Color::rgb(255, 255, 255);
-            n.shadow_color = Color::rgba(0, 0, 0, 180);
-            n.shadow_blur_radius = blur;
-            n.shadow_spread = spread;
-            n.corner_radius = radius;
-
-            scene.add_child(container, id);
-        }
-    }
-
-    cursor_y += 100;
-
-    // ── Section: Opacity ──
-    for i in 0..5i32 {
-        if let Some(id) = scene.alloc_node() {
-            let opacity = (255 - i * 50) as u8;
-            let n = scene.node_mut(id);
-
-            n.x = pt(pad + i * 56);
-            n.y = pt(cursor_y);
-            n.width = upt(48);
-            n.height = upt(48);
-            n.background = Color::rgb(231, 76, 60);
-            n.opacity = opacity;
-
-            scene.add_child(container, id);
-        }
-    }
-
-    cursor_y += 64;
-
-    // ── Section: Transforms (rotation) ──
-    let angles: [f32; 4] = [0.1, 0.3, 0.6, 1.0];
-
-    for (i, &angle) in angles.iter().enumerate() {
-        if let Some(id) = scene.alloc_node() {
-            let n = scene.node_mut(id);
-
-            n.x = pt(pad + 30 + i as i32 * 80);
-            n.y = pt(cursor_y + 10);
-            n.width = upt(40);
-            n.height = upt(40);
-            n.background = Color::rgb(46, 204, 113);
-            n.transform = scene::AffineTransform::rotate(angle);
-
-            scene.add_child(container, id);
-        }
-    }
-
-    cursor_y += 80;
-
-    // ── Section: Paths (fill + stroke) ──
-    // Triangle (filled)
-    {
-        let mut path_buf = alloc::vec::Vec::new();
-
-        scene::path_move_to(&mut path_buf, 0.0, 40.0);
-        scene::path_line_to(&mut path_buf, 20.0, 0.0);
-        scene::path_line_to(&mut path_buf, 40.0, 40.0);
-        scene::path_close(&mut path_buf);
-
-        let path_ref = scene.push_data(&path_buf);
-
-        if let Some(id) = scene.alloc_node() {
-            let n = scene.node_mut(id);
-
-            n.x = pt(pad);
-            n.y = pt(cursor_y);
-            n.width = upt(40);
-            n.height = upt(40);
-            n.content = Content::Path {
-                color: Color::rgb(231, 76, 60),
-                stroke_color: Color::TRANSPARENT,
-                fill_rule: scene::FillRule::Winding,
-                stroke_width: 0,
-                contours: path_ref,
-            };
-
-            scene.add_child(container, id);
-        }
-    }
-
-    // Circle (stroked) — approximated with 4 cubic beziers
-    {
-        let mut path_buf = alloc::vec::Vec::new();
-        let cx = 20.0f32;
-        let cy = 20.0;
-        let r = 18.0;
-        let k = r * 0.5522848;
-
-        scene::path_move_to(&mut path_buf, cx + r, cy);
-        scene::path_cubic_to(&mut path_buf, cx + r, cy + k, cx + k, cy + r, cx, cy + r);
-        scene::path_cubic_to(&mut path_buf, cx - k, cy + r, cx - r, cy + k, cx - r, cy);
-        scene::path_cubic_to(&mut path_buf, cx - r, cy - k, cx - k, cy - r, cx, cy - r);
-        scene::path_cubic_to(&mut path_buf, cx + k, cy - r, cx + r, cy - k, cx + r, cy);
-        scene::path_close(&mut path_buf);
-
-        let path_ref = scene.push_data(&path_buf);
-
-        if let Some(id) = scene.alloc_node() {
-            let n = scene.node_mut(id);
-
-            n.x = pt(pad + 60);
-            n.y = pt(cursor_y);
-            n.width = upt(40);
-            n.height = upt(40);
-            n.content = Content::Path {
-                color: Color::TRANSPARENT,
-                stroke_color: Color::rgb(52, 152, 219),
-                fill_rule: scene::FillRule::Winding,
-                stroke_width: 0x0200,
-                contours: path_ref,
-            };
-
-            scene.add_child(container, id);
-        }
-    }
-
-    // Star (filled + stroked)
-    {
-        let mut path_buf = alloc::vec::Vec::new();
-        let cx = 20.0f32;
-        let cy = 20.0;
-        let outer = 18.0;
-        let inner = 8.0;
-
-        // Precomputed (cos, sin) for 10 points of a 5-pointed star.
-        const STAR_CS: [(f32, f32); 10] = [
-            (0.0, 1.0),
-            (0.5878, 0.8090),
-            (0.9511, 0.3090),
-            (0.9511, -0.3090),
-            (0.5878, -0.8090),
-            (0.0, -1.0),
-            (-0.5878, -0.8090),
-            (-0.9511, -0.3090),
-            (-0.9511, 0.3090),
-            (-0.5878, 0.8090),
-        ];
-
-        for (i, &(cos_a, sin_a)) in STAR_CS.iter().enumerate() {
-            let r = if i % 2 == 0 { outer } else { inner };
-            let px = cx + r * cos_a;
-            let py = cy - r * sin_a;
-
-            if i == 0 {
-                scene::path_move_to(&mut path_buf, px, py);
-            } else {
-                scene::path_line_to(&mut path_buf, px, py);
-            }
-        }
-
-        scene::path_close(&mut path_buf);
-
-        let path_ref = scene.push_data(&path_buf);
-
-        if let Some(id) = scene.alloc_node() {
-            let n = scene.node_mut(id);
-
-            n.x = pt(pad + 120);
-            n.y = pt(cursor_y);
-            n.width = upt(40);
-            n.height = upt(40);
-            n.content = Content::Path {
-                color: Color::rgba(241, 196, 15, 180),
-                stroke_color: Color::rgb(243, 156, 18),
-                fill_rule: scene::FillRule::EvenOdd,
-                stroke_width: 0x0100,
-                contours: path_ref,
-            };
-
-            scene.add_child(container, id);
-        }
-    }
-
-    cursor_y += 60;
-
-    // ── Section: Clipping ──
-    if let Some(clip_container) = scene.alloc_node() {
-        {
-            let n = scene.node_mut(clip_container);
-
-            n.x = pt(pad);
-            n.y = pt(cursor_y);
-            n.width = upt(80);
-            n.height = upt(60);
-            n.flags = NodeFlags::VISIBLE.union(NodeFlags::CLIPS_CHILDREN);
-            n.background = Color::rgb(236, 240, 241);
-            n.corner_radius = 8;
-        }
-
-        scene.add_child(container, clip_container);
-
-        // Oversized child that gets clipped
-        if let Some(child) = scene.alloc_node() {
-            let n = scene.node_mut(child);
-
-            n.x = pt(-20);
-            n.y = pt(-10);
-            n.width = upt(120);
-            n.height = upt(80);
-            n.background = Color::rgb(155, 89, 182);
-
-            scene.add_child(clip_container, child);
-        }
-    }
-
-    // ── Section: Nested clipping ──
-    cursor_y += 80;
-
-    if let Some(outer_clip) = scene.alloc_node() {
-        {
-            let n = scene.node_mut(outer_clip);
-
-            n.x = pt(pad);
-            n.y = pt(cursor_y);
-            n.width = upt(160);
-            n.height = upt(80);
-            n.flags = NodeFlags::VISIBLE.union(NodeFlags::CLIPS_CHILDREN);
-            n.background = Color::rgb(44, 62, 80);
-            n.corner_radius = 12;
-        }
-
-        scene.add_child(container, outer_clip);
-
-        if let Some(inner_clip) = scene.alloc_node() {
-            {
-                let n = scene.node_mut(inner_clip);
-
-                n.x = pt(30);
-                n.y = pt(15);
-                n.width = upt(120);
-                n.height = upt(60);
-                n.flags = NodeFlags::VISIBLE.union(NodeFlags::CLIPS_CHILDREN);
-                n.background = Color::rgb(39, 174, 96);
-                n.corner_radius = 8;
-            }
-
-            scene.add_child(outer_clip, inner_clip);
-
-            if let Some(deep) = scene.alloc_node() {
-                let n = scene.node_mut(deep);
-
-                n.x = pt(-10);
-                n.y = pt(-10);
-                n.width = upt(80);
-                n.height = upt(80);
-                n.background = Color::rgb(241, 196, 15);
-
-                scene.add_child(inner_clip, deep);
-            }
-        }
-    }
-
-    cursor_y += 100;
-
-    // ── Section: Image content ──
-    if image_content_id != 0 && image_width > 0 && image_height > 0 {
-        if let Some(img_node) = scene.alloc_node() {
-            let n = scene.node_mut(img_node);
-
-            n.x = pt(pad);
-            n.y = pt(cursor_y);
-            n.width = upt(160);
-            n.height = upt(120);
-            n.corner_radius = 8;
-            n.shadow_color = Color::rgba(0, 0, 0, 120);
-            n.shadow_blur_radius = 16;
-            n.shadow_spread = 4;
-            n.content = Content::Image {
-                content_id: image_content_id,
-                src_width: image_width,
-                src_height: image_height,
-            };
-
-            scene.add_child(container, img_node);
-        }
-
-        cursor_y += 140;
-    }
-
-    // ── Section: Scale transforms ──
-    let scales: [(f32, f32); 4] = [(0.5, 0.5), (1.0, 1.5), (1.5, 0.75), (0.75, 1.25)];
-
-    for (i, &(sx, sy)) in scales.iter().enumerate() {
-        if let Some(id) = scene.alloc_node() {
-            let n = scene.node_mut(id);
-
-            n.x = pt(pad + 30 + i as i32 * 80);
-            n.y = pt(cursor_y + 10);
-            n.width = upt(36);
-            n.height = upt(36);
-            n.background = Color::rgb(52, 152, 219);
-            n.corner_radius = 4;
-            n.transform = scene::AffineTransform::scale(sx, sy);
-
-            scene.add_child(container, id);
-        }
-    }
-
-    cursor_y += 70;
-
-    // ── Section: Curved paths (bezier arcs) ──
-    // S-curve
-    {
-        let mut path_buf = alloc::vec::Vec::new();
-
-        scene::path_move_to(&mut path_buf, 0.0, 40.0);
-        scene::path_cubic_to(&mut path_buf, 13.0, 0.0, 27.0, 40.0, 40.0, 0.0);
-
-        let path_ref = scene.push_data(&path_buf);
-
-        if let Some(id) = scene.alloc_node() {
-            let n = scene.node_mut(id);
-
-            n.x = pt(pad);
-            n.y = pt(cursor_y);
-            n.width = upt(40);
-            n.height = upt(40);
-            n.content = Content::Path {
-                color: Color::TRANSPARENT,
-                stroke_color: Color::rgb(231, 76, 60),
-                fill_rule: scene::FillRule::Winding,
-                stroke_width: 0x0180,
-                contours: path_ref,
-            };
-
-            scene.add_child(container, id);
-        }
-    }
-
-    // Figure-eight (two cubic loops)
-    {
-        let mut path_buf = alloc::vec::Vec::new();
-
-        scene::path_move_to(&mut path_buf, 20.0, 20.0);
-        scene::path_cubic_to(&mut path_buf, 40.0, -10.0, 40.0, 50.0, 20.0, 20.0);
-        scene::path_cubic_to(&mut path_buf, 0.0, -10.0, 0.0, 50.0, 20.0, 20.0);
-        scene::path_close(&mut path_buf);
-
-        let path_ref = scene.push_data(&path_buf);
-
-        if let Some(id) = scene.alloc_node() {
-            let n = scene.node_mut(id);
-
-            n.x = pt(pad + 60);
-            n.y = pt(cursor_y);
-            n.width = upt(40);
-            n.height = upt(40);
-            n.content = Content::Path {
-                color: Color::rgba(155, 89, 182, 100),
-                stroke_color: Color::rgb(142, 68, 173),
-                fill_rule: scene::FillRule::EvenOdd,
-                stroke_width: 0x0100,
-                contours: path_ref,
-            };
-
-            scene.add_child(container, id);
-        }
-    }
-
-    // Spiral (multiple cubic arcs)
-    {
-        let mut path_buf = alloc::vec::Vec::new();
-        let cx = 20.0f32;
-        let cy = 20.0;
-
-        scene::path_move_to(&mut path_buf, cx, cy);
-
-        let radii = [4.0f32, 8.0, 12.0, 16.0];
-
-        for (i, &r) in radii.iter().enumerate() {
-            let k = r * 0.5522848;
-
-            if i % 2 == 0 {
-                scene::path_cubic_to(&mut path_buf, cx, cy - k, cx + r - k, cy - r, cx + r, cy);
-            } else {
-                scene::path_cubic_to(
-                    &mut path_buf,
-                    cx + r,
-                    cy + k,
-                    cx + k,
-                    cy + r,
-                    cx,
-                    cy + r - (r - radii[0]),
-                );
-            }
-        }
-
-        let path_ref = scene.push_data(&path_buf);
-
-        if let Some(id) = scene.alloc_node() {
-            let n = scene.node_mut(id);
-
-            n.x = pt(pad + 120);
-            n.y = pt(cursor_y);
-            n.width = upt(40);
-            n.height = upt(40);
-            n.content = Content::Path {
-                color: Color::TRANSPARENT,
-                stroke_color: Color::rgb(46, 204, 113),
-                fill_rule: scene::FillRule::Winding,
-                stroke_width: 0x0100,
-                contours: path_ref,
-            };
-
-            scene.add_child(container, id);
-        }
-    }
-
-    cursor_y += 60;
-
-    // ── Section: Compositing (overlapping semitransparent) ──
-    let comp_colors = [
-        Color::rgba(231, 76, 60, 140),
-        Color::rgba(46, 204, 113, 140),
-        Color::rgba(52, 152, 219, 140),
-    ];
-
-    for (i, &color) in comp_colors.iter().enumerate() {
-        if let Some(id) = scene.alloc_node() {
-            let n = scene.node_mut(id);
-
-            n.x = pt(pad + i as i32 * 30);
-            n.y = pt(cursor_y + (i as i32 % 2) * 15);
-            n.width = upt(60);
-            n.height = upt(60);
-            n.background = color;
-            n.corner_radius = 30;
-
-            scene.add_child(container, id);
-        }
-    }
-
-    cursor_y += 90;
-
-    // ── Section: Icons ──
-    let icon_names = ["document", "search", "settings", "alert", "check", "close"];
-
-    for (i, &name) in icon_names.iter().enumerate() {
-        let icon = icons::get(name, None);
-        let icon_size = 32.0f32;
-        let scale = icon_size / icon.viewbox;
-        let mut path_buf = alloc::vec::Vec::new();
-
-        for contour in icon.paths {
-            path_buf.extend_from_slice(contour.commands);
-        }
-
-        let path_ref = scene.push_data(&path_buf);
-
-        if let Some(id) = scene.alloc_node() {
-            let n = scene.node_mut(id);
-
-            n.x = pt(pad + i as i32 * 48);
-            n.y = pt(cursor_y);
-            n.width = upt(icon_size as u32);
-            n.height = upt(icon_size as u32);
-            n.transform = scene::AffineTransform::scale(scale, scale);
-
-            n.content = Content::Path {
-                color: Color::TRANSPARENT,
-                stroke_color: Color::rgb(220, 220, 220),
-                fill_rule: scene::FillRule::Winding,
-                stroke_width: 0x0200,
-                contours: path_ref,
-            };
-
-            scene.add_child(container, id);
-        }
-    }
-
-    cursor_y += 50;
-
-    // ── Section: Nested containers with translate ──
-    if let Some(outer) = scene.alloc_node() {
-        {
-            let n = scene.node_mut(outer);
-
-            n.x = pt(pad);
-            n.y = pt(cursor_y);
-            n.width = upt(200);
-            n.height = upt(80);
-            n.background = Color::rgba(52, 152, 219, 40);
-            n.corner_radius = 12;
-            n.child_offset_x = 10.0;
-            n.child_offset_y = 10.0;
-        }
-
-        scene.add_child(container, outer);
-
-        if let Some(inner) = scene.alloc_node() {
-            let n = scene.node_mut(inner);
-
-            n.width = upt(120);
-            n.height = upt(40);
-            n.background = Color::rgba(46, 204, 113, 120);
-            n.corner_radius = 6;
-
-            scene.add_child(outer, inner);
-        }
+    if let Some(id) = scene.alloc_node() {
+        let c = scene.node_mut(id);
+
+        c.x = pt(140);
+        c.y = pt(140);
+        c.width = upt(120);
+        c.height = upt(120);
+        c.background = Color::rgb(0, 0, 255);
+        c.shadow_color = Color::rgba(0, 0, 0, 180);
+        c.shadow_blur_radius = 16;
+        c.shadow_spread = 4;
+        c.corner_radius = 16;
+        c.opacity = 240;
+        c.transform = scene::AffineTransform::rotate(0.6);
+
+        scene.add_child(container, id);
     }
 }
 

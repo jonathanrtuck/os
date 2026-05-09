@@ -511,7 +511,8 @@ impl DrawList {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn push_shadow(
+    #[allow(clippy::too_many_arguments)]
+    fn push_shadow_inner(
         &mut self,
         px: f32,
         py: f32,
@@ -524,6 +525,7 @@ impl DrawList {
         shadow_color: scene::Color,
         corner_radius: f32,
         scale: f32,
+        transform: Option<(&scene::AffineTransform, f32, f32)>,
     ) {
         self.flush_current();
 
@@ -556,19 +558,51 @@ impl DrawList {
             px_cr,
         );
         let start = self.verts.len();
+        let uv0 = [qx * scale, qy * scale];
+        let uv1 = [(qx + qw) * scale, (qy + qh) * scale];
 
-        push_quad(
-            &mut self.verts,
-            self.display_w,
-            self.display_h,
-            qx,
-            qy,
-            qw,
-            qh,
-            scene::Color::TRANSPARENT,
-            [qx * scale, qy * scale],
-            [(qx + qw) * scale, (qy + qh) * scale],
-        );
+        if let Some((tf, cx, cy)) = transform {
+            let corners_local = [
+                (qx - cx, qy - cy),
+                (qx + qw - cx, qy - cy),
+                (qx + qw - cx, qy + qh - cy),
+                (qx - cx, qy + qh - cy),
+            ];
+            let corners = [
+                tf.transform_point(corners_local[0].0, corners_local[0].1),
+                tf.transform_point(corners_local[1].0, corners_local[1].1),
+                tf.transform_point(corners_local[2].0, corners_local[2].1),
+                tf.transform_point(corners_local[3].0, corners_local[3].1),
+            ];
+
+            push_quad_corners(
+                &mut self.verts,
+                self.display_w,
+                self.display_h,
+                [
+                    (corners[0].0 + cx, corners[0].1 + cy),
+                    (corners[1].0 + cx, corners[1].1 + cy),
+                    (corners[2].0 + cx, corners[2].1 + cy),
+                    (corners[3].0 + cx, corners[3].1 + cy),
+                ],
+                scene::Color::TRANSPARENT,
+                uv0,
+                uv1,
+            );
+        } else {
+            push_quad(
+                &mut self.verts,
+                self.display_w,
+                self.display_h,
+                qx,
+                qy,
+                qw,
+                qh,
+                scene::Color::TRANSPARENT,
+                uv0,
+                uv1,
+            );
+        }
 
         self.ops.push(DrawOp {
             pipe: Pipe::Shadow,
@@ -843,12 +877,19 @@ fn walk_node(
         return;
     }
 
+    let has_transform = !node.transform.is_identity();
+    let tf_args = if has_transform {
+        Some((&node.transform, x + w / 2.0, y + h / 2.0))
+    } else {
+        None
+    };
+
     if node.has_shadow() {
         let mut sc = node.shadow_color;
 
         sc.a = ((sc.a as u16 * effective_opacity as u16) / 255) as u8;
 
-        draws.push_shadow(
+        draws.push_shadow_inner(
             x,
             y,
             w,
@@ -860,10 +901,9 @@ fn walk_node(
             sc,
             node.corner_radius as f32,
             ctx.scale as f32,
+            tf_args,
         );
     }
-
-    let has_transform = !node.transform.is_identity();
 
     if !is_root && node.background.a > 0 {
         let mut bg = node.background;
@@ -871,7 +911,7 @@ fn walk_node(
         bg.a = ((bg.a as u16 * effective_opacity as u16) / 255) as u8;
 
         if node.corner_radius > 0 {
-            draws.push_shadow(
+            draws.push_shadow_inner(
                 x,
                 y,
                 w,
@@ -883,6 +923,7 @@ fn walk_node(
                 bg,
                 node.corner_radius as f32,
                 ctx.scale as f32,
+                tf_args,
             );
         } else if has_transform {
             let cx = x + w / 2.0;
