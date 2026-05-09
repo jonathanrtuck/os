@@ -9,7 +9,7 @@
 
 use super::{
     outline::GlyphOutline,
-    scale::{scale_fu, scale_fu_ceil, scale_fu_floor, FP_ONE, FP_SHIFT},
+    scale::{FP_ONE, FP_SHIFT, scale_fu, scale_fu_ceil, scale_fu_floor},
 };
 
 // ---------------------------------------------------------------------------

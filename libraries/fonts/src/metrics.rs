@@ -5,7 +5,7 @@
 //! No pixel concepts exist here. Pixel-denominated types (`GlyphMetrics`,
 //! `RasterBuffer`) and rasterization functions live in `crate::rasterize`.
 
-use read_fonts::{tables::cmap::Cmap, FontRef, TableProvider};
+use read_fonts::{FontRef, TableProvider, tables::cmap::Cmap};
 
 // ---------------------------------------------------------------------------
 // Font metrics

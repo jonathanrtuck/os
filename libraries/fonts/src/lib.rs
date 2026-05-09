@@ -206,6 +206,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rasterize_at_various_sizes() {
+        static FONT: &[u8] = include_bytes!("../../../assets/jetbrains-mono.ttf");
+
+        let gid = metrics::glyph_id_for_char(FONT, 'H').unwrap();
+        let mut scratch = rasterize::RasterScratch::zeroed();
+
+        for size in [14u16, 18, 36] {
+            let mut buf = vec![0u8; 100 * 100];
+            let mut rb = rasterize::RasterBuffer {
+                data: &mut buf,
+                width: 100,
+                height: 100,
+            };
+            let m = rasterize::rasterize(FONT, gid, size, &mut rb, &mut scratch, 1);
+
+            assert!(m.is_some(), "rasterize returned None at size {size}");
+
+            let m = m.unwrap();
+
+            assert!(
+                m.width > 0 && m.height > 0,
+                "zero-size glyph at size {size}"
+            );
+
+            let nonzero: usize = buf[..m.width as usize * m.height as usize]
+                .iter()
+                .filter(|&&b| b > 0)
+                .count();
+
+            assert!(
+                nonzero > 0,
+                "all-zero coverage at size {size} ({}x{})",
+                m.width,
+                m.height
+            );
+        }
+    }
+
+    #[test]
     fn shape_empty_text() {
         assert!(shape(b"not a real font", "", &[]).is_empty());
     }

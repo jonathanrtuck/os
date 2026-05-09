@@ -32,9 +32,9 @@ pub const KEY_EVENT: u32 = 4;
 pub const DEFAULT_WIDTH: u32 = 1440;
 pub const DEFAULT_HEIGHT: u32 = 900;
 
-pub const FONT_SIZE: u16 = 14;
+pub const FONT_SIZE: u16 = 18;
 pub const CHAR_WIDTH_F32: f32 = 10.0;
-pub const LINE_HEIGHT: u32 = 20;
+pub const LINE_HEIGHT: u32 = 25;
 
 pub const MARGIN_LEFT: i32 = 16;
 pub const MARGIN_TOP: i32 = 12;

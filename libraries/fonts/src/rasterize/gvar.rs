@@ -10,11 +10,11 @@ use read_fonts::{FontRef, TableProvider};
 use super::{
     embolden::{compute_dilation, embolden_outline},
     metrics::{GlyphMetrics, RasterBuffer},
-    outline::{extract_outline, GlyphOutline, GlyphPoint, MAX_CONTOURS, MAX_GLYPH_POINTS},
+    outline::{GlyphOutline, GlyphPoint, MAX_CONTOURS, MAX_GLYPH_POINTS, extract_outline},
     scale::{scale_fu, scale_fu_ceil, scale_fu_floor},
-    scanline::{flatten_outline_from_scratch, rasterize_segments, RasterScratch},
+    scanline::{RasterScratch, flatten_outline_from_scratch, rasterize_segments},
 };
-use crate::metrics::{font_axes, AxisValue};
+use crate::metrics::{AxisValue, font_axes};
 
 // ---------------------------------------------------------------------------
 // Axis normalization
@@ -159,13 +159,8 @@ fn iup_contour(
 
         // Interpolate each axis independently.
         for axis in 0..2u8 {
-            let get_coord = |idx: usize| -> i32 {
-                if axis == 0 {
-                    orig[idx].x
-                } else {
-                    orig[idx].y
-                }
-            };
+            let get_coord =
+                |idx: usize| -> i32 { if axis == 0 { orig[idx].x } else { orig[idx].y } };
             let get_delta = |idx: usize| -> i32 {
                 if axis == 0 {
                     delta_x[idx]

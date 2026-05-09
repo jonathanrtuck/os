@@ -329,7 +329,9 @@ struct WalkContext {
     atlas: alloc::boxed::Box<GlyphAtlas>,
     scratch: alloc::boxed::Box<RasterScratch>,
     raster_buf: alloc::vec::Vec<u8>,
-    ascent_px: f32,
+    ascent_fu: i16,
+    upem: u16,
+    scale: u32,
     atlas_dirty: bool,
     now_tick: u64,
     next_deadline: u64,
@@ -434,20 +436,23 @@ fn walk_node(
     } = node.content
     {
         let glyph_data = reader.shaped_glyphs(glyphs, glyph_count);
-        let baseline_y = y + ctx.ascent_px;
+        let ascent_pt = ctx.ascent_fu as f32 * font_size as f32 / ctx.upem as f32;
+        let baseline_y = y + ascent_pt;
+        let inv_scale = 1.0 / ctx.scale as f32;
+        let raster_size = font_size.saturating_mul(ctx.scale as u16);
         let mut gx = x;
 
         for glyph in glyph_data {
             let advance = glyph.x_advance as f32 / 65536.0;
 
             if glyph.glyph_id > 0 {
-                let entry = lookup_or_rasterize(ctx, glyph.glyph_id, font_size, style_id);
+                let entry = lookup_or_rasterize(ctx, glyph.glyph_id, raster_size, style_id);
 
                 if let Some(e) = entry.filter(|e| e.width > 0 && e.height > 0) {
-                    let px = gx + e.bearing_x as f32;
-                    let py = baseline_y - e.bearing_y as f32;
-                    let pw = e.width as f32;
-                    let ph = e.height as f32;
+                    let px = gx + e.bearing_x as f32 * inv_scale;
+                    let py = baseline_y - e.bearing_y as f32 * inv_scale;
+                    let pw = e.width as f32 * inv_scale;
+                    let ph = e.height as f32 * inv_scale;
                     let u0 = e.u as f32 / ATLAS_W_F;
                     let v0 = e.v as f32 / ATLAS_H_F;
                     let u1 = (e.u + e.width) as f32 / ATLAS_W_F;
@@ -492,7 +497,7 @@ fn lookup_or_rasterize(
         font_size,
         &mut buf,
         &mut ctx.scratch,
-        1,
+        ctx.scale as u16,
     )?;
 
     if metrics.width == 0 || metrics.height == 0 {
@@ -554,8 +559,8 @@ struct Compositor {
     render_buf_size: usize,
 
     console_ep: Handle,
-    display_w: u32,
-    display_h: u32,
+    logical_w: u32,
+    logical_h: u32,
 
     scene_va: usize,
     frame_count: u32,
@@ -657,7 +662,7 @@ impl Compositor {
 
         let root_node = reader.node(root);
         let bg = root_node.background;
-        let mut frame = FrameBuilder::new(self.display_w as f32, self.display_h as f32);
+        let mut frame = FrameBuilder::new(self.logical_w as f32, self.logical_h as f32);
 
         walk_node(
             &reader,
@@ -750,8 +755,8 @@ impl Dispatch for Compositor {
                         console::write(self.console_ep, b"render: scene connected\n");
 
                         let reply = render::comp::SetupReply {
-                            display_width: self.display_w,
-                            display_height: self.display_h,
+                            display_width: self.logical_w,
+                            display_height: self.logical_h,
                         };
                         let mut data = [0u8; render::comp::SetupReply::SIZE];
 
@@ -771,8 +776,8 @@ impl Dispatch for Compositor {
             }
             render::comp::GET_INFO => {
                 let reply = render::comp::InfoReply {
-                    display_width: self.display_w,
-                    display_height: self.display_h,
+                    display_width: self.logical_w,
+                    display_height: self.logical_h,
                     frame_count: self.frame_count,
                 };
                 let mut data = [0u8; render::comp::InfoReply::SIZE];
@@ -809,6 +814,13 @@ extern "C" fn _start() -> ! {
 
     let display_w = device.config_read32(0x00);
     let display_h = device.config_read32(0x04);
+    let scale = {
+        let raw = device.config_read32(0x0C);
+
+        if raw == 0 { 1 } else { raw }
+    };
+    let logical_w = display_w / scale;
+    let logical_h = display_h / scale;
     let setup_qsize = device
         .queue_max_size(render::VIRTQ_SETUP)
         .min(virtio::DEFAULT_QUEUE_SIZE);
@@ -885,6 +897,9 @@ extern "C" fn _start() -> ! {
 
     console::write_u32(console_ep, b"render: display w=", display_w);
     console::write_u32(console_ep, b"render: display h=", display_h);
+    console::write_u32(console_ep, b"render: scale=", scale);
+    console::write_u32(console_ep, b"render: logical w=", logical_w);
+    console::write_u32(console_ep, b"render: logical h=", logical_h);
 
     setup_pipeline(
         &device,
@@ -897,15 +912,17 @@ extern "C" fn _start() -> ! {
     console::write(console_ep, b"render: pipeline ready\n");
 
     let fm = fonts::metrics::font_metrics(FONT_DATA);
-    let ascent_px = match fm {
-        Some(ref m) => m.ascent as f32 * 14.0 / m.units_per_em as f32,
-        None => 11.0,
+    let (ascent_fu, upem) = match fm {
+        Some(ref m) => (m.ascent, m.units_per_em),
+        None => (800, 1000),
     };
     let walk_ctx = WalkContext {
         atlas: GlyphAtlas::new_boxed(),
         scratch: alloc::boxed::Box::new(RasterScratch::zeroed()),
         raster_buf: alloc::vec![0u8; RASTER_BUF_SIZE],
-        ascent_px,
+        ascent_fu,
+        upem,
+        scale,
         atlas_dirty: false,
         now_tick: 0,
         next_deadline: 0,
@@ -931,8 +948,8 @@ extern "C" fn _start() -> ! {
         setup_buf_size,
         render_buf_size,
         console_ep,
-        display_w,
-        display_h,
+        logical_w,
+        logical_h,
         scene_va: 0,
         frame_count: 0,
         walk_ctx,
