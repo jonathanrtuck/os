@@ -1148,6 +1148,7 @@ mod tests {
                         out.extend_from_slice(&src[off..off + 4]);
                         out.extend_from_slice(&x.to_le_bytes());
                         out.extend_from_slice(&y.to_le_bytes());
+
                         off += scene::PATH_MOVE_TO_SIZE;
                     }
                     scene::PATH_CUBIC_TO => {
@@ -1168,6 +1169,7 @@ mod tests {
                     }
                     scene::PATH_CLOSE => {
                         out.extend_from_slice(&src[off..off + scene::PATH_CLOSE_SIZE]);
+
                         off += scene::PATH_CLOSE_SIZE;
                     }
                     _ => break,
@@ -1185,7 +1187,6 @@ mod tests {
 
         let path_data = offset_path_test(&combined, margin_vb, margin_vb);
         let stroke_only = !icon.all_paths_closed();
-
         let (body, outline) = if stroke_only {
             let body_exp = scene::stroke::expand_stroke(&path_data, stroke_w);
             let body = super::path::rasterize_path(
@@ -1228,7 +1229,6 @@ mod tests {
 
             (fill, stroke)
         };
-
         let mut bgra = vec![0u8; (tex_sz * tex_sz * 4) as usize];
 
         for i in 0..(tex_sz * tex_sz) as usize {
@@ -1427,7 +1427,6 @@ mod tests {
     fn ibeam_rasterization_covers_viewbox() {
         let icon = icons::get("cursor-text", None);
         let stroke_w = icon.stroke_width;
-
         let mut combined = vec::Vec::new();
 
         for path in icon.paths {
@@ -1444,7 +1443,6 @@ mod tests {
             scene::FillRule::Winding,
             Some(&stroke_exp),
         );
-
         let visible = body.iter().filter(|&&a| a > 10).count();
 
         assert!(
