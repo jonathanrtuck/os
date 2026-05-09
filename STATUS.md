@@ -407,6 +407,41 @@ but not yet wired into the compositor pipeline. The fonts and render libraries
 exist and are tested (Phase 3); connecting them to the Metal compositor is the
 next rendering milestone.
 
+### Phase 10 — Visual Chrome (COMPLETE)
+
+1. **Analytical shadow pipeline** — DONE. `fragment_shadow` MSL shader using
+   separable erf integrals for sharp rects and SDF-based erfc for rounded rects.
+   Abramowitz & Stegun approximation (max error 1.5×10⁻⁷). Single-pass, no
+   offscreen render targets. Generic — any scene node with `has_shadow()` gets a
+   shadow.
+
+2. **Streaming draw list** — DONE. Replaced two-buffer accumulate-then-submit
+   model (solid_verts + glyph_verts) with ordered DrawList of DrawOps that
+   preserve depth order across pipeline switches (Solid → Shadow → Solid →
+   Glyph). Enables mid-walk pipeline changes for shadows and future path/stencil
+   rendering.
+
+3. **Content::Path rendering** — DONE. CPU-side scanline coverage rasterizer
+   (`path.rs`) with 4× vertical oversampling. Parses scene path commands,
+   flattens cubics via de Casteljau, fills with winding/even-odd rule. Coverage
+   bitmaps cached in the glyph atlas (keyed by content_hash). Stroke rendering
+   via `scene::stroke::expand_stroke()`.
+
+4. **Title bar** — DONE. "untitled" label + HH:MM clock, white text on dark
+   chrome background. Clock reads from `clock_read` syscall.
+
+5. **Page geometry + shadow** — DONE. A4-proportioned white page centered in the
+   content area below the title bar. Shadow: blur_radius=64, spread=36, black.
+   Text colors inverted for white page (dark text on white).
+
+6. **Wire protocol extensions** — DONE. `set_fragment_bytes`, depth-stencil
+   state commands, cursor commands, stencil/MSAA pixel formats added to
+   CommandWriter. 21 wire protocol tests.
+
+**Skipped for now:** Hardware cursor (10.3) — requires pointer event wiring not
+yet implemented. The cursor infrastructure (cursor commands, texture constants)
+is in place for when input pointer events are connected.
+
 ## What's Next: v0.6 Parity
 
 The userspace rebuild plan (`design/userspace-rebuild.md`) is complete through
@@ -420,7 +455,7 @@ work to reach full v0.6-pre-rewrite parity is tracked in
 - Phase 7 (cursor blink + selection): COMPLETE
 - Phase 8 (keyboard navigation): COMPLETE
 - Phase 9 (scroll + viewport): COMPLETE
-- Phase 10 (visual chrome): NOT STARTED
+- Phase 10 (visual chrome): COMPLETE
 - Phase 11 (content-type typography): NOT STARTED
 - Phase 12 (PNG decoder): NOT STARTED
 - Phase 13 (filesystem + virtio-9p): NOT STARTED
