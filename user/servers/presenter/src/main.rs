@@ -95,13 +95,14 @@ fn shape_text(
     font_data: &[u8],
     text: &str,
     font_size: u16,
+    features: &[fonts::Feature],
     out: &mut [ShapedGlyph],
 ) -> (usize, f32) {
     let upem = fonts::metrics::font_metrics(font_data)
         .map(|m| m.units_per_em)
         .unwrap_or(1000) as f32;
     let scale = font_size as f32 / upem * 65536.0;
-    let shaped = fonts::shape(font_data, text, &[]);
+    let shaped = fonts::shape(font_data, text, features);
     let count = shaped.len().min(out.len());
     let mut total_width = 0.0f32;
 
@@ -418,6 +419,7 @@ impl Presenter {
             FONT_SANS,
             "untitled",
             presenter_service::FONT_SIZE,
+            &[],
             &mut self.glyphs,
         );
         let title_glyph_ref = scene.push_shaped_glyphs(&self.glyphs[..title_glyphs_count]);
@@ -473,10 +475,12 @@ impl Presenter {
         clock_str.copy_from_slice(&clock_chars);
 
         let clock_text = core::str::from_utf8(&clock_str).unwrap_or("00:00:00");
+        let tnum = fonts::Feature::new(fonts::Tag::new(b"tnum"), 1, ..);
         let (clock_count, clock_width) = shape_text(
             FONT_SANS,
             clock_text,
             presenter_service::FONT_SIZE,
+            &[tnum],
             &mut self.glyphs,
         );
         let clock_glyph_ref = scene.push_shaped_glyphs(&self.glyphs[..clock_count]);
@@ -800,10 +804,12 @@ impl Presenter {
             b'0' + (seconds % 10) as u8,
         ];
         let clock_text = core::str::from_utf8(&clock_chars).unwrap_or("00:00:00");
+        let tnum = fonts::Feature::new(fonts::Tag::new(b"tnum"), 1, ..);
         let (clock_count, _) = shape_text(
             FONT_SANS,
             clock_text,
             presenter_service::FONT_SIZE,
+            &[tnum],
             &mut self.glyphs,
         );
         let _ = clock_count;

@@ -16,7 +16,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-pub use harfrust::Feature;
+pub use harfrust::{Feature, Tag};
 
 pub mod cache;
 pub mod metrics;
