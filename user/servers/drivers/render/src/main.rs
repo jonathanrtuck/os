@@ -29,7 +29,41 @@ use ipc::server::{Dispatch, Incoming};
 use render::CommandWriter;
 use scene::{Content, NULL, NodeId, SCENE_SIZE, SceneReader};
 
-static FONT_DATA: &[u8] = include_bytes!("../../../../../assets/jetbrains-mono.ttf");
+// ── Font data — well-known style IDs ──────────────────────────────
+
+pub const STYLE_MONO: u32 = 0;
+pub const STYLE_SANS: u32 = 1;
+pub const STYLE_SERIF: u32 = 2;
+
+static FONT_MONO: &[u8] = include_bytes!("../../../../../assets/jetbrains-mono.ttf");
+static FONT_SANS: &[u8] = include_bytes!("../../../../../assets/inter.ttf");
+static FONT_SERIF: &[u8] = include_bytes!("../../../../../assets/source-serif-4.ttf");
+
+fn font_for_style(style_id: u32) -> &'static [u8] {
+    match style_id {
+        STYLE_SANS => FONT_SANS,
+        STYLE_SERIF => FONT_SERIF,
+        _ => FONT_MONO,
+    }
+}
+
+struct FontMetricsEntry {
+    ascent_fu: i16,
+    upem: u16,
+}
+
+fn metrics_for_font(font_data: &[u8]) -> FontMetricsEntry {
+    match fonts::metrics::font_metrics(font_data) {
+        Some(m) => FontMetricsEntry {
+            ascent_fu: m.ascent,
+            upem: m.units_per_em,
+        },
+        None => FontMetricsEntry {
+            ascent_fu: 800,
+            upem: 1000,
+        },
+    }
+}
 
 const HANDLE_NS_EP: Handle = Handle(2);
 const HANDLE_VIRTIO_VMO: Handle = Handle(3);
@@ -577,8 +611,7 @@ struct WalkContext {
     atlas: alloc::boxed::Box<GlyphAtlas>,
     scratch: alloc::boxed::Box<RasterScratch>,
     raster_buf: alloc::vec::Vec<u8>,
-    ascent_fu: i16,
-    upem: u16,
+    font_metrics: [FontMetricsEntry; 3],
     scale: u32,
     atlas_dirty: bool,
     now_tick: u64,
@@ -734,7 +767,8 @@ fn walk_node(
             style_id,
         } => {
             let glyph_data = reader.shaped_glyphs(glyphs, glyph_count);
-            let ascent_pt = ctx.ascent_fu as f32 * font_size as f32 / ctx.upem as f32;
+            let fm = &ctx.font_metrics[(style_id as usize).min(2)];
+            let ascent_pt = fm.ascent_fu as f32 * font_size as f32 / fm.upem as f32;
             let baseline_y = y + ascent_pt;
             let inv_scale = 1.0 / ctx.scale as f32;
             let raster_size = font_size.saturating_mul(ctx.scale as u16);
@@ -826,13 +860,14 @@ fn lookup_or_rasterize(
         return Some(*entry);
     }
 
+    let font_data = font_for_style(style_id);
     let mut buf = RasterBuffer {
         data: &mut ctx.raster_buf,
         width: 100,
         height: 100,
     };
     let metrics = fonts::rasterize::rasterize(
-        FONT_DATA,
+        font_data,
         glyph_id,
         font_size,
         &mut buf,
@@ -1827,17 +1862,15 @@ extern "C" fn _start() -> ! {
 
     console::write(console_ep, b"render: pipeline ready\n");
 
-    let fm = fonts::metrics::font_metrics(FONT_DATA);
-    let (ascent_fu, upem) = match fm {
-        Some(ref m) => (m.ascent, m.units_per_em),
-        None => (800, 1000),
-    };
     let walk_ctx = WalkContext {
         atlas: GlyphAtlas::new_boxed(),
         scratch: alloc::boxed::Box::new(RasterScratch::zeroed()),
         raster_buf: alloc::vec![0u8; RASTER_BUF_SIZE],
-        ascent_fu,
-        upem,
+        font_metrics: [
+            metrics_for_font(FONT_MONO),
+            metrics_for_font(FONT_SANS),
+            metrics_for_font(FONT_SERIF),
+        ],
         scale,
         atlas_dirty: false,
         now_tick: 0,

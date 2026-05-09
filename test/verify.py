@@ -653,6 +653,78 @@ def assert_cursor_colors(img: Image.Image, args: str, tolerance: int) -> bool:
         return False
 
 
+def assert_font_differs(img: Image.Image, args: str, tolerance: int) -> bool:
+    """Verify two text regions use different fonts by comparing glyph column profiles.
+
+    Scans vertical columns in each region and builds a coverage profile.
+    Different fonts produce different coverage patterns for the same characters.
+    Args: x1,y1,w1,h1,x2,y2,w2,h2 — two regions to compare.
+    """
+    parts = args.split(",")
+    if len(parts) != 8:
+        print(f"FAIL: font_differs expects x1,y1,w1,h1,x2,y2,w2,h2, got '{args}'")
+        return False
+
+    x1, y1, w1, h1 = int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3])
+    x2, y2, w2, h2 = int(parts[4]), int(parts[5]), int(parts[6]), int(parts[7])
+
+    def column_profile(x, y, w, h):
+        bg_r, bg_g, bg_b = img.getpixel((x + w - 1, y + h - 1))[:3]
+        cols = []
+        for cx in range(x, x + w):
+            count = 0
+            for cy in range(y, y + h):
+                r, g, b = img.getpixel((cx, cy))[:3]
+                if abs(r - bg_r) > 20 or abs(g - bg_g) > 20 or abs(b - bg_b) > 20:
+                    count += 1
+            cols.append(count)
+        return cols
+
+    prof1 = column_profile(x1, y1, w1, h1)
+    prof2 = column_profile(x2, y2, w2, h2)
+
+    def cluster_widths(profile):
+        widths = []
+        in_cluster = False
+        width = 0
+        for v in profile:
+            if v > 0:
+                if not in_cluster:
+                    in_cluster = True
+                    width = 1
+                else:
+                    width += 1
+            else:
+                if in_cluster:
+                    widths.append(width)
+                    in_cluster = False
+                    width = 0
+        if in_cluster:
+            widths.append(width)
+        return widths
+
+    w1s = cluster_widths(prof1)
+    w2s = cluster_widths(prof2)
+
+    if len(w1s) < 2 or len(w2s) < 2:
+        print(f"FAIL: not enough glyph clusters (region1={len(w1s)}, region2={len(w2s)})")
+        return False
+
+    var1 = max(w1s) - min(w1s) if w1s else 0
+    var2 = max(w2s) - min(w2s) if w2s else 0
+
+    differ = abs(var1 - var2) > 2 or var1 != var2
+
+    if differ:
+        print(f"PASS: font differs — region1 cluster width variance={var1} "
+              f"(widths={w1s[:8]}), region2 variance={var2} (widths={w2s[:8]})")
+        return True
+    else:
+        print(f"FAIL: regions have similar cluster patterns "
+              f"(var1={var1}, var2={var2}, w1={w1s[:8]}, w2={w2s[:8]})")
+        return False
+
+
 ASSERTIONS = {
     "solid_color": assert_solid_color,
     "uniform": assert_uniform,
@@ -671,6 +743,7 @@ ASSERTIONS = {
     "clock_format": assert_clock_format,
     "right_margin": assert_right_margin,
     "cursor_colors": assert_cursor_colors,
+    "font_differs": assert_font_differs,
 }
 
 

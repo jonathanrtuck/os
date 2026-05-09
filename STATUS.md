@@ -471,6 +471,31 @@ next rendering milestone.
    triple-click drag = line-snapped. `drag_origin_start/end` stores original
    anchor boundaries for snap calculations.
 
+### Phase 11 — Content-Type Typography (COMPLETE)
+
+1. **Font embedding** — DONE. Three font families restored from the v0.6 tag:
+   JetBrains Mono (monospace, code), Inter (sans-serif, UI chrome), Source
+   Serif 4 (serif, prose — available for future content types). Embedded via
+   `include_bytes!` in both the presenter and compositor.
+
+2. **Multi-font compositor** — DONE. Well-known style IDs (STYLE_MONO=0,
+   STYLE_SANS=1, STYLE_SERIF=2) shared between presenter and compositor. The
+   compositor stores per-font metrics (ascent, upem) and selects font data for
+   rasterization based on `style_id` in each `Content::Glyphs` node. Atlas key
+   `(glyph_id, font_size_px, style_id)` already distinguishes fonts.
+
+3. **Inter chrome text** — DONE. Title ("untitled") and clock (HH:MM:SS)
+   render with Inter (STYLE_SANS) instead of JetBrains Mono. Proportional
+   glyph advances from Inter's 'M' width. Document text remains JetBrains
+   Mono (STYLE_MONO) for text/plain content.
+
+4. **Font fallback chain** — DONE. When the primary font (JetBrains Mono)
+   lacks a glyph for a character (glyph_id 0 in the cmap), the presenter
+   falls back to Inter. Fast path: if all characters resolve from the primary
+   font, emits a single `Content::Glyphs` node. Slow path: splits the line
+   into contiguous runs by font, each with the appropriate style_id. Maintains
+   monospace grid alignment for fallback glyphs (uses primary font's advance).
+
 ## What's Next: v0.6 Parity
 
 The userspace rebuild plan (`design/userspace-rebuild.md`) is complete through
@@ -487,7 +512,7 @@ work to reach full v0.6-pre-rewrite parity is tracked in
 - Phase 10 (visual chrome): COMPLETE
 - Phase 10a (pointer interaction — I-beam cursor, click/drag/multi-click):
   COMPLETE
-- Phase 11 (content-type typography): NOT STARTED
+- Phase 11 (content-type typography): COMPLETE
 - Phase 12 (PNG decoder): NOT STARTED
 - Phase 13 (filesystem + virtio-9p): NOT STARTED
 - Phase 14 (document switching — Ctrl+Tab text↔image, slide animation): NOT

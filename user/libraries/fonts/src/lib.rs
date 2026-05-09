@@ -207,7 +207,7 @@ mod tests {
 
     #[test]
     fn rasterize_at_various_sizes() {
-        static FONT: &[u8] = include_bytes!("../../../assets/jetbrains-mono.ttf");
+        static FONT: &[u8] = include_bytes!("../../../../assets/jetbrains-mono.ttf");
 
         let gid = metrics::glyph_id_for_char(FONT, 'H').unwrap();
         let mut scratch = rasterize::RasterScratch::zeroed();

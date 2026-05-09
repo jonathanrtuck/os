@@ -52,24 +52,38 @@ fn read_rtc_seconds(rtc_va: usize) -> u64 {
     val as u64
 }
 
-static FONT_DATA: &[u8] = include_bytes!("../../../../assets/jetbrains-mono.ttf");
+// ── Font data — well-known style IDs ──────────────────────────────
+//
+// Style IDs shared between the presenter and compositor. The presenter
+// assigns style_id to each Content::Glyphs node; the compositor selects
+// font data for rasterization based on the same mapping.
 
-fn build_cmap_table() -> [u16; 128] {
+const STYLE_MONO: u32 = 0;
+const STYLE_SANS: u32 = 1;
+#[allow(dead_code)]
+const STYLE_SERIF: u32 = 2;
+
+static FONT_MONO: &[u8] = include_bytes!("../../../../assets/jetbrains-mono.ttf");
+static FONT_SANS: &[u8] = include_bytes!("../../../../assets/inter.ttf");
+#[allow(dead_code)]
+static FONT_SERIF: &[u8] = include_bytes!("../../../../assets/source-serif-4.ttf");
+
+fn build_cmap_table(font_data: &[u8]) -> [u16; 128] {
     let mut table = [0u16; 128];
 
     for ch in 0u8..128 {
-        table[ch as usize] = fonts::metrics::glyph_id_for_char(FONT_DATA, ch as char).unwrap_or(0);
+        table[ch as usize] = fonts::metrics::glyph_id_for_char(font_data, ch as char).unwrap_or(0);
     }
 
     table
 }
 
-fn compute_char_advance() -> f32 {
-    let gid = fonts::metrics::glyph_id_for_char(FONT_DATA, 'M').unwrap_or(0);
+fn compute_char_advance(font_data: &[u8]) -> f32 {
+    let gid = fonts::metrics::glyph_id_for_char(font_data, 'M').unwrap_or(0);
 
     if let (Some((advance_fu, _)), Some(fm)) = (
-        fonts::metrics::glyph_h_metrics(FONT_DATA, gid),
-        fonts::metrics::font_metrics(FONT_DATA),
+        fonts::metrics::glyph_h_metrics(font_data, gid),
+        fonts::metrics::font_metrics(font_data),
     ) {
         return advance_fu as f32 * presenter_service::FONT_SIZE as f32 / fm.units_per_em as f32;
     }
@@ -168,8 +182,10 @@ struct Presenter {
     display_height: u32,
 
     glyphs: [ShapedGlyph; MAX_GLYPHS_PER_LINE],
-    cmap: [u16; 128],
+    cmap_mono: [u16; 128],
+    cmap_sans: [u16; 128],
     char_width: f32,
+    sans_char_width: f32,
 
     blink_start: u64,
 
@@ -371,11 +387,11 @@ impl Presenter {
         let title_label = b"untitled";
         let title_text_y = (title_bar_h.saturating_sub(presenter_service::LINE_HEIGHT)) / 2;
         let title_glyphs_count = title_label.len().min(MAX_GLYPHS_PER_LINE);
-        let char_advance = (self.char_width * 65536.0) as i32;
+        let sans_advance = (self.sans_char_width * 65536.0) as i32;
 
         for (j, &byte) in title_label.iter().enumerate().take(title_glyphs_count) {
             let gid = if byte < 128 {
-                self.cmap[byte as usize]
+                self.cmap_sans[byte as usize]
             } else {
                 0
             };
@@ -383,7 +399,7 @@ impl Presenter {
             self.glyphs[j] = ShapedGlyph {
                 glyph_id: gid,
                 _pad: 0,
-                x_advance: char_advance,
+                x_advance: sans_advance,
                 x_offset: 0,
                 y_offset: 0,
             };
@@ -396,14 +412,14 @@ impl Presenter {
 
             n.x = pt(36);
             n.y = pt(title_text_y as i32);
-            n.width = upt((title_glyphs_count as f32 * self.char_width) as u32 + 1);
+            n.width = upt((title_glyphs_count as f32 * self.sans_char_width) as u32 + 1);
             n.height = upt(presenter_service::LINE_HEIGHT);
             n.content = Content::Glyphs {
                 color: title_color,
                 glyphs: title_glyph_ref,
                 glyph_count: title_glyphs_count as u16,
                 font_size: presenter_service::FONT_SIZE,
-                style_id: 0,
+                style_id: STYLE_SANS,
             };
             n.role = scene::ROLE_LABEL;
 
@@ -439,7 +455,7 @@ impl Presenter {
 
         for (j, &byte) in clock_chars.iter().enumerate() {
             let gid = if byte < 128 {
-                self.cmap[byte as usize]
+                self.cmap_sans[byte as usize]
             } else {
                 0
             };
@@ -447,14 +463,14 @@ impl Presenter {
             self.glyphs[j] = ShapedGlyph {
                 glyph_id: gid,
                 _pad: 0,
-                x_advance: char_advance,
+                x_advance: sans_advance,
                 x_offset: 0,
                 y_offset: 0,
             };
         }
 
         let clock_glyph_ref = scene.push_shaped_glyphs(&self.glyphs[..8]);
-        let clock_text_w = (8.0 * self.char_width) as u32 + 1;
+        let clock_text_w = (8.0 * self.sans_char_width) as u32 + 1;
         let clock_x = (self.display_width - 12 - clock_text_w) as i32;
 
         if let Some(clock_node) = scene.alloc_node() {
@@ -469,7 +485,7 @@ impl Presenter {
                 glyphs: clock_glyph_ref,
                 glyph_count: 8,
                 font_size: presenter_service::FONT_SIZE,
-                style_id: 0,
+                style_id: STYLE_SANS,
             };
             n.role = scene::ROLE_LABEL;
 
@@ -571,46 +587,128 @@ impl Presenter {
             };
             let glyph_count = line_len.min(MAX_GLYPHS_PER_LINE);
 
+            let mut needs_fallback = false;
+
             for (j, &byte) in line_bytes.iter().enumerate().take(glyph_count) {
-                let gid = if byte < 128 {
-                    self.cmap[byte as usize]
+                let mono_gid = if byte < 128 {
+                    self.cmap_mono[byte as usize]
                 } else {
                     0
                 };
 
-                self.glyphs[j] = ShapedGlyph {
-                    glyph_id: gid,
-                    _pad: 0,
-                    x_advance: char_advance,
-                    x_offset: 0,
-                    y_offset: 0,
-                };
+                if mono_gid > 0 {
+                    self.glyphs[j] = ShapedGlyph {
+                        glyph_id: mono_gid,
+                        _pad: STYLE_MONO as u16,
+                        x_advance: char_advance,
+                        x_offset: 0,
+                        y_offset: 0,
+                    };
+                } else {
+                    let sans_gid = if byte < 128 {
+                        self.cmap_sans[byte as usize]
+                    } else {
+                        0
+                    };
+
+                    if sans_gid > 0 {
+                        self.glyphs[j] = ShapedGlyph {
+                            glyph_id: sans_gid,
+                            _pad: STYLE_SANS as u16,
+                            x_advance: char_advance,
+                            x_offset: 0,
+                            y_offset: 0,
+                        };
+                        needs_fallback = true;
+                    } else {
+                        self.glyphs[j] = ShapedGlyph {
+                            glyph_id: 0,
+                            _pad: STYLE_MONO as u16,
+                            x_advance: char_advance,
+                            x_offset: 0,
+                            y_offset: 0,
+                        };
+                    }
+                }
             }
 
-            let glyph_ref = scene.push_shaped_glyphs(&self.glyphs[..glyph_count]);
-            let line_node = match scene.alloc_node() {
-                Some(id) => id,
-                None => break,
-            };
+            if !needs_fallback {
+                // Fast path: all glyphs from primary font.
+                for j in 0..glyph_count {
+                    self.glyphs[j]._pad = 0;
+                }
 
-            {
-                let n = scene.node_mut(line_node);
-
-                n.x = scene::f32_to_mpt(line_info.x);
-                n.y = pt(line_info.y);
-                n.width = upt(line_info.width as u32 + 1);
-                n.height = upt(presenter_service::LINE_HEIGHT);
-                n.content = Content::Glyphs {
-                    color: text_color,
-                    glyphs: glyph_ref,
-                    glyph_count: glyph_count as u16,
-                    font_size: presenter_service::FONT_SIZE,
-                    style_id: 0,
+                let glyph_ref = scene.push_shaped_glyphs(&self.glyphs[..glyph_count]);
+                let line_node = match scene.alloc_node() {
+                    Some(id) => id,
+                    None => break,
                 };
-                n.role = scene::ROLE_PARAGRAPH;
-            }
 
-            scene.add_child(viewport, line_node);
+                {
+                    let n = scene.node_mut(line_node);
+
+                    n.x = scene::f32_to_mpt(line_info.x);
+                    n.y = pt(line_info.y);
+                    n.width = upt(line_info.width as u32 + 1);
+                    n.height = upt(presenter_service::LINE_HEIGHT);
+                    n.content = Content::Glyphs {
+                        color: text_color,
+                        glyphs: glyph_ref,
+                        glyph_count: glyph_count as u16,
+                        font_size: presenter_service::FONT_SIZE,
+                        style_id: STYLE_MONO,
+                    };
+                    n.role = scene::ROLE_PARAGRAPH;
+                }
+
+                scene.add_child(viewport, line_node);
+            } else {
+                // Slow path: split into runs by font for fallback.
+                let mut run_start = 0;
+
+                while run_start < glyph_count {
+                    let run_style = self.glyphs[run_start]._pad as u32;
+                    let mut run_end = run_start + 1;
+
+                    while run_end < glyph_count && self.glyphs[run_end]._pad as u32 == run_style {
+                        run_end += 1;
+                    }
+
+                    let run_len = run_end - run_start;
+
+                    for j in run_start..run_end {
+                        self.glyphs[j]._pad = 0;
+                    }
+
+                    let glyph_ref = scene.push_shaped_glyphs(&self.glyphs[run_start..run_end]);
+                    let run_node = match scene.alloc_node() {
+                        Some(id) => id,
+                        None => break,
+                    };
+
+                    let run_x = line_info.x + run_start as f32 * self.char_width;
+
+                    {
+                        let n = scene.node_mut(run_node);
+
+                        n.x = scene::f32_to_mpt(run_x);
+                        n.y = pt(line_info.y);
+                        n.width = upt((run_len as f32 * self.char_width) as u32 + 1);
+                        n.height = upt(presenter_service::LINE_HEIGHT);
+                        n.content = Content::Glyphs {
+                            color: text_color,
+                            glyphs: glyph_ref,
+                            glyph_count: run_len as u16,
+                            font_size: presenter_service::FONT_SIZE,
+                            style_id: run_style,
+                        };
+                        n.role = scene::ROLE_PARAGRAPH;
+                    }
+
+                    scene.add_child(viewport, run_node);
+                    run_start = run_end;
+                }
+            }
         }
 
         // Handle cursor past last line.
@@ -692,11 +790,11 @@ impl Presenter {
             b'0' + (seconds / 10) as u8,
             b'0' + (seconds % 10) as u8,
         ];
-        let char_advance = (self.char_width * 65536.0) as i32;
+        let sans_advance = (self.sans_char_width * 65536.0) as i32;
 
         for (j, &byte) in clock_chars.iter().enumerate() {
             let gid = if byte < 128 {
-                self.cmap[byte as usize]
+                self.cmap_sans[byte as usize]
             } else {
                 0
             };
@@ -704,7 +802,7 @@ impl Presenter {
             self.glyphs[j] = ShapedGlyph {
                 glyph_id: gid,
                 _pad: 0,
-                x_advance: char_advance,
+                x_advance: sans_advance,
                 x_offset: 0,
                 y_offset: 0,
             };
@@ -1588,8 +1686,10 @@ extern "C" fn _start() -> ! {
             x_offset: 0,
             y_offset: 0,
         }; MAX_GLYPHS_PER_LINE],
-        cmap: build_cmap_table(),
-        char_width: compute_char_advance(),
+        cmap_mono: build_cmap_table(FONT_MONO),
+        cmap_sans: build_cmap_table(FONT_SANS),
+        char_width: compute_char_advance(FONT_MONO),
+        sans_char_width: compute_char_advance(FONT_SANS),
         blink_start: abi::system::clock_read().unwrap_or(0),
         last_line_count: 0,
         last_cursor_line: 0,
