@@ -620,14 +620,16 @@ pub mod comp {
     pub struct SetupReply {
         pub display_width: u32,
         pub display_height: u32,
+        pub refresh_hz: u32,
     }
 
     impl SetupReply {
-        pub const SIZE: usize = 8;
+        pub const SIZE: usize = 12;
 
         pub fn write_to(&self, buf: &mut [u8]) {
             buf[0..4].copy_from_slice(&self.display_width.to_le_bytes());
             buf[4..8].copy_from_slice(&self.display_height.to_le_bytes());
+            buf[8..12].copy_from_slice(&self.refresh_hz.to_le_bytes());
         }
 
         #[must_use]
@@ -635,6 +637,7 @@ pub mod comp {
             Self {
                 display_width: u32::from_le_bytes(buf[0..4].try_into().unwrap()),
                 display_height: u32::from_le_bytes(buf[4..8].try_into().unwrap()),
+                refresh_hz: u32::from_le_bytes(buf[8..12].try_into().unwrap()),
             }
         }
     }
@@ -674,6 +677,7 @@ pub mod comp {
             let reply = SetupReply {
                 display_width: 1440,
                 display_height: 900,
+                refresh_hz: 120,
             };
             let mut buf = [0u8; SetupReply::SIZE];
 

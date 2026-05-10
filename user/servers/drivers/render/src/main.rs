@@ -1131,7 +1131,6 @@ const RASTER_BUF_SIZE: usize = 100 * 100;
 const ATLAS_W_F: f32 = atlas::ATLAS_WIDTH as f32;
 const ATLAS_H_F: f32 = atlas::ATLAS_HEIGHT as f32;
 const NS_PER_MS: u64 = 1_000_000;
-const FRAME_INTERVAL_NS: u64 = 16_666_667;
 
 struct WalkContext {
     atlas: alloc::boxed::Box<GlyphAtlas>,
@@ -1139,13 +1138,15 @@ struct WalkContext {
     raster_buf: alloc::vec::Vec<u8>,
     font_metrics: [FontMetricsEntry; 3],
     scale: u32,
+    frame_interval_ns: u64,
     atlas_dirty: bool,
+    atlas_full: bool,
     now_tick: u64,
     next_deadline: u64,
     image_content_id: u32,
 }
 
-fn evaluate_animation(anim: &scene::Animation, now_ns: u64) -> (u8, u64) {
+fn evaluate_animation(anim: &scene::Animation, now_ns: u64, frame_interval_ns: u64) -> (u8, u64) {
     if !anim.is_active() {
         return (255, 0);
     }
@@ -1186,7 +1187,7 @@ fn evaluate_animation(anim: &scene::Animation, now_ns: u64) -> (u8, u64) {
             let eased = animation::ease(animation::Easing::EaseInOut, t);
             let v = prev_value as f32 + (phase.value as f32 - prev_value as f32) * eased;
 
-            return (v as u8, now_ns + FRAME_INTERVAL_NS);
+            return (v as u8, now_ns + frame_interval_ns);
         }
 
         acc = phase_end;
@@ -1242,7 +1243,8 @@ fn walk_node(
 
     let effective_opacity =
         if node.animation.is_active() && node.animation.target == scene::AnimationTarget::Opacity {
-            let (val, deadline) = evaluate_animation(&node.animation, ctx.now_tick);
+            let (val, deadline) =
+                evaluate_animation(&node.animation, ctx.now_tick, ctx.frame_interval_ns);
 
             if deadline > 0 && (ctx.next_deadline == 0 || deadline < ctx.next_deadline) {
                 ctx.next_deadline = deadline;
@@ -1658,6 +1660,8 @@ fn lookup_or_rasterize(
 
         ctx.atlas.lookup(glyph_id, font_size, style_id).copied()
     } else {
+        ctx.atlas_full = true;
+
         None
     }
 }
@@ -1819,6 +1823,8 @@ fn lookup_or_rasterize_path(
 
         ctx.atlas.lookup(1, cache_size, cache_hash).copied()
     } else {
+        ctx.atlas_full = true;
+
         None
     }
 }
@@ -2096,6 +2102,7 @@ struct Compositor {
     logical_w: u32,
     logical_h: u32,
     scale: u32,
+    refresh_hz: u32,
 
     scene_va: usize,
     frame_count: u32,
@@ -2340,6 +2347,12 @@ impl Compositor {
             return 0;
         }
 
+        if self.walk_ctx.atlas_full {
+            self.walk_ctx.atlas.reset();
+            self.walk_ctx.atlas_full = false;
+            self.atlas_upload_y = 0;
+        }
+
         let now = abi::system::clock_read().unwrap_or(0);
 
         self.walk_ctx.now_tick = now;
@@ -2416,10 +2429,9 @@ impl Compositor {
         } else {
             let mut first = true;
             let mut active_pipe: Option<Pipe> = None;
+            let mut op_idx = 0;
 
-            for op_idx in 0..draws.ops.len() {
-                let op = &draws.ops[op_idx];
-                let is_last = op_idx == draws.ops.len() - 1;
+            while op_idx < draws.ops.len() {
                 // SAFETY: render_dma.va is a valid DMA allocation of render_buf_size bytes.
                 let dma_buf = unsafe {
                     core::slice::from_raw_parts_mut(
@@ -2428,7 +2440,9 @@ impl Compositor {
                     )
                 };
 
-                if matches!(op.pipe, Pipe::BackdropBlur) {
+                if matches!(draws.ops[op_idx].pipe, Pipe::BackdropBlur) {
+                    let op = &draws.ops[op_idx];
+                    let is_last = op_idx == draws.ops.len() - 1;
                     let mut corners = [(0.0f32, 0.0f32); 4];
 
                     for (i, corner) in corners.iter_mut().enumerate() {
@@ -2446,7 +2460,6 @@ impl Compositor {
                     let phys_h = dh * scale;
                     let sigma_px = radius_pt * scale / 2.0;
                     let step_px = if sigma_px > 0.0 { sigma_px / 6.0 } else { 1.0 };
-                    // AABB of transformed corners (for blit region).
                     let mut min_x = corners[0].0;
                     let mut min_y = corners[0].1;
                     let mut max_x = corners[0].0;
@@ -2474,11 +2487,8 @@ impl Compositor {
                     let sy1 = (max_y * scale) as u16 + pad;
                     let sw = (sx1.min(phys_w as u16)).saturating_sub(sx);
                     let sh = (sy1.min(phys_h as u16)).saturating_sub(sy);
-                    // Build blur quad with transformed corners and matching UVs.
-                    // TL, BL, BR, TL, BR, TR triangle winding.
                     let to_ndc = |px: f32, py: f32| (px / dw * 2.0 - 1.0, 1.0 - py / dh * 2.0);
                     let to_uv = |px: f32, py: f32| (px / dw, py / dh);
-                    // corners: TL=0, TR=1, BR=2, BL=3
                     let tl = corners[0];
                     let tr = corners[1];
                     let br = corners[2];
@@ -2510,10 +2520,6 @@ impl Compositor {
                     let corner_radius_pt =
                         f32::from_le_bytes(op.params[40..44].try_into().unwrap());
                     let phys_cr = corner_radius_pt * scale;
-                    // Derive un-rotated dimensions and inverse transform from
-                    // the 4 corners. For a rotated rectangle, the AABB is larger
-                    // than the actual node — using AABB half-extents for the SDF
-                    // check places the rounded corners at the wrong positions.
                     let dx_tr = tr.0 - tl.0;
                     let dy_tr = tr.1 - tl.1;
                     let dx_bl = bl.0 - tl.0;
@@ -2524,8 +2530,6 @@ impl Compositor {
                     let center_y = (tl.1 + br.1) / 2.0 * scale;
                     let half_w = node_w / 2.0 * scale;
                     let half_h = node_h / 2.0 * scale;
-                    // Inverse 2x2 transform: maps screen-space offsets back to
-                    // node-local space for the rounded-rect SDF check.
                     let (inv_a, inv_b, inv_c, inv_d) = if node_w > 1e-6 && node_h > 1e-6 {
                         let fwd_a = dx_tr / node_w;
                         let fwd_b = dy_tr / node_w;
@@ -2548,7 +2552,6 @@ impl Compositor {
                     } else {
                         (1.0f32, 0.0f32, 0.0f32, 1.0f32)
                     };
-                    // BlurParams: step(2) + center(2) + half_ext(2) + cr + pad + inv_xform(4)
                     let h_vals: [f32; 12] = [
                         step_px / phys_w,
                         0.0,
@@ -2585,7 +2588,6 @@ impl Compositor {
                         v_params[i * 4..(i + 1) * 4].copy_from_slice(&v_vals[i].to_le_bytes());
                     }
 
-                    // Pass 1: blit drawable → TEX_BLUR, then horizontal blur
                     let len = {
                         let mut w = CommandWriter::new(dma_buf);
 
@@ -2633,7 +2635,6 @@ impl Compositor {
                         len,
                     );
 
-                    // Pass 2: blit H-blurred drawable → TEX_BLUR, then vertical blur
                     let len = {
                         let mut w = CommandWriter::new(dma_buf);
 
@@ -2689,11 +2690,13 @@ impl Compositor {
 
                     first = false;
                     active_pipe = None;
+                    op_idx += 1;
 
                     continue;
                 }
 
-                let verts = &draws.verts[op.vert_offset..op.vert_offset + op.vert_bytes];
+                // Batch consecutive non-blur ops into a single render pass.
+                let batch_start = op_idx;
                 let len = {
                     let mut w = CommandWriter::new(dma_buf);
                     let load = if first {
@@ -2716,50 +2719,66 @@ impl Compositor {
                         1.0,
                     );
 
-                    let needs_rebind = active_pipe != Some(op.pipe)
-                        || op.pipe == Pipe::Shadow
-                        || op.pipe == Pipe::Gradient
-                        || op.pipe == Pipe::GradientMasked;
+                    while op_idx < draws.ops.len() {
+                        let op = &draws.ops[op_idx];
 
-                    if needs_rebind {
-                        match op.pipe {
-                            Pipe::Solid => {
-                                w.set_render_pipeline(PIPE_SOLID);
-                            }
-                            Pipe::Glyph => {
-                                w.set_render_pipeline(PIPE_GLYPH);
-                                w.set_fragment_texture(TEX_ATLAS, 0);
-                                w.set_fragment_sampler(SAMPLER_NEAREST, 0);
-                            }
-                            Pipe::Shadow => {
-                                w.set_render_pipeline(PIPE_SHADOW);
-                                w.set_fragment_bytes(0, &op.params[..48]);
-                            }
-                            Pipe::Gradient => {
-                                w.set_render_pipeline(PIPE_GRADIENT);
-                                w.set_fragment_bytes(0, &op.params);
-                            }
-                            Pipe::GradientMasked => {
-                                w.set_render_pipeline(PIPE_GRADIENT_MASKED);
-                                w.set_fragment_bytes(0, &op.params);
-                                w.set_fragment_texture(TEX_ATLAS, 0);
-                                w.set_fragment_sampler(SAMPLER_NEAREST, 0);
-                            }
-                            Pipe::Textured => {
-                                w.set_render_pipeline(PIPE_TEXTURED);
-                                w.set_fragment_texture(TEX_IMAGE, 0);
-                                w.set_fragment_sampler(SAMPLER_LINEAR, 0);
-                            }
-                            Pipe::BackdropBlur => unreachable!(),
+                        if matches!(op.pipe, Pipe::BackdropBlur) {
+                            break;
                         }
-                        active_pipe = Some(op.pipe);
-                    }
 
-                    render::batch::emit_draws(&mut w, verts);
+                        let verts = &draws.verts[op.vert_offset..op.vert_offset + op.vert_bytes];
+                        let needs_rebind = active_pipe != Some(op.pipe)
+                            || op.pipe == Pipe::Shadow
+                            || op.pipe == Pipe::Gradient
+                            || op.pipe == Pipe::GradientMasked;
+
+                        if needs_rebind {
+                            match op.pipe {
+                                Pipe::Solid => {
+                                    w.set_render_pipeline(PIPE_SOLID);
+                                }
+                                Pipe::Glyph => {
+                                    w.set_render_pipeline(PIPE_GLYPH);
+                                    w.set_fragment_texture(TEX_ATLAS, 0);
+                                    w.set_fragment_sampler(SAMPLER_NEAREST, 0);
+                                }
+                                Pipe::Shadow => {
+                                    w.set_render_pipeline(PIPE_SHADOW);
+                                    w.set_fragment_bytes(0, &op.params[..48]);
+                                }
+                                Pipe::Gradient => {
+                                    w.set_render_pipeline(PIPE_GRADIENT);
+                                    w.set_fragment_bytes(0, &op.params);
+                                }
+                                Pipe::GradientMasked => {
+                                    w.set_render_pipeline(PIPE_GRADIENT_MASKED);
+                                    w.set_fragment_bytes(0, &op.params);
+                                    w.set_fragment_texture(TEX_ATLAS, 0);
+                                    w.set_fragment_sampler(SAMPLER_NEAREST, 0);
+                                }
+                                Pipe::Textured => {
+                                    w.set_render_pipeline(PIPE_TEXTURED);
+                                    w.set_fragment_texture(TEX_IMAGE, 0);
+                                    w.set_fragment_sampler(SAMPLER_LINEAR, 0);
+                                }
+                                Pipe::BackdropBlur => unreachable!(),
+                            }
+                            active_pipe = Some(op.pipe);
+                        }
+
+                        render::batch::emit_draws(&mut w, verts);
+
+                        if w.has_overflow() {
+                            break;
+                        }
+
+                        first = false;
+                        op_idx += 1;
+                    }
 
                     w.end_render_pass();
 
-                    if is_last {
+                    if op_idx == draws.ops.len() {
                         w.present_and_commit(self.frame_count);
                     }
 
@@ -2774,7 +2793,10 @@ impl Compositor {
                     self.render_dma.pa,
                     len,
                 );
-                first = false;
+
+                if op_idx == batch_start {
+                    op_idx += 1;
+                }
             }
         }
 
@@ -2805,6 +2827,7 @@ impl Dispatch for Compositor {
                         let reply = render::comp::SetupReply {
                             display_width: self.logical_w,
                             display_height: self.logical_h,
+                            refresh_hz: self.refresh_hz,
                         };
                         let mut data = [0u8; render::comp::SetupReply::SIZE];
 
@@ -2907,6 +2930,11 @@ extern "C" fn _start() -> ! {
 
     let display_w = device.config_read32(0x00);
     let display_h = device.config_read32(0x04);
+    let refresh_hz = {
+        let raw = device.config_read32(0x08);
+
+        if raw == 0 { 60 } else { raw }
+    };
     let scale = {
         let raw = device.config_read32(0x0C);
 
@@ -2914,6 +2942,7 @@ extern "C" fn _start() -> ! {
     };
     let logical_w = display_w / scale;
     let logical_h = display_h / scale;
+    let frame_interval_ns = 1_000_000_000u64 / refresh_hz as u64;
     let setup_qsize = device
         .queue_max_size(render::VIRTQ_SETUP)
         .min(virtio::DEFAULT_QUEUE_SIZE);
@@ -2990,6 +3019,7 @@ extern "C" fn _start() -> ! {
 
     console::write_u32(console_ep, b"render: display w=", display_w);
     console::write_u32(console_ep, b"render: display h=", display_h);
+    console::write_u32(console_ep, b"render: refresh=", refresh_hz);
     console::write_u32(console_ep, b"render: scale=", scale);
     console::write_u32(console_ep, b"render: logical w=", logical_w);
     console::write_u32(console_ep, b"render: logical h=", logical_h);
@@ -3016,7 +3046,9 @@ extern "C" fn _start() -> ! {
             metrics_for_font(FONT_SERIF),
         ],
         scale,
+        frame_interval_ns,
         atlas_dirty: false,
+        atlas_full: false,
         now_tick: 0,
         next_deadline: 0,
         image_content_id: 0,
@@ -3045,6 +3077,7 @@ extern "C" fn _start() -> ! {
         logical_w,
         logical_h,
         scale,
+        refresh_hz,
         scene_va: 0,
         frame_count: 0,
         walk_ctx,

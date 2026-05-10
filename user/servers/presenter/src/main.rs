@@ -1169,6 +1169,8 @@ impl Presenter {
         self.last_cursor_line = cursor_line;
         self.last_cursor_col = cursor_col;
         self.last_content_len = content_len as u32;
+
+        self.update_cursor_shape();
     }
 
     fn current_clock_secs(&self) -> u64 {
@@ -2778,7 +2780,6 @@ fn decode_embedded_image(server: &mut Presenter, render_ep: Handle) {
     let _ = abi::vmo::unmap(decode_va);
     let _ = abi::handle::close(decode_vmo);
     let _ = abi::vmo::unmap(pixel_va);
-
     let pixel_dup = match abi::handle::dup(pixel_vmo, Rights::READ_MAP) {
         Ok(h) => h,
         Err(_) => return,
@@ -3133,7 +3134,7 @@ extern "C" fn _start() -> ! {
     };
     let mut reply_buf = [0u8; ipc::message::MSG_SIZE];
     let mut recv_handles = [0u32; 4];
-    let (display_width, display_height) = match ipc::client::call(
+    let (display_width, display_height, refresh_hz) = match ipc::client::call(
         render_ep,
         render::comp::SETUP,
         &[],
@@ -3144,13 +3145,15 @@ extern "C" fn _start() -> ! {
         Ok(reply) if !reply.is_error() && reply.payload.len() >= render::comp::SetupReply::SIZE => {
             let sr = render::comp::SetupReply::read_from(reply.payload);
 
-            (sr.display_width, sr.display_height)
+            (sr.display_width, sr.display_height, sr.refresh_hz)
         }
         _ => (
             presenter_service::DEFAULT_WIDTH,
             presenter_service::DEFAULT_HEIGHT,
+            60,
         ),
     };
+    let frame_ns: u64 = 1_000_000_000 / refresh_hz as u64;
 
     console::write(console_ep, b"presenter: render connected\n");
 
@@ -3250,74 +3253,78 @@ extern "C" fn _start() -> ! {
     console::write(console_ep, b"presenter: ready\n");
 
     const NS_PER_SEC: u64 = 1_000_000_000;
-    const FRAME_NS: u64 = 16_666_667;
+    let mut next_frame: u64 = 0;
 
     loop {
         let now = abi::system::clock_read().unwrap_or(0);
         let needs_anim = server.slide_animating || server.active_space == 2;
         let deadline = if needs_anim {
-            now + FRAME_NS
+            if next_frame <= now {
+                next_frame = now + frame_ns;
+            }
+
+            next_frame
         } else {
             let current_sec = now / NS_PER_SEC;
 
             (current_sec + 1) * NS_PER_SEC
         };
 
-        match ipc::server::serve_one_timed(own_ep, &mut server, deadline) {
-            Ok(()) => {
-                if server.active_space == 2 {
-                    server.build_scene();
-                    server.request_render();
-                }
-            }
-            Err(abi::types::SyscallError::TimedOut) => {
-                let mut needs_render = false;
-
-                if server.slide_animating {
-                    let frame_start = abi::system::clock_read().unwrap_or(0);
-                    let dt_ns = frame_start.saturating_sub(server.last_anim_tick);
-                    let dt = (dt_ns as f32 / 1_000_000_000.0).min(0.033);
-
-                    server.last_anim_tick = frame_start;
-
-                    server.slide_spring.tick(dt);
-
-                    if server.slide_spring.settled() {
-                        server.slide_animating = false;
-
-                        server.slide_spring.reset_to(server.slide_spring.target());
-                    }
-
-                    server.build_scene();
-
-                    needs_render = true;
-
-                    let frame_end = abi::system::clock_read().unwrap_or(0);
-
-                    server
-                        .frame_stats
-                        .record(frame_end.saturating_sub(frame_start));
-
-                    if !server.slide_animating {
-                        server.frame_stats.report(server.console_ep);
-                        server.frame_stats.reset();
-                    }
-                }
-
-                if !server.slide_animating && server.active_space == 2 {
-                    server.build_scene();
-                    needs_render = true;
-                }
-
-                if server.update_clock() {
-                    needs_render = true;
-                }
-
-                if needs_render {
-                    server.request_render();
-                }
-            }
+        let frame_due = match ipc::server::serve_one_timed(own_ep, &mut server, deadline) {
+            Ok(()) => abi::system::clock_read().unwrap_or(0) >= deadline,
+            Err(abi::types::SyscallError::TimedOut) => true,
             Err(_) => break,
+        };
+
+        if frame_due {
+            let mut needs_render = false;
+
+            if server.slide_animating {
+                let frame_start = abi::system::clock_read().unwrap_or(0);
+                let dt_ns = frame_start.saturating_sub(server.last_anim_tick);
+                let dt = (dt_ns as f32 / 1_000_000_000.0).min(0.033);
+
+                server.last_anim_tick = frame_start;
+
+                server.slide_spring.tick(dt);
+
+                if server.slide_spring.settled() {
+                    server.slide_animating = false;
+
+                    server.slide_spring.reset_to(server.slide_spring.target());
+                }
+
+                server.build_scene();
+
+                needs_render = true;
+
+                let frame_end = abi::system::clock_read().unwrap_or(0);
+
+                server
+                    .frame_stats
+                    .record(frame_end.saturating_sub(frame_start));
+
+                if !server.slide_animating {
+                    server.frame_stats.report(server.console_ep);
+                    server.frame_stats.reset();
+                }
+            }
+
+            if !server.slide_animating && server.active_space == 2 {
+                server.build_scene();
+
+                needs_render = true;
+            }
+
+            if server.update_clock() {
+                needs_render = true;
+            }
+
+            if needs_render {
+                server.request_render();
+            }
+
+            next_frame = abi::system::clock_read().unwrap_or(0) + frame_ns;
         }
     }
 
