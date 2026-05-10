@@ -72,11 +72,7 @@ fn raw_row_bytes(width: usize, color_type: u8, bit_depth: u8) -> usize {
 fn filter_bpp(color_type: u8, bit_depth: u8) -> usize {
     let bpp = bits_per_pixel(color_type, bit_depth) / 8;
 
-    if bpp == 0 {
-        1
-    } else {
-        bpp
-    }
+    if bpp == 0 { 1 } else { bpp }
 }
 
 fn validate_format(color_type: u8, bit_depth: u8) -> Result<(), PngError> {
@@ -1323,11 +1319,7 @@ mod tests {
     use super::*;
 
     fn fixture(name: &str) -> Vec<u8> {
-        let path = format!(
-            "{}/../../../host/fixtures/pngsuite/{}",
-            env!("CARGO_MANIFEST_DIR"),
-            name
-        );
+        let path = format!("{}/fixtures/{}", env!("CARGO_MANIFEST_DIR"), name);
 
         std::fs::read(&path).unwrap_or_else(|e| panic!("failed to read fixture {name}: {e}"))
     }
