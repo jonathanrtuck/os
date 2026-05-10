@@ -18,6 +18,7 @@ service = [
     "dep:layout",
     "dep:layout-service",
     "dep:name",
+    "dep:piecetable",
     "dep:png-decoder",
     "dep:png-lib",
     "dep:render",
@@ -41,6 +42,7 @@ icons = { path = "../../libraries/icons", optional = true }
 layout = { path = "../../libraries/layout", optional = true }
 layout-service = { path = "../layout", optional = true }
 name = { path = "../name", optional = true }
+piecetable = { path = "../../libraries/piecetable", optional = true }
 png-decoder = { path = "../png-decoder", optional = true }
 render = { path = "../drivers/render", optional = true }
 scene = { path = "../../libraries/scene", optional = true }

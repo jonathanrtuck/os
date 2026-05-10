@@ -10,9 +10,11 @@ service = [
     "dep:abi",
     "dep:console",
     "dep:document-service",
+    "dep:fonts",
     "dep:heap",
     "dep:layout",
     "dep:name",
+    "dep:piecetable",
     "ipc/kernel",
 ]
 
@@ -22,8 +24,10 @@ ipc = { path = "../../ipc", default-features = false }
 abi = { path = "../../abi", optional = true }
 console = { path = "../console", optional = true }
 document-service = { path = "../document", optional = true }
+fonts = { path = "../../libraries/fonts", optional = true }
 heap = { path = "../../heap", optional = true }
 layout = { path = "../../libraries/layout", optional = true }
 name = { path = "../name", optional = true }
+piecetable = { path = "../../libraries/piecetable", optional = true }
 
 [workspace]

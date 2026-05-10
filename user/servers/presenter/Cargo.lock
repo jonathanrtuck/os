@@ -75,6 +75,7 @@ dependencies = [
  "heap",
  "ipc",
  "name",
+ "piecetable",
  "store-service",
 ]
 
@@ -159,10 +160,12 @@ dependencies = [
  "abi",
  "console",
  "document-service",
+ "fonts",
  "heap",
  "ipc",
  "layout",
  "name",
+ "piecetable",
 ]
 
 [[package]]
@@ -179,6 +182,10 @@ dependencies = [
  "heap",
  "ipc",
 ]
+
+[[package]]
+name = "piecetable"
+version = "0.1.0"
 
 [[package]]
 name = "png"
@@ -212,6 +219,7 @@ dependencies = [
  "layout",
  "layout-service",
  "name",
+ "piecetable",
  "png",
  "png-decoder",
  "render",

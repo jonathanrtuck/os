@@ -416,6 +416,11 @@ pub fn header_mut(buf: &mut [u8]) -> &mut PieceTableHeader {
     read_header_mut(buf)
 }
 
+/// Total bytes used by the piece table buffer (header + styles + pieces + text).
+pub fn total_size(buf: &[u8]) -> usize {
+    total_used(read_header(buf))
+}
+
 /// Logical text length in bytes.
 pub fn text_len(buf: &[u8]) -> u32 {
     read_header(buf).text_len

@@ -12,6 +12,7 @@
 
 extern crate alloc;
 extern crate heap;
+extern crate piecetable;
 
 use core::panic::PanicInfo;
 
@@ -141,6 +142,28 @@ fn parse_line_at(buf: &[u8], index: usize) -> layout_service::LineInfo {
     let offset = layout_service::LayoutHeader::SIZE + index * layout_service::LineInfo::SIZE;
 
     layout_service::LineInfo::read_from(&buf[offset..])
+}
+
+fn parse_visible_run_at(buf: &[u8], index: usize) -> layout_service::VisibleRun {
+    let offset = layout_service::VISIBLE_RUNS_OFFSET + index * layout_service::VisibleRun::SIZE;
+
+    layout_service::VisibleRun::read_from(&buf[offset..])
+}
+
+fn font_data_for_family(family: u8) -> &'static [u8] {
+    match family {
+        piecetable::FONT_MONO => FONT_MONO,
+        piecetable::FONT_SERIF => FONT_SERIF,
+        _ => FONT_SANS,
+    }
+}
+
+fn style_id_for_family(family: u8) -> u32 {
+    match family {
+        piecetable::FONT_MONO => STYLE_MONO,
+        piecetable::FONT_SERIF => STYLE_SERIF,
+        _ => STYLE_SANS,
+    }
 }
 
 // ── Selection geometry ────────────────────────────────────────────
@@ -679,149 +702,166 @@ impl Presenter {
             build_selection_nodes(&mut scene, &self.results_buf, viewport, line_count, &span);
         }
 
-        // Per-line glyph nodes.
+        // Per-line glyph nodes (plain) or per-run glyph nodes (rich).
         let mut cursor_line = cursor_line_idx as u32;
         let mut cursor_col = cursor_col_in_line as u32;
         let char_advance = (self.char_width * 65536.0) as i32;
+        let is_rich = layout_header.format == 1;
 
-        for i in 0..line_count.min(scene::MAX_NODES - 4) {
-            let line_info = parse_line_at(&self.results_buf, i);
-            let line_start = line_info.byte_offset as usize;
-            let line_len = line_info.byte_length as usize;
+        if is_rich {
+            build_rich_text_nodes(
+                &mut scene,
+                viewport,
+                &layout_header,
+                &self.results_buf,
+                self.doc_va,
+                self.display_width,
+                &mut self.glyphs,
+            );
+        }
 
-            if line_len == 0 {
-                continue;
-            }
+        if !is_rich {
+            for i in 0..line_count.min(scene::MAX_NODES - 4) {
+                let line_info = parse_line_at(&self.results_buf, i);
+                let line_start = line_info.byte_offset as usize;
+                let line_len = line_info.byte_length as usize;
 
-            let line_bytes = if line_start + line_len <= content_len {
-                &content[line_start..line_start + line_len]
-            } else {
-                continue;
-            };
-            let glyph_count = line_len.min(MAX_GLYPHS_PER_LINE);
-            let mut needs_fallback = false;
+                if line_len == 0 {
+                    continue;
+                }
 
-            for (j, &byte) in line_bytes.iter().enumerate().take(glyph_count) {
-                let mono_gid = if byte < 128 {
-                    self.cmap_mono[byte as usize]
+                let line_bytes = if line_start + line_len <= content_len {
+                    &content[line_start..line_start + line_len]
                 } else {
-                    0
+                    continue;
                 };
+                let glyph_count = line_len.min(MAX_GLYPHS_PER_LINE);
+                let mut needs_fallback = false;
 
-                if mono_gid > 0 {
-                    self.glyphs[j] = ShapedGlyph {
-                        glyph_id: mono_gid,
-                        _pad: STYLE_MONO as u16,
-                        x_advance: char_advance,
-                        x_offset: 0,
-                        y_offset: 0,
-                    };
-                } else {
-                    let sans_gid = if byte < 128 {
-                        self.cmap_sans[byte as usize]
+                for (j, &byte) in line_bytes.iter().enumerate().take(glyph_count) {
+                    let mono_gid = if byte < 128 {
+                        self.cmap_mono[byte as usize]
                     } else {
                         0
                     };
 
-                    if sans_gid > 0 {
+                    if mono_gid > 0 {
                         self.glyphs[j] = ShapedGlyph {
-                            glyph_id: sans_gid,
-                            _pad: STYLE_SANS as u16,
-                            x_advance: char_advance,
-                            x_offset: 0,
-                            y_offset: 0,
-                        };
-                        needs_fallback = true;
-                    } else {
-                        self.glyphs[j] = ShapedGlyph {
-                            glyph_id: 0,
+                            glyph_id: mono_gid,
                             _pad: STYLE_MONO as u16,
                             x_advance: char_advance,
                             x_offset: 0,
                             y_offset: 0,
                         };
+                    } else {
+                        let sans_gid = if byte < 128 {
+                            self.cmap_sans[byte as usize]
+                        } else {
+                            0
+                        };
+
+                        if sans_gid > 0 {
+                            self.glyphs[j] = ShapedGlyph {
+                                glyph_id: sans_gid,
+                                _pad: STYLE_SANS as u16,
+                                x_advance: char_advance,
+                                x_offset: 0,
+                                y_offset: 0,
+                            };
+
+                            needs_fallback = true;
+                        } else {
+                            self.glyphs[j] = ShapedGlyph {
+                                glyph_id: 0,
+                                _pad: STYLE_MONO as u16,
+                                x_advance: char_advance,
+                                x_offset: 0,
+                                y_offset: 0,
+                            };
+                        }
                     }
                 }
-            }
 
-            if !needs_fallback {
-                // Fast path: all glyphs from primary font.
-                for j in 0..glyph_count {
-                    self.glyphs[j]._pad = 0;
-                }
-
-                let glyph_ref = scene.push_shaped_glyphs(&self.glyphs[..glyph_count]);
-                let line_node = match scene.alloc_node() {
-                    Some(id) => id,
-                    None => break,
-                };
-
-                {
-                    let n = scene.node_mut(line_node);
-
-                    n.x = scene::f32_to_mpt(line_info.x);
-                    n.y = pt(line_info.y);
-                    n.width = upt(line_info.width as u32 + 1);
-                    n.height = upt(presenter_service::LINE_HEIGHT);
-                    n.content = Content::Glyphs {
-                        color: text_color,
-                        glyphs: glyph_ref,
-                        glyph_count: glyph_count as u16,
-                        font_size: presenter_service::FONT_SIZE,
-                        style_id: STYLE_MONO,
-                    };
-                    n.role = scene::ROLE_PARAGRAPH;
-                }
-
-                scene.add_child(viewport, line_node);
-            } else {
-                // Slow path: split into runs by font for fallback.
-                let mut run_start = 0;
-
-                while run_start < glyph_count {
-                    let run_style = self.glyphs[run_start]._pad as u32;
-                    let mut run_end = run_start + 1;
-
-                    while run_end < glyph_count && self.glyphs[run_end]._pad as u32 == run_style {
-                        run_end += 1;
-                    }
-
-                    let run_len = run_end - run_start;
-
-                    for j in run_start..run_end {
+                if !needs_fallback {
+                    // Fast path: all glyphs from primary font.
+                    for j in 0..glyph_count {
                         self.glyphs[j]._pad = 0;
                     }
 
-                    let glyph_ref = scene.push_shaped_glyphs(&self.glyphs[run_start..run_end]);
-                    let run_node = match scene.alloc_node() {
+                    let glyph_ref = scene.push_shaped_glyphs(&self.glyphs[..glyph_count]);
+                    let line_node = match scene.alloc_node() {
                         Some(id) => id,
                         None => break,
                     };
-                    let run_x = line_info.x + run_start as f32 * self.char_width;
 
                     {
-                        let n = scene.node_mut(run_node);
+                        let n = scene.node_mut(line_node);
 
-                        n.x = scene::f32_to_mpt(run_x);
+                        n.x = scene::f32_to_mpt(line_info.x);
                         n.y = pt(line_info.y);
-                        n.width = upt((run_len as f32 * self.char_width) as u32 + 1);
+                        n.width = upt(line_info.width as u32 + 1);
                         n.height = upt(presenter_service::LINE_HEIGHT);
                         n.content = Content::Glyphs {
                             color: text_color,
                             glyphs: glyph_ref,
-                            glyph_count: run_len as u16,
+                            glyph_count: glyph_count as u16,
                             font_size: presenter_service::FONT_SIZE,
-                            style_id: run_style,
+                            style_id: STYLE_MONO,
                         };
                         n.role = scene::ROLE_PARAGRAPH;
                     }
 
-                    scene.add_child(viewport, run_node);
+                    scene.add_child(viewport, line_node);
+                } else {
+                    // Slow path: split into runs by font for fallback.
+                    let mut run_start = 0;
 
-                    run_start = run_end;
+                    while run_start < glyph_count {
+                        let run_style = self.glyphs[run_start]._pad as u32;
+                        let mut run_end = run_start + 1;
+
+                        while run_end < glyph_count && self.glyphs[run_end]._pad as u32 == run_style
+                        {
+                            run_end += 1;
+                        }
+
+                        let run_len = run_end - run_start;
+
+                        for j in run_start..run_end {
+                            self.glyphs[j]._pad = 0;
+                        }
+
+                        let glyph_ref = scene.push_shaped_glyphs(&self.glyphs[run_start..run_end]);
+                        let run_node = match scene.alloc_node() {
+                            Some(id) => id,
+                            None => break,
+                        };
+                        let run_x = line_info.x + run_start as f32 * self.char_width;
+
+                        {
+                            let n = scene.node_mut(run_node);
+
+                            n.x = scene::f32_to_mpt(run_x);
+                            n.y = pt(line_info.y);
+                            n.width = upt((run_len as f32 * self.char_width) as u32 + 1);
+                            n.height = upt(presenter_service::LINE_HEIGHT);
+                            n.content = Content::Glyphs {
+                                color: text_color,
+                                glyphs: glyph_ref,
+                                glyph_count: run_len as u16,
+                                font_size: presenter_service::FONT_SIZE,
+                                style_id: run_style,
+                            };
+                            n.role = scene::ROLE_PARAGRAPH;
+                        }
+
+                        scene.add_child(viewport, run_node);
+
+                        run_start = run_end;
+                    }
                 }
             }
-        }
+        } // end if !is_rich
 
         // Handle cursor past last line.
         if line_count > 0 && cursor_pos >= content_len {
@@ -1602,6 +1642,157 @@ impl Presenter {
             cursor_col: self.last_cursor_col,
             content_len: self.last_content_len,
             scroll_y: self.scroll_y,
+        }
+    }
+}
+
+// ── Rich text rendering ──────────────────────────────────────────
+
+fn build_rich_text_nodes(
+    scene: &mut SceneWriter,
+    viewport: scene::NodeId,
+    layout_header: &layout_service::LayoutHeader,
+    results_buf: &[u8],
+    doc_va: usize,
+    display_width: u32,
+    glyphs: &mut [ShapedGlyph; MAX_GLYPHS_PER_LINE],
+) {
+    let run_count = layout_header.visible_run_count as usize;
+
+    if run_count == 0 {
+        return;
+    }
+
+    // SAFETY: doc_va is a valid RO mapping of the document buffer.
+    let (content_len, _, _, _) = unsafe { document_service::read_doc_header(doc_va) };
+    let doc_buf = unsafe {
+        core::slice::from_raw_parts(
+            (doc_va + document_service::DOC_HEADER_SIZE) as *const u8,
+            content_len,
+        )
+    };
+
+    if !piecetable::validate(doc_buf) {
+        return;
+    }
+
+    let text_len = piecetable::text_len(doc_buf) as usize;
+    let mut text_scratch = alloc::vec![0u8; text_len + 1];
+    let copied = piecetable::text_slice(doc_buf, 0, text_len as u32, &mut text_scratch);
+
+    for run_i in 0..run_count {
+        let vr = parse_visible_run_at(results_buf, run_i);
+        let byte_start = vr.byte_offset as usize;
+        let byte_len = vr.byte_length as usize;
+
+        if byte_start + byte_len > copied || byte_len == 0 {
+            continue;
+        }
+
+        let run_text = &text_scratch[byte_start..byte_start + byte_len];
+        let font_data = font_data_for_family(vr.font_family);
+        let sid = style_id_for_family(vr.font_family);
+        let upem = fonts::metrics::font_metrics(font_data)
+            .map(|m| m.units_per_em)
+            .unwrap_or(1000);
+        let mut axes_buf = [fonts::metrics::AxisValue {
+            tag: [0; 4],
+            value: 0.0,
+        }; 2];
+        let mut axis_count = 0;
+
+        if vr.weight != 400 {
+            axes_buf[axis_count] = fonts::metrics::AxisValue {
+                tag: *b"wght",
+                value: vr.weight as f32,
+            };
+            axis_count += 1;
+        }
+
+        axes_buf[axis_count] = fonts::metrics::AxisValue {
+            tag: *b"opsz",
+            value: vr.font_size as f32,
+        };
+        axis_count += 1;
+
+        let axes = &axes_buf[..axis_count];
+        let mut glyph_count = 0usize;
+
+        for ch in core::str::from_utf8(run_text).unwrap_or("").chars() {
+            if glyph_count >= MAX_GLYPHS_PER_LINE {
+                break;
+            }
+
+            let gid = fonts::metrics::glyph_id_for_char(font_data, ch).unwrap_or(0);
+            let advance_fu = fonts::metrics::glyph_h_advance_with_axes(font_data, gid, axes)
+                .unwrap_or(upem as i32 / 2);
+            let advance_fp = (advance_fu as i64 * vr.font_size as i64 * 65536 / upem as i64) as i32;
+
+            glyphs[glyph_count] = ShapedGlyph {
+                glyph_id: gid,
+                _pad: 0,
+                x_advance: advance_fp,
+                x_offset: 0,
+                y_offset: 0,
+            };
+            glyph_count += 1;
+        }
+
+        if glyph_count == 0 {
+            continue;
+        }
+
+        let glyph_ref = scene.push_shaped_glyphs(&glyphs[..glyph_count]);
+        let run_node = match scene.alloc_node() {
+            Some(id) => id,
+            None => break,
+        };
+        let color = Color::rgba(
+            ((vr.color_rgba >> 24) & 0xFF) as u8,
+            ((vr.color_rgba >> 16) & 0xFF) as u8,
+            ((vr.color_rgba >> 8) & 0xFF) as u8,
+            (vr.color_rgba & 0xFF) as u8,
+        );
+        let line_height = (vr.font_size as u32 * 14) / 10;
+
+        {
+            let n = scene.node_mut(run_node);
+
+            n.x = scene::f32_to_mpt(vr.x);
+            n.y = pt(vr.y);
+            n.width = upt(display_width);
+            n.height = upt(line_height);
+            n.content = Content::Glyphs {
+                color,
+                glyphs: glyph_ref,
+                glyph_count: glyph_count as u16,
+                font_size: vr.font_size,
+                style_id: sid,
+            };
+            n.role = scene::ROLE_PARAGRAPH;
+        }
+
+        scene.add_child(viewport, run_node);
+
+        if vr.flags & piecetable::FLAG_UNDERLINE != 0 {
+            let run_width: f32 = glyphs[..glyph_count]
+                .iter()
+                .map(|g| (g.x_advance as f32) / 65536.0)
+                .sum();
+            let baseline_y = vr.y + (vr.font_size as i32 * 11) / 10;
+            let thickness = (vr.font_size as u32 / 14).max(1);
+
+            if let Some(ul_id) = scene.alloc_node() {
+                let n = scene.node_mut(ul_id);
+
+                n.x = scene::f32_to_mpt(vr.x);
+                n.y = pt(baseline_y);
+                n.width = upt(run_width as u32 + 1);
+                n.height = upt(thickness);
+                n.background = color;
+
+                scene.add_child(viewport, ul_id);
+            }
         }
     }
 }

@@ -36,6 +36,7 @@ dependencies = [
  "heap",
  "ipc",
  "name",
+ "piecetable",
  "store-service",
 ]
 
@@ -72,6 +73,10 @@ dependencies = [
  "heap",
  "ipc",
 ]
+
+[[package]]
+name = "piecetable"
+version = "0.1.0"
 
 [[package]]
 name = "store"

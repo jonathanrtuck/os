@@ -16,6 +16,7 @@
 
 extern crate alloc;
 extern crate heap;
+extern crate piecetable;
 
 use core::{
     panic::PanicInfo,
@@ -133,6 +134,7 @@ struct DocumentServer {
     cursor_pos: usize,
     sel_anchor: usize,
     generation: u32,
+    format: u32,
 
     store_ep: Handle,
     store_shared_va: usize,
@@ -159,6 +161,10 @@ impl DocumentServer {
 
             core::ptr::write_volatile(base as *mut u64, self.content_len as u64);
             core::ptr::write_volatile(base.add(8) as *mut u64, self.cursor_pos as u64);
+            core::ptr::write_volatile(
+                base.add(document_service::DOC_OFFSET_FORMAT) as *mut u32,
+                self.format,
+            );
             core::ptr::write_volatile(
                 base.add(document_service::DOC_OFFSET_SEL_ANCHOR) as *mut u64,
                 self.sel_anchor as u64,
@@ -206,6 +212,98 @@ impl DocumentServer {
 
         self.content_len = new_len;
         self.cursor_pos = offset + data.len();
+        self.sel_anchor = self.cursor_pos;
+
+        self.write_header();
+
+        true
+    }
+
+    // ── Piecetable buffer access ─────────────────────────────────────
+
+    fn pt_buf_mut(&mut self) -> &mut [u8] {
+        let cap = self.content_capacity();
+
+        // SAFETY: doc_va + DOC_HEADER_SIZE is the start of content bytes,
+        // cap bytes are available.
+        unsafe {
+            core::slice::from_raw_parts_mut(
+                (self.doc_va + document_service::DOC_HEADER_SIZE) as *mut u8,
+                cap,
+            )
+        }
+    }
+
+    fn pt_buf(&self) -> &[u8] {
+        let cap = self.content_capacity();
+
+        // SAFETY: doc_va + DOC_HEADER_SIZE is the start of content bytes.
+        unsafe {
+            core::slice::from_raw_parts(
+                (self.doc_va + document_service::DOC_HEADER_SIZE) as *const u8,
+                cap,
+            )
+        }
+    }
+
+    fn apply_insert_rich(&mut self, offset: usize, data: &[u8]) -> bool {
+        if data.is_empty() {
+            return false;
+        }
+
+        let (new_content_len, new_cursor_pos) = {
+            let buf = self.pt_buf_mut();
+
+            if !piecetable::insert_bytes(buf, offset as u32, data) {
+                return false;
+            }
+
+            let text_len = piecetable::text_len(buf) as usize;
+            let cursor = (offset + data.len()).min(text_len);
+
+            piecetable::set_cursor_pos(buf, cursor as u32);
+
+            (piecetable::total_size(buf), cursor)
+        };
+
+        self.content_len = new_content_len;
+        self.cursor_pos = new_cursor_pos;
+        self.sel_anchor = self.cursor_pos;
+
+        self.write_header();
+
+        true
+    }
+
+    fn apply_delete_rich(&mut self, offset: usize, len: usize) -> bool {
+        if len == 0 {
+            return false;
+        }
+
+        // Pre-check text length before taking a mutable borrow.
+        let text_len = piecetable::text_len(self.pt_buf()) as usize;
+
+        if offset >= text_len || offset + len > text_len {
+            return false;
+        }
+
+        let (new_content_len, new_cursor_pos) = {
+            let buf = self.pt_buf_mut();
+
+            if !piecetable::delete_range(buf, offset as u32, (offset + len) as u32) {
+                return false;
+            }
+
+            let new_text_len = piecetable::text_len(buf) as usize;
+            let cursor = offset.min(new_text_len);
+
+            piecetable::set_cursor_pos(buf, cursor as u32);
+
+            (piecetable::total_size(buf), cursor)
+        };
+
+        self.content_len = new_content_len;
+        self.cursor_pos = new_cursor_pos;
         self.sel_anchor = self.cursor_pos;
 
         self.write_header();
@@ -464,6 +562,34 @@ impl DocumentServer {
     }
 }
 
+// ── Format-aware helpers ──────────────────────────────────────────
+
+impl DocumentServer {
+    fn rich_text_len(&self) -> usize {
+        if self.format == document_service::FORMAT_RICH {
+            piecetable::text_len(self.pt_buf()) as usize
+        } else {
+            self.content_len
+        }
+    }
+
+    fn do_insert(&mut self, offset: usize, data: &[u8]) -> bool {
+        if self.format == document_service::FORMAT_RICH {
+            self.apply_insert_rich(offset, data)
+        } else {
+            self.apply_insert(offset, data)
+        }
+    }
+
+    fn do_delete(&mut self, offset: usize, len: usize) -> bool {
+        if self.format == document_service::FORMAT_RICH {
+            self.apply_delete_rich(offset, len)
+        } else {
+            self.apply_delete(offset, len)
+        }
+    }
+}
+
 // ── Dispatch ───────────────────────────────────────────────────────
 
 impl Dispatch for DocumentServer {
@@ -474,7 +600,7 @@ impl Dispatch for DocumentServer {
                     let reply = document_service::SetupReply {
                         content_len: self.content_len as u64,
                         cursor_pos: self.cursor_pos as u64,
-                        format: document_service::FORMAT_PLAIN,
+                        format: self.format,
                         file_id: self.file_id,
                     };
                     let mut data = [0u8; document_service::SetupReply::SIZE];
@@ -504,7 +630,7 @@ impl Dispatch for DocumentServer {
                     return;
                 }
 
-                if self.apply_insert(header.offset as usize, data) {
+                if self.do_insert(header.offset as usize, data) {
                     self.persist_and_snapshot();
                     self.reply_edit(msg);
                 } else {
@@ -521,7 +647,7 @@ impl Dispatch for DocumentServer {
 
                 let req = document_service::DeleteRequest::read_from(msg.payload);
 
-                if self.apply_delete(req.offset as usize, req.len as usize) {
+                if self.do_delete(req.offset as usize, req.len as usize) {
                     self.persist_and_snapshot();
                     self.reply_edit(msg);
                 } else {
@@ -541,13 +667,13 @@ impl Dispatch for DocumentServer {
                 let delete_len = header.delete_len as usize;
                 let replacement = &msg.payload[document_service::ReplaceHeader::SIZE..];
 
-                if delete_len > 0 && !self.apply_delete(offset, delete_len) {
+                if delete_len > 0 && !self.do_delete(offset, delete_len) {
                     let _ = msg.reply_error(ipc::STATUS_INVALID);
 
                     return;
                 }
 
-                if !replacement.is_empty() && !self.apply_insert(offset, replacement) {
+                if !replacement.is_empty() && !self.do_insert(offset, replacement) {
                     let _ = msg.reply_error(ipc::STATUS_INVALID);
 
                     return;
@@ -566,10 +692,15 @@ impl Dispatch for DocumentServer {
 
                 let req = document_service::CursorMove::read_from(msg.payload);
                 let pos = req.position as usize;
+                let tl = self.rich_text_len();
 
-                if pos <= self.content_len {
+                if pos <= tl {
                     self.cursor_pos = pos;
                     self.sel_anchor = pos;
+
+                    if self.format == document_service::FORMAT_RICH {
+                        piecetable::set_cursor_pos(self.pt_buf_mut(), pos as u32);
+                    }
 
                     self.write_header();
                     self.reply_edit(msg);
@@ -588,10 +719,16 @@ impl Dispatch for DocumentServer {
                 let sel = document_service::Selection::read_from(msg.payload);
                 let anchor = sel.anchor as usize;
                 let cursor = sel.cursor as usize;
+                let tl = self.rich_text_len();
 
-                if anchor <= self.content_len && cursor <= self.content_len {
+                if anchor <= tl && cursor <= tl {
                     self.sel_anchor = anchor;
                     self.cursor_pos = cursor;
+
+                    if self.format == document_service::FORMAT_RICH {
+                        piecetable::set_cursor_pos(self.pt_buf_mut(), cursor as u32);
+                        piecetable::set_selection(self.pt_buf_mut(), anchor as u32, cursor as u32);
+                    }
 
                     self.write_header();
                     self.reply_edit(msg);
@@ -616,11 +753,40 @@ impl Dispatch for DocumentServer {
                 }
             }
 
+            document_service::STYLE_APPLY => {
+                if self.format != document_service::FORMAT_RICH {
+                    let _ = msg.reply_error(ipc::STATUS_UNSUPPORTED);
+
+                    return;
+                }
+
+                if msg.payload.len() < document_service::StyleApplyRequest::SIZE {
+                    let _ = msg.reply_error(ipc::STATUS_INVALID);
+
+                    return;
+                }
+
+                let req = document_service::StyleApplyRequest::read_from(msg.payload);
+
+                piecetable::apply_style(
+                    self.pt_buf_mut(),
+                    req.start as u32,
+                    req.end as u32,
+                    req.style_id,
+                );
+
+                self.content_len = piecetable::total_size(self.pt_buf());
+
+                self.persist_and_snapshot();
+                self.write_header();
+                self.reply_edit(msg);
+            }
+
             document_service::GET_INFO => {
                 let reply = document_service::InfoReply {
                     content_len: self.content_len as u64,
                     cursor_pos: self.cursor_pos as u64,
-                    format: document_service::FORMAT_PLAIN,
+                    format: self.format,
                     file_id: self.file_id,
                     snapshot_count: self.undo.snapshot_count() as u32,
                 };
@@ -691,14 +857,13 @@ extern "C" fn _start() -> ! {
 
     // Create a document file in the store.
     let file_id = {
-        let media = b"text/plain";
+        let media = b"text/rich";
         let req = store_service::CreateRequest {
             media_type_len: media.len() as u16,
         };
         let mut payload = [0u8; 32];
 
         req.write_to(&mut payload);
-
         payload
             [store_service::CreateRequest::SIZE..store_service::CreateRequest::SIZE + media.len()]
             .copy_from_slice(media);
@@ -735,7 +900,58 @@ extern "C" fn _start() -> ! {
     let doc_va = abi::vmo::map(doc_vmo, 0, Rights::READ_WRITE_MAP).unwrap_or_else(|_| {
         abi::thread::exit(EXIT_DOC_VMO_MAP);
     });
-    // Take initial undo snapshot (empty document).
+    // Initialize piece table with demo rich text content.
+    // add_default_styles creates indices 0-6:
+    //   0=body(14pt), 1=heading1(24pt), 2=heading2(18pt),
+    //   3=bold, 4=italic, 5=bold-italic, 6=code(13pt mono)
+    let demo_text = b"Document-Centric OS\nA personal operating system where documents are first-class citizens and applications are interchangeable tools that attach to content.\n\nDesign Principles\nFiles are the primary abstraction. The OS natively understands content types. View is default, edit is deliberate. Editors bind to content types, not use cases.\n\nThis is body text with bold, italic, and code formatting.\n";
+    let content_buf = unsafe {
+        core::slice::from_raw_parts_mut(
+            (doc_va + document_service::DOC_HEADER_SIZE) as *mut u8,
+            DOC_BUF_SIZE - document_service::DOC_HEADER_SIZE,
+        )
+    };
+
+    piecetable::init(content_buf, content_buf.len());
+    piecetable::add_default_styles(content_buf);
+    piecetable::insert_bytes(content_buf, 0, demo_text);
+    // "Document-Centric OS\n" → heading1 (style 1)
+    piecetable::apply_style(content_buf, 0, 20, 1);
+
+    // "Design Principles\n" → heading2 (style 2)
+    let dp_start = demo_text
+        .windows(18)
+        .position(|w| w == b"Design Principles\n")
+        .unwrap_or(0) as u32;
+
+    piecetable::apply_style(content_buf, dp_start, dp_start + 18, 2);
+
+    // "bold" → bold (style 3)
+    let bold_start = demo_text.windows(4).position(|w| w == b"bold").unwrap_or(0) as u32;
+
+    piecetable::apply_style(content_buf, bold_start, bold_start + 4, 3);
+
+    // "italic" → italic (style 4)
+    let italic_start = demo_text
+        .windows(6)
+        .rposition(|w| w == b"italic")
+        .unwrap_or(0) as u32;
+
+    piecetable::apply_style(content_buf, italic_start, italic_start + 6, 4);
+
+    // "code" → code (style 6)
+    let code_start = demo_text
+        .windows(4)
+        .rposition(|w| w == b"code")
+        .unwrap_or(0) as u32;
+
+    piecetable::apply_style(content_buf, code_start, code_start + 4, 6);
+
+    let content_len = piecetable::total_size(content_buf);
+
+    console::write(console_ep, b"document: rich text initialized\n");
+
+    // Take initial undo snapshot.
     let mut undo = UndoState::new();
 
     {
@@ -766,10 +982,11 @@ extern "C" fn _start() -> ! {
         doc_va,
         doc_capacity: DOC_BUF_SIZE,
         doc_vmo,
-        content_len: 0,
+        content_len,
         cursor_pos: 0,
         sel_anchor: 0,
         generation: 0,
+        format: document_service::FORMAT_RICH,
         store_ep,
         store_shared_va,
         store_shared_len: STORE_SHARED_SIZE,

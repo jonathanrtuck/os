@@ -39,7 +39,45 @@ pub const DOC_OFFSET_SEL_ANCHOR: usize = 24;
 pub const FORMAT_PLAIN: u32 = 0;
 pub const FORMAT_RICH: u32 = 1;
 
+pub const STYLE_APPLY: u32 = 10;
+
+// ── Style apply ───────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StyleApplyRequest {
+    pub start: u64,
+    pub end: u64,
+    pub style_id: u8,
+}
+
+impl StyleApplyRequest {
+    pub const SIZE: usize = 24;
+
+    pub fn write_to(&self, buf: &mut [u8]) {
+        buf[0..8].copy_from_slice(&self.start.to_le_bytes());
+        buf[8..16].copy_from_slice(&self.end.to_le_bytes());
+        buf[16..24].copy_from_slice(&(self.style_id as u64).to_le_bytes());
+    }
+
+    #[must_use]
+    pub fn read_from(buf: &[u8]) -> Self {
+        Self {
+            start: u64::from_le_bytes(buf[0..8].try_into().unwrap()),
+            end: u64::from_le_bytes(buf[8..16].try_into().unwrap()),
+            style_id: buf[16],
+        }
+    }
+}
+
 // ── Client-side document buffer readers ──────────────────────────
+
+/// Read the document format from the document buffer.
+///
+/// # Safety
+/// `doc_va` must point to a valid mapped document buffer VMO.
+pub unsafe fn read_doc_format(doc_va: usize) -> u32 {
+    unsafe { core::ptr::read_volatile((doc_va + DOC_OFFSET_FORMAT) as *const u32) }
+}
 
 /// Read the document buffer header using the seqlock protocol.
 ///
@@ -425,6 +463,24 @@ mod tests {
     }
 
     #[test]
+    fn style_apply_round_trip() {
+        let req = StyleApplyRequest {
+            start: 10,
+            end: 50,
+            style_id: 3,
+        };
+        let mut buf = [0u8; StyleApplyRequest::SIZE];
+
+        req.write_to(&mut buf);
+
+        let decoded = StyleApplyRequest::read_from(&buf);
+
+        assert_eq!(decoded.start, 10);
+        assert_eq!(decoded.end, 50);
+        assert_eq!(decoded.style_id, 3);
+    }
+
+    #[test]
     fn method_ids_distinct() {
         let methods = [
             SETUP,
@@ -436,6 +492,7 @@ mod tests {
             REDO,
             GET_INFO,
             REPLACE,
+            STYLE_APPLY,
         ];
 
         for i in 0..methods.len() {
