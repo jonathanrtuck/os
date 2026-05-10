@@ -900,11 +900,9 @@ extern "C" fn _start() -> ! {
     let doc_va = abi::vmo::map(doc_vmo, 0, Rights::READ_WRITE_MAP).unwrap_or_else(|_| {
         abi::thread::exit(EXIT_DOC_VMO_MAP);
     });
-    // Initialize piece table with demo rich text content.
-    // add_default_styles creates indices 0-6:
-    //   0=body(14pt), 1=heading1(24pt), 2=heading2(18pt),
-    //   3=bold, 4=italic, 5=bold-italic, 6=code(13pt mono)
-    let demo_text = b"Document-Centric OS\nA personal operating system where documents are first-class citizens and applications are interchangeable tools that attach to content.\n\nDesign Principles\nFiles are the primary abstraction. The OS natively understands content types. View is default, edit is deliberate. Editors bind to content types, not use cases.\n\nThis is body text with bold, italic, and code formatting.\n";
+    // Initialize piece table with the style stress test document.
+    // 32 styles exercising all axes: 3 font families, sizes 10–48pt,
+    // weights 100–900, italic/underline/strikethrough, 7 vivid colors.
     let content_buf = unsafe {
         core::slice::from_raw_parts_mut(
             (doc_va + document_service::DOC_HEADER_SIZE) as *mut u8,
@@ -913,39 +911,500 @@ extern "C" fn _start() -> ! {
     };
 
     piecetable::init(content_buf, content_buf.len());
-    piecetable::add_default_styles(content_buf);
-    piecetable::insert_bytes(content_buf, 0, demo_text);
-    // "Document-Centric OS\n" → heading1 (style 1)
-    piecetable::apply_style(content_buf, 0, 20, 1);
 
-    // "Design Principles\n" → heading2 (style 2)
-    let dp_start = demo_text
-        .windows(18)
-        .position(|w| w == b"Design Principles\n")
-        .unwrap_or(0) as u32;
+    use piecetable::{
+        FLAG_ITALIC, FLAG_STRIKETHROUGH, FLAG_UNDERLINE, FONT_MONO, FONT_SANS, FONT_SERIF,
+        ROLE_BODY, ROLE_CODE, ROLE_EMPHASIS, ROLE_HEADING1, ROLE_HEADING2, ROLE_HEADING3,
+        ROLE_STRONG, Style,
+    };
 
-    piecetable::apply_style(content_buf, dp_start, dp_start + 18, 2);
+    // Style 0: body (Sans 14pt Regular Black)
+    piecetable::add_style(content_buf, &piecetable::default_body_style());
+    // Style 1: Title — Sans 48pt Bold Red
+    piecetable::add_style(
+        content_buf,
+        &Style {
+            font_family: FONT_SANS,
+            role: ROLE_HEADING1,
+            weight: 700,
+            flags: 0,
+            font_size_pt: 48,
+            color: [0xFF, 0x00, 0x00, 0xFF],
+            _pad: [0; 2],
+        },
+    );
+    // Style 2: Subtitle — Serif 24pt Regular Blue
+    piecetable::add_style(
+        content_buf,
+        &Style {
+            font_family: FONT_SERIF,
+            role: ROLE_HEADING2,
+            weight: 400,
+            flags: 0,
+            font_size_pt: 24,
+            color: [0x00, 0x00, 0xFF, 0xFF],
+            _pad: [0; 2],
+        },
+    );
+    // Style 3: Sans 36pt Bold Green
+    piecetable::add_style(
+        content_buf,
+        &Style {
+            font_family: FONT_SANS,
+            role: ROLE_BODY,
+            weight: 700,
+            flags: 0,
+            font_size_pt: 36,
+            color: [0x00, 0xAA, 0x00, 0xFF],
+            _pad: [0; 2],
+        },
+    );
+    // Style 4: Mono 10pt Regular Orange
+    piecetable::add_style(
+        content_buf,
+        &Style {
+            font_family: FONT_MONO,
+            role: ROLE_CODE,
+            weight: 400,
+            flags: 0,
+            font_size_pt: 10,
+            color: [0xFF, 0x88, 0x00, 0xFF],
+            _pad: [0; 2],
+        },
+    );
+    // Style 5: Serif 18pt Italic Purple
+    piecetable::add_style(
+        content_buf,
+        &Style {
+            font_family: FONT_SERIF,
+            role: ROLE_EMPHASIS,
+            weight: 400,
+            flags: FLAG_ITALIC,
+            font_size_pt: 18,
+            color: [0x88, 0x00, 0xFF, 0xFF],
+            _pad: [0; 2],
+        },
+    );
+    // Style 6: Mono 16pt Regular Cyan
+    piecetable::add_style(
+        content_buf,
+        &Style {
+            font_family: FONT_MONO,
+            role: ROLE_CODE,
+            weight: 400,
+            flags: 0,
+            font_size_pt: 16,
+            color: [0x00, 0xCC, 0xCC, 0xFF],
+            _pad: [0; 2],
+        },
+    );
+    // Style 7: Sans 20pt Bold Magenta
+    piecetable::add_style(
+        content_buf,
+        &Style {
+            font_family: FONT_SANS,
+            role: ROLE_STRONG,
+            weight: 700,
+            flags: 0,
+            font_size_pt: 20,
+            color: [0xFF, 0x00, 0xFF, 0xFF],
+            _pad: [0; 2],
+        },
+    );
+    // Style 8: Serif 14pt Italic Red
+    piecetable::add_style(
+        content_buf,
+        &Style {
+            font_family: FONT_SERIF,
+            role: ROLE_EMPHASIS,
+            weight: 400,
+            flags: FLAG_ITALIC,
+            font_size_pt: 14,
+            color: [0xFF, 0x00, 0x00, 0xFF],
+            _pad: [0; 2],
+        },
+    );
+    // Styles 9–15: Sans 14pt Regular in rainbow colors
+    piecetable::add_style(
+        content_buf,
+        &Style {
+            font_family: FONT_SANS,
+            role: ROLE_BODY,
+            weight: 400,
+            flags: 0,
+            font_size_pt: 14,
+            color: [0xFF, 0x00, 0x00, 0xFF],
+            _pad: [0; 2],
+        },
+    );
+    piecetable::add_style(
+        content_buf,
+        &Style {
+            font_family: FONT_SANS,
+            role: ROLE_BODY,
+            weight: 400,
+            flags: 0,
+            font_size_pt: 14,
+            color: [0x00, 0x00, 0xFF, 0xFF],
+            _pad: [0; 2],
+        },
+    );
+    piecetable::add_style(
+        content_buf,
+        &Style {
+            font_family: FONT_SANS,
+            role: ROLE_BODY,
+            weight: 400,
+            flags: 0,
+            font_size_pt: 14,
+            color: [0x00, 0xAA, 0x00, 0xFF],
+            _pad: [0; 2],
+        },
+    );
+    piecetable::add_style(
+        content_buf,
+        &Style {
+            font_family: FONT_SANS,
+            role: ROLE_BODY,
+            weight: 400,
+            flags: 0,
+            font_size_pt: 14,
+            color: [0xFF, 0x88, 0x00, 0xFF],
+            _pad: [0; 2],
+        },
+    );
+    piecetable::add_style(
+        content_buf,
+        &Style {
+            font_family: FONT_SANS,
+            role: ROLE_BODY,
+            weight: 400,
+            flags: 0,
+            font_size_pt: 14,
+            color: [0x88, 0x00, 0xFF, 0xFF],
+            _pad: [0; 2],
+        },
+    );
+    piecetable::add_style(
+        content_buf,
+        &Style {
+            font_family: FONT_SANS,
+            role: ROLE_BODY,
+            weight: 400,
+            flags: 0,
+            font_size_pt: 14,
+            color: [0x00, 0xCC, 0xCC, 0xFF],
+            _pad: [0; 2],
+        },
+    );
+    piecetable::add_style(
+        content_buf,
+        &Style {
+            font_family: FONT_SANS,
+            role: ROLE_BODY,
+            weight: 400,
+            flags: 0,
+            font_size_pt: 14,
+            color: [0xFF, 0x00, 0xFF, 0xFF],
+            _pad: [0; 2],
+        },
+    );
+    // Styles 16–24: Sans 16pt weight ramp 100–900
+    piecetable::add_style(
+        content_buf,
+        &Style {
+            font_family: FONT_SANS,
+            role: ROLE_BODY,
+            weight: 100,
+            flags: 0,
+            font_size_pt: 16,
+            color: [0x00, 0x00, 0x00, 0xFF],
+            _pad: [0; 2],
+        },
+    );
+    piecetable::add_style(
+        content_buf,
+        &Style {
+            font_family: FONT_SANS,
+            role: ROLE_BODY,
+            weight: 200,
+            flags: 0,
+            font_size_pt: 16,
+            color: [0x22, 0x22, 0x22, 0xFF],
+            _pad: [0; 2],
+        },
+    );
+    piecetable::add_style(
+        content_buf,
+        &Style {
+            font_family: FONT_SANS,
+            role: ROLE_BODY,
+            weight: 300,
+            flags: 0,
+            font_size_pt: 16,
+            color: [0x44, 0x44, 0x44, 0xFF],
+            _pad: [0; 2],
+        },
+    );
+    piecetable::add_style(
+        content_buf,
+        &Style {
+            font_family: FONT_SANS,
+            role: ROLE_BODY,
+            weight: 400,
+            flags: 0,
+            font_size_pt: 16,
+            color: [0x00, 0x00, 0x00, 0xFF],
+            _pad: [0; 2],
+        },
+    );
+    piecetable::add_style(
+        content_buf,
+        &Style {
+            font_family: FONT_SANS,
+            role: ROLE_BODY,
+            weight: 500,
+            flags: 0,
+            font_size_pt: 16,
+            color: [0x00, 0x00, 0x00, 0xFF],
+            _pad: [0; 2],
+        },
+    );
+    piecetable::add_style(
+        content_buf,
+        &Style {
+            font_family: FONT_SANS,
+            role: ROLE_BODY,
+            weight: 600,
+            flags: 0,
+            font_size_pt: 16,
+            color: [0x00, 0x00, 0x00, 0xFF],
+            _pad: [0; 2],
+        },
+    );
+    piecetable::add_style(
+        content_buf,
+        &Style {
+            font_family: FONT_SANS,
+            role: ROLE_STRONG,
+            weight: 700,
+            flags: 0,
+            font_size_pt: 16,
+            color: [0x00, 0x00, 0x00, 0xFF],
+            _pad: [0; 2],
+        },
+    );
+    piecetable::add_style(
+        content_buf,
+        &Style {
+            font_family: FONT_SANS,
+            role: ROLE_BODY,
+            weight: 800,
+            flags: 0,
+            font_size_pt: 16,
+            color: [0x00, 0x00, 0x00, 0xFF],
+            _pad: [0; 2],
+        },
+    );
+    piecetable::add_style(
+        content_buf,
+        &Style {
+            font_family: FONT_SANS,
+            role: ROLE_BODY,
+            weight: 900,
+            flags: 0,
+            font_size_pt: 16,
+            color: [0x00, 0x00, 0x00, 0xFF],
+            _pad: [0; 2],
+        },
+    );
+    // Style 25: Serif 22pt Bold Italic Underline — deep blue
+    piecetable::add_style(
+        content_buf,
+        &Style {
+            font_family: FONT_SERIF,
+            role: ROLE_HEADING3,
+            weight: 700,
+            flags: FLAG_ITALIC | FLAG_UNDERLINE,
+            font_size_pt: 22,
+            color: [0x00, 0x44, 0xCC, 0xFF],
+            _pad: [0; 2],
+        },
+    );
+    // Style 26: Mono 12pt Italic Strikethrough — dark red
+    piecetable::add_style(
+        content_buf,
+        &Style {
+            font_family: FONT_MONO,
+            role: ROLE_CODE,
+            weight: 400,
+            flags: FLAG_ITALIC | FLAG_STRIKETHROUGH,
+            font_size_pt: 12,
+            color: [0xCC, 0x00, 0x00, 0xFF],
+            _pad: [0; 2],
+        },
+    );
+    // Style 27: Sans 28pt Bold Green
+    piecetable::add_style(
+        content_buf,
+        &Style {
+            font_family: FONT_SANS,
+            role: ROLE_HEADING2,
+            weight: 700,
+            flags: 0,
+            font_size_pt: 28,
+            color: [0x00, 0xAA, 0x00, 0xFF],
+            _pad: [0; 2],
+        },
+    );
+    // Style 28: Serif 12pt Regular Black
+    piecetable::add_style(
+        content_buf,
+        &Style {
+            font_family: FONT_SERIF,
+            role: ROLE_BODY,
+            weight: 400,
+            flags: 0,
+            font_size_pt: 12,
+            color: [0x00, 0x00, 0x00, 0xFF],
+            _pad: [0; 2],
+        },
+    );
+    // Style 29: Mono 14pt Bold Cyan
+    piecetable::add_style(
+        content_buf,
+        &Style {
+            font_family: FONT_MONO,
+            role: ROLE_CODE,
+            weight: 700,
+            flags: 0,
+            font_size_pt: 14,
+            color: [0x00, 0xCC, 0xCC, 0xFF],
+            _pad: [0; 2],
+        },
+    );
+    // Style 30: Sans 40pt Italic Magenta
+    piecetable::add_style(
+        content_buf,
+        &Style {
+            font_family: FONT_SANS,
+            role: ROLE_HEADING1,
+            weight: 400,
+            flags: FLAG_ITALIC,
+            font_size_pt: 40,
+            color: [0xFF, 0x00, 0xFF, 0xFF],
+            _pad: [0; 2],
+        },
+    );
+    // Style 31: Serif 32pt Bold Underline Orange
+    piecetable::add_style(
+        content_buf,
+        &Style {
+            font_family: FONT_SERIF,
+            role: ROLE_HEADING1,
+            weight: 700,
+            flags: FLAG_UNDERLINE,
+            font_size_pt: 32,
+            color: [0xFF, 0x88, 0x00, 0xFF],
+            _pad: [0; 2],
+        },
+    );
 
-    // "bold" → bold (style 3)
-    let bold_start = demo_text.windows(4).position(|w| w == b"bold").unwrap_or(0) as u32;
+    // Build the stress test text with tracked byte ranges for style application.
+    // Each tuple: (start_byte, end_byte, style_id).
+    let mut text: [u8; 1024] = [0; 1024];
+    let mut pos: usize = 0;
+    let mut ranges: [(usize, usize, u8); 48] = [(0, 0, 0); 48];
+    let mut ri: usize = 0;
 
-    piecetable::apply_style(content_buf, bold_start, bold_start + 4, 3);
+    macro_rules! span {
+        ($style:expr, $s:expr) => {{
+            let s = pos;
+            let bytes = $s.as_bytes();
+            text[pos..pos + bytes.len()].copy_from_slice(bytes);
+            pos += bytes.len();
+            ranges[ri] = (s, pos, $style);
+            ri += 1;
+        }};
+    }
+    macro_rules! plain {
+        ($s:expr) => {{
+            let bytes = $s.as_bytes();
+            text[pos..pos + bytes.len()].copy_from_slice(bytes);
+            pos += bytes.len();
+        }};
+    }
 
-    // "italic" → italic (style 4)
-    let italic_start = demo_text
-        .windows(6)
-        .rposition(|w| w == b"italic")
-        .unwrap_or(0) as u32;
+    // Line 1: Title
+    span!(1, "Style Stress Test");
+    plain!("\n");
+    // Line 2: Subtitle
+    span!(2, "32 Styles, 3 Fonts, 9 Weights, Vivid Colors");
+    plain!("\n");
+    // Line 3: Baseline alignment — mixed sizes
+    span!(3, "Sans 36pt Bold Green");
+    span!(4, " Mono 10pt Orange");
+    span!(5, " Serif 18pt Italic Purple");
+    plain!("\n");
+    // Line 4: More mixed sizes
+    span!(1, "Sans 48pt Red");
+    plain!(" body 14pt");
+    span!(6, " Mono 16pt Cyan");
+    plain!("\n");
+    // Line 5: Font family showcase
+    span!(7, "Sans 20pt Bold Magenta");
+    span!(8, " Serif 14pt Italic Red");
+    span!(6, " Mono 16pt Cyan");
+    plain!("\n");
+    // Line 6: Color parade
+    span!(9, "Red");
+    span!(10, " Blue");
+    span!(11, " Green");
+    span!(12, " Orange");
+    span!(13, " Purple");
+    span!(14, " Cyan");
+    span!(15, " Magenta");
+    plain!("\n");
+    // Line 7: Weight ramp (100–900)
+    span!(16, "Thin ");
+    span!(17, "ExLight ");
+    span!(18, "Light ");
+    span!(19, "Regular ");
+    span!(20, "Medium ");
+    span!(21, "SemiBold ");
+    span!(22, "Bold ");
+    span!(23, "ExBold ");
+    span!(24, "Black");
+    plain!("\n");
+    // Line 8: Flag combinations
+    span!(25, "Serif 22pt Bold Italic Underline Blue");
+    span!(26, " Mono 12pt Italic Strike Red");
+    plain!("\n");
+    // Line 9: More size mixing
+    span!(27, "Sans 28pt Bold Green");
+    span!(28, " Serif 12pt Regular");
+    span!(29, " Mono 14pt Bold Cyan");
+    plain!("\n");
+    // Line 10: Large italic
+    span!(30, "Sans 40pt Italic Magenta");
+    plain!("\n");
+    // Line 11: Large bold underline
+    span!(31, "Serif 32pt Bold Underline Orange");
+    plain!("\n");
+    // Line 12: Mixed paragraph with inline styles
+    plain!("This is body text with ");
+    span!(7, "bold magenta");
+    plain!(" and ");
+    span!(8, "italic red");
+    plain!(" and ");
+    span!(6, "mono cyan");
+    plain!(" inline.\n");
 
-    piecetable::apply_style(content_buf, italic_start, italic_start + 6, 4);
+    piecetable::insert_bytes(content_buf, 0, &text[..pos]);
 
-    // "code" → code (style 6)
-    let code_start = demo_text
-        .windows(4)
-        .rposition(|w| w == b"code")
-        .unwrap_or(0) as u32;
-
-    piecetable::apply_style(content_buf, code_start, code_start + 4, 6);
+    for &(start, end, style_id) in &ranges[..ri] {
+        piecetable::apply_style(content_buf, start as u32, end as u32, style_id);
+    }
 
     let content_len = piecetable::total_size(content_buf);
 

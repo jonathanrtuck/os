@@ -18,7 +18,7 @@ use core::panic::PanicInfo;
 
 use abi::types::{Handle, Rights};
 use ipc::server::{Dispatch, Incoming};
-use scene::{Color, Content, NodeFlags, SCENE_SIZE, SceneWriter, ShapedGlyph, pt, upt};
+use scene::{Color, Content, FillRule, NodeFlags, SCENE_SIZE, SceneWriter, ShapedGlyph, pt, upt};
 
 const HANDLE_NS_EP: Handle = Handle(2);
 const HANDLE_RTC_VMO: Handle = Handle(3);
@@ -53,21 +53,29 @@ fn read_rtc_seconds(rtc_va: usize) -> u64 {
     val as u64
 }
 
-// ── Font data — well-known style IDs ──────────────────────────────
+// ── Font data — packed style IDs ──────────────────────────────────
 //
-// Style IDs shared between the presenter and compositor. The presenter
-// assigns style_id to each Content::Glyphs node; the compositor selects
-// font data for rasterization based on the same mapping.
+// style_id encodes font_family, weight, and flags in a single u32
+// so the compositor can rasterize with the correct variable font axes.
+//   bits [0..2)  = font_family (0=mono, 1=sans, 2=serif)
+//   bits [2..16) = weight (100-900)
+//   bits [16..19) = flags (bit 0=italic)
 
 const STYLE_MONO: u32 = 0;
 const STYLE_SANS: u32 = 1;
 #[allow(dead_code)]
 const STYLE_SERIF: u32 = 2;
 
+fn pack_style_id(family: u32, weight: u16, flags: u8) -> u32 {
+    (family & 0x3) | ((weight as u32) << 2) | ((flags as u32 & 0x7) << 16)
+}
+
 static FONT_MONO: &[u8] = include_bytes!("../../../../assets/jetbrains-mono.ttf");
+static FONT_MONO_ITALIC: &[u8] = include_bytes!("../../../../assets/jetbrains-mono-italic.ttf");
 static FONT_SANS: &[u8] = include_bytes!("../../../../assets/inter.ttf");
-#[allow(dead_code)]
+static FONT_SANS_ITALIC: &[u8] = include_bytes!("../../../../assets/inter-italic.ttf");
 static FONT_SERIF: &[u8] = include_bytes!("../../../../assets/source-serif-4.ttf");
+static FONT_SERIF_ITALIC: &[u8] = include_bytes!("../../../../assets/source-serif-4-italic.ttf");
 static TEST_PNG: &[u8] = include_bytes!("../../../../assets/test.png");
 
 fn build_cmap_table(font_data: &[u8]) -> [u16; 128] {
@@ -132,6 +140,86 @@ fn copy_into(dst: &mut [u8], src: &[u8]) -> usize {
     len
 }
 
+fn scale_icon_paths(
+    scene: &mut SceneWriter<'_>,
+    icon: &icons::Icon,
+    size_pt: u32,
+) -> (scene::DataRef, u32) {
+    let scale = size_pt as f32 / icon.viewbox;
+    let mut buf = alloc::vec::Vec::new();
+
+    for icon_path in icon.paths {
+        let cmds = icon_path.commands;
+        let mut pos = 0;
+
+        while pos + 4 <= cmds.len() {
+            let tag = u32::from_le_bytes([cmds[pos], cmds[pos + 1], cmds[pos + 2], cmds[pos + 3]]);
+
+            match tag {
+                0 | 1 => {
+                    if pos + 12 > cmds.len() {
+                        break;
+                    }
+
+                    let x = f32::from_le_bytes([
+                        cmds[pos + 4],
+                        cmds[pos + 5],
+                        cmds[pos + 6],
+                        cmds[pos + 7],
+                    ]) * scale;
+                    let y = f32::from_le_bytes([
+                        cmds[pos + 8],
+                        cmds[pos + 9],
+                        cmds[pos + 10],
+                        cmds[pos + 11],
+                    ]) * scale;
+
+                    buf.extend_from_slice(&tag.to_le_bytes());
+                    buf.extend_from_slice(&x.to_le_bytes());
+                    buf.extend_from_slice(&y.to_le_bytes());
+                    pos += 12;
+                }
+                2 => {
+                    if pos + 28 > cmds.len() {
+                        break;
+                    }
+
+                    let mut coords = [0f32; 6];
+
+                    for (ci, coord) in coords.iter_mut().enumerate() {
+                        let off = pos + 4 + ci * 4;
+
+                        *coord = f32::from_le_bytes([
+                            cmds[off],
+                            cmds[off + 1],
+                            cmds[off + 2],
+                            cmds[off + 3],
+                        ]) * scale;
+                    }
+
+                    buf.extend_from_slice(&2u32.to_le_bytes());
+
+                    for c in &coords {
+                        buf.extend_from_slice(&c.to_le_bytes());
+                    }
+
+                    pos += 28;
+                }
+                3 => {
+                    buf.extend_from_slice(&3u32.to_le_bytes());
+                    pos += 4;
+                }
+                _ => break,
+            }
+        }
+    }
+
+    let hash = scene::fnv1a(&buf);
+    let data_ref = scene.push_path_commands(&buf);
+
+    (data_ref, hash)
+}
+
 // ── Layout results parsing (from seqlock-read buffer) ────────────
 
 fn parse_layout_header(buf: &[u8]) -> layout_service::LayoutHeader {
@@ -150,11 +238,31 @@ fn parse_visible_run_at(buf: &[u8], index: usize) -> layout_service::VisibleRun 
     layout_service::VisibleRun::read_from(&buf[offset..])
 }
 
-fn font_data_for_family(family: u8) -> &'static [u8] {
+fn font_data_for_style(family: u8, flags: u8) -> &'static [u8] {
+    let italic = flags & piecetable::FLAG_ITALIC != 0;
+
     match family {
-        piecetable::FONT_MONO => FONT_MONO,
-        piecetable::FONT_SERIF => FONT_SERIF,
-        _ => FONT_SANS,
+        piecetable::FONT_MONO => {
+            if italic {
+                FONT_MONO_ITALIC
+            } else {
+                FONT_MONO
+            }
+        }
+        piecetable::FONT_SERIF => {
+            if italic {
+                FONT_SERIF_ITALIC
+            } else {
+                FONT_SERIF
+            }
+        }
+        _ => {
+            if italic {
+                FONT_SANS_ITALIC
+            } else {
+                FONT_SANS
+            }
+        }
     }
 }
 
@@ -164,6 +272,10 @@ fn style_id_for_family(family: u8) -> u32 {
         piecetable::FONT_SERIF => STYLE_SERIF,
         _ => STYLE_SANS,
     }
+}
+
+fn pack_run_style_id(family: u8, weight: u16, flags: u8) -> u32 {
+    pack_style_id(style_id_for_family(family), weight, flags)
 }
 
 // ── Selection geometry ────────────────────────────────────────────
@@ -454,10 +566,10 @@ impl Presenter {
         let (cursor_line_idx, cursor_col_in_line) = self.find_cursor_line(cursor_pos, line_count);
 
         if is_rich_format {
-            let (_, cy, ch) =
+            let ci =
                 compute_rich_cursor(&self.results_buf, &layout_header, cursor_pos, self.doc_va);
 
-            self.ensure_cursor_visible_at(cy, ch as i32);
+            self.ensure_cursor_visible_at(ci.y, ci.height as i32);
         } else {
             self.ensure_cursor_visible(cursor_line_idx as u32);
         }
@@ -536,6 +648,39 @@ impl Presenter {
         }
 
         scene.set_root(root);
+
+        // Document icon — mimetype-aware vector icon in the title bar.
+        let icon_size_pt = presenter_service::LINE_HEIGHT + 2;
+        let icon_mimetype = match self.active_space {
+            0 => Some("text/rich"),
+            1 => Some("image/png"),
+            _ => None,
+        };
+        let icon = icons::get("document", icon_mimetype);
+        let (icon_data_ref, icon_hash) = scale_icon_paths(&mut scene, icon, icon_size_pt);
+        let icon_sw_pt = icon.stroke_width * (icon_size_pt as f32 / icon.viewbox);
+        let icon_sw_fixed = (icon_sw_pt * 256.0) as u16;
+        let icon_x: i32 = 8;
+        let icon_y = ((title_bar_h.saturating_sub(icon_size_pt)) / 2).saturating_sub(1) as i32;
+
+        if let Some(icon_node) = scene.alloc_node() {
+            let n = scene.node_mut(icon_node);
+
+            n.x = pt(icon_x);
+            n.y = pt(icon_y);
+            n.width = upt(icon_size_pt);
+            n.height = upt(icon_size_pt);
+            n.content = Content::Path {
+                color: Color::TRANSPARENT,
+                stroke_color: title_color,
+                fill_rule: FillRule::Winding,
+                stroke_width: icon_sw_fixed,
+                contours: icon_data_ref,
+            };
+            n.content_hash = icon_hash;
+
+            scene.add_child(root, icon_node);
+        }
 
         // Title bar text — "untitled" label, shaped with Inter.
         let title_text_y = (title_bar_h.saturating_sub(presenter_service::LINE_HEIGHT)) / 2;
@@ -907,24 +1052,59 @@ impl Presenter {
         }
 
         // Cursor position — proportional for rich text, monospace for plain.
-        let (cursor_x, cursor_y, cursor_h) = if is_rich {
-            compute_rich_cursor(&self.results_buf, &layout_header, cursor_pos, self.doc_va)
-        } else {
-            (
-                cursor_col as f32 * self.char_width,
-                cursor_line as i32 * presenter_service::LINE_HEIGHT as i32,
-                presenter_service::LINE_HEIGHT,
-            )
+        let (cursor_x, cursor_y, cursor_h, cursor_style_color, cursor_weight, cursor_skew) =
+            if is_rich {
+                let ci =
+                    compute_rich_cursor(&self.results_buf, &layout_header, cursor_pos, self.doc_va);
+
+                (
+                    ci.x,
+                    ci.y,
+                    ci.height,
+                    Some(ci.color_rgba),
+                    ci.weight,
+                    ci.caret_skew,
+                )
+            } else {
+                (
+                    cursor_col as f32 * self.char_width,
+                    cursor_line as i32 * presenter_service::LINE_HEIGHT as i32,
+                    presenter_service::LINE_HEIGHT,
+                    None,
+                    400u16,
+                    0.0f32,
+                )
+            };
+        let effective_cursor_color = match cursor_style_color {
+            Some(rgba) => Color::rgba(
+                ((rgba >> 24) & 0xFF) as u8,
+                ((rgba >> 16) & 0xFF) as u8,
+                ((rgba >> 8) & 0xFF) as u8,
+                (rgba & 0xFF) as u8,
+            ),
+            None => cursor_color,
         };
+        let cursor_w_f = 1.0 + (cursor_weight.saturating_sub(100) as f32) * 3.0 / 800.0;
 
         if let Some(cursor_node) = scene.alloc_node() {
             let n = scene.node_mut(cursor_node);
 
             n.x = scene::f32_to_mpt(cursor_x);
             n.y = pt(cursor_y);
-            n.width = upt(presenter_service::CURSOR_WIDTH);
+            n.width = (cursor_w_f * scene::MPT_PER_PT as f32) as u32;
             n.height = upt(cursor_h);
-            n.background = cursor_color;
+            n.background = effective_cursor_color;
+
+            if cursor_skew != 0.0 {
+                n.transform = scene::AffineTransform {
+                    a: 1.0,
+                    b: 0.0,
+                    c: cursor_skew,
+                    d: 1.0,
+                    tx: 0.0,
+                    ty: 0.0,
+                };
+            }
 
             if !has_selection {
                 n.animation = scene::Animation::cursor_blink(self.blink_start);
@@ -1086,6 +1266,32 @@ impl Presenter {
         (line.byte_offset + line.byte_length) as usize
     }
 
+    fn logical_text(&self, _content_len_hint: usize) -> alloc::vec::Vec<u8> {
+        let (raw_len, _, _, _) = unsafe { document_service::read_doc_header(self.doc_va) };
+        let header = parse_layout_header(&self.results_buf);
+
+        if header.format == 1 {
+            let doc_buf = unsafe {
+                core::slice::from_raw_parts(
+                    (self.doc_va + document_service::DOC_HEADER_SIZE) as *const u8,
+                    raw_len,
+                )
+            };
+
+            if piecetable::validate(doc_buf) {
+                let tl = piecetable::text_len(doc_buf) as usize;
+                let mut buf = alloc::vec![0u8; tl];
+                let copied = piecetable::text_slice(doc_buf, 0, tl as u32, &mut buf);
+
+                buf.truncate(copied);
+
+                return buf;
+            }
+        }
+
+        unsafe { document_service::doc_content_slice(self.doc_va, raw_len) }.to_vec()
+    }
+
     fn visible_lines(&self) -> usize {
         let viewport_height = self
             .display_height
@@ -1117,11 +1323,9 @@ impl Presenter {
                 if cmd {
                     Some(self.line_start_byte(cur_line))
                 } else if alt {
-                    // SAFETY: doc_va is a valid RO mapping of the document buffer.
-                    let text =
-                        unsafe { document_service::doc_content_slice(self.doc_va, content_len) };
+                    let text = self.logical_text(content_len);
 
-                    Some(layout::word_boundary_backward(text, cursor_pos))
+                    Some(layout::word_boundary_backward(&text, cursor_pos))
                 } else {
                     Some(cursor_pos.saturating_sub(1))
                 }
@@ -1130,10 +1334,9 @@ impl Presenter {
                 if cmd {
                     Some(self.line_end_byte(cur_line))
                 } else if alt {
-                    let text =
-                        unsafe { document_service::doc_content_slice(self.doc_va, content_len) };
+                    let text = self.logical_text(content_len);
 
-                    Some(layout::word_boundary_forward(text, cursor_pos))
+                    Some(layout::word_boundary_forward(&text, cursor_pos))
                 } else {
                     Some((cursor_pos + 1).min(content_len))
                 }
@@ -1141,35 +1344,19 @@ impl Presenter {
             text_editor::HID_KEY_UP => {
                 if cmd {
                     Some(0)
+                } else if cur_line == 0 {
+                    Some(self.line_start_byte(0))
                 } else {
-                    let col = self.sticky_col.unwrap_or(cur_col as u32) as usize;
-
-                    if cur_line == 0 {
-                        return Some(self.line_start_byte(0));
-                    }
-
-                    let target_line = cur_line - 1;
-                    let target_line_info = parse_line_at(&self.results_buf, target_line);
-                    let target_col = col.min(target_line_info.byte_length as usize);
-
-                    Some(target_line_info.byte_offset as usize + target_col)
+                    Some(self.byte_at_sticky_x(cur_line - 1, cur_col, content_len, &header))
                 }
             }
             text_editor::HID_KEY_DOWN => {
                 if cmd {
                     Some(content_len)
+                } else if cur_line + 1 >= line_count {
+                    Some(self.line_end_byte(cur_line))
                 } else {
-                    let col = self.sticky_col.unwrap_or(cur_col as u32) as usize;
-
-                    if cur_line + 1 >= line_count {
-                        return Some(self.line_end_byte(cur_line));
-                    }
-
-                    let target_line = cur_line + 1;
-                    let target_line_info = parse_line_at(&self.results_buf, target_line);
-                    let target_col = col.min(target_line_info.byte_length as usize);
-
-                    Some(target_line_info.byte_offset as usize + target_col)
+                    Some(self.byte_at_sticky_x(cur_line + 1, cur_col, content_len, &header))
                 }
             }
             text_editor::HID_KEY_HOME => Some(self.line_start_byte(cur_line)),
@@ -1181,12 +1368,9 @@ impl Presenter {
                     return Some(self.line_start_byte(0));
                 }
 
-                let col = self.sticky_col.unwrap_or(cur_col as u32) as usize;
                 let target_line = cur_line.saturating_sub(page);
-                let target_line_info = parse_line_at(&self.results_buf, target_line);
-                let target_col = col.min(target_line_info.byte_length as usize);
 
-                Some(target_line_info.byte_offset as usize + target_col)
+                Some(self.byte_at_sticky_x(target_line, cur_col, content_len, &header))
             }
             text_editor::HID_KEY_PAGE_DOWN => {
                 let page = self.visible_lines();
@@ -1195,14 +1379,44 @@ impl Presenter {
                     return Some(self.line_end_byte(cur_line));
                 }
 
-                let col = self.sticky_col.unwrap_or(cur_col as u32) as usize;
                 let target_line = (cur_line + page).min(line_count - 1);
-                let target_line_info = parse_line_at(&self.results_buf, target_line);
-                let target_col = col.min(target_line_info.byte_length as usize);
 
-                Some(target_line_info.byte_offset as usize + target_col)
+                Some(self.byte_at_sticky_x(target_line, cur_col, content_len, &header))
             }
             _ => None,
+        }
+    }
+
+    fn byte_at_sticky_x(
+        &self,
+        target_line: usize,
+        cur_col: usize,
+        content_len: usize,
+        header: &layout_service::LayoutHeader,
+    ) -> usize {
+        let target_info = parse_line_at(&self.results_buf, target_line);
+
+        if header.format == 1 {
+            let cursor_x_fp = self.sticky_col.unwrap_or(u32::MAX);
+
+            if cursor_x_fp == u32::MAX {
+                let col = cur_col.min(target_info.byte_length as usize);
+
+                return target_info.byte_offset as usize + col;
+            }
+
+            let target_x = cursor_x_fp as f32 / 256.0;
+            let (text_x, text_y) = self.text_origin();
+            let line_y = target_info.y + 1;
+            let abs_x = text_x + target_x as u32;
+            let abs_y = (text_y as i32 + line_y - self.scroll_y).max(0) as u32;
+
+            self.xy_to_byte(abs_x, abs_y, content_len)
+        } else {
+            let col = self.sticky_col.unwrap_or(cur_col as u32) as usize;
+            let target_col = col.min(target_info.byte_length as usize);
+
+            target_info.byte_offset as usize + target_col
         }
     }
 
@@ -1245,8 +1459,25 @@ impl Presenter {
         }
 
         // SAFETY: doc_va is a valid RO mapping of the document buffer.
-        let (content_len, cursor_pos, sel_anchor, _) =
+        let (raw_content_len, cursor_pos, sel_anchor, _) =
             unsafe { document_service::read_doc_header(self.doc_va) };
+        let header = parse_layout_header(&self.results_buf);
+        let content_len = if header.format == 1 {
+            let doc_buf = unsafe {
+                core::slice::from_raw_parts(
+                    (self.doc_va + document_service::DOC_HEADER_SIZE) as *const u8,
+                    raw_content_len,
+                )
+            };
+
+            if piecetable::validate(doc_buf) {
+                piecetable::text_len(doc_buf) as usize
+            } else {
+                raw_content_len
+            }
+        } else {
+            raw_content_len
+        };
         let has_selection = sel_anchor != cursor_pos;
         let shift = dispatch.modifiers & text_editor::MOD_SHIFT != 0;
         let cmd = dispatch.modifiers & text_editor::MOD_SUPER != 0;
@@ -1260,6 +1491,20 @@ impl Presenter {
             self.request_render();
 
             return;
+        }
+
+        // Compute sticky_col BEFORE nav_target so byte_at_sticky_x has
+        // the correct proportional x on the very first vertical press.
+        if Self::is_vertical_nav(dispatch.key_code) && self.sticky_col.is_none() {
+            if header.format == 1 {
+                let ci = compute_rich_cursor(&self.results_buf, &header, cursor_pos, self.doc_va);
+
+                self.sticky_col = Some((ci.x * 256.0) as u32);
+            } else {
+                let (_, col) = self.find_cursor_line(cursor_pos, header.line_count as usize);
+
+                self.sticky_col = Some(col as u32);
+            }
         }
 
         if let Some(mut target) = self.nav_target(
@@ -1293,14 +1538,7 @@ impl Presenter {
                 self.doc_cursor_move(target);
             }
 
-            if is_vertical {
-                if self.sticky_col.is_none() {
-                    let header = parse_layout_header(&self.results_buf);
-                    let (_, col) = self.find_cursor_line(cursor_pos, header.line_count as usize);
-
-                    self.sticky_col = Some(col as u32);
-                }
-            } else {
+            if !is_vertical {
                 self.sticky_col = None;
             }
         } else {
@@ -1540,17 +1778,14 @@ impl Presenter {
         let (content_len, _cursor_pos, _sel_anchor, _) =
             unsafe { document_service::read_doc_header(self.doc_va) };
         let byte_pos = self.xy_to_byte(click_x, click_y, content_len);
-
         let now_ns = abi::system::clock_read().unwrap_or(0);
         let now_ms = now_ns / 1_000_000;
-
         let mpt = scene::MPT_PER_PT as u32;
         let dx_mpt = click_x.abs_diff(self.last_click_x) * mpt;
         let dy_mpt = click_y.abs_diff(self.last_click_y) * mpt;
         let dt = now_ms.saturating_sub(self.last_click_ms);
         let click_tolerance_mpt = 4 * mpt;
         let same_spot = dx_mpt <= click_tolerance_mpt && dy_mpt <= click_tolerance_mpt && dt <= 400;
-
         let click_count = if same_spot {
             (self.click_count % 3) + 1
         } else {
@@ -1562,17 +1797,42 @@ impl Presenter {
         self.last_click_y = click_y;
         self.click_count = click_count;
 
-        // SAFETY: doc_va is a valid RO mapping of the document buffer.
-        let content = unsafe { document_service::doc_content_slice(self.doc_va, content_len) };
+        // For rich text, extract the logical text from the piecetable.
+        // For plain text, read the raw document content directly.
+        let header = parse_layout_header(&self.results_buf);
+        let is_rich = header.format == 1;
+        let mut rich_text_buf = alloc::vec::Vec::new();
+        let content: &[u8] = if is_rich {
+            let doc_buf = unsafe {
+                core::slice::from_raw_parts(
+                    (self.doc_va + document_service::DOC_HEADER_SIZE) as *const u8,
+                    content_len,
+                )
+            };
+            if piecetable::validate(doc_buf) {
+                let tl = piecetable::text_len(doc_buf) as usize;
+
+                rich_text_buf.resize(tl, 0u8);
+
+                let copied = piecetable::text_slice(doc_buf, 0, tl as u32, &mut rich_text_buf);
+
+                &rich_text_buf[..copied]
+            } else {
+                unsafe { document_service::doc_content_slice(self.doc_va, content_len) }
+            }
+        } else {
+            unsafe { document_service::doc_content_slice(self.doc_va, content_len) }
+        };
+        let text_len = content.len();
 
         match click_count {
             2 => {
-                let at_word = byte_pos < content_len && !layout::is_whitespace(content[byte_pos]);
+                let at_word = byte_pos < text_len && !layout::is_whitespace(content[byte_pos]);
                 let back_pos = if at_word { byte_pos + 1 } else { byte_pos };
                 let lo = layout::word_boundary_backward(content, back_pos);
                 let mut hi = byte_pos;
 
-                while hi < content_len && !layout::is_whitespace(content[hi]) {
+                while hi < text_len && !layout::is_whitespace(content[hi]) {
                     hi += 1;
                 }
 
@@ -1583,13 +1843,12 @@ impl Presenter {
                 }
             }
             3 => {
-                let header = parse_layout_header(&self.results_buf);
                 let line_count = header.line_count as usize;
                 let (line_idx, _) = self.find_cursor_line(byte_pos, line_count);
                 let lo = self.line_start_byte(line_idx);
                 let mut hi = self.line_end_byte(line_idx);
 
-                if hi < content_len && content[hi] == b'\n' {
+                if hi < text_len && content[hi] == b'\n' {
                     hi += 1;
                 }
 
@@ -1627,7 +1886,32 @@ impl Presenter {
         // SAFETY: doc_va is a valid RO mapping.
         let (content_len, _, _, _) = unsafe { document_service::read_doc_header(self.doc_va) };
         let byte_pos = self.xy_to_byte(drag_x, drag_y, content_len);
-        let content = unsafe { document_service::doc_content_slice(self.doc_va, content_len) };
+        let header = parse_layout_header(&self.results_buf);
+        let is_rich = header.format == 1;
+        let mut rich_text_buf = alloc::vec::Vec::new();
+        let content: &[u8] = if is_rich {
+            let doc_buf = unsafe {
+                core::slice::from_raw_parts(
+                    (self.doc_va + document_service::DOC_HEADER_SIZE) as *const u8,
+                    content_len,
+                )
+            };
+
+            if piecetable::validate(doc_buf) {
+                let tl = piecetable::text_len(doc_buf) as usize;
+
+                rich_text_buf.resize(tl, 0u8);
+
+                let copied = piecetable::text_slice(doc_buf, 0, tl as u32, &mut rich_text_buf);
+
+                &rich_text_buf[..copied]
+            } else {
+                unsafe { document_service::doc_content_slice(self.doc_va, content_len) }
+            }
+        } else {
+            unsafe { document_service::doc_content_slice(self.doc_va, content_len) }
+        };
+        let text_len = content.len();
 
         match self.click_count {
             2 => {
@@ -1638,7 +1922,7 @@ impl Presenter {
                 } else if byte_pos >= self.drag_origin_end {
                     let mut hi = byte_pos;
 
-                    while hi < content_len && !layout::is_whitespace(content[hi]) {
+                    while hi < text_len && !layout::is_whitespace(content[hi]) {
                         hi += 1;
                     }
 
@@ -1722,14 +2006,14 @@ fn byte_to_x_rich(
             continue;
         }
 
-        let font_data = font_data_for_family(vr.font_family);
+        let font_data = font_data_for_style(vr.font_family, vr.flags);
         let upem = fonts::metrics::font_metrics(font_data)
             .map(|m| m.units_per_em)
             .unwrap_or(1000);
         let mut axes_buf = [fonts::metrics::AxisValue {
             tag: [0; 4],
             value: 0.0,
-        }; 3];
+        }; 2];
         let mut ac = 0;
 
         if vr.weight != 400 {
@@ -1745,14 +2029,6 @@ fn byte_to_x_rich(
             value: vr.font_size as f32,
         };
         ac += 1;
-
-        if vr.flags & piecetable::FLAG_ITALIC != 0 {
-            axes_buf[ac] = fonts::metrics::AxisValue {
-                tag: *b"ital",
-                value: 1.0,
-            };
-            ac += 1;
-        }
 
         let axes = &axes_buf[..ac];
         let text_len = piecetable::text_len(doc_buf) as usize;
@@ -1790,7 +2066,6 @@ fn build_rich_selection_nodes(
 ) {
     let line_count = header.line_count as usize;
     let run_count = header.visible_run_count as usize;
-
     // SAFETY: doc_va is a valid RO mapping.
     let (content_len, _, _, _) = unsafe { document_service::read_doc_header(doc_va) };
     let doc_buf = unsafe {
@@ -1818,13 +2093,11 @@ fn build_rich_selection_nodes(
         } else {
             byte_to_x_rich(doc_buf, results_buf, run_count, sel_start, i)
         };
-
         let x_end = if sel_end >= line_end {
             byte_to_x_rich(doc_buf, results_buf, run_count, line_end, i)
         } else {
             byte_to_x_rich(doc_buf, results_buf, run_count, sel_end, i)
         };
-
         let w = x_end - x_start;
 
         if w <= 0.0 {
@@ -1916,15 +2189,14 @@ fn xy_to_byte_rich(
             continue;
         }
 
-        let font_data = font_data_for_family(vr.font_family);
+        let font_data = font_data_for_style(vr.font_family, vr.flags);
         let upem = fonts::metrics::font_metrics(font_data)
             .map(|m| m.units_per_em)
             .unwrap_or(1000);
-
         let mut axes_buf = [fonts::metrics::AxisValue {
             tag: [0; 4],
             value: 0.0,
-        }; 3];
+        }; 2];
         let mut axis_count = 0;
 
         if vr.weight != 400 {
@@ -1940,14 +2212,6 @@ fn xy_to_byte_rich(
             value: vr.font_size as f32,
         };
         axis_count += 1;
-
-        if vr.flags & piecetable::FLAG_ITALIC != 0 {
-            axes_buf[axis_count] = fonts::metrics::AxisValue {
-                tag: *b"ital",
-                value: 1.0,
-            };
-            axis_count += 1;
-        }
 
         let axes = &axes_buf[..axis_count];
         let run_start = vr.byte_offset as usize;
@@ -1967,7 +2231,6 @@ fn xy_to_byte_rich(
         let mut text_buf = alloc::vec![0u8; extract_len + 1];
         let copied =
             piecetable::text_slice(doc_buf, run_start as u32, extract_end as u32, &mut text_buf);
-
         let mut x = vr.x;
         let mut byte_offset = run_start;
 
@@ -1996,16 +2259,34 @@ fn xy_to_byte_rich(
 
 // ── Rich text cursor ─────────────────────────────────────────────
 
+struct RichCursorInfo {
+    x: f32,
+    y: i32,
+    height: u32,
+    color_rgba: u32,
+    weight: u16,
+    caret_skew: f32,
+}
+
 fn compute_rich_cursor(
     results_buf: &[u8],
     layout_header: &layout_service::LayoutHeader,
     cursor_pos: usize,
     doc_va: usize,
-) -> (f32, i32, u32) {
+) -> RichCursorInfo {
+    const FALLBACK_COLOR: u32 = 0x20_20_20_FF;
+
     let run_count = layout_header.visible_run_count as usize;
 
     if run_count == 0 {
-        return (0.0, 0, 20);
+        return RichCursorInfo {
+            x: 0.0,
+            y: 0,
+            height: 20,
+            color_rgba: FALLBACK_COLOR,
+            weight: 400,
+            caret_skew: 0.0,
+        };
     }
 
     // SAFETY: doc_va is a valid RO mapping.
@@ -2018,7 +2299,14 @@ fn compute_rich_cursor(
     };
 
     if !piecetable::validate(doc_buf) {
-        return (0.0, 0, 20);
+        return RichCursorInfo {
+            x: 0.0,
+            y: 0,
+            height: 20,
+            color_rgba: FALLBACK_COLOR,
+            weight: 400,
+            caret_skew: 0.0,
+        };
     }
 
     // Find the run containing cursor_pos and compute x offset within it.
@@ -2031,15 +2319,14 @@ fn compute_rich_cursor(
             continue;
         }
 
-        let font_data = font_data_for_family(vr.font_family);
+        let font_data = font_data_for_style(vr.font_family, vr.flags);
         let upem = fonts::metrics::font_metrics(font_data)
             .map(|m| m.units_per_em)
             .unwrap_or(1000);
-
         let mut axes_buf = [fonts::metrics::AxisValue {
             tag: [0; 4],
             value: 0.0,
-        }; 3];
+        }; 2];
         let mut axis_count = 0;
 
         if vr.weight != 400 {
@@ -2056,16 +2343,7 @@ fn compute_rich_cursor(
         };
         axis_count += 1;
 
-        if vr.flags & piecetable::FLAG_ITALIC != 0 {
-            axes_buf[axis_count] = fonts::metrics::AxisValue {
-                tag: *b"ital",
-                value: 1.0,
-            };
-            axis_count += 1;
-        }
-
         let axes = &axes_buf[..axis_count];
-
         // Extract run text from piecetable.
         let text_len = piecetable::text_len(doc_buf) as usize;
         let chars_before = cursor_pos - run_start;
@@ -2073,7 +2351,6 @@ fn compute_rich_cursor(
         let mut text_buf = alloc::vec![0u8; extract_len + 1];
         let copied =
             piecetable::text_slice(doc_buf, run_start as u32, cursor_pos as u32, &mut text_buf);
-
         let mut x = vr.x;
 
         for ch in core::str::from_utf8(&text_buf[..copied])
@@ -2089,23 +2366,91 @@ fn compute_rich_cursor(
 
         let line_height = (vr.font_size as u32 * 14) / 10;
 
-        return (x, vr.y, line_height);
+        return RichCursorInfo {
+            x,
+            y: vr.y,
+            height: line_height,
+            color_rgba: vr.color_rgba,
+            weight: vr.weight,
+            caret_skew: fonts::metrics::caret_skew(font_data),
+        };
     }
 
-    // Cursor past last run — position at end of last run.
-    if run_count > 0 {
-        let last = parse_visible_run_at(results_buf, run_count - 1);
-        let line_height = (last.font_size as u32 * 14) / 10;
+    // No run contains the cursor — find the line from LineInfo.
+    let line_count = layout_header.line_count as usize;
 
-        // Approximate: use the last run's x + estimated width.
-        return (
-            last.x + last.byte_length as f32 * last.font_size as f32 * 0.5,
-            last.y,
-            line_height,
-        );
+    for i in 0..line_count {
+        let line = parse_line_at(results_buf, i);
+        let line_start = line.byte_offset as usize;
+        let line_end = line_start + line.byte_length as usize;
+
+        if cursor_pos >= line_start && cursor_pos <= line_end {
+            let default_h = 20u32;
+            let mut line_h = default_h;
+
+            for run_i in 0..run_count {
+                let vr = parse_visible_run_at(results_buf, run_i);
+
+                if vr.line_index as usize == i {
+                    line_h = (vr.font_size as u32 * 14) / 10;
+
+                    break;
+                }
+            }
+
+            // For empty lines, use the previous line's font size.
+            if line_h == default_h && i > 0 {
+                for run_i in (0..run_count).rev() {
+                    let vr = parse_visible_run_at(results_buf, run_i);
+
+                    if vr.line_index as usize == i - 1 {
+                        line_h = (vr.font_size as u32 * 14) / 10;
+
+                        break;
+                    }
+                }
+            }
+
+            return RichCursorInfo {
+                x: 0.0,
+                y: line.y,
+                height: line_h,
+                color_rgba: FALLBACK_COLOR,
+                weight: 400,
+                caret_skew: 0.0,
+            };
+        }
     }
 
-    (0.0, 0, 20)
+    // Past all lines — position after last line.
+    if line_count > 0 {
+        let last = parse_line_at(results_buf, line_count - 1);
+        let last_h = if run_count > 0 {
+            let vr = parse_visible_run_at(results_buf, run_count - 1);
+
+            (vr.font_size as u32 * 14) / 10
+        } else {
+            20
+        };
+
+        return RichCursorInfo {
+            x: 0.0,
+            y: last.y + last_h as i32,
+            height: last_h,
+            color_rgba: FALLBACK_COLOR,
+            weight: 400,
+            caret_skew: 0.0,
+        };
+    }
+
+    RichCursorInfo {
+        x: 0.0,
+        y: 0,
+        height: 20,
+        color_rgba: FALLBACK_COLOR,
+        weight: 400,
+        caret_skew: 0.0,
+    }
 }
 
 // ── Rich text rendering ──────────────────────────────────────────
@@ -2152,15 +2497,15 @@ fn build_rich_text_nodes(
         }
 
         let run_text = &text_scratch[byte_start..byte_start + byte_len];
-        let font_data = font_data_for_family(vr.font_family);
-        let sid = style_id_for_family(vr.font_family);
+        let font_data = font_data_for_style(vr.font_family, vr.flags);
+        let sid = pack_run_style_id(vr.font_family, vr.weight, vr.flags);
         let upem = fonts::metrics::font_metrics(font_data)
             .map(|m| m.units_per_em)
             .unwrap_or(1000);
         let mut axes_buf = [fonts::metrics::AxisValue {
             tag: [0; 4],
             value: 0.0,
-        }; 3];
+        }; 2];
         let mut axis_count = 0;
 
         if vr.weight != 400 {
@@ -2176,14 +2521,6 @@ fn build_rich_text_nodes(
             value: vr.font_size as f32,
         };
         axis_count += 1;
-
-        if vr.flags & piecetable::FLAG_ITALIC != 0 {
-            axes_buf[axis_count] = fonts::metrics::AxisValue {
-                tag: *b"ital",
-                value: 1.0,
-            };
-            axis_count += 1;
-        }
 
         let axes = &axes_buf[..axis_count];
         let mut glyph_count = 0usize;

@@ -560,6 +560,20 @@ pub fn break_measured_lines(
         }
     }
 
+    // Trailing newline produces an empty line so the cursor has a
+    // real layout line to land on at the end of the document.
+    if let Some(last_char) = chars.last() {
+        if last_char.is_newline {
+            let end_byte = last_char.byte_offset + last_char.byte_len as u32;
+
+            lines.push(LineBreak {
+                byte_start: end_byte,
+                byte_end: end_byte,
+                width: 0.0,
+            });
+        }
+    }
+
     lines
 }
 
@@ -587,7 +601,11 @@ mod tests {
     struct ProportionalMetrics;
     impl FontMetrics for ProportionalMetrics {
         fn char_width(&self, ch: char) -> f32 {
-            if ch == ' ' { 5.0 } else { 10.0 }
+            if ch == ' ' {
+                5.0
+            } else {
+                10.0
+            }
         }
 
         fn line_height(&self) -> f32 {

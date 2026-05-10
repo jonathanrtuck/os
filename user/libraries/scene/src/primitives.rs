@@ -406,12 +406,20 @@ fn cubic_winding_recursive(
 
 #[inline]
 fn f32_min(a: f32, b: f32) -> f32 {
-    if a < b { a } else { b }
+    if a < b {
+        a
+    } else {
+        b
+    }
 }
 
 #[inline]
 fn f32_max(a: f32, b: f32) -> f32 {
-    if a > b { a } else { b }
+    if a > b {
+        a
+    } else {
+        b
+    }
 }
 
 // ── Font identity constants ─────────────────────────────────────────

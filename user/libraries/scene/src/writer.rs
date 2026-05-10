@@ -2,8 +2,8 @@
 
 use crate::{
     node::{
-        DATA_BUFFER_SIZE, DATA_OFFSET, DIRTY_BITMAP_WORDS, MAX_NODES, NODES_OFFSET, NULL, Node,
-        NodeId, SCENE_SIZE, SceneHeader,
+        Node, NodeId, SceneHeader, DATA_BUFFER_SIZE, DATA_OFFSET, DIRTY_BITMAP_WORDS, MAX_NODES,
+        NODES_OFFSET, NULL, SCENE_SIZE,
     },
     primitives::{Content, DataRef, ShapedGlyph},
 };

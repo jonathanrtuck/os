@@ -10,7 +10,7 @@ use crate::{
     stroke::expand_stroke,
     svg_path::parse_svg_path,
     transform::AffineTransform,
-    triple::{TRIPLE_SCENE_SIZE, TripleWriter},
+    triple::{TripleWriter, TRIPLE_SCENE_SIZE},
     writer::SceneWriter,
 };
 

@@ -63,8 +63,6 @@ pub const CURSOR_R: u8 = 0x20;
 pub const CURSOR_G: u8 = 0x20;
 pub const CURSOR_B: u8 = 0x20;
 
-pub const CURSOR_WIDTH: u32 = 2;
-
 pub const SEL_R: u8 = 59;
 pub const SEL_G: u8 = 130;
 pub const SEL_B: u8 = 246;

@@ -41,14 +41,37 @@ const EXIT_ENDPOINT_CREATE: u32 = 0xE107;
 // ── Font data ─────────────────────────────────────────────────────
 
 static FONT_MONO: &[u8] = include_bytes!("../../../../assets/jetbrains-mono.ttf");
+static FONT_MONO_ITALIC: &[u8] = include_bytes!("../../../../assets/jetbrains-mono-italic.ttf");
 static FONT_SANS: &[u8] = include_bytes!("../../../../assets/inter.ttf");
+static FONT_SANS_ITALIC: &[u8] = include_bytes!("../../../../assets/inter-italic.ttf");
 static FONT_SERIF: &[u8] = include_bytes!("../../../../assets/source-serif-4.ttf");
+static FONT_SERIF_ITALIC: &[u8] = include_bytes!("../../../../assets/source-serif-4-italic.ttf");
 
-fn font_data_for_family(family: u8) -> &'static [u8] {
+fn font_data_for_style(family: u8, flags: u8) -> &'static [u8] {
+    let italic = flags & piecetable::FLAG_ITALIC != 0;
+
     match family {
-        piecetable::FONT_MONO => FONT_MONO,
-        piecetable::FONT_SERIF => FONT_SERIF,
-        _ => FONT_SANS,
+        piecetable::FONT_MONO => {
+            if italic {
+                FONT_MONO_ITALIC
+            } else {
+                FONT_MONO
+            }
+        }
+        piecetable::FONT_SERIF => {
+            if italic {
+                FONT_SERIF_ITALIC
+            } else {
+                FONT_SERIF
+            }
+        }
+        _ => {
+            if italic {
+                FONT_SANS_ITALIC
+            } else {
+                FONT_SANS
+            }
+        }
     }
 }
 
@@ -56,6 +79,18 @@ fn font_upem(font_data: &[u8]) -> u16 {
     fonts::metrics::font_metrics(font_data)
         .map(|m| m.units_per_em)
         .unwrap_or(1000)
+}
+
+fn font_ascent_fu(font_data: &[u8]) -> i16 {
+    fonts::metrics::font_metrics(font_data)
+        .map(|m| m.ascent)
+        .unwrap_or(800)
+}
+
+fn ascent_pt(font_data: &[u8], font_size_pt: u16, upem: u16) -> f32 {
+    let ascent_fu = font_ascent_fu(font_data);
+
+    ascent_fu as f32 * font_size_pt as f32 / upem as f32
 }
 
 fn char_advance_pt(
@@ -110,10 +145,6 @@ struct LayoutServer {
     last_content_len: u32,
     last_viewport_width: u32,
     last_line_height: u32,
-
-    mono_upem: u16,
-    sans_upem: u16,
-    serif_upem: u16,
 
     #[allow(dead_code)]
     console_ep: Handle,
@@ -245,16 +276,12 @@ impl LayoutServer {
             let Some(style) = piecetable::style(doc_buf, run.style_id) else {
                 continue;
             };
-            let fi_data = font_data_for_family(style.font_family);
-            let fi_upem = match style.font_family {
-                piecetable::FONT_MONO => self.mono_upem,
-                piecetable::FONT_SERIF => self.serif_upem,
-                _ => self.sans_upem,
-            };
+            let fi_data = font_data_for_style(style.font_family, style.flags);
+            let fi_upem = font_upem(fi_data);
             let mut axes_buf = [fonts::metrics::AxisValue {
                 tag: [0; 4],
                 value: 0.0,
-            }; 3];
+            }; 2];
             let mut axis_count = 0;
 
             if style.weight != 400 {
@@ -270,14 +297,6 @@ impl LayoutServer {
                 value: style.font_size_pt as f32,
             };
             axis_count += 1;
-
-            if style.flags & piecetable::FLAG_ITALIC != 0 {
-                axes_buf[axis_count] = fonts::metrics::AxisValue {
-                    tag: *b"ital",
-                    value: 1.0,
-                };
-                axis_count += 1;
-            }
 
             let axes = &axes_buf[..axis_count];
             let run_start = run.byte_offset as usize;
@@ -325,7 +344,9 @@ impl LayoutServer {
                 mc_cursor += 1;
             }
 
-            let mut max_font_size: u16 = 0;
+            let runs_start = visible_runs.len();
+            let mut max_ascent_pt = 0.0f32;
+            let mut max_descent_pt = 0.0f32;
             let mut run_x = 0.0f32;
             let mut current_run_idx: Option<u16> = None;
             let mut run_start_byte = line_byte_start;
@@ -337,9 +358,22 @@ impl LayoutServer {
 
                 if let Some(run) = piecetable::styled_run(doc_buf, mc.run_index as usize)
                     && let Some(style) = piecetable::style(doc_buf, run.style_id)
-                    && style.font_size_pt as u16 > max_font_size
                 {
-                    max_font_size = style.font_size_pt as u16;
+                    let fi_data = font_data_for_style(style.font_family, style.flags);
+                    let fi_upem = font_upem(fi_data);
+                    let asc = ascent_pt(fi_data, style.font_size_pt as u16, fi_upem);
+
+                    if asc > max_ascent_pt {
+                        max_ascent_pt = asc;
+                    }
+
+                    if let Some(fm) = fonts::metrics::font_metrics(fi_data) {
+                        let desc = -fm.descent as f32 * style.font_size_pt as f32 / fi_upem as f32;
+
+                        if desc > max_descent_pt {
+                            max_descent_pt = desc;
+                        }
+                    }
                 }
 
                 if current_run_idx != Some(mc.run_index) {
@@ -354,7 +388,7 @@ impl LayoutServer {
                                 byte_offset: run_start_byte,
                                 byte_length: mc.byte_offset - run_start_byte,
                                 x: run_start_x,
-                                y,
+                                y: 0,
                                 line_index: line_idx as u16,
                             },
                         );
@@ -380,14 +414,26 @@ impl LayoutServer {
                         byte_offset: run_start_byte,
                         byte_length: line_byte_end - run_start_byte,
                         x: run_start_x,
-                        y,
+                        y: 0,
                         line_index: line_idx as u16,
                     },
                 );
             }
 
-            let line_h = if max_font_size > 0 {
-                (max_font_size as i32 * 14) / 10
+            // Adjust each run's y for baseline alignment: runs with smaller
+            // ascent get pushed down so all runs share the same baseline.
+            for vr in &mut visible_runs[runs_start..] {
+                let fi_data = font_data_for_style(vr.font_family, vr.flags);
+                let fi_upem = font_upem(fi_data);
+                let run_ascent = ascent_pt(fi_data, vr.font_size, fi_upem);
+
+                vr.y = y + (max_ascent_pt - run_ascent) as i32;
+            }
+
+            let line_h = if max_ascent_pt > 0.0 {
+                let leading = (max_ascent_pt + max_descent_pt) * 0.2;
+
+                (max_ascent_pt + max_descent_pt + leading) as i32
             } else {
                 default_line_height
             };
@@ -701,9 +747,6 @@ extern "C" fn _start() -> ! {
         last_content_len: 0,
         last_viewport_width: 0,
         last_line_height: 0,
-        mono_upem: font_upem(FONT_MONO),
-        sans_upem: font_upem(FONT_SANS),
-        serif_upem: font_upem(FONT_SERIF),
         console_ep,
     };
 

@@ -1,7 +1,7 @@
 //! Scene graph node type, header, and memory layout constants.
 
 use crate::{
-    primitives::{Animation, Border, Color, Content, DataRef, bitflags},
+    primitives::{bitflags, Animation, Border, Color, Content, DataRef},
     transform::AffineTransform,
 };
 

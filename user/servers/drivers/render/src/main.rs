@@ -29,21 +29,64 @@ use ipc::server::{Dispatch, Incoming};
 use render::CommandWriter;
 use scene::{Content, NULL, NodeId, SCENE_SIZE, SceneReader};
 
-// ── Font data — well-known style IDs ──────────────────────────────
+// ── Font data — packed style IDs ──────────────────────────────────
+//
+// style_id encodes font_family, weight, and flags in a single u32:
+//   bits [0..2)  = font_family (0=mono, 1=sans, 2=serif)
+//   bits [2..16) = weight (100-900)
+//   bits [16..19) = flags (bit 0=italic)
+//
+// The atlas cache uses (glyph_id, font_size, style_id) as key, so
+// each unique (family, weight, flags) combination gets its own entries.
 
 pub const STYLE_MONO: u32 = 0;
 pub const STYLE_SANS: u32 = 1;
 pub const STYLE_SERIF: u32 = 2;
 
 static FONT_MONO: &[u8] = include_bytes!("../../../../../assets/jetbrains-mono.ttf");
+static FONT_MONO_ITALIC: &[u8] = include_bytes!("../../../../../assets/jetbrains-mono-italic.ttf");
 static FONT_SANS: &[u8] = include_bytes!("../../../../../assets/inter.ttf");
+static FONT_SANS_ITALIC: &[u8] = include_bytes!("../../../../../assets/inter-italic.ttf");
 static FONT_SERIF: &[u8] = include_bytes!("../../../../../assets/source-serif-4.ttf");
+static FONT_SERIF_ITALIC: &[u8] = include_bytes!("../../../../../assets/source-serif-4-italic.ttf");
+
+fn unpack_family(style_id: u32) -> u32 {
+    style_id & 0x3
+}
+
+fn unpack_weight(style_id: u32) -> u16 {
+    ((style_id >> 2) & 0x3FFF) as u16
+}
+
+fn unpack_flags(style_id: u32) -> u8 {
+    ((style_id >> 16) & 0x7) as u8
+}
 
 fn font_for_style(style_id: u32) -> &'static [u8] {
-    match style_id {
-        STYLE_SANS => FONT_SANS,
-        STYLE_SERIF => FONT_SERIF,
-        _ => FONT_MONO,
+    let italic = unpack_flags(style_id) & 1 != 0;
+
+    match unpack_family(style_id) {
+        STYLE_SANS => {
+            if italic {
+                FONT_SANS_ITALIC
+            } else {
+                FONT_SANS
+            }
+        }
+        STYLE_SERIF => {
+            if italic {
+                FONT_SERIF_ITALIC
+            } else {
+                FONT_SERIF
+            }
+        }
+        _ => {
+            if italic {
+                FONT_MONO_ITALIC
+            } else {
+                FONT_MONO
+            }
+        }
     }
 }
 
@@ -1324,7 +1367,7 @@ fn walk_node(
             style_id,
         } => {
             let glyph_data = reader.shaped_glyphs(glyphs, glyph_count);
-            let fm = &ctx.font_metrics[(style_id as usize).min(2)];
+            let fm = &ctx.font_metrics[unpack_family(style_id) as usize];
             let ascent_pt = fm.ascent_fu as f32 * font_size as f32 / fm.upem as f32;
             let baseline_y = y + ascent_pt;
             let inv_scale = 1.0 / ctx.scale as f32;
@@ -1549,12 +1592,28 @@ fn lookup_or_rasterize(
         width: 100,
         height: 100,
     };
-    let metrics = fonts::rasterize::rasterize(
+    let weight = unpack_weight(style_id);
+    let mut axes_buf = [fonts::metrics::AxisValue {
+        tag: [0; 4],
+        value: 0.0,
+    }; 1];
+    let mut axis_count = 0;
+
+    if weight != 0 && weight != 400 {
+        axes_buf[axis_count] = fonts::metrics::AxisValue {
+            tag: *b"wght",
+            value: weight as f32,
+        };
+        axis_count += 1;
+    }
+
+    let metrics = fonts::rasterize::rasterize_with_axes(
         font_data,
         glyph_id,
         font_size,
         &mut buf,
         &mut ctx.scratch,
+        &axes_buf[..axis_count],
         ctx.scale as u16,
     )?;
 

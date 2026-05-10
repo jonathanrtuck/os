@@ -28,4 +28,4 @@ pub use outline::{GlyphOutline, GlyphPoint};
 // Re-export crate-visible items used by other modules in the crate.
 pub(crate) use scale::{scale_fu, scale_fu_ceil};
 // From scanline
-pub use scanline::{RasterScratch, rasterize};
+pub use scanline::{rasterize, RasterScratch};
