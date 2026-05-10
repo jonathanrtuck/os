@@ -37,7 +37,7 @@ fault handling, cross-space mapping. 16 KiB pages (Apple Silicon native).
 
 ### Verification Summary
 
-12-phase verification campaign (`design/kernel-verification-plan.md`):
+12-phase verification campaign:
 
 | Phase                 | Key results                                       |
 | --------------------- | ------------------------------------------------- |
@@ -176,7 +176,7 @@ v0.6-pre-rewrite prototype.
 The kernel's ABI is frozen. Changes driven by userspace needs will add syscalls
 or extend existing ones, never break the existing interface.
 
-### Phase 2 — Drivers (IN PROGRESS)
+### Phase 2 — Drivers (COMPLETE)
 
 **Kernel extensions for drivers:**
 
