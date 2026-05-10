@@ -162,6 +162,8 @@ pub fn handle_data_abort(current: ThreadId, fault_addr: usize, is_write: bool) -
             let root = crate::frame::arch::page_alloc::PhysAddr(space.page_table_root());
             let perms = if mapping.rights.contains(crate::types::Rights::WRITE) {
                 crate::frame::arch::page_table::Perms::RW
+            } else if mapping.rights.contains(crate::types::Rights::EXECUTE) {
+                crate::frame::arch::page_table::Perms::RX
             } else {
                 crate::frame::arch::page_table::Perms::RO
             };

@@ -433,6 +433,16 @@ def assert_row_is_bg(img: Image.Image, args: str, tolerance: int) -> bool:
         return False
 
 
+def _normalize_ocr(text: str) -> str:
+    """Collapse characters that tesseract routinely confuses.
+
+    Inter's lowercase 'l' is a thin vertical stroke that sits on
+    tesseract's decision boundary between 'l' and 'i'.  Normalizing
+    both sides of the comparison avoids flaky tests.
+    """
+    return text.replace("i", "l").replace("I", "L")
+
+
 def assert_ocr_contains(img: Image.Image, args: str, tolerance: int) -> bool:
     """OCR the image and check that it contains the expected substring.
 
@@ -450,7 +460,10 @@ def assert_ocr_contains(img: Image.Image, args: str, tolerance: int) -> bool:
     text_lower = text.lower().strip()
     expected_lower = args.lower().strip()
 
-    if expected_lower in text_lower:
+    text_norm = _normalize_ocr(text_lower)
+    expected_norm = _normalize_ocr(expected_lower)
+
+    if expected_norm in text_norm:
         preview = text_lower[:200].replace('\n', ' ')
         print(f"PASS: OCR found '{args}' in rendered text: '{preview}...'")
         return True

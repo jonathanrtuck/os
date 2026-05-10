@@ -187,7 +187,18 @@ impl GlyphAtlas {
 
         while i < CAPACITY {
             self.slots[i].key = EMPTY;
+
             i += 1;
+        }
+
+        // Clear pixel buffer so stale glyph data from the previous generation
+        // cannot leak into the GPU texture upload.
+        let mut p = 0;
+
+        while p < self.pixels.len() {
+            self.pixels[p] = 0;
+
+            p += 1;
         }
 
         self.row_y = 0;

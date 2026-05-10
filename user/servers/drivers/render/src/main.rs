@@ -2726,6 +2726,7 @@ impl Compositor {
                             break;
                         }
 
+                        let cp = w.checkpoint();
                         let verts = &draws.verts[op.vert_offset..op.vert_offset + op.vert_bytes];
                         let needs_rebind = active_pipe != Some(op.pipe)
                             || op.pipe == Pipe::Shadow
@@ -2769,6 +2770,10 @@ impl Compositor {
                         render::batch::emit_draws(&mut w, verts);
 
                         if w.has_overflow() {
+                            w.rewind_to(cp);
+
+                            active_pipe = None;
+
                             break;
                         }
 

@@ -87,6 +87,6 @@ fn pte_barrier() {
     // SAFETY: DSB ISH + ISB are pure barrier instructions with no side
     // effects beyond ordering. Required by the ARM ARM after writing PTEs.
     unsafe {
-        core::arch::asm!("dsb ish", "isb", options(nostack, nomem));
+        core::arch::asm!("dsb ish", "isb", options(nostack));
     }
 }

@@ -136,6 +136,15 @@ impl<'a> CommandWriter<'a> {
         self.overflow
     }
 
+    pub fn checkpoint(&self) -> usize {
+        self.pos
+    }
+
+    pub fn rewind_to(&mut self, pos: usize) {
+        self.pos = pos;
+        self.overflow = false;
+    }
+
     fn put_u8(&mut self, v: u8) {
         if self.overflow || self.pos >= self.buf.len() {
             self.overflow = true;
@@ -879,6 +888,54 @@ mod tests {
 
         // begin_render_pass(8+32) + set_pipeline(8+4) + draw(8+12) + end(8) + present(8+4)
         assert_eq!(w.len(), 40 + 12 + 20 + 8 + 12);
+    }
+
+    #[test]
+    fn command_writer_checkpoint_rewind() {
+        let mut buf = [0u8; 256];
+        let mut w = CommandWriter::new(&mut buf);
+
+        w.set_render_pipeline(10);
+
+        let cp = w.checkpoint();
+
+        assert_eq!(cp, 12);
+
+        w.set_render_pipeline(20);
+
+        assert_eq!(w.len(), 24);
+
+        w.rewind_to(cp);
+
+        assert_eq!(w.len(), 12);
+        assert!(!w.has_overflow());
+
+        w.end_render_pass();
+
+        assert_eq!(w.len(), 20);
+    }
+
+    #[test]
+    fn command_writer_rewind_clears_overflow() {
+        let mut buf = [0u8; 32];
+        let mut w = CommandWriter::new(&mut buf);
+
+        w.set_render_pipeline(10);
+
+        let cp = w.checkpoint();
+
+        w.compile_library(1, b"way too long for this tiny buffer");
+
+        assert!(w.has_overflow());
+
+        w.rewind_to(cp);
+
+        assert!(!w.has_overflow());
+        assert_eq!(w.len(), cp);
+
+        w.end_render_pass();
+
+        assert!(!w.has_overflow());
     }
 
     #[test]
