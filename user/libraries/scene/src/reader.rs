@@ -1,9 +1,11 @@
 //! Immutable scene graph reader operating on a flat byte buffer.
 
+use core::sync::atomic::{AtomicU32, Ordering};
+
 use crate::{
     node::{
-        Node, NodeId, SceneHeader, DATA_BUFFER_SIZE, DATA_OFFSET, MAX_NODES, NODES_OFFSET,
-        SCENE_SIZE,
+        DATA_BUFFER_SIZE, DATA_OFFSET, GENERATION_OFFSET, MAX_NODES, NODES_OFFSET, Node, NodeId,
+        SCENE_SIZE, SceneHeader,
     },
     primitives::{DataRef, ShapedGlyph},
 };
@@ -56,6 +58,36 @@ impl<'a> SceneReader<'a> {
     }
     pub fn generation(&self) -> u32 {
         self.header().generation
+    }
+
+    /// Acquire-load the generation counter. Returns `None` if the writer
+    /// is mid-mutation (odd generation) — the caller should skip the read.
+    pub fn begin_read(&self) -> Option<u32> {
+        let gen = self.load_generation_acquire();
+
+        if gen & 1 != 0 {
+            None
+        } else {
+            Some(gen)
+        }
+    }
+
+    /// Verify the generation hasn't changed since `begin_read`. A fence
+    /// ensures all scene data reads complete before the verification load.
+    pub fn end_read(&self, expected: u32) -> bool {
+        core::sync::atomic::fence(Ordering::Acquire);
+
+        self.load_generation_acquire() == expected
+    }
+
+    fn load_generation_acquire(&self) -> u32 {
+        // SAFETY: GENERATION_OFFSET is within SceneHeader (offset 0, first
+        // field). AtomicU32 has the same layout as u32.
+        unsafe {
+            let ptr = self.buf.as_ptr().add(GENERATION_OFFSET) as *const AtomicU32;
+
+            (*ptr).load(Ordering::Acquire)
+        }
     }
     /// Get a reference to a node by ID.
     pub fn node(&self, id: NodeId) -> &Node {

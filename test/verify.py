@@ -880,6 +880,59 @@ def assert_sample_region(img: Image.Image, args: str, tolerance: int) -> bool:
     return True
 
 
+def assert_no_black_bar(img: Image.Image, args: str, tolerance: int) -> bool:
+    """Detect horizontal bands of near-black pixels within a region.
+
+    Scans each row in the region. A row is "black" if the average luminance
+    is below a threshold. Reports any run of consecutive black rows.
+    Args: X,Y,W,H,MAX_RUN — region bounds and max allowed consecutive
+    black rows (0 = no black rows allowed).
+    """
+    parts = args.split(",")
+    if len(parts) != 5:
+        print(f"FAIL: no_black_bar expects X,Y,W,H,MAX_RUN, got '{args}'")
+        return False
+
+    x, y, w, h, max_run = (int(p) for p in parts)
+    lum_threshold = 10
+    run = 0
+    worst_run = 0
+    worst_start = -1
+    current_start = -1
+
+    for py in range(y, min(y + h, img.height)):
+        lum_sum = 0
+        count = 0
+        for px in range(x, min(x + w, img.width)):
+            r, g, b = img.getpixel((px, py))[:3]
+            lum_sum += (r + g + b) // 3
+            count += 1
+
+        avg_lum = lum_sum // max(count, 1)
+        if avg_lum <= lum_threshold:
+            if run == 0:
+                current_start = py
+            run += 1
+        else:
+            if run > worst_run:
+                worst_run = run
+                worst_start = current_start
+            run = 0
+
+    if run > worst_run:
+        worst_run = run
+        worst_start = current_start
+
+    if worst_run <= max_run:
+        print(f"PASS: no black bar in region ({x},{y},{w},{h}) "
+              f"(worst run: {worst_run} rows)")
+        return True
+    else:
+        print(f"FAIL: black bar detected at y={worst_start}, "
+              f"{worst_run} rows tall in region ({x},{y},{w},{h})")
+        return False
+
+
 ASSERTIONS = {
     "solid_color": assert_solid_color,
     "uniform": assert_uniform,
@@ -902,6 +955,7 @@ ASSERTIONS = {
     "blue_dominant_region": assert_blue_dominant_region,
     "no_color_fringe": assert_no_color_fringe,
     "sample_region": assert_sample_region,
+    "no_black_bar": assert_no_black_bar,
 }
 
 

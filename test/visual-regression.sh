@@ -132,6 +132,16 @@ assert /tmp/os-p9-pagedown-200.png row_has_text 60,20 || ok=false
 assert /tmp/os-p9-pagedown-202.png row_has_text 60,20 || ok=false
 end_test $ok "phase9: scroll"
 
+# ── 5. Phase 14: image space renders without black bars ──────────
+
+begin_test "image space (phase14: three-space document switching)"
+hypervisor "$KERNEL" --events test/phase14-three-spaces.events \
+    --drive "$DISK" --background --resolution "$RES" --timeout 30 \
+    >/dev/null 2>&1
+ok=true
+assert /tmp/p14-space1.png no_black_bar 400,65,600,770,0 || ok=false
+end_test $ok "phase14: image space"
+
 # ── Summary ───────────────────────────────────────────────────────
 
 cleanup

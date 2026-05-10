@@ -444,6 +444,88 @@ mod tests {
     }
 
     #[test]
+    fn cross_vmo_va_reuse_sees_new_pages() {
+        setup();
+
+        let page_count = 64; // > MAX_PAGES_INLINE (32), forces Pages::Heap
+        let vmo_size = page_count * config::PAGE_SIZE;
+        let rw = Rights(Rights::READ.0 | Rights::WRITE.0);
+        // Create VMO A and map it at a fixed VA.
+        let vmo_a = Vmo::new(VmoId(0), vmo_size, VmoFlags::NONE);
+        let (idx_a, _) = state::vmos().alloc_shared(vmo_a).unwrap();
+        let fixed_va = 0x10_0000; // well within user VA range, page-aligned
+        let va_a = state::spaces()
+            .write(0)
+            .unwrap()
+            .map_vmo(VmoId(idx_a), vmo_size, rw, fixed_va)
+            .unwrap();
+
+        assert_eq!(va_a, fixed_va);
+
+        // Fault a few pages of VMO A to commit them.
+        for page in [0, 1, 2] {
+            let fault_addr = va_a + page * config::PAGE_SIZE;
+            let action = handle_data_abort(ThreadId(0), fault_addr, true);
+
+            assert_eq!(action, FaultAction::Resolved);
+        }
+
+        // Record A's committed page addresses.
+        let a_page_0 = state::vmos().read(idx_a).unwrap().page_at(0).unwrap();
+        let a_page_1 = state::vmos().read(idx_a).unwrap().page_at(1).unwrap();
+        let a_page_2 = state::vmos().read(idx_a).unwrap().page_at(2).unwrap();
+
+        // Unmap VMO A — frees the VA range back to the allocator.
+        state::spaces().write(0).unwrap().unmap(va_a).unwrap();
+
+        // Create VMO B (same size) and map it at the SAME VA.
+        let vmo_b = Vmo::new(VmoId(1), vmo_size, VmoFlags::NONE);
+        let (idx_b, _) = state::vmos().alloc_shared(vmo_b).unwrap();
+        let va_b = state::spaces()
+            .write(0)
+            .unwrap()
+            .map_vmo(VmoId(idx_b), vmo_size, rw, fixed_va)
+            .unwrap();
+
+        assert_eq!(va_b, fixed_va, "VA should be reused after unmap");
+        // VMO B should have NO committed pages yet.
+        assert!(state::vmos().read(idx_b).unwrap().page_at(0).is_none());
+        assert!(state::vmos().read(idx_b).unwrap().page_at(1).is_none());
+        assert!(state::vmos().read(idx_b).unwrap().page_at(2).is_none());
+
+        // Fault on VMO B at the same page indices.
+        for page in [0, 1, 2] {
+            let fault_addr = va_b + page * config::PAGE_SIZE;
+            let action = handle_data_abort(ThreadId(0), fault_addr, true);
+
+            assert_eq!(action, FaultAction::Resolved);
+        }
+
+        // VMO B should now have its OWN committed pages.
+        let b_page_0 = state::vmos().read(idx_b).unwrap().page_at(0).unwrap();
+        let b_page_1 = state::vmos().read(idx_b).unwrap().page_at(1).unwrap();
+        let b_page_2 = state::vmos().read(idx_b).unwrap().page_at(2).unwrap();
+
+        // B's pages must be DIFFERENT from A's — they are independent VMOs.
+        assert_ne!(b_page_0, a_page_0, "page 0: B got A's stale page");
+        assert_ne!(b_page_1, a_page_1, "page 1: B got A's stale page");
+        assert_ne!(b_page_2, a_page_2, "page 2: B got A's stale page");
+        // VMO A's pages should be unaffected.
+        assert_eq!(
+            state::vmos().read(idx_a).unwrap().page_at(0).unwrap(),
+            a_page_0
+        );
+        assert_eq!(
+            state::vmos().read(idx_a).unwrap().page_at(1).unwrap(),
+            a_page_1
+        );
+        assert_eq!(
+            state::vmos().read(idx_a).unwrap().page_at(2).unwrap(),
+            a_page_2
+        );
+    }
+
+    #[test]
     fn fault_counter_resets_on_different_page() {
         setup();
         let vmo = Vmo::new(VmoId(0), config::PAGE_SIZE * 2, VmoFlags::NONE);

@@ -1,9 +1,11 @@
 //! Mutable scene graph builder operating on a flat byte buffer.
 
+use core::sync::atomic::{AtomicU32, Ordering};
+
 use crate::{
     node::{
-        Node, NodeId, SceneHeader, DATA_BUFFER_SIZE, DATA_OFFSET, DIRTY_BITMAP_WORDS, MAX_NODES,
-        NODES_OFFSET, NULL, SCENE_SIZE,
+        DATA_BUFFER_SIZE, DATA_OFFSET, DIRTY_BITMAP_WORDS, GENERATION_OFFSET, MAX_NODES,
+        NODES_OFFSET, NULL, Node, NodeId, SCENE_SIZE, SceneHeader,
     },
     primitives::{Content, DataRef, ShapedGlyph},
 };
@@ -137,10 +139,17 @@ impl<'a> SceneWriter<'a> {
 
         Some(id)
     }
-    /// Reset node count and data usage. Preserves generation.
-    /// Sets all dirty bits — a full rebuild means the render service
-    /// must repaint the entire screen.
+    /// Reset node count and data usage for a full rebuild.
+    ///
+    /// Sets an odd generation (mutation-in-progress signal) so that
+    /// concurrent readers spin until `commit()` publishes the even
+    /// generation. This is the write side of the seqlock protocol.
     pub fn clear(&mut self) {
+        let gen = self.header().generation;
+        let odd = gen.wrapping_add(1) | 1;
+
+        self.store_generation_release(odd);
+
         self.header_mut().node_count = 0;
         self.header_mut().data_used = 0;
         self.header_mut().root = NULL;
@@ -163,11 +172,15 @@ impl<'a> SceneWriter<'a> {
 
         count
     }
-    /// Increment the generation counter (signals a complete update).
+    /// Publish the scene: stores an even generation with release ordering.
+    ///
+    /// Pairs with `clear()` which sets the odd generation. Together they
+    /// form a seqlock: readers spin on odd, read on even, verify unchanged.
     pub fn commit(&mut self) {
-        let g = self.header().generation;
+        let gen = self.header().generation;
+        let even = gen.wrapping_add(1) & !1;
 
-        self.header_mut().generation = g.wrapping_add(1);
+        self.store_generation_release(even);
     }
     /// Get the used portion of the data buffer as a read-only slice.
     pub fn data_buf(&self) -> &[u8] {
@@ -446,5 +459,17 @@ impl<'a> SceneWriter<'a> {
     /// Iterate all siblings from `start` until `NULL`.
     pub fn siblings(&self, start: NodeId) -> ChildIter<'_> {
         self.children_until(start, NULL)
+    }
+
+    fn store_generation_release(&mut self, gen: u32) {
+        // SAFETY: GENERATION_OFFSET is within SceneHeader (offset 0, first
+        // field). AtomicU32 has the same size/alignment as u32. Release
+        // ordering ensures all prior writes are visible before the
+        // generation update.
+        unsafe {
+            let ptr = self.buf.as_mut_ptr().add(GENERATION_OFFSET) as *const AtomicU32;
+
+            (*ptr).store(gen, Ordering::Release);
+        }
     }
 }

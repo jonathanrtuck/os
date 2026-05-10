@@ -2309,6 +2309,7 @@ impl Compositor {
         let pixels = unsafe {
             core::slice::from_raw_parts(self.image_va as *const u8, self.image_pixel_size as usize)
         };
+
         let mut y: usize = 0;
 
         while y < total_rows {
@@ -2365,6 +2366,12 @@ impl Compositor {
         let scene_buf =
             unsafe { core::slice::from_raw_parts(self.scene_va as *const u8, SCENE_SIZE) };
         let reader = SceneReader::new(scene_buf);
+
+        let scene_gen = match reader.begin_read() {
+            Some(g) => g,
+            None => return self.walk_ctx.frame_interval_ns,
+        };
+
         let root = reader.root();
 
         if reader.node_count() == 0 || root == NULL {
@@ -2385,6 +2392,10 @@ impl Compositor {
             &mut self.walk_ctx,
             true,
         );
+
+        if !reader.end_read(scene_gen) {
+            return self.walk_ctx.frame_interval_ns;
+        }
 
         draws.finalize();
 

@@ -1,7 +1,7 @@
 //! Scene graph node type, header, and memory layout constants.
 
 use crate::{
-    primitives::{bitflags, Animation, Border, Color, Content, DataRef},
+    primitives::{Animation, Border, Color, Content, DataRef, bitflags},
     transform::AffineTransform,
 };
 
@@ -357,6 +357,9 @@ pub const DATA_BUFFER_SIZE: usize = 128 * 1024;
 pub const NODES_OFFSET: usize = core::mem::size_of::<SceneHeader>();
 pub const DATA_OFFSET: usize = NODES_OFFSET + MAX_NODES * core::mem::size_of::<Node>();
 pub const SCENE_SIZE: usize = DATA_OFFSET + DATA_BUFFER_SIZE;
+
+/// Byte offset of the `generation` field within `SceneHeader`.
+pub const GENERATION_OFFSET: usize = 0;
 
 /// Number of u64 words in the dirty bitmap (512 bits / 64 = 8 words).
 pub const DIRTY_BITMAP_WORDS: usize = 8;

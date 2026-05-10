@@ -452,6 +452,28 @@ impl AddressSpace {
 
         let record = self.mappings.remove(pos);
 
+        // Clear PTEs and invalidate TLB so the VA range can be safely
+        // reused by a new mapping. Without this, stale PTEs from the old
+        // mapping prevent page faults, so pages are never committed to
+        // the new VMO.
+        #[cfg(target_os = "none")]
+        {
+            let root = crate::frame::arch::page_alloc::PhysAddr(self.page_table_root);
+            let asid = crate::frame::arch::page_table::Asid(self.asid);
+            let page_count = record.size / crate::config::PAGE_SIZE;
+
+            for i in 0..page_count {
+                let va = record.va_start + i * crate::config::PAGE_SIZE;
+
+                crate::frame::arch::page_table::unmap_page(
+                    root,
+                    crate::frame::arch::page_table::VirtAddr(va),
+                );
+            }
+
+            crate::frame::arch::page_table::invalidate_asid(asid);
+        }
+
         self.va_allocator.free(record.va_start, record.size);
 
         Ok(record)
