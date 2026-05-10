@@ -352,7 +352,7 @@ const ATLAS_WIDTH: u16 = 2048;
 const ATLAS_HEIGHT: u16 = 2048;
 
 const SETUP_BUF_PAGES: usize = 8;
-const RENDER_BUF_PAGES: usize = 4;
+const RENDER_BUF_PAGES: usize = 8;
 
 // ── Vertex data ─────────────────────────────────────────────────────
 
@@ -1822,7 +1822,6 @@ fn rasterize_cursor_icon(icon_name: &str, scale: u32) -> (alloc::vec::Vec<u8>, u
     let viewbox = icon.viewbox;
     let stroke_w = icon.stroke_width;
     let px_scale = CURSOR_DISPLAY_PT * scale as f32 / viewbox;
-
     let stroke_margin = stroke_w / 2.0 + 1.0;
     let shadow_pad_vb =
         (CURSOR_SHADOW_DX.max(CURSOR_SHADOW_DY) + CURSOR_SHADOW_SIGMA * 3.0) / px_scale;
@@ -1843,7 +1842,6 @@ fn rasterize_cursor_icon(icon_name: &str, scale: u32) -> (alloc::vec::Vec<u8>, u
     let path_data = offset_path(&combined_path, margin_vb, margin_vb);
     let raster_scale = px_scale;
     let stroke_only = !icon.all_paths_closed();
-
     // For closed paths (arrow): fill = black body, stroke = white outline.
     // For open paths (I-beam): fill is garbage (implicit closure artifacts),
     // so use stroke as black body with a wider outline stroke for white border.
@@ -1928,7 +1926,6 @@ fn rasterize_cursor_icon(icon_name: &str, scale: u32) -> (alloc::vec::Vec<u8>, u
         let outline_a = outline.get(i).copied().unwrap_or(0) as u16;
         let shadow_a = shadow[i] as u16;
         let border_only = outline_a.saturating_sub(body_a);
-
         // Shadow layer: black at reduced alpha.
         let sha = (shadow_a * CURSOR_SHADOW_ALPHA as u16 / 255).min(255);
         // Cursor: black body + white outline border, composited over shadow.
@@ -1938,7 +1935,6 @@ fn rasterize_cursor_icon(icon_name: &str, scale: u32) -> (alloc::vec::Vec<u8>, u
         } else {
             0
         };
-
         // Alpha composite cursor over shadow.
         let out_a = cursor_a + (sha * (255 - cursor_a) / 255);
         let out_a = out_a.min(255);
