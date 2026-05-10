@@ -90,3 +90,16 @@ pub fn bind_irq(event: Handle, intid: u32, bits: u64) -> Result<(), SyscallError
     ))
     .map(|_| ())
 }
+
+pub fn bind_thread(event: Handle, thread: Handle) -> Result<(), SyscallError> {
+    check(raw::syscall(
+        num::EVENT_BIND_THREAD,
+        event.0 as u64,
+        thread.0 as u64,
+        0,
+        0,
+        0,
+        0,
+    ))
+    .map(|_| ())
+}

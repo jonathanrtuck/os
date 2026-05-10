@@ -44,6 +44,7 @@ pub mod num {
     // System (32–33)
     pub const CLOCK_READ: u64 = 32;
     pub const SYSTEM_INFO: u64 = 33;
+    pub const EVENT_BIND_THREAD: u64 = 34;
 }
 
 #[inline(always)]

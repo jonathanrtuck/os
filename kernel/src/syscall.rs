@@ -62,6 +62,7 @@ pub mod num {
     // System (32–33)
     pub const CLOCK_READ: u64 = 32;
     pub const SYSTEM_INFO: u64 = 33;
+    pub const EVENT_BIND_THREAD: u64 = 34;
 }
 
 struct StagedHandles {
@@ -587,6 +588,8 @@ pub fn dispatch(
         // System (32–33)
         num::CLOCK_READ => sys_clock_read(current, space_id, core_id, args),
         num::SYSTEM_INFO => sys_system_info(current, space_id, core_id, args),
+        // Event binding (34)
+        num::EVENT_BIND_THREAD => sys_event_bind_thread(current, space_id, core_id, args),
         _ => Err(SyscallError::InvalidArgument),
     };
 
@@ -1266,6 +1269,48 @@ fn sys_event_bind_irq(
 
     #[cfg(target_os = "none")]
     crate::frame::arch::gic::unmask_spi(intid);
+
+    Ok(0)
+}
+
+#[inline(never)]
+fn sys_event_bind_thread(
+    _current: ThreadId,
+    space_id: Option<AddressSpaceId>,
+    _core_id: usize,
+    args: &[u64; 6],
+) -> Result<u64, SyscallError> {
+    let event_handle_id = HandleId(args[0] as u32);
+    let thread_handle_id = HandleId(args[1] as u32);
+    let space_id = space_id.ok_or(SyscallError::InvalidArgument)?;
+
+    let event_handle = lookup_handle(space_id, event_handle_id)?;
+
+    if event_handle.object_type != ObjectType::Event {
+        return Err(SyscallError::WrongHandleType);
+    }
+    if !event_handle.rights.contains(Rights::SIGNAL) {
+        return Err(SyscallError::InsufficientRights);
+    }
+
+    let thread_handle = lookup_handle(space_id, thread_handle_id)?;
+
+    if thread_handle.object_type != ObjectType::Thread {
+        return Err(SyscallError::WrongHandleType);
+    }
+
+    let event_id = EventId(event_handle.object_id);
+    let thread_id = ThreadId(thread_handle.object_id);
+
+    state::threads()
+        .write(thread_id.0)
+        .ok_or(SyscallError::InvalidHandle)?
+        .set_exit_event(event_id);
+
+    state::events()
+        .write(event_id.0)
+        .ok_or(SyscallError::InvalidHandle)?
+        .add_ref();
 
     Ok(0)
 }
@@ -2639,7 +2684,21 @@ fn sys_handle_info(
 
     profile::stamp(slot::SYS_HANDLE_LOOKUP);
 
-    Ok(((handle.object_type as u64) << 32) | (handle.rights.0 as u64))
+    let mut info = ((handle.object_type as u64) << 32) | (handle.rights.0 as u64);
+
+    // For Thread handles, pack exit state into bits [48..64]:
+    //   bit 48: exited (1 = yes)
+    //   bits [49..64): exit code (15 bits, covers all practical codes)
+    if handle.object_type == ObjectType::Thread
+        && let Some(t) = state::threads().read(handle.object_id)
+        && t.state() == crate::thread::ThreadRunState::Exited
+    {
+        let code = t.exit_code().unwrap_or(0) & 0x7FFF;
+
+        info |= (1u64 << 48) | ((code as u64) << 49);
+    }
+
+    Ok(info)
 }
 
 // ── Miscellaneous syscalls ──────────────────────────────────
@@ -2980,6 +3039,23 @@ fn sys_thread_exit(
     for &evt_id in &wait_evts[..wait_n as usize] {
         if let Some(mut e) = state::events().write(evt_id) {
             e.remove_waiter(current);
+        }
+    }
+
+    // Signal the death notification event (if bound via event_bind_thread).
+    // Must happen before exit_current — after the context switch, this
+    // thread's kernel stack is frozen and code is unreachable.
+    let exit_event = state::threads()
+        .read(current.0)
+        .and_then(|t| t.exit_event());
+
+    if let Some(event_id) = exit_event
+        && let Some(mut evt) = state::events().write(event_id.0)
+    {
+        let woken = evt.signal(1);
+
+        for info in woken.as_slice() {
+            crate::sched::wake(info.thread_id, core_id);
         }
     }
 
