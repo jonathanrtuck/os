@@ -26,8 +26,9 @@ pub const SERVICE_EDITOR_TEXT: u16 = 9;
 pub const SERVICE_PNG_DECODER: u16 = 10;
 pub const SERVICE_9P: u16 = 11;
 pub const SERVICE_FS: u16 = 12;
+pub const SERVICE_JPEG_DECODER: u16 = 13;
 
-pub const SERVICE_COUNT: usize = 13;
+pub const SERVICE_COUNT: usize = 14;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BootstrapConfig {

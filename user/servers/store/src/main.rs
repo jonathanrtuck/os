@@ -204,11 +204,12 @@ impl Dispatch for StoreServer {
 
                 let vmo = Handle(msg.handles[0]);
                 let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
+                let vmo_size = abi::vmo::info(vmo).unwrap_or(PAGE_SIZE * 4);
 
                 match abi::vmo::map(vmo, 0, rw) {
                     Ok(va) => {
                         self.client_shared_va = va;
-                        self.client_shared_len = PAGE_SIZE * 4;
+                        self.client_shared_len = vmo_size;
 
                         let _ = msg.reply_empty();
                     }
@@ -453,6 +454,42 @@ impl Dispatch for StoreServer {
                     Err(_) => {
                         let _ = msg.reply_error(ipc::STATUS_NOT_FOUND);
                     }
+                }
+            }
+
+            store_service::QUERY_TYPE => {
+                if msg.payload.len() < store_service::QueryTypeRequest::SIZE {
+                    let _ = msg.reply_error(ipc::STATUS_INVALID);
+
+                    return;
+                }
+
+                let req = store_service::QueryTypeRequest::read_from(msg.payload);
+                let mt_len = (req.media_type_len as usize)
+                    .min(msg.payload.len() - store_service::QueryTypeRequest::SIZE);
+                let media_type = core::str::from_utf8(
+                    &msg.payload[store_service::QueryTypeRequest::SIZE
+                        ..store_service::QueryTypeRequest::SIZE + mt_len],
+                )
+                .unwrap_or("");
+
+                let results = self.store.query(&store::Query::MediaType(
+                    alloc::string::ToString::to_string(&media_type),
+                ));
+
+                if let Some(&file_id) = results.first() {
+                    let size = self.store.metadata(file_id).map(|m| m.size).unwrap_or(0);
+                    let reply = store_service::QueryTypeReply {
+                        file_id: file_id.0,
+                        size,
+                    };
+                    let mut data = [0u8; store_service::QueryTypeReply::SIZE];
+
+                    reply.write_to(&mut data);
+
+                    let _ = msg.reply_ok(&data, &[]);
+                } else {
+                    let _ = msg.reply_error(ipc::STATUS_NOT_FOUND);
                 }
             }
 

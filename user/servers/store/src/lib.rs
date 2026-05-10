@@ -20,6 +20,7 @@ pub const SNAPSHOT: u32 = 7;
 pub const RESTORE: u32 = 8;
 pub const DELETE_SNAPSHOT: u32 = 9;
 pub const GET_INFO: u32 = 10;
+pub const QUERY_TYPE: u32 = 11;
 
 /// Create request — media type as inline bytes after the header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -286,6 +287,51 @@ pub struct InfoReply {
 }
 
 impl InfoReply {
+    pub const SIZE: usize = 16;
+
+    pub fn write_to(&self, buf: &mut [u8]) {
+        buf[0..8].copy_from_slice(&self.file_id.to_le_bytes());
+        buf[8..16].copy_from_slice(&self.size.to_le_bytes());
+    }
+
+    #[must_use]
+    pub fn read_from(buf: &[u8]) -> Self {
+        Self {
+            file_id: u64::from_le_bytes(buf[0..8].try_into().unwrap()),
+            size: u64::from_le_bytes(buf[8..16].try_into().unwrap()),
+        }
+    }
+}
+
+/// Query by media type — media type as inline bytes after the header.
+/// Returns the first matching file's ID and size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueryTypeRequest {
+    pub media_type_len: u16,
+}
+
+impl QueryTypeRequest {
+    pub const SIZE: usize = 2;
+
+    pub fn write_to(&self, buf: &mut [u8]) {
+        buf[0..2].copy_from_slice(&self.media_type_len.to_le_bytes());
+    }
+
+    #[must_use]
+    pub fn read_from(buf: &[u8]) -> Self {
+        Self {
+            media_type_len: u16::from_le_bytes(buf[0..2].try_into().unwrap()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueryTypeReply {
+    pub file_id: u64,
+    pub size: u64,
+}
+
+impl QueryTypeReply {
     pub const SIZE: usize = 16;
 
     pub fn write_to(&self, buf: &mut [u8]) {

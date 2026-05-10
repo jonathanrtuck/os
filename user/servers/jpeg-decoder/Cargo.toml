@@ -1,0 +1,15 @@
+[package]
+name = "jpeg-decoder"
+version = "0.1.0"
+edition = "2024"
+license = "Unlicense"
+
+[dependencies]
+abi = { path = "../../abi" }
+console = { path = "../console" }
+heap = { path = "../../heap" }
+ipc = { path = "../../ipc" }
+jpeg = { path = "../../libraries/jpeg" }
+name = { path = "../name" }
+
+[workspace]

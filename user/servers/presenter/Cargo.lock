@@ -150,6 +150,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "jpeg"
+version = "0.1.0"
+
+[[package]]
 name = "layout"
 version = "0.1.0"
 
@@ -188,22 +192,6 @@ name = "piecetable"
 version = "0.1.0"
 
 [[package]]
-name = "png"
-version = "0.1.0"
-
-[[package]]
-name = "png-decoder"
-version = "0.1.0"
-dependencies = [
- "abi",
- "console",
- "heap",
- "ipc",
- "name",
- "png",
-]
-
-[[package]]
 name = "presenter-service"
 version = "0.1.0"
 dependencies = [
@@ -216,14 +204,14 @@ dependencies = [
  "heap",
  "icons",
  "ipc",
+ "jpeg",
  "layout",
  "layout-service",
  "name",
  "piecetable",
- "png",
- "png-decoder",
  "render",
  "scene",
+ "store-service",
  "text-editor",
 ]
 

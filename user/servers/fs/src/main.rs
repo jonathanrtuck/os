@@ -23,7 +23,7 @@ const HANDLE_NS_EP: Handle = Handle(2);
 
 const PAGE_SIZE: usize = 16384;
 
-const SHARED_VMO_SIZE: usize = PAGE_SIZE * 64;
+const SHARED_VMO_SIZE: usize = PAGE_SIZE * 256;
 
 struct FsServer {
     ninep_ep: Handle,

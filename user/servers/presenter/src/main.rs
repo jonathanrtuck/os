@@ -76,7 +76,6 @@ static FONT_SANS: &[u8] = include_bytes!("../../../../assets/inter.ttf");
 static FONT_SANS_ITALIC: &[u8] = include_bytes!("../../../../assets/inter-italic.ttf");
 static FONT_SERIF: &[u8] = include_bytes!("../../../../assets/source-serif-4.ttf");
 static FONT_SERIF_ITALIC: &[u8] = include_bytes!("../../../../assets/source-serif-4-italic.ttf");
-static TEST_PNG: &[u8] = include_bytes!("../../../../assets/test.png");
 
 fn build_cmap_table(font_data: &[u8]) -> [u16; 128] {
     let mut table = [0u16; 128];
@@ -653,7 +652,7 @@ impl Presenter {
         let icon_size_pt = presenter_service::LINE_HEIGHT + 2;
         let icon_mimetype = match self.active_space {
             0 => Some("text/rich"),
-            1 => Some("image/png"),
+            1 => Some("image/jpeg"),
             _ => None,
         };
         let icon = icons::get("document", icon_mimetype);
@@ -2707,28 +2706,165 @@ impl Dispatch for Presenter {
     }
 }
 
-// ── Embedded image decode + upload ───────────────────────────────
+// ── Image loading from store + decode + upload ──────────────────
 
 const IMAGE_CONTENT_ID: u32 = 1;
+const IMAGE_MEDIA_TYPE: &[u8] = b"image/jpeg";
 
-fn decode_embedded_image(server: &mut Presenter, render_ep: Handle) {
-    let header = match png_lib::png_header(TEST_PNG) {
+fn load_and_decode_image(server: &mut Presenter, render_ep: Handle) {
+    let store_ep = match name::lookup(HANDLE_NS_EP, b"store") {
         Ok(h) => h,
         Err(_) => return,
     };
-    let buf_size = match png_lib::png_decode_buf_size(TEST_PNG) {
-        Ok(s) => s,
+    // Query store for an image/jpeg document.
+    let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
+    let mut call_buf = [0u8; ipc::message::MSG_SIZE];
+    let mut query_buf = [0u8; store_service::QueryTypeRequest::SIZE + 10];
+    let qt_req = store_service::QueryTypeRequest {
+        media_type_len: IMAGE_MEDIA_TYPE.len() as u16,
+    };
+
+    qt_req.write_to(&mut query_buf);
+    query_buf[store_service::QueryTypeRequest::SIZE..][..IMAGE_MEDIA_TYPE.len()]
+        .copy_from_slice(IMAGE_MEDIA_TYPE);
+
+    let query_len = store_service::QueryTypeRequest::SIZE + IMAGE_MEDIA_TYPE.len();
+    let query_reply = match ipc::client::call(
+        store_ep,
+        store_service::QUERY_TYPE,
+        &query_buf[..query_len],
+        &[],
+        &mut [],
+        &mut call_buf,
+    ) {
+        Ok(r) => r,
         Err(_) => return,
     };
-    let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
+
+    if query_reply.is_error() || query_reply.payload.len() < store_service::QueryTypeReply::SIZE {
+        return;
+    }
+
+    let qt = store_service::QueryTypeReply::read_from(query_reply.payload);
+    let file_id = qt.file_id;
+    let file_size = qt.size as usize;
+
+    if file_size == 0 {
+        return;
+    }
+
+    // Set up a shared VMO large enough for the JPEG data.
+    let shared_vmo_size = file_size.next_multiple_of(PAGE_SIZE);
+    let shared_vmo = match abi::vmo::create(shared_vmo_size, 0) {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+    let shared_va = match abi::vmo::map(shared_vmo, 0, rw) {
+        Ok(va) => va,
+        Err(_) => {
+            let _ = abi::handle::close(shared_vmo);
+
+            return;
+        }
+    };
+    let shared_dup = match abi::handle::dup(shared_vmo, rw) {
+        Ok(h) => h,
+        Err(_) => {
+            let _ = abi::vmo::unmap(shared_va);
+            let _ = abi::handle::close(shared_vmo);
+
+            return;
+        }
+    };
+    // SETUP: give the store service access to our shared VMO.
+    let setup_reply = ipc::client::call(
+        store_ep,
+        store_service::SETUP,
+        &[],
+        &[shared_dup.0],
+        &mut [],
+        &mut call_buf,
+    );
+
+    if setup_reply.is_err() {
+        let _ = abi::vmo::unmap(shared_va);
+        let _ = abi::handle::close(shared_vmo);
+
+        return;
+    }
+
+    // READ_DOC: read the JPEG data into the shared VMO.
+    let read_req = store_service::ReadRequest {
+        file_id,
+        offset: 0,
+        vmo_offset: 0,
+        max_len: file_size as u32,
+    };
+    let mut read_buf = [0u8; store_service::ReadRequest::SIZE];
+
+    read_req.write_to(&mut read_buf);
+
+    let read_reply = match ipc::client::call(
+        store_ep,
+        store_service::READ_DOC,
+        &read_buf,
+        &[],
+        &mut [],
+        &mut call_buf,
+    ) {
+        Ok(r) => r,
+        Err(_) => {
+            let _ = abi::vmo::unmap(shared_va);
+            let _ = abi::handle::close(shared_vmo);
+
+            return;
+        }
+    };
+
+    if read_reply.is_error() || read_reply.payload.len() < store_service::ReadReply::SIZE {
+        let _ = abi::vmo::unmap(shared_va);
+        let _ = abi::handle::close(shared_vmo);
+
+        return;
+    }
+
+    let rr = store_service::ReadReply::read_from(read_reply.payload);
+    let bytes_read = rr.bytes_read as usize;
+
+    if bytes_read == 0 {
+        let _ = abi::vmo::unmap(shared_va);
+        let _ = abi::handle::close(shared_vmo);
+
+        return;
+    }
+
+    // Decode the JPEG from the shared VMO.
+    // SAFETY: shared_va is a valid mapping of at least bytes_read bytes.
+    let jpeg_data = unsafe { core::slice::from_raw_parts(shared_va as *const u8, bytes_read) };
+    let buf_size = match jpeg_lib::jpeg_decode_buf_size(jpeg_data) {
+        Ok(s) => s,
+        Err(_) => {
+            let _ = abi::vmo::unmap(shared_va);
+            let _ = abi::handle::close(shared_vmo);
+
+            return;
+        }
+    };
     let decode_vmo_size = buf_size.next_multiple_of(PAGE_SIZE);
     let decode_vmo = match abi::vmo::create(decode_vmo_size, 0) {
         Ok(h) => h,
-        Err(_) => return,
+        Err(_) => {
+            let _ = abi::vmo::unmap(shared_va);
+            let _ = abi::handle::close(shared_vmo);
+
+            return;
+        }
     };
     let decode_va = match abi::vmo::map(decode_vmo, 0, rw) {
         Ok(va) => va,
         Err(_) => {
+            let _ = abi::vmo::unmap(shared_va);
+            let _ = abi::handle::close(shared_vmo);
             let _ = abi::handle::close(decode_vmo);
 
             return;
@@ -2736,17 +2872,22 @@ fn decode_embedded_image(server: &mut Presenter, render_ep: Handle) {
     };
     // SAFETY: decode_va is a valid RW mapping of at least buf_size bytes.
     let output = unsafe { core::slice::from_raw_parts_mut(decode_va as *mut u8, buf_size) };
+    let header = match jpeg_lib::jpeg_decode(jpeg_data, output) {
+        Ok(h) => h,
+        Err(_) => {
+            let _ = abi::vmo::unmap(shared_va);
+            let _ = abi::handle::close(shared_vmo);
+            let _ = abi::vmo::unmap(decode_va);
+            let _ = abi::handle::close(decode_vmo);
 
-    if png_lib::png_decode(TEST_PNG, output).is_err() {
-        let _ = abi::vmo::unmap(decode_va);
-        let _ = abi::handle::close(decode_vmo);
-
-        return;
-    }
-
+            return;
+        }
+    };
+    let _ = abi::vmo::unmap(shared_va);
+    let _ = abi::handle::close(shared_vmo);
     let width = header.width as u16;
     let height = header.height as u16;
-    let pixel_size = header.width as u32 * header.height as u32 * 4;
+    let pixel_size = header.width * header.height * 4;
     let pixel_vmo_size = (pixel_size as usize).next_multiple_of(PAGE_SIZE);
     let pixel_vmo = match abi::vmo::create(pixel_vmo_size, 0) {
         Ok(h) => h,
@@ -2795,13 +2936,13 @@ fn decode_embedded_image(server: &mut Presenter, render_ep: Handle) {
     upload_req.write_to(&mut upload_buf);
 
     let mut reply_buf = [0u8; ipc::message::MSG_SIZE];
-    let mut recv_handles = [0u32; 4];
+    let mut upload_handles = [0u32; 4];
     let _ = ipc::client::call(
         render_ep,
         render::comp::UPLOAD_IMAGE,
         &upload_buf,
         &[pixel_dup.0],
-        &mut recv_handles,
+        &mut upload_handles,
         &mut reply_buf,
     );
 
@@ -2809,7 +2950,7 @@ fn decode_embedded_image(server: &mut Presenter, render_ep: Handle) {
     server.image_width = width;
     server.image_height = height;
 
-    console::write(server.console_ep, b"presenter: embedded image ready\n");
+    console::write(server.console_ep, b"presenter: image loaded from store\n");
 }
 
 // ── Showcase scene (space 2) ────────────────────────────────────
@@ -3240,7 +3381,7 @@ extern "C" fn _start() -> ! {
         console_ep,
     };
 
-    decode_embedded_image(&mut server, render_ep);
+    load_and_decode_image(&mut server, render_ep);
 
     // Space 0 = text, 1 = image, 2 = showcase.
     server.num_spaces = 3;

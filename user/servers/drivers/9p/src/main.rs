@@ -217,15 +217,49 @@ impl P9Client {
         msg_type == P9_RATTACH
     }
 
-    fn walk(&mut self, fid: u32, newfid: u32, name: &[u8]) -> bool {
+    fn walk(&mut self, fid: u32, newfid: u32, path: &[u8]) -> bool {
+        let mut components = [[0u8; 64]; 8];
+        let mut comp_lens = [0usize; 8];
+        let mut nwname = 0u16;
+        let mut start = 0;
+
+        for i in 0..path.len() {
+            if path[i] == b'/' {
+                if i > start && nwname < 8 {
+                    let len = (i - start).min(64);
+
+                    components[nwname as usize][..len].copy_from_slice(&path[start..start + len]);
+                    comp_lens[nwname as usize] = len;
+                    nwname += 1;
+                }
+
+                start = i + 1;
+            }
+        }
+
+        if start < path.len() && nwname < 8 {
+            let len = (path.len() - start).min(64);
+
+            components[nwname as usize][..len].copy_from_slice(&path[start..start + len]);
+            comp_lens[nwname as usize] = len;
+            nwname += 1;
+        }
+
+        if nwname == 0 {
+            return false;
+        }
+
         let mut w = MsgWriter::new(self.t_va as *mut u8);
 
         w.put_u8(P9_TWALK);
         w.put_u16(0);
         w.put_u32(fid);
         w.put_u32(newfid);
-        w.put_u16(1);
-        w.put_str(name);
+        w.put_u16(nwname);
+
+        for i in 0..nwname as usize {
+            w.put_str(&components[i][..comp_lens[i]]);
+        }
 
         let size = w.finish();
         let mut r = self.transact(size);
