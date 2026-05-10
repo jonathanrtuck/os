@@ -1482,8 +1482,8 @@ impl super::Presenter {
 
         // Space 1: Image document node — positioned at x=display_width within the strip.
         if self.image_content_id != 0 && self.image_width > 0 && self.image_height > 0 {
-            let max_w = self.display_width.saturating_sub(48);
-            let max_h = content_h.saturating_sub(48);
+            let max_w = self.display_width.saturating_sub(2 * page_margin);
+            let max_h = content_h.saturating_sub(2 * page_margin);
             let src_w = self.image_width as u32;
             let src_h = self.image_height as u32;
             let scale_w = max_w as f32 / src_w as f32;
