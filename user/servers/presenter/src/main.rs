@@ -874,9 +874,16 @@ impl Presenter {
             }
         }
 
-        // Cursor node — on top of text, with blink animation.
-        let cursor_x = cursor_col as f32 * self.char_width;
-        let cursor_y = cursor_line as i32 * presenter_service::LINE_HEIGHT as i32;
+        // Cursor position — proportional for rich text, monospace for plain.
+        let (cursor_x, cursor_y, cursor_h) = if is_rich {
+            compute_rich_cursor(&self.results_buf, &layout_header, cursor_pos, self.doc_va)
+        } else {
+            (
+                cursor_col as f32 * self.char_width,
+                cursor_line as i32 * presenter_service::LINE_HEIGHT as i32,
+                presenter_service::LINE_HEIGHT,
+            )
+        };
 
         if let Some(cursor_node) = scene.alloc_node() {
             let n = scene.node_mut(cursor_node);
@@ -884,7 +891,7 @@ impl Presenter {
             n.x = scene::f32_to_mpt(cursor_x);
             n.y = pt(cursor_y);
             n.width = upt(presenter_service::CURSOR_WIDTH);
-            n.height = upt(presenter_service::LINE_HEIGHT);
+            n.height = upt(cursor_h);
             n.background = cursor_color;
 
             if !has_selection {
@@ -1644,6 +1651,112 @@ impl Presenter {
             scroll_y: self.scroll_y,
         }
     }
+}
+
+// ── Rich text cursor ─────────────────────────────────────────────
+
+fn compute_rich_cursor(
+    results_buf: &[u8],
+    layout_header: &layout_service::LayoutHeader,
+    cursor_pos: usize,
+    doc_va: usize,
+) -> (f32, i32, u32) {
+    let run_count = layout_header.visible_run_count as usize;
+
+    if run_count == 0 {
+        return (0.0, 0, 20);
+    }
+
+    // SAFETY: doc_va is a valid RO mapping.
+    let (content_len, _, _, _) = unsafe { document_service::read_doc_header(doc_va) };
+    let doc_buf = unsafe {
+        core::slice::from_raw_parts(
+            (doc_va + document_service::DOC_HEADER_SIZE) as *const u8,
+            content_len,
+        )
+    };
+
+    if !piecetable::validate(doc_buf) {
+        return (0.0, 0, 20);
+    }
+
+    // Find the run containing cursor_pos and compute x offset within it.
+    for run_i in 0..run_count {
+        let vr = parse_visible_run_at(results_buf, run_i);
+        let run_start = vr.byte_offset as usize;
+        let run_end = run_start + vr.byte_length as usize;
+
+        if cursor_pos < run_start || cursor_pos > run_end {
+            continue;
+        }
+
+        let font_data = font_data_for_family(vr.font_family);
+        let upem = fonts::metrics::font_metrics(font_data)
+            .map(|m| m.units_per_em)
+            .unwrap_or(1000);
+
+        let mut axes_buf = [fonts::metrics::AxisValue {
+            tag: [0; 4],
+            value: 0.0,
+        }; 2];
+        let mut axis_count = 0;
+
+        if vr.weight != 400 {
+            axes_buf[axis_count] = fonts::metrics::AxisValue {
+                tag: *b"wght",
+                value: vr.weight as f32,
+            };
+            axis_count += 1;
+        }
+
+        axes_buf[axis_count] = fonts::metrics::AxisValue {
+            tag: *b"opsz",
+            value: vr.font_size as f32,
+        };
+        axis_count += 1;
+
+        let axes = &axes_buf[..axis_count];
+
+        // Extract run text from piecetable.
+        let text_len = piecetable::text_len(doc_buf) as usize;
+        let chars_before = cursor_pos - run_start;
+        let extract_len = chars_before.min(text_len.saturating_sub(run_start));
+        let mut text_buf = alloc::vec![0u8; extract_len + 1];
+        let copied =
+            piecetable::text_slice(doc_buf, run_start as u32, cursor_pos as u32, &mut text_buf);
+
+        let mut x = vr.x;
+
+        for ch in core::str::from_utf8(&text_buf[..copied])
+            .unwrap_or("")
+            .chars()
+        {
+            let gid = fonts::metrics::glyph_id_for_char(font_data, ch).unwrap_or(0);
+            let advance_fu = fonts::metrics::glyph_h_advance_with_axes(font_data, gid, axes)
+                .unwrap_or(upem as i32 / 2);
+
+            x += (advance_fu as f32 * vr.font_size as f32) / upem as f32;
+        }
+
+        let line_height = (vr.font_size as u32 * 14) / 10;
+
+        return (x, vr.y, line_height);
+    }
+
+    // Cursor past last run — position at end of last run.
+    if run_count > 0 {
+        let last = parse_visible_run_at(results_buf, run_count - 1);
+        let line_height = (last.font_size as u32 * 14) / 10;
+
+        // Approximate: use the last run's x + estimated width.
+        return (
+            last.x + last.byte_length as f32 * last.font_size as f32 * 0.5,
+            last.y,
+            line_height,
+        );
+    }
+
+    (0.0, 0, 20)
 }
 
 // ── Rich text rendering ──────────────────────────────────────────
