@@ -43,10 +43,13 @@ pub const DESC_F_WRITE: u16 = 2;
 
 pub const VIRTIO_MAGIC: u32 = 0x7472_6976;
 
+pub const DEVICE_NET: u32 = 1;
 pub const DEVICE_BLK: u32 = 2;
+pub const DEVICE_RNG: u32 = 4;
 pub const DEVICE_9P: u32 = 9;
 pub const DEVICE_INPUT: u32 = 18;
 pub const DEVICE_METAL: u32 = 22;
+pub const DEVICE_SND: u32 = 25;
 
 pub const MMIO_STRIDE: usize = 0x200;
 pub const MAX_DEVICES: usize = 8;

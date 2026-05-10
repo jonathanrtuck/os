@@ -67,6 +67,10 @@ fn build_init(kernel_dir: &std::path::Path) {
     println!("cargo:rerun-if-changed=../user/servers/drivers/blk/src/main.rs");
     println!("cargo:rerun-if-changed=../user/servers/drivers/blk/link.ld");
     println!("cargo:rerun-if-changed=../user/servers/drivers/blk/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/servers/drivers/rng/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/servers/drivers/rng/src/lib.rs");
+    println!("cargo:rerun-if-changed=../user/servers/drivers/rng/link.ld");
+    println!("cargo:rerun-if-changed=../user/servers/drivers/rng/Cargo.toml");
     println!("cargo:rerun-if-changed=../user/servers/drivers/render/src/main.rs");
     println!("cargo:rerun-if-changed=../user/servers/drivers/render/link.ld");
     println!("cargo:rerun-if-changed=../user/servers/drivers/render/Cargo.toml");
@@ -269,6 +273,11 @@ const SERVICES: &[ServiceDef] = &[
         name: "png-decoder",
         dir: "../user/servers/png-decoder",
         crate_name: "png-decoder",
+    },
+    ServiceDef {
+        name: "rng",
+        dir: "../user/servers/drivers/rng",
+        crate_name: "rng",
     },
     ServiceDef {
         name: "9p",

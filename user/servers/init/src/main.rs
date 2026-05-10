@@ -45,6 +45,7 @@ const INPUT_SVC: &[u8] = b"input";
 const BLK_SVC: &[u8] = b"blk";
 const RENDER_SVC: &[u8] = b"render";
 const NINEP_SVC: &[u8] = b"9p";
+const RNG_SVC: &[u8] = b"rng";
 const PRESENTER_SVC: &[u8] = b"presenter";
 const LAYOUT_SVC: &[u8] = b"layout";
 
@@ -169,7 +170,7 @@ fn spawn_from_pack(pack_data: &[u8], ns_ep: Handle, init_ep: Handle, font_vmo: H
                 &entry,
                 &[ns_ep, HANDLE_VIRTIO_VMO, init_ep, dup_ro(font_vmo), ep],
             );
-        } else if name == INPUT_SVC || name == BLK_SVC || name == NINEP_SVC {
+        } else if name == INPUT_SVC || name == BLK_SVC || name == NINEP_SVC || name == RNG_SVC {
             let ep = register_for(ns_ep, name);
             let _ = spawn_service(pack_data, &entry, &[ns_ep, HANDLE_VIRTIO_VMO, init_ep, ep]);
         } else if name == PRESENTER_SVC {
