@@ -46,8 +46,57 @@ const BLK_SVC: &[u8] = b"blk";
 const RENDER_SVC: &[u8] = b"render";
 const NINEP_SVC: &[u8] = b"9p";
 const PRESENTER_SVC: &[u8] = b"presenter";
+const LAYOUT_SVC: &[u8] = b"layout";
 
-fn spawn_from_pack(pack_data: &[u8], ns_ep: Handle, init_ep: Handle) {
+static FONT_MONO: &[u8] = include_bytes!("../../../../assets/jetbrains-mono.ttf");
+static FONT_MONO_ITALIC: &[u8] = include_bytes!("../../../../assets/jetbrains-mono-italic.ttf");
+static FONT_SANS: &[u8] = include_bytes!("../../../../assets/inter.ttf");
+static FONT_SANS_ITALIC: &[u8] = include_bytes!("../../../../assets/inter-italic.ttf");
+static FONT_SERIF: &[u8] = include_bytes!("../../../../assets/source-serif-4.ttf");
+static FONT_SERIF_ITALIC: &[u8] = include_bytes!("../../../../assets/source-serif-4-italic.ttf");
+
+fn create_font_vmo() -> Handle {
+    let fonts: [&[u8]; init::FONT_PACK_COUNT] = [
+        FONT_MONO,
+        FONT_MONO_ITALIC,
+        FONT_SANS,
+        FONT_SANS_ITALIC,
+        FONT_SERIF,
+        FONT_SERIF_ITALIC,
+    ];
+    let total_data: usize = fonts.iter().map(|f| f.len()).sum();
+    let vmo_size = (init::FONT_PACK_HEADER + total_data).next_multiple_of(PAGE_SIZE);
+    let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
+    let vmo = abi::vmo::create(vmo_size, 0).unwrap_or_else(|_| abi::thread::exit(0xE010));
+    let mut mapping =
+        abi::vmo::map_region(vmo, vmo_size, rw).unwrap_or_else(|_| abi::thread::exit(0xE011));
+
+    // Write header: magic + count
+    mapping[0..4].copy_from_slice(&init::FONT_PACK_MAGIC.to_le_bytes());
+    mapping[4..8].copy_from_slice(&(init::FONT_PACK_COUNT as u32).to_le_bytes());
+
+    // Write entries and data
+    let mut data_offset = init::FONT_PACK_HEADER;
+
+    for (i, font) in fonts.iter().enumerate() {
+        let entry_off = 8 + i * 8;
+
+        mapping[entry_off..entry_off + 4].copy_from_slice(&(data_offset as u32).to_le_bytes());
+        mapping[entry_off + 4..entry_off + 8].copy_from_slice(&(font.len() as u32).to_le_bytes());
+        mapping[data_offset..data_offset + font.len()].copy_from_slice(font);
+        data_offset += font.len();
+    }
+
+    drop(mapping);
+
+    vmo
+}
+
+fn dup_ro(h: Handle) -> Handle {
+    abi::handle::dup(h, Rights::READ_MAP).unwrap_or(h)
+}
+
+fn spawn_from_pack(pack_data: &[u8], ns_ep: Handle, init_ep: Handle, font_vmo: Handle) {
     let header = pack::read_header(pack_data);
 
     if !header.is_valid() {
@@ -77,10 +126,22 @@ fn spawn_from_pack(pack_data: &[u8], ns_ep: Handle, init_ep: Handle) {
 
         if name == CONSOLE_SVC {
             let _ = spawn_service(pack_data, &entry, &[ns_ep, HANDLE_UART_VMO]);
-        } else if name == INPUT_SVC || name == BLK_SVC || name == RENDER_SVC || name == NINEP_SVC {
+        } else if name == RENDER_SVC {
+            let _ = spawn_service(
+                pack_data,
+                &entry,
+                &[ns_ep, HANDLE_VIRTIO_VMO, init_ep, dup_ro(font_vmo)],
+            );
+        } else if name == INPUT_SVC || name == BLK_SVC || name == NINEP_SVC {
             let _ = spawn_service(pack_data, &entry, &[ns_ep, HANDLE_VIRTIO_VMO, init_ep]);
         } else if name == PRESENTER_SVC {
-            let _ = spawn_service(pack_data, &entry, &[ns_ep, HANDLE_RTC_VMO]);
+            let _ = spawn_service(
+                pack_data,
+                &entry,
+                &[ns_ep, HANDLE_RTC_VMO, dup_ro(font_vmo)],
+            );
+        } else if name == LAYOUT_SVC {
+            let _ = spawn_service(pack_data, &entry, &[ns_ep, dup_ro(font_vmo)]);
         } else {
             let _ = spawn_service(pack_data, &entry, &[ns_ep]);
         }
@@ -241,7 +302,9 @@ extern "C" fn _start() -> ! {
                 core::slice::from_raw_parts(pack_va as *const u8, header.total_size as usize)
             };
 
-            spawn_from_pack(pack_data, ns_ep, init_ep);
+            let font_vmo = create_font_vmo();
+
+            spawn_from_pack(pack_data, ns_ep, init_ep, font_vmo);
         }
     }
 

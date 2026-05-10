@@ -126,6 +126,10 @@ impl UndoState {
 
 // ── Document server ────────────────────────────────────────────────
 
+const COALESCE_TIMEOUT_NS: u64 = 200_000_000; // 200ms
+
+const OP_NONE: u32 = 0;
+
 struct DocumentServer {
     doc_va: usize,
     doc_capacity: usize,
@@ -143,6 +147,10 @@ struct DocumentServer {
 
     undo: UndoState,
 
+    dirty: bool,
+    last_op: u32,
+    last_op_cursor: usize,
+
     #[allow(dead_code)]
     console_ep: Handle,
 }
@@ -153,6 +161,20 @@ impl DocumentServer {
     }
 
     // ── Buffer operations ──────────────────────────────────────────
+
+    fn begin_mutation(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+
+        // SAFETY: doc_va + 16 is within the 64-byte header, 4-byte aligned.
+        // Odd generation signals "mutation in progress" — readers spin.
+        // Release ordering ensures prior state is visible before the signal.
+        unsafe {
+            let gen_ptr =
+                (self.doc_va + document_service::DOC_OFFSET_GENERATION) as *const AtomicU32;
+
+            (*gen_ptr).store(self.generation, Ordering::Release);
+        }
+    }
 
     fn write_header(&mut self) {
         // SAFETY: doc_va is a valid RW mapping of at least DOC_HEADER_SIZE bytes.
@@ -174,9 +196,9 @@ impl DocumentServer {
         self.generation = self.generation.wrapping_add(1);
 
         // SAFETY: doc_va + 16 is within the 64-byte header, 4-byte aligned.
-        // AtomicU32 Release ordering makes all prior writes (content_len,
-        // cursor_pos, sel_anchor, content bytes) visible to readers that
-        // Acquire-load this generation counter.
+        // Even generation signals "mutation complete." Release ordering
+        // makes all prior writes (header fields, content bytes) visible
+        // to readers that Acquire-load this counter.
         unsafe {
             let gen_ptr =
                 (self.doc_va + document_service::DOC_OFFSET_GENERATION) as *const AtomicU32;
@@ -191,6 +213,8 @@ impl DocumentServer {
         if offset > self.content_len || new_len > self.content_capacity() || data.is_empty() {
             return false;
         }
+
+        self.begin_mutation();
 
         // SAFETY: doc_va is a valid RW mapping. Header occupies the first
         // DOC_HEADER_SIZE bytes; content starts after. offset + data.len()
@@ -251,6 +275,8 @@ impl DocumentServer {
             return false;
         }
 
+        self.begin_mutation();
+
         let (new_content_len, new_cursor_pos) = {
             let buf = self.pt_buf_mut();
 
@@ -287,6 +313,8 @@ impl DocumentServer {
             return false;
         }
 
+        self.begin_mutation();
+
         let (new_content_len, new_cursor_pos) = {
             let buf = self.pt_buf_mut();
 
@@ -315,6 +343,8 @@ impl DocumentServer {
         if len == 0 || offset >= self.content_len || offset + len > self.content_len {
             return false;
         }
+
+        self.begin_mutation();
 
         // SAFETY: doc_va is a valid RW mapping. offset + len <= content_len,
         // so all indices are within the mapped content region.
@@ -402,6 +432,7 @@ impl DocumentServer {
     }
 
     fn reload_from_store(&mut self) {
+        self.begin_mutation();
         self.content_len = 0;
 
         let mut offset: usize = 0;
@@ -508,9 +539,13 @@ impl DocumentServer {
         )
     }
 
-    // ── Undo/Redo ──────────────────────────────────────────────────
+    // ── Undo coalescing ─────────────────────────────────────────────
 
-    fn persist_and_snapshot(&mut self) {
+    fn flush_pending(&mut self) {
+        if !self.dirty {
+            return;
+        }
+
         self.flush_to_store();
 
         if let Some(snap_id) = self.take_snapshot() {
@@ -521,6 +556,33 @@ impl DocumentServer {
                 self.delete_snapshot(id);
             }
         }
+
+        self.dirty = false;
+        self.last_op = OP_NONE;
+    }
+
+    fn should_coalesce(&self, op: u32, offset: usize) -> bool {
+        if !self.dirty {
+            return false;
+        }
+
+        match (self.last_op, op) {
+            (document_service::INSERT, document_service::INSERT) => offset == self.last_op_cursor,
+            (document_service::DELETE, document_service::DELETE) => {
+                offset == self.last_op_cursor || offset + 1 == self.last_op_cursor
+            }
+            _ => false,
+        }
+    }
+
+    fn mark_edit(&mut self, op: u32, offset: usize) {
+        if !self.should_coalesce(op, offset) {
+            self.flush_pending();
+        }
+
+        self.dirty = true;
+        self.last_op = op;
+        self.last_op_cursor = self.cursor_pos;
     }
 
     fn perform_undo(&mut self) -> bool {
@@ -631,7 +693,7 @@ impl Dispatch for DocumentServer {
                 }
 
                 if self.do_insert(header.offset as usize, data) {
-                    self.persist_and_snapshot();
+                    self.mark_edit(document_service::INSERT, header.offset as usize);
                     self.reply_edit(msg);
                 } else {
                     let _ = msg.reply_error(ipc::STATUS_INVALID);
@@ -648,7 +710,7 @@ impl Dispatch for DocumentServer {
                 let req = document_service::DeleteRequest::read_from(msg.payload);
 
                 if self.do_delete(req.offset as usize, req.len as usize) {
-                    self.persist_and_snapshot();
+                    self.mark_edit(document_service::DELETE, req.offset as usize);
                     self.reply_edit(msg);
                 } else {
                     let _ = msg.reply_error(ipc::STATUS_INVALID);
@@ -679,7 +741,7 @@ impl Dispatch for DocumentServer {
                     return;
                 }
 
-                self.persist_and_snapshot();
+                self.mark_edit(document_service::REPLACE, offset);
                 self.reply_edit(msg);
             }
 
@@ -695,6 +757,7 @@ impl Dispatch for DocumentServer {
                 let tl = self.rich_text_len();
 
                 if pos <= tl {
+                    self.begin_mutation();
                     self.cursor_pos = pos;
                     self.sel_anchor = pos;
 
@@ -722,6 +785,7 @@ impl Dispatch for DocumentServer {
                 let tl = self.rich_text_len();
 
                 if anchor <= tl && cursor <= tl {
+                    self.begin_mutation();
                     self.sel_anchor = anchor;
                     self.cursor_pos = cursor;
 
@@ -738,6 +802,8 @@ impl Dispatch for DocumentServer {
             }
 
             document_service::UNDO => {
+                self.flush_pending();
+
                 if self.perform_undo() {
                     self.reply_edit(msg);
                 } else {
@@ -746,6 +812,8 @@ impl Dispatch for DocumentServer {
             }
 
             document_service::REDO => {
+                self.flush_pending();
+
                 if self.perform_redo() {
                     self.reply_edit(msg);
                 } else {
@@ -768,6 +836,7 @@ impl Dispatch for DocumentServer {
 
                 let req = document_service::StyleApplyRequest::read_from(msg.payload);
 
+                self.begin_mutation();
                 piecetable::apply_style(
                     self.pt_buf_mut(),
                     req.start as u32,
@@ -777,8 +846,8 @@ impl Dispatch for DocumentServer {
 
                 self.content_len = piecetable::total_size(self.pt_buf());
 
-                self.persist_and_snapshot();
                 self.write_header();
+                self.mark_edit(document_service::STYLE_APPLY, req.start as usize);
                 self.reply_edit(msg);
             }
 
@@ -1451,12 +1520,34 @@ extern "C" fn _start() -> ! {
         store_shared_len: STORE_SHARED_SIZE,
         file_id,
         undo,
+        dirty: false,
+        last_op: OP_NONE,
+        last_op_cursor: 0,
         console_ep,
     };
 
+    server.begin_mutation();
     server.write_header();
 
-    ipc::server::serve(own_ep, &mut server);
+    loop {
+        if server.dirty {
+            let now = abi::system::clock_read().unwrap_or(0);
+            let deadline = now.saturating_add(COALESCE_TIMEOUT_NS);
+
+            match ipc::server::serve_one_timed(own_ep, &mut server, deadline) {
+                Ok(()) => {}
+                Err(abi::types::SyscallError::TimedOut) => {
+                    server.flush_pending();
+                }
+                Err(_) => break,
+            }
+        } else {
+            match ipc::server::serve_one(own_ep, &mut server) {
+                Ok(()) => {}
+                Err(_) => break,
+            }
+        }
+    }
 
     abi::thread::exit(0);
 }

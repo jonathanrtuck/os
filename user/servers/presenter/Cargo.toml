@@ -15,6 +15,7 @@ service = [
     "dep:fs-service",
     "dep:heap",
     "dep:icons",
+    "dep:init",
     "dep:layout",
     "dep:layout-service",
     "dep:name",
@@ -36,9 +37,10 @@ console = { path = "../console", optional = true }
 document-service = { path = "../document", optional = true }
 fonts = { path = "../../libraries/fonts", optional = true }
 fs-service = { path = "../fs", optional = true }
-jpeg-lib = { path = "../../libraries/jpeg", package = "jpeg", optional = true }
 heap = { path = "../../heap", optional = true }
 icons = { path = "../../libraries/icons", optional = true }
+init = { path = "../init", optional = true }
+jpeg-lib = { path = "../../libraries/jpeg", package = "jpeg", optional = true }
 layout = { path = "../../libraries/layout", optional = true }
 layout-service = { path = "../layout", optional = true }
 name = { path = "../name", optional = true }

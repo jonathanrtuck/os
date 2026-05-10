@@ -132,6 +132,38 @@ impl DeviceEntry {
     }
 }
 
+// ── Font pack VMO ────────────────────────────────────────────
+//
+// A shared read-only VMO containing all font data. Init creates it,
+// passes RO handles to presenter, layout, and render. This avoids
+// embedding 4+ MB of font data in each consumer binary.
+//
+// Layout: [magic: u32][count: u32][entries: (offset: u32, size: u32) × count][data]
+
+pub const FONT_PACK_MAGIC: u32 = 0x544E_4F46; // "FONT" LE
+pub const FONT_PACK_COUNT: usize = 6;
+pub const FONT_PACK_HEADER: usize = 8 + FONT_PACK_COUNT * 8; // 56 bytes
+
+pub const FONT_IDX_MONO: usize = 0;
+pub const FONT_IDX_MONO_ITALIC: usize = 1;
+pub const FONT_IDX_SANS: usize = 2;
+pub const FONT_IDX_SANS_ITALIC: usize = 3;
+pub const FONT_IDX_SERIF: usize = 4;
+pub const FONT_IDX_SERIF_ITALIC: usize = 5;
+
+/// Read font data slice from a mapped font pack VMO.
+///
+/// # Safety
+/// `va` must point to a valid, mapped font pack VMO of sufficient size.
+pub unsafe fn font_data(va: usize, index: usize) -> &'static [u8] {
+    let entry_off = 8 + index * 8;
+    // SAFETY: caller guarantees va points to a valid font pack VMO.
+    let offset = unsafe { core::ptr::read_unaligned((va + entry_off) as *const u32) } as usize;
+    let size = unsafe { core::ptr::read_unaligned((va + entry_off + 4) as *const u32) } as usize;
+
+    unsafe { core::slice::from_raw_parts((va + offset) as *const u8, size) }
+}
+
 // ── DMA allocation protocol (init serves this) ────────────
 
 pub const DMA_ALLOC: u32 = 2;

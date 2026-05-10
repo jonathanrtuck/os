@@ -12,6 +12,7 @@ service = [
     "dep:document-service",
     "dep:fonts",
     "dep:heap",
+    "dep:init",
     "dep:layout",
     "dep:name",
     "dep:piecetable",
@@ -26,6 +27,7 @@ console = { path = "../console", optional = true }
 document-service = { path = "../document", optional = true }
 fonts = { path = "../../libraries/fonts", optional = true }
 heap = { path = "../../heap", optional = true }
+init = { path = "../init", optional = true }
 layout = { path = "../../libraries/layout", optional = true }
 name = { path = "../name", optional = true }
 piecetable = { path = "../../libraries/piecetable", optional = true }

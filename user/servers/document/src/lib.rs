@@ -93,6 +93,14 @@ pub unsafe fn read_doc_header(doc_va: usize) -> (usize, usize, usize, u32) {
         let ptr = (doc_va + DOC_OFFSET_GENERATION) as *const AtomicU32;
         // SAFETY: ptr is within the document buffer header (offset 16).
         let generation = unsafe { (*ptr).load(Ordering::Acquire) };
+
+        // Odd generation means the writer is mid-mutation; spin.
+        if generation & 1 != 0 {
+            core::hint::spin_loop();
+
+            continue;
+        }
+
         // SAFETY: doc_va offsets 0..8, 8..16, 24..32 are content_len,
         // cursor_pos, sel_anchor. read_volatile prevents the compiler
         // from reordering or caching reads across the generation check.
@@ -103,7 +111,14 @@ pub unsafe fn read_doc_header(doc_va: usize) -> (usize, usize, usize, u32) {
         let sel_anchor = unsafe {
             core::ptr::read_volatile((doc_va + DOC_OFFSET_SEL_ANCHOR) as *const u64) as usize
         };
-        let generation2 = unsafe { (*ptr).load(Ordering::Acquire) };
+
+        // Fence ensures all data reads above complete before the
+        // verification load below. On AArch64, Acquire only orders the
+        // *specific* atomic load vs later operations — it does not
+        // prevent the CPU from speculating non-atomic reads past it.
+        core::sync::atomic::fence(Ordering::Acquire);
+
+        let generation2 = unsafe { (*ptr).load(Ordering::Relaxed) };
 
         if generation == generation2 {
             return (content_len, cursor_pos, sel_anchor, generation);
@@ -111,6 +126,22 @@ pub unsafe fn read_doc_header(doc_va: usize) -> (usize, usize, usize, u32) {
 
         core::hint::spin_loop();
     }
+}
+
+/// Verify the document buffer generation hasn't changed since a prior
+/// `read_doc_header` call. Use after reading content bytes to confirm
+/// no mutation occurred during the read.
+///
+/// # Safety
+/// `doc_va` must point to a valid mapped document buffer VMO.
+pub unsafe fn verify_generation(doc_va: usize, expected: u32) -> bool {
+    // Fence ensures all prior reads (content bytes) complete before
+    // we check the generation counter.
+    core::sync::atomic::fence(Ordering::Acquire);
+
+    let ptr = (doc_va + DOC_OFFSET_GENERATION) as *const AtomicU32;
+
+    unsafe { (*ptr).load(Ordering::Relaxed) == expected }
 }
 
 /// Get a slice over the document content bytes.

@@ -143,6 +143,7 @@ dependencies = [
  "document-service",
  "fonts",
  "heap",
+ "init",
  "ipc",
  "layout",
  "name",

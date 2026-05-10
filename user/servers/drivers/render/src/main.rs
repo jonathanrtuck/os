@@ -43,12 +43,11 @@ pub const STYLE_MONO: u32 = 0;
 pub const STYLE_SANS: u32 = 1;
 pub const STYLE_SERIF: u32 = 2;
 
-static FONT_MONO: &[u8] = include_bytes!("../../../../../assets/jetbrains-mono.ttf");
-static FONT_MONO_ITALIC: &[u8] = include_bytes!("../../../../../assets/jetbrains-mono-italic.ttf");
-static FONT_SANS: &[u8] = include_bytes!("../../../../../assets/inter.ttf");
-static FONT_SANS_ITALIC: &[u8] = include_bytes!("../../../../../assets/inter-italic.ttf");
-static FONT_SERIF: &[u8] = include_bytes!("../../../../../assets/source-serif-4.ttf");
-static FONT_SERIF_ITALIC: &[u8] = include_bytes!("../../../../../assets/source-serif-4-italic.ttf");
+static mut FONT_VA: usize = 0;
+
+fn font(index: usize) -> &'static [u8] {
+    unsafe { init::font_data(FONT_VA, index) }
+}
 
 fn unpack_family(style_id: u32) -> u32 {
     style_id & 0x3
@@ -68,23 +67,23 @@ fn font_for_style(style_id: u32) -> &'static [u8] {
     match unpack_family(style_id) {
         STYLE_SANS => {
             if italic {
-                FONT_SANS_ITALIC
+                font(init::FONT_IDX_SANS_ITALIC)
             } else {
-                FONT_SANS
+                font(init::FONT_IDX_SANS)
             }
         }
         STYLE_SERIF => {
             if italic {
-                FONT_SERIF_ITALIC
+                font(init::FONT_IDX_SERIF_ITALIC)
             } else {
-                FONT_SERIF
+                font(init::FONT_IDX_SERIF)
             }
         }
         _ => {
             if italic {
-                FONT_MONO_ITALIC
+                font(init::FONT_IDX_MONO_ITALIC)
             } else {
-                FONT_MONO
+                font(init::FONT_IDX_MONO)
             }
         }
     }
@@ -111,6 +110,7 @@ fn metrics_for_font(font_data: &[u8]) -> FontMetricsEntry {
 const HANDLE_NS_EP: Handle = Handle(2);
 const HANDLE_VIRTIO_VMO: Handle = Handle(3);
 const HANDLE_INIT_EP: Handle = Handle(4);
+const HANDLE_FONT_VMO: Handle = Handle(5);
 
 const PAGE_SIZE: usize = virtio::PAGE_SIZE;
 
@@ -2919,6 +2919,10 @@ impl Dispatch for Compositor {
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.boot")]
 extern "C" fn _start() -> ! {
+    unsafe {
+        FONT_VA = abi::vmo::map(HANDLE_FONT_VMO, 0, Rights::READ_MAP).unwrap_or(0);
+    }
+
     let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
     let virtio_va = match abi::vmo::map(HANDLE_VIRTIO_VMO, 0, rw) {
         Ok(va) => va,
@@ -3046,9 +3050,9 @@ extern "C" fn _start() -> ! {
         scratch: alloc::boxed::Box::new(RasterScratch::zeroed()),
         raster_buf: alloc::vec![0u8; RASTER_BUF_SIZE],
         font_metrics: [
-            metrics_for_font(FONT_MONO),
-            metrics_for_font(FONT_SANS),
-            metrics_for_font(FONT_SERIF),
+            metrics_for_font(font(init::FONT_IDX_MONO)),
+            metrics_for_font(font(init::FONT_IDX_SANS)),
+            metrics_for_font(font(init::FONT_IDX_SERIF)),
         ],
         scale,
         frame_interval_ns,

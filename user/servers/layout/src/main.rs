@@ -27,6 +27,7 @@ use abi::types::{Handle, Rights};
 use ipc::server::{Dispatch, Incoming};
 
 const HANDLE_NS_EP: Handle = Handle(2);
+const HANDLE_FONT_VMO: Handle = Handle(3);
 
 const PAGE_SIZE: usize = 16384;
 const RESULTS_VMO_SIZE: usize = PAGE_SIZE * 2;
@@ -38,14 +39,13 @@ const EXIT_RESULTS_CREATE: u32 = 0xE105;
 const EXIT_RESULTS_MAP: u32 = 0xE106;
 const EXIT_ENDPOINT_CREATE: u32 = 0xE107;
 
-// ── Font data ─────────────────────────────────────────────────────
+// ── Font data (shared VMO from init) ─────────────────────────────
 
-static FONT_MONO: &[u8] = include_bytes!("../../../../assets/jetbrains-mono.ttf");
-static FONT_MONO_ITALIC: &[u8] = include_bytes!("../../../../assets/jetbrains-mono-italic.ttf");
-static FONT_SANS: &[u8] = include_bytes!("../../../../assets/inter.ttf");
-static FONT_SANS_ITALIC: &[u8] = include_bytes!("../../../../assets/inter-italic.ttf");
-static FONT_SERIF: &[u8] = include_bytes!("../../../../assets/source-serif-4.ttf");
-static FONT_SERIF_ITALIC: &[u8] = include_bytes!("../../../../assets/source-serif-4-italic.ttf");
+static mut FONT_VA: usize = 0;
+
+fn font(index: usize) -> &'static [u8] {
+    unsafe { init::font_data(FONT_VA, index) }
+}
 
 fn font_data_for_style(family: u8, flags: u8) -> &'static [u8] {
     let italic = flags & piecetable::FLAG_ITALIC != 0;
@@ -53,23 +53,23 @@ fn font_data_for_style(family: u8, flags: u8) -> &'static [u8] {
     match family {
         piecetable::FONT_MONO => {
             if italic {
-                FONT_MONO_ITALIC
+                font(init::FONT_IDX_MONO_ITALIC)
             } else {
-                FONT_MONO
+                font(init::FONT_IDX_MONO)
             }
         }
         piecetable::FONT_SERIF => {
             if italic {
-                FONT_SERIF_ITALIC
+                font(init::FONT_IDX_SERIF_ITALIC)
             } else {
-                FONT_SERIF
+                font(init::FONT_IDX_SERIF)
             }
         }
         _ => {
             if italic {
-                FONT_SANS_ITALIC
+                font(init::FONT_IDX_SANS_ITALIC)
             } else {
-                FONT_SANS
+                font(init::FONT_IDX_SANS)
             }
         }
     }
@@ -692,6 +692,10 @@ extern "C" fn _start() -> ! {
     };
 
     console::write(console_ep, b"layout: starting\n");
+
+    unsafe {
+        FONT_VA = abi::vmo::map(HANDLE_FONT_VMO, 0, Rights::READ_MAP).unwrap_or(0);
+    }
 
     let doc_ep = match name::watch(HANDLE_NS_EP, b"document") {
         Ok(h) => h,

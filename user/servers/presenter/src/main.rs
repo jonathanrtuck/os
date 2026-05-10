@@ -22,6 +22,7 @@ use scene::{Color, Content, FillRule, NodeFlags, SCENE_SIZE, SceneWriter, Shaped
 
 const HANDLE_NS_EP: Handle = Handle(2);
 const HANDLE_RTC_VMO: Handle = Handle(3);
+const HANDLE_FONT_VMO: Handle = Handle(4);
 
 const PAGE_SIZE: usize = 16384;
 
@@ -70,12 +71,13 @@ fn pack_style_id(family: u32, weight: u16, flags: u8) -> u32 {
     (family & 0x3) | ((weight as u32) << 2) | ((flags as u32 & 0x7) << 16)
 }
 
-static FONT_MONO: &[u8] = include_bytes!("../../../../assets/jetbrains-mono.ttf");
-static FONT_MONO_ITALIC: &[u8] = include_bytes!("../../../../assets/jetbrains-mono-italic.ttf");
-static FONT_SANS: &[u8] = include_bytes!("../../../../assets/inter.ttf");
-static FONT_SANS_ITALIC: &[u8] = include_bytes!("../../../../assets/inter-italic.ttf");
-static FONT_SERIF: &[u8] = include_bytes!("../../../../assets/source-serif-4.ttf");
-static FONT_SERIF_ITALIC: &[u8] = include_bytes!("../../../../assets/source-serif-4-italic.ttf");
+static mut FONT_VA: usize = 0;
+
+fn font(index: usize) -> &'static [u8] {
+    // SAFETY: FONT_VA is set once in _start before any use, and the
+    // mapping persists for the process lifetime. Single-threaded.
+    unsafe { init::font_data(FONT_VA, index) }
+}
 
 fn build_cmap_table(font_data: &[u8]) -> [u16; 128] {
     let mut table = [0u16; 128];
@@ -243,23 +245,23 @@ fn font_data_for_style(family: u8, flags: u8) -> &'static [u8] {
     match family {
         piecetable::FONT_MONO => {
             if italic {
-                FONT_MONO_ITALIC
+                font(init::FONT_IDX_MONO_ITALIC)
             } else {
-                FONT_MONO
+                font(init::FONT_IDX_MONO)
             }
         }
         piecetable::FONT_SERIF => {
             if italic {
-                FONT_SERIF_ITALIC
+                font(init::FONT_IDX_SERIF_ITALIC)
             } else {
-                FONT_SERIF
+                font(init::FONT_IDX_SERIF)
             }
         }
         _ => {
             if italic {
-                FONT_SANS_ITALIC
+                font(init::FONT_IDX_SANS_ITALIC)
             } else {
-                FONT_SANS
+                font(init::FONT_IDX_SANS)
             }
         }
     }
@@ -684,7 +686,7 @@ impl Presenter {
         // Title bar text — "untitled" label, shaped with Inter.
         let title_text_y = (title_bar_h.saturating_sub(presenter_service::LINE_HEIGHT)) / 2;
         let (title_glyphs_count, title_width) = shape_text(
-            FONT_SANS,
+            font(init::FONT_IDX_SANS),
             "untitled",
             presenter_service::FONT_SIZE,
             &[],
@@ -745,7 +747,7 @@ impl Presenter {
         let clock_text = core::str::from_utf8(&clock_str).unwrap_or("00:00:00");
         let tnum = fonts::Feature::new(fonts::Tag::new(b"tnum"), 1, ..);
         let (clock_count, clock_width) = shape_text(
-            FONT_SANS,
+            font(init::FONT_IDX_SANS),
             clock_text,
             presenter_service::FONT_SIZE,
             &[tnum],
@@ -1213,7 +1215,7 @@ impl Presenter {
         let clock_text = core::str::from_utf8(&clock_chars).unwrap_or("00:00:00");
         let tnum = fonts::Feature::new(fonts::Tag::new(b"tnum"), 1, ..);
         let (clock_count, _) = shape_text(
-            FONT_SANS,
+            font(init::FONT_IDX_SANS),
             clock_text,
             presenter_service::FONT_SIZE,
             &[tnum],
@@ -3188,6 +3190,11 @@ extern "C" fn _start() -> ! {
 
     let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
     let rtc_va = abi::vmo::map(HANDLE_RTC_VMO, 0, rw).unwrap_or(0);
+
+    // SAFETY: single-threaded, set once before any font access.
+    unsafe {
+        FONT_VA = abi::vmo::map(HANDLE_FONT_VMO, 0, Rights::READ_MAP).unwrap_or(0);
+    }
     let doc_ep = match name::watch(HANDLE_NS_EP, b"document") {
         Ok(h) => h,
         Err(_) => {
@@ -3334,9 +3341,9 @@ extern "C" fn _start() -> ! {
             x_offset: 0,
             y_offset: 0,
         }; MAX_GLYPHS_PER_LINE],
-        cmap_mono: build_cmap_table(FONT_MONO),
-        cmap_sans: build_cmap_table(FONT_SANS),
-        char_width: compute_char_advance(FONT_MONO),
+        cmap_mono: build_cmap_table(font(init::FONT_IDX_MONO)),
+        cmap_sans: build_cmap_table(font(init::FONT_IDX_SANS)),
+        char_width: compute_char_advance(font(init::FONT_IDX_MONO)),
         blink_start: abi::system::clock_read().unwrap_or(0),
         last_line_count: 0,
         last_cursor_line: 0,
