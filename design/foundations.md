@@ -94,7 +94,7 @@ a larger suite.
 
 8. **All persistent content with a media type is a file.** The litmus test: does
    it have a media type and does it persist? If yes, it belongs in the
-   filesystem. If no (scene graph, IPC channels, process state), it doesn't.
+   filesystem. If no (scene graph, IPC endpoints, process state), it doesn't.
    This keeps the filesystem meaningful as the persistent content store without
    forcing runtime state through it for philosophical purity. The user doesn't
    interact with files directly — the interface presents domain-appropriate

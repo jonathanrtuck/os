@@ -45,18 +45,18 @@ data that flows through its primitives.
 The full kernel interface is specified in
 `design/research/kernel-userspace-interface.md`. Summary:
 
-**Five kernel objects:** VMO (memory), Channel (messages), Event (signals),
-Thread (execution), Address Space (isolation). Each traces back to a hardware
-restriction — there's no sixth object because there's no sixth hardware reason.
+**Six kernel objects:** VMO (memory), Endpoint (IPC), Event (signals), Thread
+(execution), Address Space (isolation), Resource (authority). Each traces back
+to a hardware or security restriction.
 
-**25 syscalls.** Capability-based access control: every kernel object is
+**34 syscalls.** Capability-based access control: every kernel object is
 accessed through a handle with attenuated rights. No ambient authority.
 
 **Data/control plane split.** Bulk data (scene graph, document content, decoded
 pixels) flows through shared memory VMOs with no kernel involvement after
 initial setup. Control messages (edit requests, input events) flow through
-channels. Events unify all asynchronous notifications (interrupts, timers,
-channel readability, thread exit).
+synchronous endpoint-based IPC (call/recv/reply). Events provide asynchronous
+notifications (interrupts, timers, endpoint readiness, thread exit).
 
 **The hot path is invisible to the kernel.** On the render path, the OS service
 writes to a shared VMO, bumps a generation counter (atomic store), and the
@@ -180,7 +180,7 @@ Keystroke → Input driver → OS Service → Editor → OS Service → Scene Gr
 The only apparent loop is input → OS service → editor → OS service. But this is
 not a loop — it's a request/response across a process boundary. The OS service
 sends an input event; the editor sends back a write request. These are different
-message types on the same bidirectional channel. The data being written
+message types on the same bidirectional IPC connection. The data being written
 (document content) never flows backward.
 
 **Why this matters:** One-way flow means no component needs to synchronize with
@@ -258,11 +258,11 @@ it intelligently.
 ## Process Boundaries
 
 ```text
-┌─────────────────────────────────────────────────┐
+┌──────────────────────────────────────────────────┐
 │                    Kernel (EL1)                  │
-│   VMO · Channel · Event · Thread · Address Space │
-│   Capability handles · 25 syscalls               │
-└─────────────────────────────────────────────────┘
+│   VMO · Endpoint · Event · Thread · AS · Resource│
+│   Capability handles · 34 syscalls               │
+└──────────────────────────────────────────────────┘
         ▲               ▲               ▲
         │               │               │
 ┌───────┴───────┐ ┌─────┴─────┐ ┌───────┴───────┐
@@ -293,11 +293,12 @@ fence), and signals the compositor via an event. The compositor reads the front
 buffer (acquires, reads generation, reads data). They never touch the same
 buffer. No locks.
 
-All cross-process shared memory is VMOs transferred as capability handles over
-channels. The kernel enforces rights at the handle level — a compositor that
-holds a read-only VMO handle cannot write to the scene graph even if it maps the
-memory. This is the structural guarantee behind the one-way data flow: the
-pipeline's directionality is enforced by capability attenuation, not convention.
+All cross-process shared memory is VMOs transferred as capability handles via
+endpoint-based IPC. The kernel enforces rights at the handle level — a
+compositor that holds a read-only VMO handle cannot write to the scene graph
+even if it maps the memory. This is the structural guarantee behind the one-way
+data flow: the pipeline's directionality is enforced by capability attenuation,
+not convention.
 
 ---
 

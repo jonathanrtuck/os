@@ -56,22 +56,21 @@ How confident are we in each settled decision? What would trigger revisiting?
 What's the fallback? Only lists decisions where risk is meaningful — axioms and
 their direct consequences are omitted.
 
-| Decision                                  | Confidence  | Revisit trigger                                     | Fallback                            | Blast radius                      |
-| ----------------------------------------- | ----------- | --------------------------------------------------- | ----------------------------------- | --------------------------------- |
-| Edit protocol (#9)                        | High        | beginOp/endOp granularity wrong for real editors    | Adjust boundary semantics           | Undo model, IPC messages          |
-| Compound docs (#14)                       | Medium-High | Five layout models miss a real use case             | Add or merge models                 | Layout engine                     |
-| Undo: COW snapshots (#12)                 | High        | Snapshots too expensive for fine-grained ops        | Operation-log undo                  | Filesystem integration            |
-| File org: queries (#7)                    | High        | Query performance unacceptable                      | Path-based fallback                 | Metadata DB, shell                |
-| Handles (#16)                             | High        | Need sub-document access granularity                | Extend rights model                 | Handle table, access control      |
-| IPC: ring buffers (#16)                   | Medium-High | Complexity unmanageable or perf insufficient        | Syscall-based message passing       | IPC layer, editor-OS interface    |
-| IPC: fixed 64-byte messages (#16)         | Medium-High | Control messages regularly exceed 60-byte payload   | Variable-size messages              | ipc library, all message types    |
-| IPC: separate pages per direction (#16)   | High        | Memory pressure from 2 pages per channel            | Single page split in half           | Kernel channel code, ipc library  |
-| IPC: one mechanism (no config path) (#16) | High        | Ring buffer overhead unacceptable for simple config | Separate config struct mechanism    | Init, all services                |
-| Process arch: one OS service (#16)        | Medium      | Crashes require component isolation                 | Split into multiple services        | IPC topology                      |
-| From-scratch kernel (#16)                 | Medium      | Driver/hardware blockers                            | Existing kernel (Zircon, Linux)     | Large, but behind syscall API     |
-| Rust (#16)                                | High        | Bare-metal Rust impractical at scale                | C kernel, Rust userspace            | Kernel source only                |
-| Scheduling: EEVDF + contexts (#16)        | Medium-High | EEVDF overhead excessive or contexts too complex    | Priority scheduler + no billing     | Scheduler, handle table           |
-| Rendering: web engine substrate (#11)     | Medium-High | Engine integration proves impossible/impractical    | Different engine or native renderer | Layout engine, prototype approach |
+| Decision                               | Confidence  | Revisit trigger                                   | Fallback                            | Blast radius                      |
+| -------------------------------------- | ----------- | ------------------------------------------------- | ----------------------------------- | --------------------------------- |
+| Edit protocol (#9)                     | High        | beginOp/endOp granularity wrong for real editors  | Adjust boundary semantics           | Undo model, IPC messages          |
+| Compound docs (#14)                    | Medium-High | Five layout models miss a real use case           | Add or merge models                 | Layout engine                     |
+| Undo: COW snapshots (#12)              | High        | Snapshots too expensive for fine-grained ops      | Operation-log undo                  | Filesystem integration            |
+| File org: queries (#7)                 | High        | Query performance unacceptable                    | Path-based fallback                 | Metadata DB, shell                |
+| Handles (#16)                          | High        | Need sub-document access granularity              | Extend rights model                 | Handle table, access control      |
+| IPC: sync endpoints (#16)              | High        | Sync IPC too slow for high-frequency data         | Async message queues                | Kernel endpoint code, all IPC     |
+| IPC: layered model (sync + shared mem) | High        | Layered model too complex                         | Single mechanism for everything     | IPC layer, editor-OS interface    |
+| IPC: event ring format (64-byte) (#16) | Medium-High | Control messages regularly exceed 60-byte payload | Variable-size messages              | ipc library, all message types    |
+| Process arch: one OS service (#16)     | Medium      | Crashes require component isolation               | Split into multiple services        | IPC topology                      |
+| From-scratch kernel (#16)              | Medium      | Driver/hardware blockers                          | Existing kernel (Zircon, Linux)     | Large, but behind syscall API     |
+| Rust (#16)                             | High        | Bare-metal Rust impractical at scale              | C kernel, Rust userspace            | Kernel source only                |
+| Scheduling: EEVDF + contexts (#16)     | Medium-High | EEVDF overhead excessive or contexts too complex  | Priority scheduler + no billing     | Scheduler, handle table           |
+| Rendering: web engine substrate (#11)  | Medium-High | Engine integration proves impossible/impractical  | Different engine or native renderer | Layout engine, prototype approach |
 
 **Key principle:** Decisions marked "Behind interface" in Implementation
 Readiness are inherently lower risk — the interface is stable even if the
@@ -920,39 +919,35 @@ fine-grained narrowing) aren't needed. Handles can extend to cover IPC endpoints
 and devices if needed, growing incrementally toward capabilities without
 committing to the full type system upfront.
 
-**IPC mechanism: Shared memory ring buffers with handle-based access control.**
-A "channel" is a pair of shared memory pages — one per direction — each
-containing a SPSC (single-producer, single-consumer) ring buffer of fixed
-64-byte messages. Accessed via handles in each participant's handle table. The
-kernel creates channels, maps both pages into both participants, issues handles,
-and validates message structure at trust boundaries (editor ↔ OS service). The
-kernel is in the control plane (setup, access control, validation), not the data
-plane — after setup, communication flows directly through shared memory.
-Notification uses a futex-like mechanism (check shared flag first, syscall only
-when actually needing to sleep). One mechanism for all IPC — no separate
-configuration-passing vs conversation paths. Configuration is the opening
-message(s) on the ring buffer (Singularity contract pattern: state machine
-starts with init messages, then transitions to steady-state). Documents are
-separately memory-mapped into both editor and OS service address spaces; file
-data does not flow through ring buffers. Ring buffers carry control messages
-only: edit protocol calls (beginOp/endOp), input events, overlay descriptions,
-configuration. Prior art: io_uring (shared ring buffers, fixed-size entries,
-separate SQ/CQ), Fuchsia channels (handle-based async messaging), LMAX Disruptor
-(fixed-size SPSC, cache-line separation), Singularity (typed channel contracts
-with state machines).
+**IPC mechanism: Synchronous endpoint-based IPC + shared memory for bulk data.**
+The kernel provides endpoints — rendezvous points for synchronous
+call/recv/reply IPC with priority inheritance. A client thread calls an endpoint
+and blocks; a server thread receives, processes, and replies. Messages carry up
+to 128 bytes inline and up to 4 handle transfers. A one-shot reply capability
+prevents double-reply. Endpoints can be bound to events for async notification
+of pending calls. The kernel is in the control plane; bulk data flows through
+shared memory VMOs with no kernel involvement after initial setup. Userspace
+layers two additional mechanisms on top: event rings (64-byte lock-free SPSC
+ring buffers in shared memory pages) for discrete events where order and count
+matter (key presses, input events), and state registers (atomic shared memory
+with store-release / load-acquire) for continuous state where only the latest
+value matters (pointer position). Documents are separately memory-mapped into
+service address spaces; file data does not flow through IPC. Prior art: seL4
+(sync IPC with reply capabilities), Fuchsia (handle-based messaging), io_uring
+(shared ring buffers for userspace data plane), LMAX Disruptor (SPSC cache-line
+separation).
 
-**IPC message format: Fixed 64-byte messages, split architecture.** Each message
-is one AArch64 cache line: 4-byte type tag + 60-byte payload. The `ipc` library
-(shared) owns ring buffer mechanics (init, produce, consume, head/tail
-management, memory barriers). Per-protocol crates define message types and
-payload structs that fit within 60 bytes. Adding a new protocol means defining
-new `msg_type` constants and payload structs — the ring buffer infrastructure
-doesn't change. 254 message slots per direction per channel (16 KiB page minus
-128-byte header). Pressure point: messages >60 bytes. If genuinely needed, the
-answer is shared memory + reference through the ring — documented as a known
-tension, not pre-built. Runtime protocol state validation (Singularity-style
-contract checking) deferred until edit protocol exists. See also Considered and
-rejected below for alternatives evaluated.
+**Userspace event ring format: Fixed 64-byte messages, split architecture.** For
+high-frequency userspace communication (event rings layered on shared memory),
+each message is one AArch64 cache line: 4-byte type tag + 60-byte payload. The
+`ipc` library (shared) owns ring buffer mechanics (init, produce, consume,
+head/tail management, memory barriers). Per-protocol crates define message types
+and payload structs that fit within 60 bytes. Adding a new protocol means
+defining new `msg_type` constants and payload structs — the ring buffer
+infrastructure doesn't change. 254 message slots per direction per ring (16 KiB
+page minus 128-byte header). Pressure point: messages >60 bytes. If genuinely
+needed, the answer is shared memory + reference through the ring — documented as
+a known tension, not pre-built.
 
 **Process architecture: Three-layer (kernel, OS service, editors).** "The OS
 renders everything" means an OS service process renders, not the kernel. One OS
@@ -961,16 +956,16 @@ compositing. Editors are separate EL0 processes, one per attached tool. The OS
 service is trusted (it IS the OS, running at EL0 for crash isolation from
 kernel); editors are untrusted. The trust boundary that matters is OS service ↔
 editors, not between OS service components internally. The kernel (EL1) handles
-hardware, memory, scheduling, IPC channel creation, handle management, and
+hardware, memory, scheduling, IPC endpoint creation, handle management, and
 message validation at the editor ↔ OS service boundary. The primary IPC
 relationship is editor ↔ OS service via shared memory ring buffers. The kernel
-creates and authorizes these channels but is not in the data path. Security is a
-side effect of good architecture: handles enforce access, EL0/EL1 provides crash
-isolation, per-process address spaces provide memory isolation, kernel message
-validation protects the OS service from malformed editor messages — all natural
-consequences of the design, not additional security machinery. Can split the OS
-service into multiple processes later if isolation needs arise (reversible
-decision).
+creates and authorizes these endpoints but is not in the data path. Security is
+a side effect of good architecture: handles enforce access, EL0/EL1 provides
+crash isolation, per-process address spaces provide memory isolation, kernel
+message validation protects the OS service from malformed editor messages — all
+natural consequences of the design, not additional security machinery. Can split
+the OS service into multiple processes later if isolation needs arise
+(reversible decision).
 
 **Binary format: ELF64.** Industry-standard executable format for aarch64.
 Validated by the research spike (step 7) — the kernel loads standalone ELF
@@ -994,7 +989,7 @@ practical at kernel scale. Promoted from tentative to committed.
 **Scheduling: EEVDF selection + scheduling contexts (combined model).**
 Two-layer scheduling design. **Scheduling contexts** are kernel objects (budget,
 period, remaining budget, replenishment time) accessed via handles — time
-becomes a resource held through the same handle mechanism as IPC channels.
+becomes a resource held through the same handle mechanism as IPC endpoints.
 Threads can only run when their scheduling context has remaining budget.
 **EEVDF** (Earliest Eligible Virtual Deadline First) is the selection algorithm
 among threads with budget: each thread has a virtual runtime, weight, and
@@ -1004,7 +999,7 @@ latency-sensitive work (foreground editor) lower latency without consuming more
 than its fair share. Together: contexts answer "may this thread run?" (budget
 check), EEVDF answers "which runnable thread runs next?" (fairness + latency).
 **Context donation:** When the OS service processes a message from editor X's
-IPC channel, it explicitly borrows X's scheduling context via syscall, billing
+IPC endpoint, it explicitly borrows X's scheduling context via syscall, billing
 that work to X's budget. Prevents noisy-neighbor: a greedy editor can only
 exhaust its own time. The OS service self-budgets from the total system
 allocation. **Content-type-aware scheduling:** The OS service knows each
@@ -1020,7 +1015,7 @@ guarantees under contention, not hard reservations. Strict admission can be
 added later (additive change) if needed. **Shared contexts:** An editor's
 threads share one scheduling context (the document's budget), regardless of
 internal thread organization. **Reversible aspects:** Context donation model
-(explicit syscall → automatic on channel_recv) and admission control
+(explicit syscall → automatic on endpoint recv) and admission control
 (best-effort → strict) are painless to change — same kernel mechanism, different
 trigger point.
 
@@ -1134,12 +1129,15 @@ vs time-correlated).
   not semantic protection. View/edit distinction unenforced. Edit protocol
   advisory only. Any process can corrupt any document. Too permissive even for a
   personal OS — buggy editors shouldn't have unlimited blast radius.
-- **Synchronous message passing (L4/seL4-style IPC):** Register-sized messages,
-  sender blocks until receiver ready. Ultra-fast for tiny messages but can't
-  deliver input events to a busy editor (requires receiver to be waiting in
-  receive()). Size-limited (~120 bytes in registers); anything larger needs a
-  second mechanism, violating one-mechanism principle. Total complexity
-  displaced to userspace marshaling and buffering.
+- **Async shared-memory channels (original design):** A "channel" as a pair of
+  shared memory pages with SPSC ring buffers. The kernel creates channels and
+  maps pages into participants; communication flows directly through shared
+  memory. Initially adopted; superseded by synchronous endpoint-based IPC after
+  `design/research/control-plane-ipc.md` analysis. Sync IPC provides natural
+  priority inheritance, simpler server design (recv→process→reply), and one-shot
+  reply capabilities. The earlier concern about sync IPC blocking on busy
+  editors was resolved by the layered model: sync IPC for control plane, shared
+  memory event rings for high-frequency data plane.
 - **Asynchronous queued messages (Mach-style IPC):** Kernel-managed message
   queues with out-of-line data and port rights. Powerful but copies data twice
   (sender→kernel→receiver), complex kernel involvement per message, historically

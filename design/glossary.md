@@ -57,18 +57,18 @@ external reality. See also: render service. See
 
 **Init** — the root task. The only process the kernel spawns directly. Init
 spawns all other processes, orchestrates shared memory allocation, creates IPC
-channels, and runs the startup handshake. Microkernel pattern (cf. Fuchsia
-`component_manager`, seL4 root task). Currently scaffolding; the pattern is
-foundational. See [design/userspace.md § 2.1](userspace.md).
+endpoints, and runs the startup handshake. Microkernel pattern (cf. Fuchsia
+`component_manager`, seL4 root task). See
+[design/userspace.md § 2.1](userspace.md).
 
 **Kernel** — manages hardware resources (memory, CPU time, interrupts, process
 isolation). Semantically ignorant — does not know what a document, mimetype, or
-pixel is. Five object types (VMO, Endpoint, Event, Thread, Address Space), each
-accessed via capability handles with rights attenuation. 34 syscalls, SMP with
-per-core fixed-priority preemptive scheduler (4 priority levels), sync IPC
-(call/recv/reply), GICv3, 16 KiB pages, ~28K LOC Rust. Framekernel discipline:
-`unsafe` confined to `frame/` module, enforced at compile time. See
-`kernel/src/`.
+pixel is. Six object types (VMO, Endpoint, Event, Thread, Address Space,
+Resource), each accessed via capability handles with rights attenuation. 34
+syscalls, SMP with per-core fixed-priority preemptive scheduler (4 priority
+levels), sync IPC (call/recv/reply), GICv3, 16 KiB pages, ~29K LOC Rust.
+Framekernel discipline: `unsafe` confined to `frame/` module, enforced at
+compile time. See `kernel/src/`.
 
 **Leaf node** — a component at the outermost edge of a pipeline, connecting to
 nothing downstream. Leaf nodes are where essential complexity lives: a PNG
@@ -146,15 +146,16 @@ translator; the OS doesn't change. Translation is inherently lossy. See
 region base addresses. Defense-in-depth alongside the capability model. Planned
 for userspace bring-up.
 
-**Badge** — a u64 value attached to a handle, preserved through transfer and
+**Badge** — a u32 value attached to a handle, preserved through transfer and
 attenuation. Enables userspace servers to identify callers without a global PID
 namespace — each client gets a unique badge when the server mints their handle.
 See `kernel/src/handle.rs`.
 
 **Capability (handle)** — the kernel's access control primitive. A process can
-only interact with a resource (channel, VMO, thread, event, scheduling context)
-by holding a handle to it. Handles carry rights and a badge. No ambient
-authority — nothing is accessible without a handle. See `kernel/src/handle.rs`.
+only interact with a resource (endpoint, VMO, event, thread, address space,
+resource) by holding a handle to it. Handles carry rights and a badge. No
+ambient authority — nothing is accessible without a handle. See
+`kernel/src/handle.rs`.
 
 **CWC (Concurrent Work Conservation)** — a property of the SMP scheduler: no
 idle core coexists with an overloaded core after a scheduling round. Linux CFS
@@ -186,9 +187,9 @@ per-process keys (5 × 128-bit, loaded on context switch). BTI enforces that
 indirect branches land on valid targets. Strictly superior to stack canaries.
 See `kernel/src/frame/arch/aarch64/context.rs`.
 
-**Pager** — a userspace process that supplies pages to a VMO on demand, via a
-channel. When a thread faults on an uncommitted VMO page, the kernel sends a
-fault message to the pager channel; the pager responds with physical memory.
+**Pager** — a userspace process that supplies pages to a VMO on demand, via an
+endpoint. When a thread faults on an uncommitted VMO page, the kernel sends a
+fault message to the pager endpoint; the pager responds with physical memory.
 Fault deduplication ensures only one request per page. See `kernel/src/vmo.rs`.
 
 **Rights** — a bitmask of 9 named permissions on a handle: READ, WRITE, EXECUTE,
@@ -205,8 +206,9 @@ as part of the userspace scheduler interface.
 **VMO (Virtual Memory Object)** — the kernel's memory primitive. A collection of
 pages with five features: COW snapshots, sealing (immutable freeze), lazy
 allocation (demand-paged with zero-fill), pager-backed (userspace fault handling
-via channel), and cross-space mapping (`vmo_map_into`). 8 syscalls: create, map,
-map_into, unmap, snapshot, seal, resize, set_pager. See `kernel/src/vmo.rs`.
+via endpoint), and cross-space mapping (`vmo_map_into`). 9 syscalls: create,
+map, map_into, unmap, snapshot, seal, resize, set_pager, info. See
+`kernel/src/vmo.rs`.
 
 **Work stealing** — idle SMP cores steal runnable threads from the busiest
 remote core's ready queue. Not currently implemented; the multi-core scheduler
@@ -347,12 +349,6 @@ replace it. The viewer is a pure function of state:
 ---
 
 ## IPC
-
-**Channel** — a bidirectional IPC connection between two processes. Two shared
-memory pages (one ring per direction), created by the kernel. The `ipc` library
-provides lock-free SPSC ring buffer mechanics; the `protocol` library defines
-message types. Notification via `channel_signal` syscall. See
-[design/userspace.md § 1.5](userspace.md) and `user/libraries/ipc/`.
 
 **Event ring** — a SPSC ring buffer of 64-byte messages over a shared memory
 page. Used for discrete events where order and count matter: key presses, button

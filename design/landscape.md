@@ -17,14 +17,14 @@ The questions a systems programmer would ask on first encounter:
 
 | Question                            | Answer                                                                                                                      |
 | ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| What kind of kernel?                | Microkernel. Rust, `no_std`, arm64. 34 syscalls, ~28K LOC.                                                                  |
+| What kind of kernel?                | Microkernel. Rust, `no_std`, arm64. 34 syscalls, ~29K LOC.                                                                  |
 | POSIX?                              | No. Custom syscall ABI designed around handles and sync IPC.                                                                |
 | More like Linux, macOS, or Fuchsia? | Microkernel + capabilities like Fuchsia. MIME-aware content model like BeOS. Document-centric data model like none of them. |
-| Filesystem?                         | Planned: custom COW with per-document snapshots, metadata queries, and a document store layer.                              |
-| GPU?                                | Planned: Metal via hypervisor passthrough, scene graph rendering.                                                           |
+| Filesystem?                         | Custom COW with per-document snapshots, metadata queries, and a document store layer. Implemented.                          |
+| GPU?                                | Metal via hypervisor passthrough, scene graph rendering. Implemented.                                                       |
 | Can it run existing software?       | No. No POSIX, no libc, no compatibility layer. Everything is `no_std` Rust.                                                 |
 | Performance?                        | Kernel hot paths cycle-benchmarked on M4 Pro. IPC round-trip, page fault, object lifecycle all baselined.                   |
-| How much code?                      | ~28K LOC Rust (kernel). 704 tests, 4 fuzz targets, 33 property tests, 16 invariant checks. Userspace next.                  |
+| How much code?                      | ~90K LOC Rust (~29K kernel + ~61K userspace). 558 kernel tests, 4 fuzz targets, 33 property tests.                          |
 | Is this serious?                    | Design exploration with a verified kernel. Not a product, not a weekend project. Closer to a research OS.                   |
 
 ---
@@ -53,17 +53,18 @@ to compare against technically.
 
 **Our approach:** Preemptive microkernel in Rust (`no_std`,
 `aarch64-unknown-none`). SMP (up to 8 cores), per-core fixed-priority preemptive
-scheduler with 4 levels (Idle/Low/Medium/High). 34 syscalls across 5 object
-types (VMO, Endpoint, Event, Thread, Address Space). Kernel spawns only init;
-init spawns everything else. Hardware isolation via ARM EL0/EL1. Full context
-save/restore including NEON/FP state. Framekernel discipline: all `unsafe` code
-confined to `frame/` module, enforced by `#![deny(unsafe_code)]` at crate root.
+scheduler with 4 levels (Idle/Low/Medium/High). 34 syscalls across 6 object
+types (VMO, Endpoint, Event, Thread, Address Space, Resource). Kernel spawns
+only init; init spawns everything else. Hardware isolation via ARM EL0/EL1. Full
+context save/restore including NEON/FP state. Framekernel discipline: all
+`unsafe` code confined to `frame/` module, enforced by `#![deny(unsafe_code)]`
+at crate root.
 
 |                     | This OS                 | Linux                | macOS (XNU)         | Fuchsia (Zircon)  | Redox                    | seL4                         |
 | ------------------- | ----------------------- | -------------------- | ------------------- | ----------------- | ------------------------ | ---------------------------- |
 | Architecture        | Microkernel             | Monolithic           | Hybrid (Mach + BSD) | Microkernel       | Microkernel              | Microkernel                  |
 | Language            | Rust (`no_std`)         | C                    | C/C++               | C++               | Rust                     | C (verified)                 |
-| Syscalls            | 30                      | ~450                 | ~540 (Mach + BSD)   | ~170              | POSIX-like set           | ~12                          |
+| Syscalls            | 34                      | ~450                 | ~540 (Mach + BSD)   | ~170              | POSIX-like set           | ~12                          |
 | Scheduler           | Per-core fixed-priority | EEVDF (since 6.6)    | Mach decay-usage    | Fair scheduler    | Cooperative + preemptive | Round-robin (minimal)        |
 | SMP                 | Up to 8 cores           | Thousands            | Dozens              | Many              | Single core (WIP)        | Configurable                 |
 | Boot init model     | Init from service pack  | PID 1 (systemd/init) | launchd             | component_manager | initfs                   | Root task                    |
@@ -78,7 +79,7 @@ complexity.
 its own sake — networking, multi-user, and pipes don't exist yet. The count will
 grow. Rust prevents memory safety bugs in the kernel (shared with Redox), but
 the kernel is not formally verified (seL4's advantage). The design bets that
-Rust's type system + framekernel discipline + 12-phase verification (704 tests,
+Rust's type system + framekernel discipline + 12-phase verification (558 tests,
 4 fuzz targets, 33 property tests, Miri, mutation testing, sanitizers, SMP
 stress) provides adequate confidence for a single-user system — a weaker
 guarantee than seL4's formal proofs, but at a fraction of the engineering cost.
@@ -139,7 +140,7 @@ the latest value matters.
 | Message size       | Fixed 64 bytes                     | Arbitrary                     | Arbitrary (Mach messages)    | Arbitrary (FIDL)      | Arbitrary (9P)    |
 | Bulk data          | Shared memory (zero-copy)          | sendfile, splice, mmap        | Mach OOL memory              | VMOs (zero-copy)      | Read/write on fd  |
 | Typed messages     | Yes (protocol library, 10 modules) | No (byte streams)             | Partial (MIG)                | Yes (FIDL, versioned) | No (byte streams) |
-| Async notification | channel_signal → wait              | epoll / io_uring              | Mach port sets               | port_wait             | sleep/wakeup      |
+| Async notification | Event signals + endpoint binding   | epoll / io_uring              | Mach port sets               | port_wait             | sleep/wakeup      |
 
 **Convergences:** Zero-copy bulk data via shared memory is the same design as
 Fuchsia's VMOs and Spring OS's VM/IPC unification. Typed message definitions
@@ -416,7 +417,7 @@ not reshape the architecture. But until then, the OS is an island.
 
 **Our approach:** Cargo workspace with kernel and userspace crates.
 `cargo build -p kernel` cross-compiles the kernel to `aarch64-unknown-none`;
-`cargo test -p kernel --lib` runs 704 host-side tests on the build machine. A
+`cargo test -p kernel --lib` runs 558 host-side tests on the build machine. A
 separate `user/integration-tests` crate builds bare-metal init binaries for
 hypervisor boot. Makefile provides verification targets: `make test`,
 `make miri`, `make fuzz`, `make bench-check`, `make nightly`. Configuration via
@@ -443,7 +444,7 @@ system this is simplicity; for a multi-platform OS it would be insufficient.
 
 **Our approach:** The kernel underwent a 12-phase verification campaign
 (`design/kernel-verification-plan.md`) applying every technique short of formal
-verification. Host-side tests (704) cover unit, syscall-level, property-based,
+verification. Host-side tests (558) cover unit, syscall-level, property-based,
 pipeline, and verification scenarios. 4 structured fuzz targets with
 invariant-checking harnesses. 33 property tests (proptest) for state machine
 properties. Miri for undefined behavior detection. Mutation testing to verify
@@ -455,7 +456,7 @@ during the campaign.
 
 |                       | This OS                                          | Linux                       | Fuchsia                   | Redox          | seL4           |
 | --------------------- | ------------------------------------------------ | --------------------------- | ------------------------- | -------------- | -------------- |
-| Unit tests            | 704 (kernel, host-side)                          | kselftest, kunit            | Extensive (host + device) | Moderate       | Formal proofs  |
+| Unit tests            | 558 (kernel, host-side)                          | kselftest, kunit            | Extensive (host + device) | Moderate       | Formal proofs  |
 | Property tests        | 33 proptests (state machine + boundary values)   | Limited                     | Some                      | No             | N/A            |
 | Fuzzing               | 4 targets, invariant-checking, 200K+ runs        | Syzkaller (extensive)       | CQ fuzzing                | Limited        | N/A            |
 | UB detection          | Miri (host tests) + ASan                         | KASAN, KMSAN, KCSAN         | ASan, MSan                | No             | N/A            |
@@ -524,23 +525,26 @@ the codebase is `no_std` with no public crate interface.
 
 | Dimension             | This OS                    | Fuchsia                 | Redox                   | Haiku                   | seL4                     |
 | --------------------- | -------------------------- | ----------------------- | ----------------------- | ----------------------- | ------------------------ |
-| Active development    | ~2 months                  | ~10 years               | ~11 years               | ~23 years               | ~17 years                |
-| Codebase              | ~28K LOC Rust (kernel)     | Millions LOC (C++/Rust) | ~400K LOC Rust          | Millions LOC (C++)      | ~10K LOC C (kernel)      |
-| Tests                 | 704 + 4 fuzz + 33 proptest | Extensive               | Moderate                | Extensive               | Formal proofs + tests    |
-| Content types handled | 0 (kernel only)            | N/A (delegated to apps) | N/A (delegated to apps) | N/A (delegated to apps) | N/A                      |
+| Active development    | ~4 months                  | ~10 years               | ~11 years               | ~23 years               | ~17 years                |
+| Codebase              | ~90K LOC Rust (29K+61K)    | Millions LOC (C++/Rust) | ~400K LOC Rust          | Millions LOC (C++)      | ~10K LOC C (kernel)      |
+| Tests                 | 558 + 4 fuzz + 33 proptest | Extensive               | Moderate                | Extensive               | Formal proofs + tests    |
+| Content types handled | 3 (text, rich text, PNG)   | N/A (delegated to apps) | N/A (delegated to apps) | N/A (delegated to apps) | N/A                      |
 | Self-hosting          | Not a goal                 | Partial                 | In progress             | Yes                     | Not a goal               |
 | Contributors          | 1                          | ~500+                   | ~80+                    | ~100+                   | ~30+                     |
 | Ships to users        | No                         | Yes (Nest Hub, Pixel)   | Alpha ISOs              | Beta releases           | Deployed (defense, auto) |
 
 **Honest assessment:** The kernel has been rewritten from first principles and
 verified through a 12-phase campaign (20 bugs found and fixed, zero remaining
-after convergence). The userspace has not yet been built. The kernel is the
-foundation; everything above it is next.
+after convergence). Userspace is in active development: service infrastructure,
+drivers (console, virtio-input/blk, Metal GPU render), core libraries, the full
+document pipeline (document, layout, presenter services), and three content
+types (text/plain, text/rich, image/png) are implemented with visual
+verification.
 
 The comparison here is not "this OS vs production systems" — it's "the design
 choices this OS makes vs the design choices production systems make, and what
 the tradeoffs imply." The kernel is production-grade in verification depth; the
-system as a whole is pre-alpha.
+system as a whole is pre-alpha with a working rendering pipeline.
 
 ---
 
@@ -571,10 +575,13 @@ system as a whole is pre-alpha.
   planned. Every tool must be written from scratch in `no_std` Rust.
 - **Hardware support** — One architecture, one GPU vendor, mediated by a
   hypervisor. No native hardware drivers.
-- **Maturity** — ~2 months old, single developer. The kernel is well-verified
-  (12-phase campaign, 704 tests); the userspace has not yet been built.
+- **Maturity** — ~4 months old, single developer. The kernel is well-verified
+  (12-phase campaign); the userspace is in active development with a working
+  rendering pipeline.
 - **Networking** — None.
-- **Content breadth** — Zero content types currently (kernel only).
+- **Content breadth** — Three content types (text/plain, text/rich, image/png)
+  with full rendering pipeline. Each additional type requires a decoder (leaf
+  node) and layout handler.
 - **Rendering constraints** — Applications that need custom visual output
   (games, CAD, video editing, data visualization) have no path today.
 - **No multi-user, no multi-display** — Single-user, single-screen by design
