@@ -2,12 +2,13 @@
 //!
 //! Bootstrap handles (from init via thread_create_in):
 //!   Handle 2: name service endpoint
-//!   Handle 3: virtio MMIO VMO (unused — blk driver owns hardware)
-//!   Handle 4: init endpoint (for DMA allocation — forwarded but unused)
+//!   Handle 3: service endpoint (pre-registered as "store")
+//!   Handle 4: virtio MMIO VMO (unused — blk driver owns hardware)
+//!   Handle 5: init endpoint (for DMA allocation — forwarded but unused)
 //!
 //! Boots, looks up "blk" from name service, establishes a shared VMO
 //! for block I/O, mounts the COW filesystem, opens the document store,
-//! registers as "store", and enters an IPC serve loop.
+//! and enters an IPC serve loop on the pre-registered service endpoint.
 
 #![no_std]
 #![no_main]
@@ -23,6 +24,7 @@ use fs::BlockDevice;
 use ipc::server::{Dispatch, Incoming};
 
 const HANDLE_NS_EP: Handle = Handle(2);
+const HANDLE_SVC_EP: Handle = Handle(3);
 
 const PAGE_SIZE: usize = 16384;
 const BLOCK_SIZE: usize = fs::BLOCK_SIZE as usize;
@@ -35,7 +37,6 @@ const EXIT_MOUNT_FAILED: u32 = 0xE003;
 const EXIT_FORMAT_FAILED: u32 = 0xE004;
 const EXIT_STORE_INIT_FAILED: u32 = 0xE005;
 const EXIT_STORE_OPEN_FAILED: u32 = 0xE006;
-const EXIT_ENDPOINT_CREATE_FAILED: u32 = 0xE007;
 const EXIT_SHARED_VMO_CREATE_FAILED: u32 = 0xE010;
 const EXIT_SHARED_VMO_MAP_FAILED: u32 = 0xE011;
 const EXIT_SHARED_VMO_DUP_FAILED: u32 = 0xE012;
@@ -598,13 +599,6 @@ extern "C" fn _start() -> ! {
         }
     };
 
-    let own_ep = match abi::ipc::endpoint_create() {
-        Ok(h) => h,
-        Err(_) => abi::thread::exit(EXIT_ENDPOINT_CREATE_FAILED),
-    };
-
-    name::register(HANDLE_NS_EP, b"store", own_ep);
-
     console::write(console_ep, b"store: ready\n");
 
     let mut server = StoreServer {
@@ -613,7 +607,7 @@ extern "C" fn _start() -> ! {
         client_shared_len: 0,
     };
 
-    ipc::server::serve(own_ep, &mut server);
+    ipc::server::serve(HANDLE_SVC_EP, &mut server);
 
     abi::thread::exit(0);
 }

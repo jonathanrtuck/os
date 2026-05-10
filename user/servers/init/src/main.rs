@@ -96,6 +96,37 @@ fn dup_ro(h: Handle) -> Handle {
     abi::handle::dup(h, Rights::READ_MAP).unwrap_or(h)
 }
 
+fn register_for(ns_ep: Handle, svc_name: &[u8]) -> Handle {
+    let ep = abi::ipc::endpoint_create().unwrap_or_else(|_| abi::thread::exit(0xE020));
+    let dup = abi::handle::dup(ep, Rights::ALL).unwrap_or_else(|_| abi::thread::exit(0xE021));
+
+    // Inline name::register — avoids pulling in the name crate
+    // (which brings heap/alloc deps unsuitable for init).
+    let mut buf = [0u8; MSG_SIZE];
+    let mut name_payload = [0u8; 32];
+    let len = svc_name.len().min(32);
+
+    name_payload[..len].copy_from_slice(&svc_name[..len]);
+
+    ipc::message::write_request(&mut buf, 1, &name_payload); // 1 = REGISTER
+    let _ = abi::ipc::call(
+        ns_ep,
+        &mut buf,
+        ipc::message::HEADER_SIZE + 32,
+        &[dup.0],
+        &mut [],
+    );
+
+    ep
+}
+
+const STORE_SVC: &[u8] = b"store";
+const DOCUMENT_SVC: &[u8] = b"document";
+const EDITOR_TEXT_SVC: &[u8] = b"editor.text";
+const PNG_DECODER_SVC: &[u8] = b"png-decoder";
+const JPEG_DECODER_SVC: &[u8] = b"jpeg-decoder";
+const FS_SVC: &[u8] = b"fs";
+
 fn spawn_from_pack(pack_data: &[u8], ns_ep: Handle, init_ep: Handle, font_vmo: Handle) {
     let header = pack::read_header(pack_data);
 
@@ -103,6 +134,7 @@ fn spawn_from_pack(pack_data: &[u8], ns_ep: Handle, init_ep: Handle, font_vmo: H
         return;
     }
 
+    // Phase 1: spawn the name service (it IS the registry).
     for i in 0..header.count as usize {
         let entry = pack::read_entry(pack_data, i);
         let name = pack::read_name(pack_data, i);
@@ -116,6 +148,9 @@ fn spawn_from_pack(pack_data: &[u8], ns_ep: Handle, init_ep: Handle, font_vmo: H
         }
     }
 
+    // Phase 2: spawn all other services with pre-registered endpoints.
+    // Init creates the endpoint, registers it with the name service,
+    // and passes it to the service. Services never self-register.
     for i in 0..header.count as usize {
         let entry = pack::read_entry(pack_data, i);
         let name = pack::read_name(pack_data, i);
@@ -125,24 +160,39 @@ fn spawn_from_pack(pack_data: &[u8], ns_ep: Handle, init_ep: Handle, font_vmo: H
         }
 
         if name == CONSOLE_SVC {
-            let _ = spawn_service(pack_data, &entry, &[ns_ep, HANDLE_UART_VMO]);
+            let ep = register_for(ns_ep, name);
+            let _ = spawn_service(pack_data, &entry, &[ns_ep, HANDLE_UART_VMO, ep]);
         } else if name == RENDER_SVC {
+            let ep = register_for(ns_ep, name);
             let _ = spawn_service(
                 pack_data,
                 &entry,
-                &[ns_ep, HANDLE_VIRTIO_VMO, init_ep, dup_ro(font_vmo)],
+                &[ns_ep, HANDLE_VIRTIO_VMO, init_ep, dup_ro(font_vmo), ep],
             );
         } else if name == INPUT_SVC || name == BLK_SVC || name == NINEP_SVC {
-            let _ = spawn_service(pack_data, &entry, &[ns_ep, HANDLE_VIRTIO_VMO, init_ep]);
+            let ep = register_for(ns_ep, name);
+            let _ = spawn_service(pack_data, &entry, &[ns_ep, HANDLE_VIRTIO_VMO, init_ep, ep]);
         } else if name == PRESENTER_SVC {
+            let ep = register_for(ns_ep, name);
             let _ = spawn_service(
                 pack_data,
                 &entry,
-                &[ns_ep, HANDLE_RTC_VMO, dup_ro(font_vmo)],
+                &[ns_ep, HANDLE_RTC_VMO, dup_ro(font_vmo), ep],
             );
         } else if name == LAYOUT_SVC {
-            let _ = spawn_service(pack_data, &entry, &[ns_ep, dup_ro(font_vmo)]);
+            let ep = register_for(ns_ep, name);
+            let _ = spawn_service(pack_data, &entry, &[ns_ep, dup_ro(font_vmo), ep]);
+        } else if name == STORE_SVC
+            || name == DOCUMENT_SVC
+            || name == EDITOR_TEXT_SVC
+            || name == PNG_DECODER_SVC
+            || name == JPEG_DECODER_SVC
+            || name == FS_SVC
+        {
+            let ep = register_for(ns_ep, name);
+            let _ = spawn_service(pack_data, &entry, &[ns_ep, ep]);
         } else {
+            // Test services and unknown services: self-register.
             let _ = spawn_service(pack_data, &entry, &[ns_ep]);
         }
     }

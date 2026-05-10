@@ -23,6 +23,7 @@ use scene::{Color, Content, FillRule, NodeFlags, SCENE_SIZE, SceneWriter, Shaped
 const HANDLE_NS_EP: Handle = Handle(2);
 const HANDLE_RTC_VMO: Handle = Handle(3);
 const HANDLE_FONT_VMO: Handle = Handle(4);
+const HANDLE_SVC_EP: Handle = Handle(5);
 
 const PAGE_SIZE: usize = 16384;
 
@@ -35,7 +36,6 @@ const EXIT_VIEWPORT_MAP: u32 = 0xE207;
 const EXIT_LAYOUT_SETUP: u32 = 0xE208;
 const EXIT_SCENE_CREATE: u32 = 0xE20A;
 const EXIT_SCENE_MAP: u32 = 0xE20B;
-const EXIT_ENDPOINT_CREATE: u32 = 0xE20C;
 const EXIT_RENDER_NOT_FOUND: u32 = 0xE20D;
 const EXIT_RENDER_SETUP: u32 = 0xE20E;
 const EXIT_EDITOR_NOT_FOUND: u32 = 0xE20F;
@@ -3316,13 +3316,6 @@ extern "C" fn _start() -> ! {
 
     console::write(console_ep, b"presenter: editor connected\n");
 
-    let own_ep = match abi::ipc::endpoint_create() {
-        Ok(h) => h,
-        Err(_) => abi::thread::exit(EXIT_ENDPOINT_CREATE),
-    };
-
-    name::register(HANDLE_NS_EP, b"presenter", own_ep);
-
     let mut server = Presenter {
         doc_va,
         doc_ep,
@@ -3418,7 +3411,7 @@ extern "C" fn _start() -> ! {
             (current_sec + 1) * NS_PER_SEC
         };
 
-        let frame_due = match ipc::server::serve_one_timed(own_ep, &mut server, deadline) {
+        let frame_due = match ipc::server::serve_one_timed(HANDLE_SVC_EP, &mut server, deadline) {
             Ok(()) => abi::system::clock_read().unwrap_or(0) >= deadline,
             Err(abi::types::SyscallError::TimedOut) => true,
             Err(_) => break,

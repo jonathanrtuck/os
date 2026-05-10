@@ -28,6 +28,7 @@ use ipc::server::{Dispatch, Incoming};
 
 const HANDLE_NS_EP: Handle = Handle(2);
 const HANDLE_FONT_VMO: Handle = Handle(3);
+const HANDLE_SVC_EP: Handle = Handle(4);
 
 const PAGE_SIZE: usize = 16384;
 const RESULTS_VMO_SIZE: usize = PAGE_SIZE * 2;
@@ -37,7 +38,6 @@ const EXIT_DOC_NOT_FOUND: u32 = 0xE102;
 const EXIT_DOC_SETUP: u32 = 0xE103;
 const EXIT_RESULTS_CREATE: u32 = 0xE105;
 const EXIT_RESULTS_MAP: u32 = 0xE106;
-const EXIT_ENDPOINT_CREATE: u32 = 0xE107;
 
 // ── Font data (shared VMO from init) ─────────────────────────────
 
@@ -729,14 +729,6 @@ extern "C" fn _start() -> ! {
     // Initialize seqlock generation to 0.
     ipc::register::init(results_va as *mut u8);
 
-    // Register with name service.
-    let own_ep = match abi::ipc::endpoint_create() {
-        Ok(h) => h,
-        Err(_) => abi::thread::exit(EXIT_ENDPOINT_CREATE),
-    };
-
-    name::register(HANDLE_NS_EP, b"layout", own_ep);
-
     console::write(console_ep, b"layout: ready\n");
 
     let mut server = LayoutServer {
@@ -754,7 +746,7 @@ extern "C" fn _start() -> ! {
         console_ep,
     };
 
-    ipc::server::serve(own_ep, &mut server);
+    ipc::server::serve(HANDLE_SVC_EP, &mut server);
 
     abi::thread::exit(0);
 }

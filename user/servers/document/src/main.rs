@@ -6,10 +6,11 @@
 //!
 //! Bootstrap handles (from init via thread_create_in):
 //!   Handle 2: name service endpoint
+//!   Handle 3: service endpoint (pre-registered as "document")
 //!
 //! Boots, looks up "store" from name service, establishes shared VMO
-//! for bulk I/O, creates a document file, registers as "document",
-//! and enters an IPC serve loop.
+//! for bulk I/O, creates a document file, and enters an IPC serve loop
+//! on the pre-registered service endpoint.
 
 #![no_std]
 #![no_main]
@@ -27,6 +28,7 @@ use abi::types::{Handle, Rights};
 use ipc::server::{Dispatch, Incoming};
 
 const HANDLE_NS_EP: Handle = Handle(2);
+const HANDLE_SVC_EP: Handle = Handle(3);
 
 const PAGE_SIZE: usize = 16384;
 const DOC_BUF_PAGES: usize = 4;
@@ -42,7 +44,6 @@ const EXIT_SHARED_VMO_MAP: u32 = 0xE004;
 const EXIT_SHARED_VMO_DUP: u32 = 0xE005;
 const EXIT_DOC_VMO_CREATE: u32 = 0xE006;
 const EXIT_DOC_VMO_MAP: u32 = 0xE007;
-const EXIT_ENDPOINT_CREATE: u32 = 0xE008;
 const EXIT_STORE_CREATE: u32 = 0xE00A;
 
 // ── Undo state ─────────────────────────────────────────────────────
@@ -1496,14 +1497,6 @@ extern "C" fn _start() -> ! {
         }
     }
 
-    // Register with name service.
-    let own_ep = match abi::ipc::endpoint_create() {
-        Ok(h) => h,
-        Err(_) => abi::thread::exit(EXIT_ENDPOINT_CREATE),
-    };
-
-    name::register(HANDLE_NS_EP, b"document", own_ep);
-
     console::write(console_ep, b"document: ready\n");
 
     let mut server = DocumentServer {
@@ -1534,7 +1527,7 @@ extern "C" fn _start() -> ! {
             let now = abi::system::clock_read().unwrap_or(0);
             let deadline = now.saturating_add(COALESCE_TIMEOUT_NS);
 
-            match ipc::server::serve_one_timed(own_ep, &mut server, deadline) {
+            match ipc::server::serve_one_timed(HANDLE_SVC_EP, &mut server, deadline) {
                 Ok(()) => {}
                 Err(abi::types::SyscallError::TimedOut) => {
                     server.flush_pending();
@@ -1542,7 +1535,7 @@ extern "C" fn _start() -> ! {
                 Err(_) => break,
             }
         } else {
-            match ipc::server::serve_one(own_ep, &mut server) {
+            match ipc::server::serve_one(HANDLE_SVC_EP, &mut server) {
                 Ok(()) => {}
                 Err(_) => break,
             }

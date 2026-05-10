@@ -3,12 +3,13 @@
 //! Bootstrap handle layout:
 //!   Handle 0: code VMO
 //!   Handle 1: stack VMO
-//!   Handle 2: name service endpoint (for register/lookup)
+//!   Handle 2: (reserved)
 //!   Handle 3: UART MMIO VMO (device-backed, one page)
+//!   Handle 4: service endpoint (pre-registered by init as "console")
 //!
-//! Maps the UART MMIO region, registers as "console" with the name service,
-//! then serves write requests. Each request contains raw bytes in the IPC
-//! payload, written directly to the UART TX register.
+//! Maps the UART MMIO region and serves write requests. Each request
+//! contains raw bytes in the IPC payload, written directly to the UART
+//! TX register.
 
 #![no_std]
 #![no_main]
@@ -18,8 +19,8 @@ use core::panic::PanicInfo;
 use abi::types::{Handle, Rights};
 use ipc::server::{self, Dispatch, Incoming};
 
-const HANDLE_NS_EP: Handle = Handle(2);
 const HANDLE_UART_VMO: Handle = Handle(3);
+const HANDLE_SVC_EP: Handle = Handle(4);
 
 const PL011_DR: usize = 0x00;
 const PL011_FR: usize = 0x18;
@@ -76,18 +77,11 @@ extern "C" fn _start() -> ! {
         Ok(va) => va,
         Err(_) => abi::thread::exit(1),
     };
-    let own_ep = match abi::ipc::endpoint_create() {
-        Ok(h) => h,
-        Err(_) => abi::thread::exit(2),
-    };
-
-    name::register(HANDLE_NS_EP, b"console", own_ep);
-
     let mut console = Console { uart_base: uart_va };
 
     console.write_bytes(b"console: ready\n");
 
-    server::serve(own_ep, &mut console);
+    server::serve(HANDLE_SVC_EP, &mut console);
 
     abi::thread::exit(0);
 }

@@ -4,6 +4,7 @@
 //!   Handle 2: name service endpoint
 //!   Handle 3: virtio MMIO VMO (device, identity-mapped)
 //!   Handle 4: init endpoint (for DMA allocation)
+//!   Handle 5: service endpoint (pre-registered by init as "blk")
 //!
 //! Probes the virtio MMIO region for a block device (device ID 2).
 //! Negotiates features (including FLUSH), reads capacity, allocates
@@ -21,6 +22,7 @@ use ipc::server::{Dispatch, Incoming};
 const HANDLE_NS_EP: Handle = Handle(2);
 const HANDLE_VIRTIO_VMO: Handle = Handle(3);
 const HANDLE_INIT_EP: Handle = Handle(4);
+const HANDLE_SVC_EP: Handle = Handle(5);
 
 const PAGE_SIZE: usize = virtio::PAGE_SIZE;
 
@@ -431,13 +433,6 @@ extern "C" fn _start() -> ! {
         console::write(console_ep, b"blk: skip self-test (< 2 blocks)\n");
     }
 
-    let own_ep = match abi::ipc::endpoint_create() {
-        Ok(h) => h,
-        Err(_) => abi::thread::exit(9),
-    };
-
-    name::register(HANDLE_NS_EP, b"blk", own_ep);
-
     console::write(console_ep, b"blk: ready\n");
 
     let mut server = BlkServer {
@@ -446,7 +441,7 @@ extern "C" fn _start() -> ! {
         shared_len: 0,
     };
 
-    ipc::server::serve(own_ep, &mut server);
+    ipc::server::serve(HANDLE_SVC_EP, &mut server);
 
     abi::thread::exit(0);
 }

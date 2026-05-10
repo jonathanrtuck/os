@@ -2,9 +2,9 @@
 //!
 //! Bootstrap handles (from init via thread_create_in):
 //!   Handle 2: name service endpoint
+//!   Handle 3: service endpoint (pre-registered as "png-decoder")
 //!
-//! Registers as "png-decoder" with the name service, then enters an IPC
-//! serve loop. Clients send a VMO containing PNG file data along with the
+//! Enters an IPC serve loop on the pre-registered endpoint. Clients send a VMO containing PNG file data along with the
 //! file size; the service maps it, decodes, creates an output VMO with
 //! BGRA pixels, and replies with the output VMO handle + dimensions.
 
@@ -20,11 +20,11 @@ use abi::types::{Handle, Rights};
 use ipc::server::{Dispatch, Incoming};
 
 const HANDLE_NS_EP: Handle = Handle(2);
+const HANDLE_SVC_EP: Handle = Handle(3);
 
 const PAGE_SIZE: usize = 16384;
 
 const EXIT_CONSOLE_NOT_FOUND: u32 = 0xE001;
-const EXIT_ENDPOINT_CREATE_FAILED: u32 = 0xE002;
 
 struct PngDecoder {
     _console_ep: Handle,
@@ -179,20 +179,13 @@ extern "C" fn _start() -> ! {
 
     console::write(console_ep, b"  png-decoder: starting\n");
 
-    let svc_ep = match abi::ipc::endpoint_create() {
-        Ok(h) => h,
-        Err(_) => abi::thread::exit(EXIT_ENDPOINT_CREATE_FAILED),
-    };
-
-    name::register(HANDLE_NS_EP, b"png-decoder", svc_ep);
-
     console::write(console_ep, b"  png-decoder: ready\n");
 
     let mut decoder = PngDecoder {
         _console_ep: console_ep,
     };
 
-    ipc::server::serve(svc_ep, &mut decoder);
+    ipc::server::serve(HANDLE_SVC_EP, &mut decoder);
 
     abi::thread::exit(0);
 }

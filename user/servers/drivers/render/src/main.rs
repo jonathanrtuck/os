@@ -4,6 +4,8 @@
 //!   Handle 2: name service endpoint
 //!   Handle 3: virtio MMIO VMO (device, identity-mapped)
 //!   Handle 4: init endpoint (for DMA allocation)
+//!   Handle 5: font VMO (bundled font data)
+//!   Handle 6: service endpoint (pre-registered by init as "render")
 //!
 //! Probes the virtio MMIO region for a Metal GPU device (device ID 22).
 //! Sets up two virtqueues (setup + render), compiles shaders, creates
@@ -111,6 +113,7 @@ const HANDLE_NS_EP: Handle = Handle(2);
 const HANDLE_VIRTIO_VMO: Handle = Handle(3);
 const HANDLE_INIT_EP: Handle = Handle(4);
 const HANDLE_FONT_VMO: Handle = Handle(5);
+const HANDLE_SVC_EP: Handle = Handle(6);
 
 const PAGE_SIZE: usize = virtio::PAGE_SIZE;
 
@@ -3065,12 +3068,6 @@ extern "C" fn _start() -> ! {
 
     console::write(console_ep, b"render: atlas ready\n");
 
-    let own_ep = match abi::ipc::endpoint_create() {
-        Ok(h) => h,
-        Err(_) => abi::thread::exit(11),
-    };
-
-    name::register(HANDLE_NS_EP, b"render", own_ep);
     console::write(console_ep, b"render: ready\n");
 
     let mut compositor = Compositor {
@@ -3103,7 +3100,7 @@ extern "C" fn _start() -> ! {
     let mut next_deadline: u64 = 0;
 
     loop {
-        match ipc::server::serve_one_timed(own_ep, &mut compositor, next_deadline) {
+        match ipc::server::serve_one_timed(HANDLE_SVC_EP, &mut compositor, next_deadline) {
             Ok(()) => {
                 next_deadline = compositor.walk_ctx.next_deadline;
             }

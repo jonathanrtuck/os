@@ -19,6 +19,7 @@
 //!
 //! Bootstrap handles:
 //!   Handle 2: name service endpoint
+//!   Handle 3: service endpoint (pre-registered as "editor.text")
 
 #![no_std]
 #![no_main]
@@ -29,11 +30,11 @@ use abi::types::{Handle, Rights};
 use ipc::server::{Dispatch, Incoming};
 
 const HANDLE_NS_EP: Handle = Handle(2);
+const HANDLE_SVC_EP: Handle = Handle(3);
 
 const EXIT_CONSOLE_NOT_FOUND: u32 = 0xE301;
 const EXIT_DOC_NOT_FOUND: u32 = 0xE302;
 const EXIT_DOC_SETUP: u32 = 0xE303;
-const EXIT_ENDPOINT_CREATE: u32 = 0xE305;
 
 // ── Document buffer access ───────────────────────────────────────
 
@@ -381,13 +382,6 @@ extern "C" fn _start() -> ! {
 
     console::write(console_ep, b"text-editor: doc connected\n");
 
-    let own_ep = match abi::ipc::endpoint_create() {
-        Ok(h) => h,
-        Err(_) => abi::thread::exit(EXIT_ENDPOINT_CREATE),
-    };
-
-    name::register(HANDLE_NS_EP, b"editor.text", own_ep);
-
     console::write(console_ep, b"text-editor: ready\n");
 
     let mut server = TextEditor {
@@ -396,7 +390,7 @@ extern "C" fn _start() -> ! {
         console_ep,
     };
 
-    ipc::server::serve(own_ep, &mut server);
+    ipc::server::serve(HANDLE_SVC_EP, &mut server);
 
     abi::thread::exit(0);
 }

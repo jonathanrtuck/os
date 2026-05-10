@@ -2,6 +2,7 @@
 //!
 //! Bootstrap handles (from init via thread_create_in):
 //!   Handle 2: name service endpoint
+//!   Handle 3: service endpoint (pre-registered as "fs")
 //!
 //! Looks up the "9p" driver via the name service. On READ_FILE, reads
 //! the file via 9p into a new VMO and returns it to the caller. On STAT,
@@ -20,6 +21,7 @@ use abi::types::{Handle, Rights};
 use ipc::server::{Dispatch, Incoming};
 
 const HANDLE_NS_EP: Handle = Handle(2);
+const HANDLE_SVC_EP: Handle = Handle(3);
 
 const PAGE_SIZE: usize = 16384;
 
@@ -281,13 +283,6 @@ extern "C" fn _start() -> ! {
             abi::thread::exit(0xE003);
         }
     };
-    let own_ep = match abi::ipc::endpoint_create() {
-        Ok(h) => h,
-        Err(_) => abi::thread::exit(0xE002),
-    };
-
-    name::register(HANDLE_NS_EP, b"fs", own_ep);
-
     console::write(console_ep, b"  fs: ready\n");
 
     let mut server = FsServer {
@@ -295,7 +290,7 @@ extern "C" fn _start() -> ! {
         ninep_shared_va: shared_va,
     };
 
-    ipc::server::serve(own_ep, &mut server);
+    ipc::server::serve(HANDLE_SVC_EP, &mut server);
 
     abi::thread::exit(0);
 }

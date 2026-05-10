@@ -4,6 +4,7 @@
 //!   Handle 2: name service endpoint
 //!   Handle 3: virtio MMIO VMO (device, identity-mapped)
 //!   Handle 4: init endpoint (for DMA allocation)
+//!   Handle 5: service endpoint (pre-registered by init as "input")
 //!
 //! Probes the virtio MMIO region for input devices (device ID 18).
 //! Requests DMA VMOs from init for virtqueue and event buffers.
@@ -20,6 +21,8 @@ use abi::types::{Handle, Rights};
 const HANDLE_NS_EP: Handle = Handle(2);
 const HANDLE_VIRTIO_VMO: Handle = Handle(3);
 const HANDLE_INIT_EP: Handle = Handle(4);
+#[allow(dead_code)] // Pre-registered by init; available for future incoming IPC.
+const HANDLE_SVC_EP: Handle = Handle(5);
 
 const PAGE_SIZE: usize = virtio::PAGE_SIZE;
 
@@ -333,13 +336,6 @@ extern "C" fn _start() -> ! {
     } else {
         tab_irq_event = None;
     }
-
-    let own_ep = match abi::ipc::endpoint_create() {
-        Ok(h) => h,
-        Err(_) => abi::thread::exit(8),
-    };
-
-    name::register(HANDLE_NS_EP, b"input", own_ep);
 
     let console_ep = name::lookup(HANDLE_NS_EP, b"console").ok();
     let mut presenter_ep: Option<Handle> = None;

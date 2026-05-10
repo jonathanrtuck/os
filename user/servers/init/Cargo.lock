@@ -11,4 +11,12 @@ name = "init"
 version = "0.1.0"
 dependencies = [
  "abi",
+ "ipc",
+]
+
+[[package]]
+name = "ipc"
+version = "0.1.0"
+dependencies = [
+ "abi",
 ]

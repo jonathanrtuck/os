@@ -24,7 +24,6 @@ version = "0.1.0"
 dependencies = [
  "abi",
  "ipc",
- "name",
 ]
 
 [[package]]
@@ -56,6 +55,7 @@ name = "init"
 version = "0.1.0"
 dependencies = [
  "abi",
+ "ipc",
 ]
 
 [[package]]
