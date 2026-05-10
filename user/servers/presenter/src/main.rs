@@ -391,6 +391,16 @@ impl Presenter {
         }
     }
 
+    fn ensure_cursor_visible_at(&mut self, cursor_y: i32, cursor_h: i32) {
+        let vp_h = self.viewport_height();
+
+        if cursor_y < self.scroll_y {
+            self.scroll_y = cursor_y;
+        } else if cursor_y + cursor_h > self.scroll_y + vp_h {
+            self.scroll_y = cursor_y + cursor_h - vp_h;
+        }
+    }
+
     fn clamp_scroll(&mut self) {
         let header = parse_layout_header(&self.results_buf);
         let total_h = header.total_height;
@@ -439,10 +449,19 @@ impl Presenter {
 
         let layout_header = parse_layout_header(&self.results_buf);
         let line_count = layout_header.line_count as usize;
-        // Compute cursor line, then auto-scroll to keep it visible.
+        let is_rich_format = layout_header.format == 1;
+        // Compute cursor position and auto-scroll to keep it visible.
         let (cursor_line_idx, cursor_col_in_line) = self.find_cursor_line(cursor_pos, line_count);
 
-        self.ensure_cursor_visible(cursor_line_idx as u32);
+        if is_rich_format {
+            let (_, cy, ch) =
+                compute_rich_cursor(&self.results_buf, &layout_header, cursor_pos, self.doc_va);
+
+            self.ensure_cursor_visible_at(cy, ch as i32);
+        } else {
+            self.ensure_cursor_visible(cursor_line_idx as u32);
+        }
+
         self.clamp_scroll();
         self.write_viewport();
 
@@ -692,14 +711,27 @@ impl Presenter {
 
         // Selection rectangles — rendered behind text, before glyph nodes.
         if has_selection && line_count > 0 {
-            let span = SelectionSpan {
-                start: sel_start,
-                end: sel_end,
-                color: sel_color,
-                char_width: self.char_width,
-            };
+            if layout_header.format == 1 {
+                build_rich_selection_nodes(
+                    &mut scene,
+                    &self.results_buf,
+                    viewport,
+                    &layout_header,
+                    sel_start,
+                    sel_end,
+                    sel_color,
+                    self.doc_va,
+                );
+            } else {
+                let span = SelectionSpan {
+                    start: sel_start,
+                    end: sel_end,
+                    color: sel_color,
+                    char_width: self.char_width,
+                };
 
-            build_selection_nodes(&mut scene, &self.results_buf, viewport, line_count, &span);
+                build_selection_nodes(&mut scene, &self.results_buf, viewport, line_count, &span);
+            }
         }
 
         // Per-line glyph nodes (plain) or per-run glyph nodes (rich).
@@ -1438,7 +1470,7 @@ impl Presenter {
 
     fn xy_to_byte(&self, px: u32, py: u32, content_len: usize) -> usize {
         let (text_x, text_y) = self.text_origin();
-        let rel_x = px.saturating_sub(text_x);
+        let rel_x = px.saturating_sub(text_x) as f32;
         let rel_y = py.saturating_sub(text_y) as i32 + self.scroll_y;
 
         if rel_y < 0 {
@@ -1452,11 +1484,22 @@ impl Presenter {
             return 0;
         }
 
+        if header.format == 1 {
+            return xy_to_byte_rich(
+                &self.results_buf,
+                &header,
+                rel_x,
+                rel_y,
+                self.doc_va,
+                content_len,
+            );
+        }
+
         let line_h = presenter_service::LINE_HEIGHT as i32;
         let target_line = (rel_y / line_h) as usize;
         let cw = self.char_width;
         let target_col = if cw > 0.0 {
-            ((rel_x as f32 + cw * 0.5) / cw) as usize
+            ((rel_x + cw * 0.5) / cw) as usize
         } else {
             0
         };
@@ -1653,6 +1696,304 @@ impl Presenter {
     }
 }
 
+// ── Rich text selection ──────────────────────────────────────────
+
+fn byte_to_x_rich(
+    doc_buf: &[u8],
+    results_buf: &[u8],
+    run_count: usize,
+    byte_pos: usize,
+    target_line: usize,
+) -> f32 {
+    for run_i in 0..run_count {
+        let vr = parse_visible_run_at(results_buf, run_i);
+
+        if vr.line_index as usize != target_line {
+            continue;
+        }
+
+        let run_start = vr.byte_offset as usize;
+        let run_end = run_start + vr.byte_length as usize;
+
+        if byte_pos < run_start {
+            return vr.x;
+        }
+        if byte_pos > run_end {
+            continue;
+        }
+
+        let font_data = font_data_for_family(vr.font_family);
+        let upem = fonts::metrics::font_metrics(font_data)
+            .map(|m| m.units_per_em)
+            .unwrap_or(1000);
+        let mut axes_buf = [fonts::metrics::AxisValue {
+            tag: [0; 4],
+            value: 0.0,
+        }; 3];
+        let mut ac = 0;
+
+        if vr.weight != 400 {
+            axes_buf[ac] = fonts::metrics::AxisValue {
+                tag: *b"wght",
+                value: vr.weight as f32,
+            };
+            ac += 1;
+        }
+
+        axes_buf[ac] = fonts::metrics::AxisValue {
+            tag: *b"opsz",
+            value: vr.font_size as f32,
+        };
+        ac += 1;
+
+        if vr.flags & piecetable::FLAG_ITALIC != 0 {
+            axes_buf[ac] = fonts::metrics::AxisValue {
+                tag: *b"ital",
+                value: 1.0,
+            };
+            ac += 1;
+        }
+
+        let axes = &axes_buf[..ac];
+        let text_len = piecetable::text_len(doc_buf) as usize;
+        let extract_end = byte_pos.min(text_len);
+        let extract_start = run_start.min(extract_end);
+        let mut buf = alloc::vec![0u8; extract_end - extract_start + 1];
+        let copied =
+            piecetable::text_slice(doc_buf, extract_start as u32, extract_end as u32, &mut buf);
+        let mut x = vr.x;
+
+        for ch in core::str::from_utf8(&buf[..copied]).unwrap_or("").chars() {
+            let gid = fonts::metrics::glyph_id_for_char(font_data, ch).unwrap_or(0);
+            let adv = fonts::metrics::glyph_h_advance_with_axes(font_data, gid, axes)
+                .unwrap_or(upem as i32 / 2);
+
+            x += (adv as f32 * vr.font_size as f32) / upem as f32;
+        }
+
+        return x;
+    }
+
+    0.0
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_rich_selection_nodes(
+    scene: &mut SceneWriter,
+    results_buf: &[u8],
+    viewport: scene::NodeId,
+    header: &layout_service::LayoutHeader,
+    sel_start: usize,
+    sel_end: usize,
+    color: Color,
+    doc_va: usize,
+) {
+    let line_count = header.line_count as usize;
+    let run_count = header.visible_run_count as usize;
+
+    // SAFETY: doc_va is a valid RO mapping.
+    let (content_len, _, _, _) = unsafe { document_service::read_doc_header(doc_va) };
+    let doc_buf = unsafe {
+        core::slice::from_raw_parts(
+            (doc_va + document_service::DOC_HEADER_SIZE) as *const u8,
+            content_len,
+        )
+    };
+
+    if !piecetable::validate(doc_buf) {
+        return;
+    }
+
+    for i in 0..line_count {
+        let line = parse_line_at(results_buf, i);
+        let line_start = line.byte_offset as usize;
+        let line_end = line_start + line.byte_length as usize;
+
+        if sel_end <= line_start || sel_start >= line_end {
+            continue;
+        }
+
+        let x_start = if sel_start <= line_start {
+            0.0
+        } else {
+            byte_to_x_rich(doc_buf, results_buf, run_count, sel_start, i)
+        };
+
+        let x_end = if sel_end >= line_end {
+            byte_to_x_rich(doc_buf, results_buf, run_count, line_end, i)
+        } else {
+            byte_to_x_rich(doc_buf, results_buf, run_count, sel_end, i)
+        };
+
+        let w = x_end - x_start;
+
+        if w <= 0.0 {
+            continue;
+        }
+
+        // Use the line's actual height from its font sizes.
+        let mut max_font = 14u16;
+
+        for run_i in 0..run_count {
+            let vr = parse_visible_run_at(results_buf, run_i);
+
+            if vr.line_index as usize == i && vr.font_size > max_font {
+                max_font = vr.font_size;
+            }
+        }
+
+        let line_h = (max_font as u32 * 14) / 10;
+
+        if let Some(sel_node) = scene.alloc_node() {
+            let n = scene.node_mut(sel_node);
+
+            n.x = scene::f32_to_mpt(x_start);
+            n.y = pt(line.y);
+            n.width = scene::f32_to_mpt(w) as u32;
+            n.height = upt(line_h);
+            n.background = color;
+            n.role = scene::ROLE_SELECTION;
+
+            scene.add_child(viewport, sel_node);
+        }
+    }
+}
+
+// ── Rich text hit testing ────────────────────────────────────────
+
+fn xy_to_byte_rich(
+    results_buf: &[u8],
+    header: &layout_service::LayoutHeader,
+    rel_x: f32,
+    rel_y: i32,
+    doc_va: usize,
+    content_len: usize,
+) -> usize {
+    let line_count = header.line_count as usize;
+    let run_count = header.visible_run_count as usize;
+
+    if line_count == 0 || run_count == 0 {
+        return 0;
+    }
+
+    // Find the target line by y position using actual line positions.
+    let mut target_line = line_count - 1;
+
+    for i in 0..line_count {
+        let next_y = if i + 1 < line_count {
+            parse_line_at(results_buf, i + 1).y
+        } else {
+            i32::MAX
+        };
+
+        if rel_y < next_y {
+            target_line = i;
+
+            break;
+        }
+    }
+
+    // SAFETY: doc_va is a valid RO mapping.
+    let (cl, _, _, _) = unsafe { document_service::read_doc_header(doc_va) };
+    let doc_buf = unsafe {
+        core::slice::from_raw_parts(
+            (doc_va + document_service::DOC_HEADER_SIZE) as *const u8,
+            cl,
+        )
+    };
+
+    if !piecetable::validate(doc_buf) {
+        return 0;
+    }
+
+    // Find the run on target_line closest to rel_x, then measure glyphs.
+    let mut best_pos = parse_line_at(results_buf, target_line).byte_offset as usize;
+
+    for run_i in 0..run_count {
+        let vr = parse_visible_run_at(results_buf, run_i);
+
+        if vr.line_index as usize != target_line {
+            continue;
+        }
+
+        let font_data = font_data_for_family(vr.font_family);
+        let upem = fonts::metrics::font_metrics(font_data)
+            .map(|m| m.units_per_em)
+            .unwrap_or(1000);
+
+        let mut axes_buf = [fonts::metrics::AxisValue {
+            tag: [0; 4],
+            value: 0.0,
+        }; 3];
+        let mut axis_count = 0;
+
+        if vr.weight != 400 {
+            axes_buf[axis_count] = fonts::metrics::AxisValue {
+                tag: *b"wght",
+                value: vr.weight as f32,
+            };
+            axis_count += 1;
+        }
+
+        axes_buf[axis_count] = fonts::metrics::AxisValue {
+            tag: *b"opsz",
+            value: vr.font_size as f32,
+        };
+        axis_count += 1;
+
+        if vr.flags & piecetable::FLAG_ITALIC != 0 {
+            axes_buf[axis_count] = fonts::metrics::AxisValue {
+                tag: *b"ital",
+                value: 1.0,
+            };
+            axis_count += 1;
+        }
+
+        let axes = &axes_buf[..axis_count];
+        let run_start = vr.byte_offset as usize;
+        let run_end = run_start + vr.byte_length as usize;
+
+        // If click is before this run's start, snap to run start.
+        if rel_x < vr.x {
+            best_pos = run_start;
+
+            break;
+        }
+
+        // Walk glyphs in this run to find the character boundary.
+        let text_len = piecetable::text_len(doc_buf) as usize;
+        let extract_end = run_end.min(text_len);
+        let extract_len = extract_end.saturating_sub(run_start);
+        let mut text_buf = alloc::vec![0u8; extract_len + 1];
+        let copied =
+            piecetable::text_slice(doc_buf, run_start as u32, extract_end as u32, &mut text_buf);
+
+        let mut x = vr.x;
+        let mut byte_offset = run_start;
+
+        for ch in core::str::from_utf8(&text_buf[..copied])
+            .unwrap_or("")
+            .chars()
+        {
+            let gid = fonts::metrics::glyph_id_for_char(font_data, ch).unwrap_or(0);
+            let advance_fu = fonts::metrics::glyph_h_advance_with_axes(font_data, gid, axes)
+                .unwrap_or(upem as i32 / 2);
+            let advance_pt = (advance_fu as f32 * vr.font_size as f32) / upem as f32;
+
+            if rel_x < x + advance_pt * 0.5 {
+                return byte_offset.min(content_len);
+            }
+
+            x += advance_pt;
+            byte_offset += ch.len_utf8();
+        }
+
+        best_pos = byte_offset;
+    }
+
+    best_pos.min(content_len)
+}
+
 // ── Rich text cursor ─────────────────────────────────────────────
 
 fn compute_rich_cursor(
@@ -1698,7 +2039,7 @@ fn compute_rich_cursor(
         let mut axes_buf = [fonts::metrics::AxisValue {
             tag: [0; 4],
             value: 0.0,
-        }; 2];
+        }; 3];
         let mut axis_count = 0;
 
         if vr.weight != 400 {
@@ -1714,6 +2055,14 @@ fn compute_rich_cursor(
             value: vr.font_size as f32,
         };
         axis_count += 1;
+
+        if vr.flags & piecetable::FLAG_ITALIC != 0 {
+            axes_buf[axis_count] = fonts::metrics::AxisValue {
+                tag: *b"ital",
+                value: 1.0,
+            };
+            axis_count += 1;
+        }
 
         let axes = &axes_buf[..axis_count];
 
@@ -1811,7 +2160,7 @@ fn build_rich_text_nodes(
         let mut axes_buf = [fonts::metrics::AxisValue {
             tag: [0; 4],
             value: 0.0,
-        }; 2];
+        }; 3];
         let mut axis_count = 0;
 
         if vr.weight != 400 {
@@ -1827,6 +2176,14 @@ fn build_rich_text_nodes(
             value: vr.font_size as f32,
         };
         axis_count += 1;
+
+        if vr.flags & piecetable::FLAG_ITALIC != 0 {
+            axes_buf[axis_count] = fonts::metrics::AxisValue {
+                tag: *b"ital",
+                value: 1.0,
+            };
+            axis_count += 1;
+        }
 
         let axes = &axes_buf[..axis_count];
         let mut glyph_count = 0usize;

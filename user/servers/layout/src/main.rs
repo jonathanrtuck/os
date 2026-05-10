@@ -254,7 +254,7 @@ impl LayoutServer {
             let mut axes_buf = [fonts::metrics::AxisValue {
                 tag: [0; 4],
                 value: 0.0,
-            }; 2];
+            }; 3];
             let mut axis_count = 0;
 
             if style.weight != 400 {
@@ -270,6 +270,14 @@ impl LayoutServer {
                 value: style.font_size_pt as f32,
             };
             axis_count += 1;
+
+            if style.flags & piecetable::FLAG_ITALIC != 0 {
+                axes_buf[axis_count] = fonts::metrics::AxisValue {
+                    tag: *b"ital",
+                    value: 1.0,
+                };
+                axis_count += 1;
+            }
 
             let axes = &axes_buf[..axis_count];
             let run_start = run.byte_offset as usize;
