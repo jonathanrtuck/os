@@ -180,6 +180,18 @@ name = "jpeg"
 version = "0.1.0"
 
 [[package]]
+name = "jpeg-decoder"
+version = "0.1.0"
+dependencies = [
+ "abi",
+ "console",
+ "heap",
+ "ipc",
+ "jpeg",
+ "name",
+]
+
+[[package]]
 name = "layout"
 version = "0.1.0"
 
@@ -233,7 +245,7 @@ dependencies = [
  "icons",
  "init",
  "ipc",
- "jpeg",
+ "jpeg-decoder",
  "layout",
  "layout-service",
  "name",

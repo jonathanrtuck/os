@@ -735,89 +735,59 @@ fn load_and_decode_image(server: &mut Presenter, render_ep: Handle) {
         return;
     }
 
-    // Decode the JPEG from the shared VMO.
-    // SAFETY: shared_va is a valid mapping of at least bytes_read bytes.
-    let jpeg_data = unsafe { core::slice::from_raw_parts(shared_va as *const u8, bytes_read) };
-    let buf_size = match jpeg_lib::jpeg_decode_buf_size(jpeg_data) {
-        Ok(s) => s,
-        Err(_) => {
-            let _ = abi::vmo::unmap(shared_va);
-            let _ = abi::handle::close(shared_vmo);
-
-            return;
-        }
-    };
-    let decode_vmo_size = buf_size.next_multiple_of(PAGE_SIZE);
-    let decode_vmo = match abi::vmo::create(decode_vmo_size, 0) {
+    // Send the JPEG data to the decoder service for decoding.
+    let decoder_ep = match name::lookup(HANDLE_NS_EP, b"jpeg-decoder") {
         Ok(h) => h,
         Err(_) => {
+            console::write(
+                server.console_ep,
+                b"presenter: jpeg-decoder lookup failed\n",
+            );
             let _ = abi::vmo::unmap(shared_va);
             let _ = abi::handle::close(shared_vmo);
-
-            return;
-        }
-    };
-    let decode_va = match abi::vmo::map(decode_vmo, 0, rw) {
-        Ok(va) => va,
-        Err(_) => {
-            let _ = abi::vmo::unmap(shared_va);
-            let _ = abi::handle::close(shared_vmo);
-            let _ = abi::handle::close(decode_vmo);
-
-            return;
-        }
-    };
-    // SAFETY: decode_va is a valid RW mapping of at least buf_size bytes.
-    let output = unsafe { core::slice::from_raw_parts_mut(decode_va as *mut u8, buf_size) };
-    let header = match jpeg_lib::jpeg_decode(jpeg_data, output) {
-        Ok(h) => h,
-        Err(_) => {
-            let _ = abi::vmo::unmap(shared_va);
-            let _ = abi::handle::close(shared_vmo);
-            let _ = abi::vmo::unmap(decode_va);
-            let _ = abi::handle::close(decode_vmo);
 
             return;
         }
     };
     let _ = abi::vmo::unmap(shared_va);
-    let _ = abi::handle::close(shared_vmo);
-    let width = header.width as u16;
-    let height = header.height as u16;
-    let pixel_size = header.width * header.height * 4;
-    let pixel_vmo_size = (pixel_size as usize).next_multiple_of(PAGE_SIZE);
-    let pixel_vmo = match abi::vmo::create(pixel_vmo_size, 0) {
-        Ok(h) => h,
+    let decode_req = jpeg_decoder::DecodeRequest {
+        file_size: bytes_read as u32,
+    };
+    let mut decode_buf = [0u8; jpeg_decoder::DecodeRequest::SIZE];
+
+    decode_req.write_to(&mut decode_buf);
+
+    let mut decode_handles = [0u32; 4];
+    let decode_reply = match ipc::client::call(
+        decoder_ep,
+        jpeg_decoder::DECODE,
+        &decode_buf,
+        &[shared_vmo.0],
+        &mut decode_handles,
+        &mut call_buf,
+    ) {
+        Ok(r) => r,
         Err(_) => {
-            let _ = abi::vmo::unmap(decode_va);
-            let _ = abi::handle::close(decode_vmo);
+            console::write(server.console_ep, b"presenter: jpeg decode IPC failed\n");
 
             return;
         }
     };
-    let pixel_va = match abi::vmo::map(pixel_vmo, 0, rw) {
-        Ok(va) => va,
-        Err(_) => {
-            let _ = abi::vmo::unmap(decode_va);
-            let _ = abi::handle::close(decode_vmo);
-            let _ = abi::handle::close(pixel_vmo);
 
-            return;
-        }
-    };
+    if decode_reply.is_error()
+        || decode_reply.payload.len() < jpeg_decoder::DecodeReply::SIZE
+        || decode_reply.handle_count == 0
+    {
+        console::write(server.console_ep, b"presenter: jpeg decode error reply\n");
 
-    // SAFETY: both mappings are valid and non-overlapping.
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            decode_va as *const u8,
-            pixel_va as *mut u8,
-            pixel_size as usize,
-        );
+        return;
     }
 
-    let _ = abi::vmo::unmap(decode_va);
-    let _ = abi::handle::close(decode_vmo);
-    let _ = abi::vmo::unmap(pixel_va);
+    let dr = jpeg_decoder::DecodeReply::read_from(decode_reply.payload);
+    let pixel_vmo = Handle(decode_handles[0]);
+    let width = dr.width as u16;
+    let height = dr.height as u16;
+    let pixel_size = dr.pixel_size;
     let pixel_dup = match abi::handle::dup(pixel_vmo, Rights::READ_MAP) {
         Ok(h) => h,
         Err(_) => return,

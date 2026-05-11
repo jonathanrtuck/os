@@ -236,13 +236,18 @@ fn writer_commit_increments_generation() {
 
     assert_eq!(w.generation(), 0);
 
-    w.commit();
+    w.clear();
 
-    assert_eq!(w.generation(), 1);
+    assert_eq!(w.generation() & 1, 1);
 
     w.commit();
 
     assert_eq!(w.generation(), 2);
+
+    w.clear();
+    w.commit();
+
+    assert_eq!(w.generation(), 4);
 }
 
 #[test]
@@ -307,6 +312,9 @@ fn reader_roundtrip() {
 
     {
         let mut w = SceneWriter::new(&mut buf);
+
+        w.clear();
+
         let root = w.alloc_node().unwrap();
         let child = w.alloc_node().unwrap();
 
@@ -324,7 +332,7 @@ fn reader_roundtrip() {
 
     let r = SceneReader::new(&buf);
 
-    assert_eq!(r.generation(), 1);
+    assert_eq!(r.generation(), 2);
     assert_eq!(r.node_count(), 2);
     assert_eq!(r.root(), 0);
 
@@ -1112,6 +1120,9 @@ fn from_existing_preserves_state() {
 
     {
         let mut w = SceneWriter::new(&mut buf);
+
+        w.clear();
+
         let root = w.alloc_node().unwrap();
 
         w.set_root(root);
@@ -1121,7 +1132,7 @@ fn from_existing_preserves_state() {
 
     let w2 = SceneWriter::from_existing(&mut buf);
 
-    assert_eq!(w2.generation(), 1);
+    assert_eq!(w2.generation(), 2);
     assert_eq!(w2.node_count(), 1);
     assert_eq!(w2.node(0).x, pt(42));
 }

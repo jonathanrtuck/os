@@ -21,7 +21,7 @@ service = [
     "dep:layout-service",
     "dep:name",
     "dep:piecetable",
-    "dep:jpeg-lib",
+    "dep:jpeg-decoder",
     "dep:render",
     "dep:store-service",
     "dep:scene",
@@ -42,7 +42,7 @@ fs-service = { path = "../fs", optional = true }
 heap = { path = "../../heap", optional = true }
 icons = { path = "../../libraries/icons", optional = true }
 init = { path = "../init", optional = true }
-jpeg-lib = { path = "../../libraries/jpeg", package = "jpeg", optional = true }
+jpeg-decoder = { path = "../jpeg-decoder", optional = true }
 layout = { path = "../../libraries/layout", optional = true }
 layout-service = { path = "../layout", optional = true }
 name = { path = "../name", optional = true }

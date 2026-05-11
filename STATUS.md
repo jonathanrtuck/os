@@ -561,11 +561,11 @@ next rendering milestone.
    (row-by-row through setup DMA buffer, same pattern as glyph atlas upload).
    Setup buffer increased from 2 to 8 pages (128 KiB) for faster image uploads.
 
-3. **In-process PNG decode** — DONE. Presenter loads `demo.png` from host via
-   filesystem service, decodes in-process using the `png` library (avoids a
-   kernel bug with cross-process VMO permission faults). Reads file data VMO,
-   maps it locally, calls `png_decode` directly, creates pixel VMO, uploads to
-   compositor.
+3. **Image decode via decoder services** — DONE. Presenter queries store for
+   image documents, reads file data into a VMO, sends the VMO to the appropriate
+   decoder service (jpeg-decoder or png-decoder) via sync IPC. Decoder returns a
+   pixel VMO + dimensions. Presenter forwards the pixel VMO to the compositor
+   via UPLOAD_IMAGE. The presenter never touches pixel data.
 
 4. **Two-space scene graph** — DONE. Strip container node holds both document
    spaces side-by-side (width = 2 \* display_width). `child_offset_x` on the

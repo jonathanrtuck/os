@@ -142,6 +142,8 @@ ok=true
 # Multi-capture: "p14-back" prefix → -NNN.png per frame_id.
 # Frame 40: space 1 (image) after one Ctrl+Tab.
 assert /tmp/p14-back-040.png no_black_bar 400,65,600,770,0 || ok=false
+# Image must have real visual content (a decoded photo), not just a non-black fill.
+assert /tmp/p14-back-040.png region_variance 400,100,600,600,50 || ok=false
 end_test $ok "phase14: image space"
 
 # ── 6. Phase 15: showcase play button ────────────────────────────
