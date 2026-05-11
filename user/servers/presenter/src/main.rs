@@ -1046,11 +1046,15 @@ fn upload_video_frame(server: &mut Presenter, render_ep: Handle) {
         server.video_content_id = VIDEO_CONTENT_ID;
         server.video_uploaded = true;
     } else {
+        let mut payload = [0u8; 4];
+
+        payload.copy_from_slice(&VIDEO_CONTENT_ID.to_le_bytes());
+
         let mut reply_buf = [0u8; ipc::message::MSG_SIZE];
         let _ = ipc::client::call(
             render_ep,
             render::comp::REFRESH_IMAGE,
-            &[],
+            &payload,
             &[],
             &mut [],
             &mut reply_buf,

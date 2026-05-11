@@ -3031,8 +3031,19 @@ impl Dispatch for Compositor {
                 let _ = msg.reply_empty();
             }
             render::comp::REFRESH_IMAGE => {
+                let target_id = if msg.payload.len() >= 4 {
+                    u32::from_le_bytes(msg.payload[0..4].try_into().unwrap())
+                } else {
+                    0
+                };
+
                 for i in 0..MAX_IMAGES {
-                    if self.images[i].va != 0 && self.images[i].tex_created {
+                    let img = &self.images[i];
+
+                    if img.va != 0
+                        && img.tex_created
+                        && (target_id == 0 || img.content_id == target_id)
+                    {
                         self.upload_image_slot(i);
                     }
                 }
