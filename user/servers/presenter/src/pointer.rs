@@ -105,8 +105,11 @@ impl Presenter {
                 let node = scene.node(hit_id);
 
                 if node.role == scene::ROLE_BUTTON {
-                    self.toggle_video_playback();
-                    self.play_audio_clip();
+                    if self.active_space == 2 && self.video_content_id != 0 {
+                        self.toggle_video_playback();
+                    } else {
+                        self.play_audio_clip();
+                    }
 
                     return;
                 }

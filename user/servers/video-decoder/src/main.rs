@@ -123,7 +123,25 @@ impl VideoDecoder {
                 return;
             }
         };
-        let decode_buf_size = self.estimate_decode_buf(info.width, info.height);
+        let first_frame_data = frame_index
+            .first()
+            .and_then(|f| avi::frame_data(file_data, f));
+        let decode_buf_size = match first_frame_data {
+            Some(jpeg_data) => jpeg::jpeg_decode_buf_size(jpeg_data).unwrap_or(0),
+            None => 0,
+        };
+
+        if decode_buf_size == 0 {
+            let _ = abi::vmo::unmap(file_va);
+            let _ = abi::handle::close(file_vmo);
+            let _ = abi::vmo::unmap(output_va);
+            let _ = abi::handle::close(output_vmo);
+            let _ = msg.reply_error(ipc::STATUS_INVALID);
+
+            return;
+        }
+
+        let decode_buf_size = decode_buf_size.next_multiple_of(PAGE_SIZE);
         let decode_buf_vmo = match abi::vmo::create(decode_buf_size, 0) {
             Ok(h) => h,
             Err(_) => {
@@ -149,8 +167,10 @@ impl VideoDecoder {
                 return;
             }
         };
-        let output_dup = match abi::handle::dup(output_vmo, Rights(Rights::READ.0 | Rights::MAP.0))
-        {
+        let output_dup = match abi::handle::dup(
+            output_vmo,
+            Rights(Rights::READ.0 | Rights::MAP.0 | Rights::DUP.0),
+        ) {
             Ok(h) => h,
             Err(_) => {
                 let _ = abi::vmo::unmap(file_va);
@@ -294,15 +314,6 @@ impl VideoDecoder {
         self.decode_buf_size = 0;
         self.width = 0;
         self.height = 0;
-    }
-
-    fn estimate_decode_buf(&self, width: u32, height: u32) -> usize {
-        let pixel_size = width as usize * height as usize * 4;
-
-        // Progressive JPEG needs coefficient buffer (~2x pixel size).
-        // Rotation scratch needs 2x pixel size.
-        // Allocate 3x to be safe.
-        (pixel_size * 3).next_multiple_of(PAGE_SIZE)
     }
 }
 

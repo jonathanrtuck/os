@@ -1,0 +1,6 @@
+# Video playback test.
+# Switch to video space (space 2) with two Ctrl+Tabs, capture.
+0 key ctrl+tab
+35 key ctrl+tab
+70 capture /tmp/video-space.png
+70 exit

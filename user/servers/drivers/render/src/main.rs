@@ -539,7 +539,7 @@ enum Pipe {
     Solid,
     Glyph,
     Shadow,
-    Textured,
+    Textured(u32),
     Gradient,
     GradientMasked,
     BackdropBlur,
@@ -1146,7 +1146,7 @@ struct WalkContext {
     atlas_full: bool,
     now_tick: u64,
     next_deadline: u64,
-    image_content_id: u32,
+    images: [ImageSlot; MAX_IMAGES],
 }
 
 fn evaluate_animation(anim: &scene::Animation, now_ns: u64, frame_interval_ns: u64) -> (u8, u64) {
@@ -1444,34 +1444,38 @@ fn walk_node(
             content_id,
             src_width,
             src_height,
-        } if ctx.image_content_id == content_id
-            && content_id != 0
-            && src_width > 0
-            && src_height > 0 =>
-        {
-            let fit_scale_w = w / src_width as f32;
-            let fit_scale_h = h / src_height as f32;
-            let fit_scale = if fit_scale_w < fit_scale_h {
-                fit_scale_w
-            } else {
-                fit_scale_h
-            };
-            let draw_w = src_width as f32 * fit_scale;
-            let draw_h = src_height as f32 * fit_scale;
-            let draw_x = x + (w - draw_w) / 2.0;
-            let draw_y = y + (h - draw_h) / 2.0;
+        } if content_id != 0 && src_width > 0 && src_height > 0 => {
+            let slot = ctx
+                .images
+                .iter()
+                .find(|s| s.content_id == content_id && s.tex_created);
 
-            draws.push_quad_maybe_transformed(
-                Pipe::Textured,
-                draw_x,
-                draw_y,
-                draw_w,
-                draw_h,
-                scene::Color::rgba(255, 255, 255, 255),
-                [0.0, 0.0],
-                [1.0, 1.0],
-                tf_args,
-            );
+            if let Some(img) = slot {
+                let tex_id = img.tex_id;
+                let fit_scale_w = w / src_width as f32;
+                let fit_scale_h = h / src_height as f32;
+                let fit_scale = if fit_scale_w < fit_scale_h {
+                    fit_scale_w
+                } else {
+                    fit_scale_h
+                };
+                let draw_w = src_width as f32 * fit_scale;
+                let draw_h = src_height as f32 * fit_scale;
+                let draw_x = x + (w - draw_w) / 2.0;
+                let draw_y = y + (h - draw_h) / 2.0;
+
+                draws.push_quad_maybe_transformed(
+                    Pipe::Textured(tex_id),
+                    draw_x,
+                    draw_y,
+                    draw_w,
+                    draw_h,
+                    scene::Color::rgba(255, 255, 255, 255),
+                    [0.0, 0.0],
+                    [1.0, 1.0],
+                    tf_args,
+                );
+            }
         }
         Content::Gradient {
             color_start,
@@ -2176,11 +2180,32 @@ struct Compositor {
     cursor_visible: bool,
     cursor_shape: u8,
 
-    image_va: usize,
-    image_w: u16,
-    image_h: u16,
-    image_pixel_size: u32,
-    image_tex_created: bool,
+    images: [ImageSlot; MAX_IMAGES],
+}
+
+const MAX_IMAGES: usize = 4;
+
+#[derive(Clone, Copy)]
+struct ImageSlot {
+    content_id: u32,
+    tex_id: u32,
+    va: usize,
+    w: u16,
+    h: u16,
+    pixel_size: u32,
+    tex_created: bool,
+}
+
+impl ImageSlot {
+    const EMPTY: Self = Self {
+        content_id: 0,
+        tex_id: 0,
+        va: 0,
+        w: 0,
+        h: 0,
+        pixel_size: 0,
+        tex_created: false,
+    };
 }
 
 impl Compositor {
@@ -2323,24 +2348,32 @@ impl Compositor {
         );
     }
 
-    fn upload_image(&mut self) {
-        if self.image_va == 0 || self.image_w == 0 || self.image_h == 0 {
+    fn upload_image_slot(&mut self, slot: usize) {
+        let img = &self.images[slot];
+
+        if img.va == 0 || img.w == 0 || img.h == 0 {
             return;
         }
+
+        let tex_id = img.tex_id;
+        let img_w = img.w;
+        let img_h = img.h;
+        let pixel_size = img.pixel_size;
+        let img_va = img.va;
 
         // SAFETY: setup_dma.va is a valid DMA allocation of setup_buf_size bytes.
         let dma_buf = unsafe {
             core::slice::from_raw_parts_mut(self.setup_dma.va as *mut u8, self.setup_buf_size)
         };
 
-        if !self.image_tex_created {
+        if !self.images[slot].tex_created {
             let len = {
                 let mut w = CommandWriter::new(dma_buf);
 
                 w.create_texture(
-                    TEX_IMAGE,
-                    self.image_w,
-                    self.image_h,
+                    tex_id,
+                    img_w,
+                    img_h,
                     render::PIXEL_FORMAT_BGRA8_SRGB,
                     0,
                     1,
@@ -2359,18 +2392,17 @@ impl Compositor {
                 len,
             );
 
-            self.image_tex_created = true;
+            self.images[slot].tex_created = true;
         }
 
-        let row_bytes = self.image_w as usize * 4;
+        let row_bytes = img_w as usize * 4;
         let cmd_overhead = render::HEADER_SIZE + 16;
         let max_data_per_submit = self.setup_buf_size - cmd_overhead;
         let max_rows_per_submit = (max_data_per_submit / row_bytes).max(1);
-        let total_rows = self.image_h as usize;
-        // SAFETY: image_va is a valid RO mapping of the pixel VMO.
-        let pixels = unsafe {
-            core::slice::from_raw_parts(self.image_va as *const u8, self.image_pixel_size as usize)
-        };
+        let total_rows = img_h as usize;
+        // SAFETY: img_va is a valid RO mapping of the pixel VMO.
+        let pixels =
+            unsafe { core::slice::from_raw_parts(img_va as *const u8, pixel_size as usize) };
 
         let mut y: usize = 0;
 
@@ -2383,10 +2415,10 @@ impl Compositor {
                 let mut w = CommandWriter::new(dma_buf);
 
                 w.upload_texture_region(
-                    TEX_IMAGE,
+                    tex_id,
                     0,
                     y as u16,
-                    self.image_w,
+                    img_w,
                     rows as u16,
                     row_bytes as u32,
                     pixel_data,
@@ -2408,6 +2440,12 @@ impl Compositor {
         }
     }
 
+    fn find_or_alloc_image_slot(&self, content_id: u32) -> Option<usize> {
+        (0..MAX_IMAGES)
+            .find(|&i| self.images[i].content_id == content_id)
+            .or_else(|| (0..MAX_IMAGES).find(|&i| self.images[i].content_id == 0))
+    }
+
     fn render_frame(&mut self) -> u64 {
         if self.scene_va == 0 {
             return 0;
@@ -2423,6 +2461,7 @@ impl Compositor {
 
         self.walk_ctx.now_tick = now;
         self.walk_ctx.next_deadline = 0;
+        self.walk_ctx.images = self.images;
 
         // SAFETY: scene_va is a valid RO mapping of at least SCENE_SIZE bytes.
         let scene_buf =
@@ -2833,9 +2872,9 @@ impl Compositor {
                                     w.set_fragment_texture(TEX_ATLAS, 0);
                                     w.set_fragment_sampler(SAMPLER_NEAREST, 0);
                                 }
-                                Pipe::Textured => {
+                                Pipe::Textured(tex_id) => {
                                     w.set_render_pipeline(PIPE_TEXTURED);
-                                    w.set_fragment_texture(TEX_IMAGE, 0);
+                                    w.set_fragment_texture(tex_id, 0);
                                     w.set_fragment_sampler(SAMPLER_LINEAR, 0);
                                 }
                                 Pipe::BackdropBlur => unreachable!(),
@@ -2969,23 +3008,33 @@ impl Dispatch for Compositor {
                     let vmo = Handle(msg.handles[0]);
 
                     if let Ok(va) = abi::vmo::map(vmo, 0, Rights::READ_MAP) {
-                        self.image_va = va;
-                        self.image_w = req.width;
-                        self.image_h = req.height;
-                        self.image_pixel_size = req.pixel_size;
-                        self.image_tex_created = false;
-                        self.walk_ctx.image_content_id = req.content_id;
-                        self.upload_image();
+                        let slot = self.find_or_alloc_image_slot(req.content_id);
 
-                        console::write(self.console_ep, b"render: image uploaded\n");
+                        if let Some(idx) = slot {
+                            self.images[idx] = ImageSlot {
+                                content_id: req.content_id,
+                                tex_id: TEX_IMAGE + idx as u32,
+                                va,
+                                w: req.width,
+                                h: req.height,
+                                pixel_size: req.pixel_size,
+                                tex_created: false,
+                            };
+
+                            self.upload_image_slot(idx);
+
+                            console::write(self.console_ep, b"render: image uploaded\n");
+                        }
                     }
                 }
 
                 let _ = msg.reply_empty();
             }
             render::comp::REFRESH_IMAGE => {
-                if self.image_va != 0 && self.image_tex_created {
-                    self.upload_image();
+                for i in 0..MAX_IMAGES {
+                    if self.images[i].va != 0 && self.images[i].tex_created {
+                        self.upload_image_slot(i);
+                    }
                 }
 
                 let _ = msg.reply_empty();
@@ -3143,7 +3192,7 @@ extern "C" fn _start() -> ! {
         atlas_full: false,
         now_tick: 0,
         next_deadline: 0,
-        image_content_id: 0,
+        images: [ImageSlot::EMPTY; MAX_IMAGES],
     };
 
     console::write(console_ep, b"render: atlas ready\n");
@@ -3171,11 +3220,7 @@ extern "C" fn _start() -> ! {
         cursor_uploaded: false,
         cursor_visible: false,
         cursor_shape: scene::CURSOR_DEFAULT,
-        image_va: 0,
-        image_w: 0,
-        image_h: 0,
-        image_pixel_size: 0,
-        image_tex_created: false,
+        images: [ImageSlot::EMPTY; MAX_IMAGES],
     };
     let mut next_deadline: u64 = 0;
 

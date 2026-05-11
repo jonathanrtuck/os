@@ -358,12 +358,16 @@ pub(crate) struct Presenter {
     pub(crate) video_decoder_ep: Handle,
     pub(crate) video_frame_vmo: Handle,
     pub(crate) video_frame_va: usize,
+    pub(crate) video_content_id: u32,
+    pub(crate) video_width: u16,
+    pub(crate) video_height: u16,
     pub(crate) video_total_frames: u32,
     pub(crate) video_current_frame: u32,
     pub(crate) video_ns_per_frame: u64,
     pub(crate) video_pixel_size: u32,
     pub(crate) video_playing: bool,
     pub(crate) video_next_frame_ns: u64,
+    pub(crate) video_uploaded: bool,
 
     pub(crate) console_ep: Handle,
 }
@@ -955,11 +959,20 @@ fn load_video(server: &mut Presenter, render_ep: Handle) {
     server.video_frame_va = frame_va;
     server.video_total_frames = or.total_frames;
     server.video_ns_per_frame = or.ns_per_frame;
-    server.image_width = or.width as u16;
-    server.image_height = or.height as u16;
+    server.video_width = or.width as u16;
+    server.video_height = or.height as u16;
 
     decode_video_frame(server, 0);
+
+    if server.video_pixel_size == 0 {
+        console::write(server.console_ep, b"presenter: video decode failed\n");
+
+        return;
+    }
+
     upload_video_frame(server, render_ep);
+
+    server.num_spaces += 1;
 
     console::write(
         server.console_ep,
@@ -1001,7 +1014,7 @@ fn upload_video_frame(server: &mut Presenter, render_ep: Handle) {
         return;
     }
 
-    if server.image_content_id != VIDEO_CONTENT_ID {
+    if !server.video_uploaded {
         let frame_dup = match abi::handle::dup(
             server.video_frame_vmo,
             Rights(Rights::READ.0 | Rights::MAP.0),
@@ -1011,8 +1024,8 @@ fn upload_video_frame(server: &mut Presenter, render_ep: Handle) {
         };
         let upload_req = render::comp::UploadImageRequest {
             content_id: VIDEO_CONTENT_ID,
-            width: server.image_width,
-            height: server.image_height,
+            width: server.video_width,
+            height: server.video_height,
             pixel_size: server.video_pixel_size,
         };
         let mut upload_buf = [0u8; render::comp::UploadImageRequest::SIZE];
@@ -1030,7 +1043,8 @@ fn upload_video_frame(server: &mut Presenter, render_ep: Handle) {
             &mut reply_buf,
         );
 
-        server.image_content_id = VIDEO_CONTENT_ID;
+        server.video_content_id = VIDEO_CONTENT_ID;
+        server.video_uploaded = true;
     } else {
         let mut reply_buf = [0u8; ipc::message::MSG_SIZE];
         let _ = ipc::client::call(
@@ -1477,21 +1491,25 @@ extern "C" fn _start() -> ! {
         video_decoder_ep: Handle(0),
         video_frame_vmo: Handle(0),
         video_frame_va: 0,
+        video_content_id: 0,
+        video_width: 0,
+        video_height: 0,
         video_total_frames: 0,
         video_current_frame: 0,
         video_ns_per_frame: 0,
         video_pixel_size: 0,
         video_playing: false,
         video_next_frame_ns: 0,
+        video_uploaded: false,
         console_ep,
     };
+
+    // Space 0 = text, 1 = image, last = showcase.
+    server.num_spaces = 3;
 
     load_and_decode_image(&mut server, render_ep);
     load_video(&mut server, render_ep);
     load_audio_clip(&mut server);
-
-    // Space 0 = text, 1 = image, 2 = showcase.
-    server.num_spaces = 3;
 
     // Initial render: write viewport, build scene graph, tell compositor.
     server.write_viewport();
@@ -1505,7 +1523,9 @@ extern "C" fn _start() -> ! {
 
     loop {
         let now = abi::system::clock_read().unwrap_or(0);
-        let needs_anim = server.slide_animating || server.active_space == 2 || server.video_playing;
+        let showcase_space = server.num_spaces - 1;
+        let needs_anim =
+            server.slide_animating || server.active_space == showcase_space || server.video_playing;
         let deadline = if needs_anim {
             if next_frame <= now {
                 next_frame = now + frame_ns;
@@ -1558,7 +1578,7 @@ extern "C" fn _start() -> ! {
                 }
             }
 
-            if !server.slide_animating && server.active_space == 2 {
+            if !server.slide_animating && server.active_space == showcase_space {
                 server.build_scene();
 
                 needs_render = true;
@@ -1575,7 +1595,7 @@ extern "C" fn _start() -> ! {
 
                     server.video_next_frame_ns = now + server.video_ns_per_frame;
 
-                    if server.active_space == 1 {
+                    if server.active_space == 2 {
                         server.build_scene();
 
                         needs_render = true;

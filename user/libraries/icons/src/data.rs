@@ -1208,6 +1208,35 @@ static ICON_PLAYER_PLAY: Icon = Icon {
     stroke_width: 2.0,
 };
 
+// player-pause: two vertical bars. Tabler player-pause, 24x24 viewbox.
+// Path 0: M 6 5 L 6 19 (left bar)
+// Path 1: M 18 5 L 18 19 (right bar)
+static PATH_PLAYER_PAUSE_0: &[u8] = &[
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x40, 0x00, 0x00, 0xA0, 0x40, 0x01, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0xC0, 0x40, 0x00, 0x00, 0x98, 0x41,
+];
+static PATH_PLAYER_PAUSE_1: &[u8] = &[
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x90, 0x41, 0x00, 0x00, 0xA0, 0x40, 0x01, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x90, 0x41, 0x00, 0x00, 0x98, 0x41,
+];
+static PATHS_PLAYER_PAUSE: &[IconPath] = &[
+    IconPath {
+        commands: PATH_PLAYER_PAUSE_0,
+        layer: Layer::Primary,
+    },
+    IconPath {
+        commands: PATH_PLAYER_PAUSE_1,
+        layer: Layer::Primary,
+    },
+];
+static ICON_PLAYER_PAUSE: Icon = Icon {
+    name: "player-pause",
+    label: "Pause",
+    paths: PATHS_PLAYER_PAUSE,
+    viewbox: 24.0,
+    stroke_width: 2.0,
+};
+
 /// Look up an icon by exact name and optional exact mimetype.
 pub(crate) fn lookup(name: &str, mimetype: Option<&str>) -> Option<&'static Icon> {
     match (name, mimetype) {
@@ -1237,6 +1266,7 @@ pub(crate) fn lookup(name: &str, mimetype: Option<&str>) -> Option<&'static Icon
         ("pointer-plus", None) => Some(&ICON_POINTER_PLUS),
         ("pointer-x", None) => Some(&ICON_POINTER_X),
         ("player-play", None) => Some(&ICON_PLAYER_PLAY),
+        ("player-pause", None) => Some(&ICON_PLAYER_PAUSE),
         _ => None,
     }
 }

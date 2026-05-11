@@ -44,13 +44,13 @@ fn main() {
     } else {
         jpeg_data.iter().map(|d| d.as_slice()).collect()
     };
-
     let (width, height) = jpeg_dimensions(&jpeg_data[0]).unwrap_or((320, 240));
     let us_per_frame = 1_000_000 / fps;
     let avi = build_avi(width, height, us_per_frame, &frames);
 
     fs::write(output_path, &avi).unwrap_or_else(|e| {
         eprintln!("error writing {output_path}: {e}");
+
         std::process::exit(1);
     });
 
@@ -120,6 +120,7 @@ fn build_avi(width: u32, height: u32, us_per_frame: u32, frames: &[&[u8]]) -> Ve
 
     // hdrl LIST.
     let hdrl_start = buf.len();
+
     write_fourcc(&mut buf, b"LIST");
     write_u32(&mut buf, 0); // size placeholder
     write_fourcc(&mut buf, b"hdrl");
@@ -144,6 +145,7 @@ fn build_avi(width: u32, height: u32, us_per_frame: u32, frames: &[&[u8]]) -> Ve
 
     // strl LIST.
     let strl_start = buf.len();
+
     write_fourcc(&mut buf, b"LIST");
     write_u32(&mut buf, 0); // size placeholder
     write_fourcc(&mut buf, b"strl");
@@ -194,6 +196,7 @@ fn build_avi(width: u32, height: u32, us_per_frame: u32, frames: &[&[u8]]) -> Ve
 
     // movi LIST.
     let movi_start = buf.len();
+
     write_fourcc(&mut buf, b"LIST");
     write_u32(&mut buf, 0); // size placeholder
     write_fourcc(&mut buf, b"movi");
@@ -205,6 +208,7 @@ fn build_avi(width: u32, height: u32, us_per_frame: u32, frames: &[&[u8]]) -> Ve
 
         write_fourcc(&mut buf, b"00dc");
         write_u32(&mut buf, frame.len() as u32);
+
         buf.extend_from_slice(frame);
 
         if frame.len() % 2 != 0 {

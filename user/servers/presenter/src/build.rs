@@ -692,7 +692,7 @@ fn build_rich_text_nodes(
     }
 }
 
-// ── Showcase scene (space 2) ────────────────────────────────────
+// ── Showcase scene (last space) ─────────────────────────────────
 
 fn build_showcase_nodes(
     scene: &mut SceneWriter,
@@ -701,8 +701,9 @@ fn build_showcase_nodes(
     content_h: u32,
     now_ns: u64,
     has_audio: bool,
+    space_index: u8,
 ) {
-    let base_x = (display_width * 2) as i32;
+    let base_x = (display_width * space_index as u32) as i32;
     let container = match scene.alloc_node() {
         Some(id) => id,
         None => return,
@@ -1576,7 +1577,105 @@ impl super::Presenter {
             }
         }
 
-        // Space 2: Rendering showcase.
+        // Space 2 (optional): Video document node.
+        if self.video_content_id != 0 && self.video_width > 0 && self.video_height > 0 {
+            let video_base_x = (self.display_width * 2) as i32;
+            let max_w = self.display_width.saturating_sub(2 * page_margin);
+            let max_h = content_h.saturating_sub(2 * page_margin);
+            let src_w = self.video_width as u32;
+            let src_h = self.video_height as u32;
+            let scale_w = max_w as f32 / src_w as f32;
+            let scale_h = max_h as f32 / src_h as f32;
+            let fit_scale = if scale_w < scale_h { scale_w } else { scale_h };
+            let vid_w = if fit_scale < 1.0 {
+                (src_w as f32 * fit_scale) as u32
+            } else {
+                src_w
+            };
+            let vid_h = if fit_scale < 1.0 {
+                (src_h as f32 * fit_scale) as u32
+            } else {
+                src_h
+            };
+            let vid_x = video_base_x + ((self.display_width as i32 - vid_w as i32) / 2);
+            let vid_y = ((content_h as i32 - vid_h as i32) / 2).max(0);
+
+            if let Some(video_node) = scene.alloc_node() {
+                let n = scene.node_mut(video_node);
+
+                n.x = pt(vid_x);
+                n.y = pt(vid_y);
+                n.width = upt(vid_w);
+                n.height = upt(vid_h);
+                n.content = Content::Image {
+                    content_id: self.video_content_id,
+                    src_width: self.video_width,
+                    src_height: self.video_height,
+                };
+                n.shadow_color = Color::rgba(0, 0, 0, 255);
+                n.shadow_blur_radius = presenter_service::SHADOW_BLUR_RADIUS;
+                n.shadow_spread = presenter_service::SHADOW_SPREAD;
+
+                scene.add_child(strip, video_node);
+            }
+
+            // Play/pause button overlay.
+            if let Some(btn_id) = scene.alloc_node() {
+                let btn_size = 80u32;
+                let btn_x = video_base_x + ((self.display_width as i32 - btn_size as i32) / 2);
+                let btn_y = ((content_h as i32 - btn_size as i32) / 2).max(0);
+                let icon_name = if self.video_playing {
+                    "player-pause"
+                } else {
+                    "player-play"
+                };
+                let name_ref = scene.push_data(b"Play video");
+                let n = scene.node_mut(btn_id);
+
+                n.x = pt(btn_x);
+                n.y = pt(btn_y);
+                n.width = upt(btn_size);
+                n.height = upt(btn_size);
+                n.background = Color::rgba(0, 0, 0, 120);
+                n.corner_radius = 40;
+                n.role = scene::ROLE_BUTTON;
+                n.state = scene::STATE_FOCUSABLE;
+                n.cursor_shape = scene::CURSOR_PRESSABLE;
+                n.name = name_ref;
+
+                scene.add_child(strip, btn_id);
+
+                let icon_data = icons::get(icon_name, None);
+                let icon_padding = 16u32;
+                let icon_size_pt = btn_size - icon_padding * 2;
+                let (icon_data_ref, icon_hash) =
+                    scale_icon_paths(&mut scene, icon_data, icon_size_pt);
+                let icon_sw_pt = icon_data.stroke_width * (icon_size_pt as f32 / icon_data.viewbox);
+                let icon_sw_fixed = (icon_sw_pt * 256.0) as u16;
+
+                if let Some(icon_id) = scene.alloc_node() {
+                    let icon = scene.node_mut(icon_id);
+
+                    icon.x = pt(icon_padding as i32);
+                    icon.y = pt(icon_padding as i32);
+                    icon.width = upt(icon_size_pt);
+                    icon.height = upt(icon_size_pt);
+                    icon.content = Content::Path {
+                        color: Color::TRANSPARENT,
+                        stroke_color: Color::rgba(255, 255, 255, 200),
+                        fill_rule: FillRule::Winding,
+                        stroke_width: icon_sw_fixed,
+                        contours: icon_data_ref,
+                    };
+                    icon.content_hash = icon_hash;
+
+                    scene.add_child(btn_id, icon_id);
+                }
+            }
+        }
+
+        // Last space: Rendering showcase.
+        let showcase_space = self.num_spaces - 1;
         let now_ns = abi::system::clock_read().unwrap_or(0);
         let has_audio = self.audio_ep.0 != 0;
 
@@ -1587,6 +1686,7 @@ impl super::Presenter {
             content_h,
             now_ns,
             has_audio,
+            showcase_space,
         );
 
         scene.commit();
