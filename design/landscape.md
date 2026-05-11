@@ -17,7 +17,7 @@ The questions a systems programmer would ask on first encounter:
 
 | Question                            | Answer                                                                                                                      |
 | ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| What kind of kernel?                | Microkernel. Rust, `no_std`, arm64. 34 syscalls, ~29K LOC.                                                                  |
+| What kind of kernel?                | Microkernel. Rust, `no_std`, arm64. 35 syscalls, ~29K LOC.                                                                  |
 | POSIX?                              | No. Custom syscall ABI designed around handles and sync IPC.                                                                |
 | More like Linux, macOS, or Fuchsia? | Microkernel + capabilities like Fuchsia. MIME-aware content model like BeOS. Document-centric data model like none of them. |
 | Filesystem?                         | Custom COW with per-document snapshots, metadata queries, and a document store layer. Implemented.                          |
@@ -53,7 +53,7 @@ to compare against technically.
 
 **Our approach:** Preemptive microkernel in Rust (`no_std`,
 `aarch64-unknown-none`). SMP (up to 8 cores), per-core fixed-priority preemptive
-scheduler with 4 levels (Idle/Low/Medium/High). 34 syscalls across 6 object
+scheduler with 4 levels (Idle/Low/Medium/High). 35 syscalls across 6 object
 types (VMO, Endpoint, Event, Thread, Address Space, Resource). Kernel spawns
 only init; init spawns everything else. Hardware isolation via ARM EL0/EL1. Full
 context save/restore including NEON/FP state. Framekernel discipline: all
@@ -75,7 +75,7 @@ shared with Fuchsia and seL4. The kernel uses a fixed-priority scheduler; EEVDF
 (as used by Linux 6.6+) is a future option if workload data justifies the
 complexity.
 
-**Tradeoffs:** 34 syscalls vs Linux's ~450 reflects scope, not minimalism for
+**Tradeoffs:** 35 syscalls vs Linux's ~450 reflects scope, not minimalism for
 its own sake — networking, multi-user, and pipes don't exist yet. The count will
 grow. Rust prevents memory safety bugs in the kernel (shared with Redox), but
 the kernel is not formally verified (seL4's advantage). The design bets that

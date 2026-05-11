@@ -17,7 +17,7 @@ Do not add, remove, or renumber syscalls without explicit authorization.
 
 ## Structure
 
-- `raw.rs` -- SVC #0 invocation, syscall number constants (0-33)
+- `raw.rs` -- SVC #0 invocation, syscall number constants (0-34)
 - `types.rs` -- `Handle`, `ThreadId`, `SyscallError`, shared ABI types
 - `vmo.rs`, `ipc.rs`, `event.rs`, `thread.rs`, `space.rs`, `handle.rs`,
   `system.rs` -- typed wrappers per kernel object

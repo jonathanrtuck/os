@@ -49,7 +49,7 @@ The full kernel interface is specified in
 (execution), Address Space (isolation), Resource (authority). Each traces back
 to a hardware or security restriction.
 
-**34 syscalls.** Capability-based access control: every kernel object is
+**35 syscalls.** Capability-based access control: every kernel object is
 accessed through a handle with attenuated rights. No ambient authority.
 
 **Data/control plane split.** Bulk data (scene graph, document content, decoded
@@ -261,7 +261,7 @@ it intelligently.
 ┌──────────────────────────────────────────────────┐
 │                    Kernel (EL1)                  │
 │   VMO · Endpoint · Event · Thread · AS · Resource│
-│   Capability handles · 34 syscalls               │
+│   Capability handles · 35 syscalls               │
 └──────────────────────────────────────────────────┘
         ▲               ▲               ▲
         │               │               │

@@ -1,6 +1,6 @@
 # Syscall Quick Reference
 
-34 syscalls via `SVC #0`. Registers: `x8` = syscall number, `x0`–`x5` =
+35 syscalls via `SVC #0`. Registers: `x8` = syscall number, `x0`–`x5` =
 arguments, returns `x0` = error (0 = success), `x1` = value. All caller-saved
 registers are clobbered.
 
@@ -82,7 +82,7 @@ Flags for VMO_CREATE: `FLAG_DMA = 1 << 2` (requires Resource handle in x2).
 RECV packed return: `badge << 32 | handle_count << 16 | msg_len`. RECV_TIMED
 extra_ptr points to `[reply_cap_ptr, deadline_tick]`.
 
-### Event (15–20)
+### Event (15–21)
 
 | #   | Name                | Args                            | Returns         |
 | --- | ------------------- | ------------------------------- | --------------- |
@@ -92,46 +92,48 @@ extra_ptr points to `[reply_cap_ptr, deadline_tick]`.
 | 18  | EVENT_CLEAR         | handle, bits                    | —               |
 | 19  | EVENT_BIND_IRQ      | event, intid, bits              | —               |
 | 20  | EVENT_WAIT_DEADLINE | handle, mask, deadline_tick     | signaled_handle |
+| 21  | EVENT_BIND_THREAD   | event, thread                   | —               |
 
 EVENT_WAIT multiplexes up to 3 events via register pairs. deadline_tick = 0
-means infinite wait.
+means infinite wait. EVENT_BIND_THREAD registers a thread death notification on
+an event object.
 
-### Thread (21–26)
+### Thread (22–27)
 
 | #   | Name                | Args                                                   | Returns    |
 | --- | ------------------- | ------------------------------------------------------ | ---------- |
-| 21  | THREAD_CREATE       | entry, stack_top, arg                                  | handle     |
-| 22  | THREAD_CREATE_IN    | space, entry, stack_top, arg, handles_ptr, handles_len | handle     |
-| 23  | THREAD_EXIT         | code                                                   | (noreturn) |
-| 24  | THREAD_SET_PRIORITY | handle, priority                                       | —          |
-| 25  | THREAD_SET_AFFINITY | handle, hint                                           | —          |
-| 26  | THREAD_YIELD        | —                                                      | —          |
+| 22  | THREAD_CREATE       | entry, stack_top, arg                                  | handle     |
+| 23  | THREAD_CREATE_IN    | space, entry, stack_top, arg, handles_ptr, handles_len | handle     |
+| 24  | THREAD_EXIT         | code                                                   | (noreturn) |
+| 25  | THREAD_SET_PRIORITY | handle, priority                                       | —          |
+| 26  | THREAD_SET_AFFINITY | handle, hint                                           | —          |
+| 27  | THREAD_YIELD        | —                                                      | —          |
 
 Priority: 0=Idle, 1=Low, 2=Medium, 3=High.
 
-### Address Space (27–28)
+### Address Space (28–29)
 
 | #   | Name          | Args   | Returns |
 | --- | ------------- | ------ | ------- |
-| 27  | SPACE_CREATE  | —      | handle  |
-| 28  | SPACE_DESTROY | handle | —       |
+| 28  | SPACE_CREATE  | —      | handle  |
+| 29  | SPACE_DESTROY | handle | —       |
 
-### Handle (29–31)
+### Handle (30–32)
 
 | #   | Name         | Args           | Returns                     |
 | --- | ------------ | -------------- | --------------------------- |
-| 29  | HANDLE_DUP   | handle, rights | new_handle                  |
-| 30  | HANDLE_CLOSE | handle         | —                           |
-| 31  | HANDLE_INFO  | handle         | packed(object_type, rights) |
+| 30  | HANDLE_DUP   | handle, rights | new_handle                  |
+| 31  | HANDLE_CLOSE | handle         | —                           |
+| 32  | HANDLE_INFO  | handle         | packed(object_type, rights) |
 
 HANDLE_INFO packed return: `object_type << 32 | rights`.
 
-### System (32–33)
+### System (33–34)
 
 | #   | Name        | Args | Returns       |
 | --- | ----------- | ---- | ------------- |
-| 32  | CLOCK_READ  | —    | counter_ticks |
-| 33  | SYSTEM_INFO | key  | value         |
+| 33  | CLOCK_READ  | —    | counter_ticks |
+| 34  | SYSTEM_INFO | key  | value         |
 
 SYSTEM_INFO keys: 0=PAGE_SIZE, 1=MSG_SIZE, 2=NUM_CORES. Timer frequency: 24 MHz.
 `ticks / 24_000_000 = seconds`.

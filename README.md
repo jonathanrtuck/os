@@ -18,7 +18,7 @@ Key ideas:
   plugins.
 - **no POSIX:** Clean-slate APIs built on established standards (mimetypes,
   URIs, Unicode, arm64).
-- **microkernel:** 5 kernel objects, 34 syscalls, capability-based security.
+- **microkernel:** 5 kernel objects, 35 syscalls, capability-based security.
 
 ## prerequisites
 

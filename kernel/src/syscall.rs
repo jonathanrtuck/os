@@ -19,7 +19,7 @@ use crate::{
     vmo::{Vmo, VmoFlags},
 };
 
-/// Syscall numbers (34 total, dense-packed by object group).
+/// Syscall numbers (35 total, dense-packed by object group).
 pub mod num {
     // VMO (0–8)
     pub const VMO_CREATE: u64 = 0;
@@ -38,31 +38,31 @@ pub mod num {
     pub const REPLY: u64 = 12;
     pub const ENDPOINT_BIND_EVENT: u64 = 13;
     pub const RECV_TIMED: u64 = 14;
-    // Event (15–20)
+    // Event (15–21)
     pub const EVENT_CREATE: u64 = 15;
     pub const EVENT_SIGNAL: u64 = 16;
     pub const EVENT_WAIT: u64 = 17;
     pub const EVENT_CLEAR: u64 = 18;
     pub const EVENT_BIND_IRQ: u64 = 19;
     pub const EVENT_WAIT_DEADLINE: u64 = 20;
-    // Thread (21–26)
-    pub const THREAD_CREATE: u64 = 21;
-    pub const THREAD_CREATE_IN: u64 = 22;
-    pub const THREAD_EXIT: u64 = 23;
-    pub const THREAD_SET_PRIORITY: u64 = 24;
-    pub const THREAD_SET_AFFINITY: u64 = 25;
-    pub const THREAD_YIELD: u64 = 26;
-    // Space (27–28)
-    pub const SPACE_CREATE: u64 = 27;
-    pub const SPACE_DESTROY: u64 = 28;
-    // Handle (29–31)
-    pub const HANDLE_DUP: u64 = 29;
-    pub const HANDLE_CLOSE: u64 = 30;
-    pub const HANDLE_INFO: u64 = 31;
-    // System (32–33)
-    pub const CLOCK_READ: u64 = 32;
-    pub const SYSTEM_INFO: u64 = 33;
-    pub const EVENT_BIND_THREAD: u64 = 34;
+    pub const EVENT_BIND_THREAD: u64 = 21;
+    // Thread (22–27)
+    pub const THREAD_CREATE: u64 = 22;
+    pub const THREAD_CREATE_IN: u64 = 23;
+    pub const THREAD_EXIT: u64 = 24;
+    pub const THREAD_SET_PRIORITY: u64 = 25;
+    pub const THREAD_SET_AFFINITY: u64 = 26;
+    pub const THREAD_YIELD: u64 = 27;
+    // Space (28–29)
+    pub const SPACE_CREATE: u64 = 28;
+    pub const SPACE_DESTROY: u64 = 29;
+    // Handle (30–32)
+    pub const HANDLE_DUP: u64 = 30;
+    pub const HANDLE_CLOSE: u64 = 31;
+    pub const HANDLE_INFO: u64 = 32;
+    // System (33–34)
+    pub const CLOCK_READ: u64 = 33;
+    pub const SYSTEM_INFO: u64 = 34;
 }
 
 struct StagedHandles {
@@ -564,32 +564,31 @@ pub fn dispatch(
         num::REPLY => sys_reply(current, space_id, core_id, args),
         num::ENDPOINT_BIND_EVENT => sys_endpoint_bind_event(current, space_id, core_id, args),
         num::RECV_TIMED => sys_recv_timed(current, space_id, core_id, args),
-        // Event (15–20)
+        // Event (15–21)
         num::EVENT_CREATE => sys_event_create(current, space_id, core_id, args),
         num::EVENT_SIGNAL => sys_event_signal(current, space_id, core_id, args),
         num::EVENT_WAIT => sys_event_wait(current, space_id, core_id, args),
         num::EVENT_CLEAR => sys_event_clear(current, space_id, core_id, args),
         num::EVENT_BIND_IRQ => sys_event_bind_irq(current, space_id, core_id, args),
         num::EVENT_WAIT_DEADLINE => sys_event_wait_deadline(current, space_id, core_id, args),
-        // Thread (21–26)
+        num::EVENT_BIND_THREAD => sys_event_bind_thread(current, space_id, core_id, args),
+        // Thread (22–27)
         num::THREAD_CREATE => sys_thread_create(current, space_id, core_id, args),
         num::THREAD_CREATE_IN => sys_thread_create_in(current, space_id, core_id, args),
         num::THREAD_EXIT => sys_thread_exit(current, space_id, core_id, args),
         num::THREAD_SET_PRIORITY => sys_thread_set_priority(current, space_id, core_id, args),
         num::THREAD_SET_AFFINITY => sys_thread_set_affinity(current, space_id, core_id, args),
         num::THREAD_YIELD => sys_thread_yield(current, space_id, core_id, args),
-        // Space (27–28)
+        // Space (28–29)
         num::SPACE_CREATE => sys_space_create(current, space_id, core_id, args),
         num::SPACE_DESTROY => sys_space_destroy(current, space_id, core_id, args),
-        // Handle (29–31)
+        // Handle (30–32)
         num::HANDLE_DUP => sys_handle_dup(current, space_id, core_id, args),
         num::HANDLE_CLOSE => sys_handle_close(current, space_id, core_id, args),
         num::HANDLE_INFO => sys_handle_info(current, space_id, core_id, args),
-        // System (32–33)
+        // System (33–34)
         num::CLOCK_READ => sys_clock_read(current, space_id, core_id, args),
         num::SYSTEM_INFO => sys_system_info(current, space_id, core_id, args),
-        // Event binding (34)
-        num::EVENT_BIND_THREAD => sys_event_bind_thread(current, space_id, core_id, args),
         _ => Err(SyscallError::InvalidArgument),
     };
 

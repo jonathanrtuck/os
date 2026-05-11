@@ -10,7 +10,7 @@ rationale.
 
 ## Kernel
 
-34 syscalls across 5 object types. ~28K LOC Rust. Framekernel discipline: all
+35 syscalls across 5 object types. ~28K LOC Rust. Framekernel discipline: all
 `unsafe` confined to `frame/` module, enforced at compile time.
 
 **Object types:** VMO (9 syscalls), Endpoint (2 + call/recv/reply/recv_timed),
@@ -150,7 +150,7 @@ v0.6-pre-rewrite prototype.
 
 ### Completed (Layer 0)
 
-- `user/abi` — raw syscall wrappers for all 34 syscalls
+- `user/abi` — raw syscall wrappers for all 35 syscalls
 - `user/ipc` — SPSC ring buffers, seqlock state registers, typed messages
 - `user/init` — parses SVPK service pack, spawns services in separate address
   spaces

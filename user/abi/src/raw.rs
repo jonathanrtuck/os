@@ -20,31 +20,31 @@ pub mod num {
     pub const REPLY: u64 = 12;
     pub const ENDPOINT_BIND_EVENT: u64 = 13;
     pub const RECV_TIMED: u64 = 14;
-    // Event (15–20)
+    // Event (15–21)
     pub const EVENT_CREATE: u64 = 15;
     pub const EVENT_SIGNAL: u64 = 16;
     pub const EVENT_WAIT: u64 = 17;
     pub const EVENT_CLEAR: u64 = 18;
     pub const EVENT_BIND_IRQ: u64 = 19;
     pub const EVENT_WAIT_DEADLINE: u64 = 20;
-    // Thread (21–26)
-    pub const THREAD_CREATE: u64 = 21;
-    pub const THREAD_CREATE_IN: u64 = 22;
-    pub const THREAD_EXIT: u64 = 23;
-    pub const THREAD_SET_PRIORITY: u64 = 24;
-    pub const THREAD_SET_AFFINITY: u64 = 25;
-    pub const THREAD_YIELD: u64 = 26;
-    // Space (27–28)
-    pub const SPACE_CREATE: u64 = 27;
-    pub const SPACE_DESTROY: u64 = 28;
-    // Handle (29–31)
-    pub const HANDLE_DUP: u64 = 29;
-    pub const HANDLE_CLOSE: u64 = 30;
-    pub const HANDLE_INFO: u64 = 31;
-    // System (32–33)
-    pub const CLOCK_READ: u64 = 32;
-    pub const SYSTEM_INFO: u64 = 33;
-    pub const EVENT_BIND_THREAD: u64 = 34;
+    pub const EVENT_BIND_THREAD: u64 = 21;
+    // Thread (22–27)
+    pub const THREAD_CREATE: u64 = 22;
+    pub const THREAD_CREATE_IN: u64 = 23;
+    pub const THREAD_EXIT: u64 = 24;
+    pub const THREAD_SET_PRIORITY: u64 = 25;
+    pub const THREAD_SET_AFFINITY: u64 = 26;
+    pub const THREAD_YIELD: u64 = 27;
+    // Space (28–29)
+    pub const SPACE_CREATE: u64 = 28;
+    pub const SPACE_DESTROY: u64 = 29;
+    // Handle (30–32)
+    pub const HANDLE_DUP: u64 = 30;
+    pub const HANDLE_CLOSE: u64 = 31;
+    pub const HANDLE_INFO: u64 = 32;
+    // System (33–34)
+    pub const CLOCK_READ: u64 = 33;
+    pub const SYSTEM_INFO: u64 = 34;
 }
 
 #[inline(always)]
