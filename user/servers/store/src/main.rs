@@ -279,7 +279,6 @@ impl Dispatch for StoreServer {
                 let data = unsafe {
                     core::slice::from_raw_parts((self.client_shared_va + offset) as *const u8, len)
                 };
-
                 let file_id = fs::FileId(req.file_id);
 
                 match self.store.write(file_id, req.offset, data) {
@@ -513,7 +512,6 @@ impl Dispatch for StoreServer {
                 let results = self.store.query(&store::Query::MediaType(
                     alloc::string::ToString::to_string(&media_type),
                 ));
-
                 let file_id = match results.first() {
                     Some(&id) => id,
                     None => {
@@ -522,7 +520,6 @@ impl Dispatch for StoreServer {
                         return;
                     }
                 };
-
                 let size = self.store.metadata(file_id).map(|m| m.size).unwrap_or(0);
 
                 if size == 0 {
@@ -550,10 +547,8 @@ impl Dispatch for StoreServer {
                         return;
                     }
                 };
-
                 // SAFETY: va is a valid RW mapping of vmo_size >= size bytes.
                 let buf = unsafe { core::slice::from_raw_parts_mut(va as *mut u8, size as usize) };
-
                 let bytes_read = match self.store.read(file_id, 0, buf) {
                     Ok(n) => n as u64,
                     Err(ref e) => {
@@ -564,9 +559,7 @@ impl Dispatch for StoreServer {
                         return;
                     }
                 };
-
                 let _ = abi::vmo::unmap(va);
-
                 let ro = Rights(Rights::READ.0 | Rights::MAP.0 | Rights::DUP.0);
                 let transfer = match abi::handle::dup(vmo, ro) {
                     Ok(h) => {
@@ -576,7 +569,6 @@ impl Dispatch for StoreServer {
                     }
                     Err(_) => vmo,
                 };
-
                 let reply = store_service::QueryTypeReply {
                     file_id: file_id.0,
                     size: bytes_read,
@@ -666,9 +658,7 @@ extern "C" fn _start() -> ! {
     console::write(console_ep, b"store: fs OK\n");
 
     let needs_store_init = !has_filesystem;
-
     let fs_box: Box<dyn fs::Files> = Box::new(filesystem);
-
     let store = if needs_store_init {
         console::write(console_ep, b"store: initializing new store\n");
 
