@@ -1326,3 +1326,34 @@ fn hit_test_with_child_offset() {
     assert_eq!(w.hit_test(110.0, 20.0), Some(child));
     assert_eq!(w.hit_test(20.0, 20.0), None);
 }
+
+#[test]
+fn hit_test_rounded_rect() {
+    let mut buf = make_scene_buf();
+    let mut w = SceneWriter::new(&mut buf);
+    let root = w.alloc_node().unwrap();
+
+    w.set_root(root);
+
+    {
+        let n = w.node_mut(root);
+
+        n.width = upt(48);
+        n.height = upt(48);
+        n.corner_radius = 24; // fully circular
+        n.state = STATE_FOCUSABLE;
+    }
+
+    // Center of circle — should hit.
+    assert_eq!(w.hit_test(24.0, 24.0), Some(root));
+    // Inside bounding box but outside the circle — corners.
+    assert_eq!(w.hit_test(1.0, 1.0), None);
+    assert_eq!(w.hit_test(47.0, 1.0), None);
+    assert_eq!(w.hit_test(1.0, 47.0), None);
+    assert_eq!(w.hit_test(47.0, 47.0), None);
+    // Edge of circle — just inside at the cardinal points.
+    assert_eq!(w.hit_test(24.0, 0.5), Some(root));
+    assert_eq!(w.hit_test(24.0, 47.5), Some(root));
+    assert_eq!(w.hit_test(0.5, 24.0), Some(root));
+    assert_eq!(w.hit_test(47.5, 24.0), Some(root));
+}

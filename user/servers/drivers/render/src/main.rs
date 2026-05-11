@@ -2195,6 +2195,7 @@ impl Compositor {
     fn cursor_icon_name(&self) -> &'static str {
         match self.cursor_shape {
             scene::CURSOR_TEXT => "cursor-text",
+            scene::CURSOR_HAND => "hand-finger",
             _ => "pointer",
         }
     }

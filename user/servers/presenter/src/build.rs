@@ -932,36 +932,33 @@ fn build_showcase_nodes(
             n.corner_radius = 24;
             n.role = scene::ROLE_BUTTON;
             n.state = scene::STATE_FOCUSABLE;
-            n.cursor_shape = scene::CURSOR_POINTER;
+            n.cursor_shape = scene::CURSOR_HAND;
             n.name = name_ref;
 
             scene.add_child(container, btn_id);
 
-            // Play triangle icon (▶) centered in the button.
-            let mut path_buf = alloc::vec::Vec::new();
-            let cx = btn_w as f32 / 2.0;
-            let cy = btn_h as f32 / 2.0;
-            let tri_size = 12.0;
-
-            scene::path_move_to(&mut path_buf, cx - tri_size * 0.4, cy - tri_size);
-            scene::path_line_to(&mut path_buf, cx + tri_size * 0.8, cy);
-            scene::path_line_to(&mut path_buf, cx - tri_size * 0.4, cy + tri_size);
-            scene::path_close(&mut path_buf);
-
-            let path_ref = scene.push_data(&path_buf);
+            let icon_data = icons::get("player-play", None);
+            let icon_padding = 12u32;
+            let icon_size_pt = btn_h.min(btn_w) - icon_padding * 2;
+            let (icon_data_ref, icon_hash) = scale_icon_paths(scene, icon_data, icon_size_pt);
+            let icon_sw_pt = icon_data.stroke_width * (icon_size_pt as f32 / icon_data.viewbox);
+            let icon_sw_fixed = (icon_sw_pt * 256.0) as u16;
 
             if let Some(icon_id) = scene.alloc_node() {
                 let icon = scene.node_mut(icon_id);
 
-                icon.width = upt(btn_w);
-                icon.height = upt(btn_h);
+                icon.x = pt(icon_padding as i32);
+                icon.y = pt(icon_padding as i32);
+                icon.width = upt(icon_size_pt);
+                icon.height = upt(icon_size_pt);
                 icon.content = Content::Path {
-                    color: Color::rgba(255, 255, 255, 200),
-                    stroke_color: Color::TRANSPARENT,
+                    color: Color::TRANSPARENT,
+                    stroke_color: Color::rgba(255, 255, 255, 200),
                     fill_rule: FillRule::Winding,
-                    stroke_width: 0,
-                    contours: path_ref,
+                    stroke_width: icon_sw_fixed,
+                    contours: icon_data_ref,
                 };
+                icon.content_hash = icon_hash;
 
                 scene.add_child(btn_id, icon_id);
             }
@@ -1684,78 +1681,17 @@ impl super::Presenter {
         let scene = SceneWriter::from_existing(unsafe {
             core::slice::from_raw_parts_mut(self.scene_buf.as_ptr() as *mut u8, SCENE_SIZE)
         });
-        let node_count = scene.node_count() as usize;
 
-        if node_count == 0 {
-            return scene::CURSOR_POINTER;
-        }
-
-        let test_x = (self.pointer_x as i64) * (scene::MPT_PER_PT as i64);
-        let test_y = (self.pointer_y as i64) * (scene::MPT_PER_PT as i64);
-        let mut parent = [scene::NULL; 64];
-        let mut hit: scene::NodeId = scene::NULL;
-        let mut stack: [(scene::NodeId, i64, i64); 48] = [(scene::NULL, 0, 0); 48];
-        let mut sp: usize = 0;
-        let root = scene.node(0);
-
-        if root.flags.contains(NodeFlags::VISIBLE) {
-            stack[0] = (0, 0, 0);
-            sp = 1;
-        }
-
-        while sp > 0 {
-            sp -= 1;
-
-            let (id, ox, oy) = stack[sp];
-            let node = scene.node(id);
-            let abs_x = ox + node.x as i64;
-            let abs_y = oy + node.y as i64;
-            let inside = test_x >= abs_x
-                && test_x < abs_x + node.width as i64
-                && test_y >= abs_y
-                && test_y < abs_y + node.height as i64;
-
-            if inside {
-                hit = id;
-            }
-
-            if node.clips_children() && !inside {
-                continue;
-            }
-
-            let child_ox = abs_x - (node.child_offset_x * scene::MPT_PER_PT as f32) as i64;
-            let child_oy = abs_y - (node.child_offset_y * scene::MPT_PER_PT as f32) as i64;
-            let mut children: [scene::NodeId; 16] = [scene::NULL; 16];
-            let mut nc: usize = 0;
-            let mut c = node.first_child;
-
-            while c != scene::NULL && (c as usize) < node_count && nc < 16 {
-                children[nc] = c;
-                parent[c as usize & 63] = id;
-                nc += 1;
-                c = scene.node(c).next_sibling;
-            }
-
-            for i in (0..nc).rev() {
-                let cid = children[i];
-
-                if scene.node(cid).flags.contains(NodeFlags::VISIBLE) && sp < stack.len() {
-                    stack[sp] = (cid, child_ox, child_oy);
-                    sp += 1;
-                }
-            }
-        }
-
-        let mut cursor_node = hit;
-
-        while cursor_node != scene::NULL && (cursor_node as usize) < node_count {
-            let shape = scene.node(cursor_node).cursor_shape;
+        if let Some(hit_id) = scene.hit_test(self.pointer_x, self.pointer_y) {
+            let shape = scene.node(hit_id).cursor_shape;
 
             if shape != scene::CURSOR_INHERIT {
                 return shape;
             }
+        }
 
-            cursor_node = parent[cursor_node as usize & 63];
+        if self.active_space == 0 && self.is_on_page(self.pointer_x as u32, self.pointer_y as u32) {
+            return scene::CURSOR_TEXT;
         }
 
         scene::CURSOR_POINTER

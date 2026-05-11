@@ -97,16 +97,22 @@ impl Presenter {
         let click_x = (btn.abs_x as u64 * self.display_width as u64 / 32768) as u32;
         let click_y = (btn.abs_y as u64 * self.display_height as u64 / 32768) as u32;
 
-        // Space 2 (showcase): use scene-graph hit testing.
-        if self.active_space == 2 {
+        // Hit-test at click time — same algorithm as pointer-move hover.
+        {
             let scene = scene::SceneWriter::from_existing(self.scene_buf);
 
-            if let Some(hit_id) = scene.hit_test(click_x as f32, click_y as f32)
-                && scene.node(hit_id).role == scene::ROLE_BUTTON
-            {
-                self.play_audio_clip();
-            }
+            if let Some(hit_id) = scene.hit_test(click_x as f32, click_y as f32) {
+                let node = scene.node(hit_id);
 
+                if node.role == scene::ROLE_BUTTON {
+                    self.play_audio_clip();
+
+                    return;
+                }
+            }
+        }
+
+        if self.active_space != 0 {
             return;
         }
 

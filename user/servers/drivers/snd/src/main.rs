@@ -51,9 +51,15 @@ struct SndDevice {
     irq_event: Handle,
     ctrl_buf_va: usize,
     ctrl_buf_pa: u64,
-    tx_buf_va: usize,
-    tx_buf_pa: u64,
+    tx_buf: [TxBuf; 2],
+    tx_active: usize,
+    tx_pending: bool,
     started: bool,
+}
+
+struct TxBuf {
+    va: usize,
+    pa: u64,
 }
 
 impl SndDevice {
@@ -147,44 +153,54 @@ impl SndDevice {
         ok
     }
 
-    fn write_pcm(&mut self, f32_data: &[f32]) {
-        let frame_count = f32_data.len() / 2;
-        let s16_bytes = frame_count * FRAME_BYTES;
-
-        if s16_bytes > PAGE_SIZE - 12 {
+    fn wait_tx_complete(&mut self) {
+        if !self.tx_pending {
             return;
         }
 
-        let buf = self.tx_buf_va as *mut u8;
+        let _ = abi::event::wait(&[(self.irq_event, 0x1)]);
 
-        // SAFETY: tx_buf is a PAGE_SIZE DMA buffer.
+        self.device.ack_interrupt();
+
+        let _ = abi::event::clear(self.irq_event, 0x1);
+        let _ = self.tx_vq.pop_used();
+
+        self.tx_pending = false;
+    }
+
+    fn fill_tx_buf(buf: &TxBuf, f32_data: &[f32]) -> usize {
+        let frame_count = f32_data.len() / 2;
+        let s16_bytes = frame_count * FRAME_BYTES;
+
+        // SAFETY: buf.va is a PAGE_SIZE DMA buffer.
         unsafe {
-            let header = buf as *mut u32;
-
-            core::ptr::write(header, 0u32);
+            core::ptr::write(buf.va as *mut u32, 0u32);
         }
 
-        let s16_start = self.tx_buf_va + 4;
+        let s16_start = buf.va + 4;
 
         for (i, &val) in f32_data.iter().enumerate() {
             let sample = (val * 32767.0).clamp(-32768.0, 32767.0) as i16;
 
             // SAFETY: s16_start + i*2 is within the DMA buffer.
             unsafe {
-                let dst = (s16_start + i * 2) as *mut i16;
-
-                core::ptr::write(dst, sample);
+                core::ptr::write((s16_start + i * 2) as *mut i16, sample);
             }
         }
 
         let status_offset = 4 + s16_bytes;
 
         // SAFETY: status_offset is within the DMA buffer.
-        unsafe { core::ptr::write_bytes((self.tx_buf_va + status_offset) as *mut u8, 0, 8) };
+        unsafe { core::ptr::write_bytes((buf.va + status_offset) as *mut u8, 0, 8) };
 
-        let header_pa = self.tx_buf_pa;
-        let data_pa = self.tx_buf_pa + 4;
-        let status_pa = self.tx_buf_pa + status_offset as u64;
+        s16_bytes
+    }
+
+    fn submit_tx_buf(&mut self, s16_bytes: usize) {
+        let buf = &self.tx_buf[self.tx_active];
+        let header_pa = buf.pa;
+        let data_pa = buf.pa + 4;
+        let status_pa = buf.pa + (4 + s16_bytes) as u64;
 
         self.tx_vq.push_chain(&[
             (header_pa, 4, false),
@@ -194,12 +210,22 @@ impl SndDevice {
 
         self.device.notify(TXQUEUE);
 
-        let _ = abi::event::wait(&[(self.irq_event, 0x1)]);
+        self.tx_pending = true;
+        self.tx_active ^= 1;
+    }
 
-        self.device.ack_interrupt();
+    fn write_pcm(&mut self, f32_data: &[f32]) {
+        let frame_count = f32_data.len() / 2;
+        let s16_bytes = frame_count * FRAME_BYTES;
 
-        let _ = abi::event::clear(self.irq_event, 0x1);
-        let _ = self.tx_vq.pop_used();
+        if s16_bytes > PAGE_SIZE - 12 {
+            return;
+        }
+
+        let s16_bytes = Self::fill_tx_buf(&self.tx_buf[self.tx_active], f32_data);
+
+        self.wait_tx_complete();
+        self.submit_tx_buf(s16_bytes);
     }
 }
 
@@ -251,12 +277,6 @@ impl Dispatch for SndServer {
                     return;
                 }
 
-                if !self.snd.started && !self.snd.start() {
-                    let _ = msg.reply_error(ipc::STATUS_IO_ERROR);
-
-                    return;
-                }
-
                 let f32_count = len / 4;
                 let f32_data = unsafe {
                     core::slice::from_raw_parts((self.shared_va + offset) as *const f32, f32_count)
@@ -264,6 +284,12 @@ impl Dispatch for SndServer {
                 let chunk_frames = (PAGE_SIZE - 12) / FRAME_BYTES;
                 let chunk_samples = chunk_frames * 2;
                 let mut written = 0;
+
+                if !self.snd.started && !self.snd.start() {
+                    let _ = msg.reply_error(ipc::STATUS_IO_ERROR);
+
+                    return;
+                }
 
                 while written < f32_count {
                     let remaining = f32_count - written;
@@ -273,6 +299,8 @@ impl Dispatch for SndServer {
 
                     written += chunk;
                 }
+
+                self.snd.wait_tx_complete();
 
                 let _ = msg.reply_empty();
             }
@@ -364,13 +392,21 @@ extern "C" fn _start() -> ! {
     // SAFETY: DMA allocation is valid; zeroing before use.
     unsafe { core::ptr::write_bytes(ctrl_dma.va as *mut u8, 0, PAGE_SIZE) };
 
-    let tx_dma = match init::request_dma(HANDLE_INIT_EP, PAGE_SIZE) {
+    let tx_dma_0 = match init::request_dma(HANDLE_INIT_EP, PAGE_SIZE) {
         Ok(d) => d,
         Err(_) => abi::thread::exit(5),
     };
 
     // SAFETY: DMA allocation is valid; zeroing before use.
-    unsafe { core::ptr::write_bytes(tx_dma.va as *mut u8, 0, PAGE_SIZE) };
+    unsafe { core::ptr::write_bytes(tx_dma_0.va as *mut u8, 0, PAGE_SIZE) };
+
+    let tx_dma_1 = match init::request_dma(HANDLE_INIT_EP, PAGE_SIZE) {
+        Ok(d) => d,
+        Err(_) => abi::thread::exit(5),
+    };
+
+    // SAFETY: DMA allocation is valid; zeroing before use.
+    unsafe { core::ptr::write_bytes(tx_dma_1.va as *mut u8, 0, PAGE_SIZE) };
 
     device.driver_ok();
 
@@ -391,8 +427,18 @@ extern "C" fn _start() -> ! {
         irq_event,
         ctrl_buf_va: ctrl_dma.va,
         ctrl_buf_pa: ctrl_dma.va as u64,
-        tx_buf_va: tx_dma.va,
-        tx_buf_pa: tx_dma.va as u64,
+        tx_buf: [
+            TxBuf {
+                va: tx_dma_0.va,
+                pa: tx_dma_0.va as u64,
+            },
+            TxBuf {
+                va: tx_dma_1.va,
+                pa: tx_dma_1.va as u64,
+            },
+        ],
+        tx_active: 0,
+        tx_pending: false,
         started: false,
     };
     let console_ep = match name::watch(HANDLE_NS_EP, b"console") {

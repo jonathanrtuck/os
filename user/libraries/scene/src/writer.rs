@@ -529,11 +529,41 @@ impl<'a> SceneWriter<'a> {
         }
 
         // No child was hit — test this node itself.
-        if n.state & STATE_FOCUSABLE != 0 && lx >= 0.0 && ly >= 0.0 && lx < nw && ly < nh {
+        if n.state & STATE_FOCUSABLE != 0
+            && lx >= 0.0
+            && ly >= 0.0
+            && lx < nw
+            && ly < nh
+            && Self::point_in_rounded_rect(lx, ly, nw, nh, n.corner_radius)
+        {
             return Some(id);
         }
 
         None
+    }
+
+    fn point_in_rounded_rect(x: f32, y: f32, w: f32, h: f32, corner_radius: u8) -> bool {
+        if corner_radius == 0 {
+            return true;
+        }
+
+        let r = (corner_radius as f32).min(w * 0.5).min(h * 0.5);
+        let dx = if x < r {
+            r - x
+        } else if x > w - r {
+            x - (w - r)
+        } else {
+            return true;
+        };
+        let dy = if y < r {
+            r - y
+        } else if y > h - r {
+            y - (h - r)
+        } else {
+            return true;
+        };
+
+        dx * dx + dy * dy <= r * r
     }
 
     fn store_generation_release(&mut self, gen: u32) {

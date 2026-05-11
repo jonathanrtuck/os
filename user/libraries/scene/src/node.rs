@@ -70,6 +70,8 @@ pub const CURSOR_INHERIT: u8 = 0;
 pub const CURSOR_POINTER: u8 = 1;
 /// Text/I-beam cursor (text content regions).
 pub const CURSOR_TEXT: u8 = 2;
+/// Hand/finger cursor (clickable interactive elements).
+pub const CURSOR_HAND: u8 = 3;
 
 // ── Semantic roles ──────────────────────────────────────────────────
 //
