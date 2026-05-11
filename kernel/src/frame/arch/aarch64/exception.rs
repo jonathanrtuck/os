@@ -720,6 +720,7 @@ fn handle_data_abort(frame: &mut TrapFrame) {
 
 fn unimplemented_el0(frame: &TrapFrame, kind: &str) -> ! {
     sysreg::disable_irqs();
+    super::serial::break_lock();
 
     crate::println!();
 

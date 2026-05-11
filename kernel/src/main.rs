@@ -129,6 +129,8 @@ extern "C" fn kernel_main_upper() -> ! {
                     arch::page_table::Asid(asid),
                 );
 
+                arch::serial::suppress();
+
                 arch::context::enter_userspace_by_id(tid.0);
             }
             Err(e) => {

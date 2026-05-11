@@ -20,6 +20,7 @@ const TXFF: u32 = 1 << 5;
 
 static SERIAL_LOCK: AtomicBool = AtomicBool::new(false);
 static LOCK_ENABLED: AtomicBool = AtomicBool::new(false);
+static SUPPRESSED: AtomicBool = AtomicBool::new(false);
 
 /// Enable the serial spinlock. Call after the MMU is enabled and before
 /// secondary cores start printing.
@@ -27,9 +28,17 @@ pub fn enable_lock() {
     LOCK_ENABLED.store(true, Ordering::Release);
 }
 
-/// Force-release the serial lock. Called from the panic handler to prevent
-/// deadlock when the panicking core already holds the lock.
+/// Suppress informational serial output. Call once userspace owns the UART
+/// via the console service — avoids interleaved output from kernel and
+/// userspace writing to the same UART register on different cores.
+pub fn suppress() {
+    SUPPRESSED.store(true, Ordering::Release);
+}
+
+/// Force-release the serial lock and clear suppression. Called from the
+/// panic handler to ensure panic messages always reach the UART.
 pub fn break_lock() {
+    SUPPRESSED.store(false, Ordering::Release);
     SERIAL_LOCK.store(false, Ordering::Release);
 }
 
@@ -93,6 +102,10 @@ impl core::fmt::Write for Writer {
     // write_fmt calls write_str per segment, which would interleave
     // output from concurrent cores.
     fn write_fmt(&mut self, args: core::fmt::Arguments<'_>) -> core::fmt::Result {
+        if SUPPRESSED.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+
         let _guard = SerialGuard::acquire();
 
         core::fmt::write(self, args)

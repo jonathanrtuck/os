@@ -604,6 +604,7 @@ pub fn dispatch(
         let violations = crate::invariants::verify();
 
         if !violations.is_empty() {
+            crate::frame::arch::serial::break_lock();
             crate::println!("INVARIANT VIOLATION after syscall {syscall_num}:");
 
             for v in &violations {
