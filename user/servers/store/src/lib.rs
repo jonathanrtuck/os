@@ -22,6 +22,11 @@ pub const DELETE_SNAPSHOT: u32 = 9;
 pub const GET_INFO: u32 = 10;
 pub const QUERY_TYPE: u32 = 11;
 
+/// Load a file by media type in one round-trip.
+/// Request: QueryTypeRequest + inline media type bytes.
+/// Reply: QueryTypeReply (file_id, size) + handle[0] = data VMO (READ | MAP).
+pub const LOAD_TYPE: u32 = 12;
+
 /// Create request — media type as inline bytes after the header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CreateRequest {
@@ -504,6 +509,8 @@ mod tests {
             RESTORE,
             DELETE_SNAPSHOT,
             GET_INFO,
+            QUERY_TYPE,
+            LOAD_TYPE,
         ];
 
         for i in 0..methods.len() {

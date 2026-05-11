@@ -609,131 +609,57 @@ impl Dispatch for Presenter {
     }
 }
 
+// ── Store helper ─────────────────────────────────────────────────
+
+fn store_load_type(media_type: &[u8]) -> Option<(Handle, usize)> {
+    let store_ep = name::lookup(HANDLE_NS_EP, b"store").ok()?;
+    let mut call_buf = [0u8; ipc::message::MSG_SIZE];
+    let mut req_buf = [0u8; ipc::message::MAX_PAYLOAD];
+    let qt_req = store_service::QueryTypeRequest {
+        media_type_len: media_type.len() as u16,
+    };
+
+    qt_req.write_to(&mut req_buf);
+    req_buf[store_service::QueryTypeRequest::SIZE..][..media_type.len()]
+        .copy_from_slice(media_type);
+
+    let payload_len = store_service::QueryTypeRequest::SIZE + media_type.len();
+    let mut handles = [0u32; 4];
+    let reply = ipc::client::call(
+        store_ep,
+        store_service::LOAD_TYPE,
+        &req_buf[..payload_len],
+        &[],
+        &mut handles,
+        &mut call_buf,
+    )
+    .ok()?;
+
+    if reply.is_error()
+        || reply.payload.len() < store_service::QueryTypeReply::SIZE
+        || handles[0] == 0
+    {
+        return None;
+    }
+
+    let qt = store_service::QueryTypeReply::read_from(reply.payload);
+
+    Some((Handle(handles[0]), qt.size as usize))
+}
+
 // ── Image loading from store + decode + upload ──────────────────
 
 const IMAGE_CONTENT_ID: u32 = 1;
-const IMAGE_MEDIA_TYPE: &[u8] = b"image/jpeg";
 
 fn load_and_decode_image(server: &mut Presenter, render_ep: Handle) {
-    let store_ep = match name::lookup(HANDLE_NS_EP, b"store") {
-        Ok(h) => h,
-        Err(_) => return,
+    let (file_vmo, bytes_read) = match store_load_type(b"image/jpeg") {
+        Some(r) => r,
+        None => return,
     };
-    // Query store for an image/jpeg document.
-    let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
-    let mut call_buf = [0u8; ipc::message::MSG_SIZE];
-    let mut query_buf = [0u8; store_service::QueryTypeRequest::SIZE + IMAGE_MEDIA_TYPE.len()];
-    let qt_req = store_service::QueryTypeRequest {
-        media_type_len: IMAGE_MEDIA_TYPE.len() as u16,
-    };
-
-    qt_req.write_to(&mut query_buf);
-    query_buf[store_service::QueryTypeRequest::SIZE..][..IMAGE_MEDIA_TYPE.len()]
-        .copy_from_slice(IMAGE_MEDIA_TYPE);
-
-    let query_len = store_service::QueryTypeRequest::SIZE + IMAGE_MEDIA_TYPE.len();
-    let query_reply = match ipc::client::call(
-        store_ep,
-        store_service::QUERY_TYPE,
-        &query_buf[..query_len],
-        &[],
-        &mut [],
-        &mut call_buf,
-    ) {
-        Ok(r) => r,
-        Err(_) => return,
-    };
-
-    if query_reply.is_error() || query_reply.payload.len() < store_service::QueryTypeReply::SIZE {
-        return;
-    }
-
-    let qt = store_service::QueryTypeReply::read_from(query_reply.payload);
-    let file_id = qt.file_id;
-    let file_size = qt.size as usize;
-
-    if file_size == 0 {
-        return;
-    }
-
-    let shared_vmo_size = file_size.next_multiple_of(PAGE_SIZE);
-    let shared_vmo = match abi::vmo::create(shared_vmo_size, 0) {
-        Ok(h) => h,
-        Err(_) => return,
-    };
-    let shared_dup = match abi::handle::dup(shared_vmo, rw) {
-        Ok(h) => h,
-        Err(_) => {
-            let _ = abi::handle::close(shared_vmo);
-
-            return;
-        }
-    };
-    let setup_reply = ipc::client::call(
-        store_ep,
-        store_service::SETUP,
-        &[],
-        &[shared_dup.0],
-        &mut [],
-        &mut call_buf,
-    );
-
-    if setup_reply.is_err() {
-        let _ = abi::handle::close(shared_vmo);
-
-        return;
-    }
-
-    let read_req = store_service::ReadRequest {
-        file_id,
-        offset: 0,
-        vmo_offset: 0,
-        max_len: file_size as u32,
-    };
-    let mut read_buf = [0u8; store_service::ReadRequest::SIZE];
-
-    read_req.write_to(&mut read_buf);
-
-    let read_reply = match ipc::client::call(
-        store_ep,
-        store_service::READ_DOC,
-        &read_buf,
-        &[],
-        &mut [],
-        &mut call_buf,
-    ) {
-        Ok(r) => r,
-        Err(_) => {
-            let _ = abi::handle::close(shared_vmo);
-
-            return;
-        }
-    };
-
-    if read_reply.is_error() || read_reply.payload.len() < store_service::ReadReply::SIZE {
-        let _ = abi::handle::close(shared_vmo);
-
-        return;
-    }
-
-    let rr = store_service::ReadReply::read_from(read_reply.payload);
-    let bytes_read = rr.bytes_read as usize;
-
-    if bytes_read == 0 {
-        let _ = abi::handle::close(shared_vmo);
-
-        return;
-    }
-
-    // Send the JPEG data to the decoder service for decoding.
     let decoder_ep = match name::lookup(HANDLE_NS_EP, b"jpeg-decoder") {
         Ok(h) => h,
         Err(_) => {
-            console::write(
-                server.console_ep,
-                b"presenter: jpeg-decoder lookup failed\n",
-            );
-            let _ = abi::handle::close(shared_vmo);
+            let _ = abi::handle::close(file_vmo);
 
             return;
         }
@@ -745,29 +671,24 @@ fn load_and_decode_image(server: &mut Presenter, render_ep: Handle) {
 
     decode_req.write_to(&mut decode_buf);
 
+    let mut call_buf = [0u8; ipc::message::MSG_SIZE];
     let mut decode_handles = [0u32; 4];
     let decode_reply = match ipc::client::call(
         decoder_ep,
         jpeg_decoder::DECODE,
         &decode_buf,
-        &[shared_vmo.0],
+        &[file_vmo.0],
         &mut decode_handles,
         &mut call_buf,
     ) {
         Ok(r) => r,
-        Err(_) => {
-            console::write(server.console_ep, b"presenter: jpeg decode IPC failed\n");
-
-            return;
-        }
+        Err(_) => return,
     };
 
     if decode_reply.is_error()
         || decode_reply.payload.len() < jpeg_decoder::DecodeReply::SIZE
         || decode_reply.handle_count == 0
     {
-        console::write(server.console_ep, b"presenter: jpeg decode error reply\n");
-
         return;
     }
 
@@ -812,123 +733,20 @@ fn load_and_decode_image(server: &mut Presenter, render_ep: Handle) {
 // ── Video loading from document store ───────────────────────────
 
 const VIDEO_CONTENT_ID: u32 = 2;
-const VIDEO_MEDIA_TYPE: &[u8] = b"video/avi";
 
 fn load_video(server: &mut Presenter, render_ep: Handle) {
-    let store_ep = match name::lookup(HANDLE_NS_EP, b"store") {
-        Ok(h) => h,
-        Err(_) => return,
+    let (file_vmo, bytes_read) = match store_load_type(b"video/avi") {
+        Some(r) => r,
+        None => return,
     };
     let decoder_ep = match name::lookup(HANDLE_NS_EP, b"video-decoder") {
         Ok(h) => h,
-        Err(_) => return,
-    };
-    let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
-    let mut call_buf = [0u8; ipc::message::MSG_SIZE];
-    let mut query_buf = [0u8; store_service::QueryTypeRequest::SIZE + VIDEO_MEDIA_TYPE.len()];
-    let qt_req = store_service::QueryTypeRequest {
-        media_type_len: VIDEO_MEDIA_TYPE.len() as u16,
-    };
-
-    qt_req.write_to(&mut query_buf);
-    query_buf[store_service::QueryTypeRequest::SIZE..][..VIDEO_MEDIA_TYPE.len()]
-        .copy_from_slice(VIDEO_MEDIA_TYPE);
-
-    let query_len = store_service::QueryTypeRequest::SIZE + VIDEO_MEDIA_TYPE.len();
-    let query_reply = match ipc::client::call(
-        store_ep,
-        store_service::QUERY_TYPE,
-        &query_buf[..query_len],
-        &[],
-        &mut [],
-        &mut call_buf,
-    ) {
-        Ok(r) => r,
-        Err(_) => return,
-    };
-
-    if query_reply.is_error() || query_reply.payload.len() < store_service::QueryTypeReply::SIZE {
-        return;
-    }
-
-    let qt = store_service::QueryTypeReply::read_from(query_reply.payload);
-    let file_id = qt.file_id;
-    let file_size = qt.size as usize;
-
-    if file_size == 0 {
-        return;
-    }
-
-    let shared_vmo_size = file_size.next_multiple_of(PAGE_SIZE);
-    let shared_vmo = match abi::vmo::create(shared_vmo_size, 0) {
-        Ok(h) => h,
-        Err(_) => return,
-    };
-    let shared_dup = match abi::handle::dup(shared_vmo, rw) {
-        Ok(h) => h,
         Err(_) => {
-            let _ = abi::handle::close(shared_vmo);
+            let _ = abi::handle::close(file_vmo);
 
             return;
         }
     };
-
-    if ipc::client::call(
-        store_ep,
-        store_service::SETUP,
-        &[],
-        &[shared_dup.0],
-        &mut [],
-        &mut call_buf,
-    )
-    .is_err()
-    {
-        let _ = abi::handle::close(shared_vmo);
-
-        return;
-    }
-
-    let read_req = store_service::ReadRequest {
-        file_id,
-        offset: 0,
-        vmo_offset: 0,
-        max_len: file_size as u32,
-    };
-    let mut read_buf = [0u8; store_service::ReadRequest::SIZE];
-
-    read_req.write_to(&mut read_buf);
-
-    let read_reply = match ipc::client::call(
-        store_ep,
-        store_service::READ_DOC,
-        &read_buf,
-        &[],
-        &mut [],
-        &mut call_buf,
-    ) {
-        Ok(r) => r,
-        Err(_) => {
-            let _ = abi::handle::close(shared_vmo);
-
-            return;
-        }
-    };
-
-    if read_reply.is_error() || read_reply.payload.len() < store_service::ReadReply::SIZE {
-        let _ = abi::handle::close(shared_vmo);
-
-        return;
-    }
-
-    let rr = store_service::ReadReply::read_from(read_reply.payload);
-    let bytes_read = rr.bytes_read as usize;
-
-    if bytes_read == 0 {
-        let _ = abi::handle::close(shared_vmo);
-
-        return;
-    }
-
     let open_req = video_decoder::OpenRequest {
         file_size: bytes_read as u32,
     };
@@ -936,12 +754,13 @@ fn load_video(server: &mut Presenter, render_ep: Handle) {
 
     open_req.write_to(&mut open_buf);
 
+    let mut call_buf = [0u8; ipc::message::MSG_SIZE];
     let mut open_handles = [0u32; 4];
     let open_reply = match ipc::client::call(
         decoder_ep,
         video_decoder::OPEN,
         &open_buf,
-        &[shared_vmo.0],
+        &[file_vmo.0],
         &mut open_handles,
         &mut call_buf,
     ) {
@@ -1014,136 +833,19 @@ fn upload_video_to_compositor(server: &mut Presenter, render_ep: Handle) {
 
 // ── Audio clip loading from store ─────────────────────────────────
 
-const AUDIO_MEDIA_TYPE: &[u8] = b"audio/wav";
-
 fn load_audio_clip(server: &mut Presenter) {
-    let store_ep = match name::lookup(HANDLE_NS_EP, b"store") {
-        Ok(h) => h,
-        Err(_) => return,
+    let (data_vmo, bytes_read) = match store_load_type(b"audio/wav") {
+        Some(r) => r,
+        None => return,
     };
     let audio_ep = match name::lookup(HANDLE_NS_EP, b"audio") {
         Ok(h) => h,
-        Err(_) => return,
-    };
-    let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
-    let mut call_buf = [0u8; ipc::message::MSG_SIZE];
-    let mut query_buf = [0u8; store_service::QueryTypeRequest::SIZE + AUDIO_MEDIA_TYPE.len()];
-    let qt_req = store_service::QueryTypeRequest {
-        media_type_len: AUDIO_MEDIA_TYPE.len() as u16,
-    };
-
-    qt_req.write_to(&mut query_buf);
-    query_buf[store_service::QueryTypeRequest::SIZE..][..AUDIO_MEDIA_TYPE.len()]
-        .copy_from_slice(AUDIO_MEDIA_TYPE);
-
-    let query_len = store_service::QueryTypeRequest::SIZE + AUDIO_MEDIA_TYPE.len();
-    let query_reply = match ipc::client::call(
-        store_ep,
-        store_service::QUERY_TYPE,
-        &query_buf[..query_len],
-        &[],
-        &mut [],
-        &mut call_buf,
-    ) {
-        Ok(r) => r,
-        Err(_) => return,
-    };
-
-    if query_reply.is_error() || query_reply.payload.len() < store_service::QueryTypeReply::SIZE {
-        return;
-    }
-
-    let qt = store_service::QueryTypeReply::read_from(query_reply.payload);
-    let file_id = qt.file_id;
-    let file_size = qt.size as usize;
-
-    if file_size == 0 {
-        return;
-    }
-
-    let vmo_size = file_size.next_multiple_of(PAGE_SIZE);
-    let data_vmo = match abi::vmo::create(vmo_size, 0) {
-        Ok(h) => h,
-        Err(_) => return,
-    };
-    let data_va = match abi::vmo::map(data_vmo, 0, rw) {
-        Ok(va) => va,
         Err(_) => {
             let _ = abi::handle::close(data_vmo);
 
             return;
         }
     };
-    let shared_dup = match abi::handle::dup(data_vmo, rw) {
-        Ok(h) => h,
-        Err(_) => {
-            let _ = abi::vmo::unmap(data_va);
-            let _ = abi::handle::close(data_vmo);
-
-            return;
-        }
-    };
-    let setup_reply = ipc::client::call(
-        store_ep,
-        store_service::SETUP,
-        &[],
-        &[shared_dup.0],
-        &mut [],
-        &mut call_buf,
-    );
-
-    if setup_reply.is_err() {
-        let _ = abi::vmo::unmap(data_va);
-        let _ = abi::handle::close(data_vmo);
-
-        return;
-    }
-
-    let read_req = store_service::ReadRequest {
-        file_id,
-        offset: 0,
-        vmo_offset: 0,
-        max_len: file_size as u32,
-    };
-    let mut read_buf = [0u8; store_service::ReadRequest::SIZE];
-
-    read_req.write_to(&mut read_buf);
-
-    let read_reply = match ipc::client::call(
-        store_ep,
-        store_service::READ_DOC,
-        &read_buf,
-        &[],
-        &mut [],
-        &mut call_buf,
-    ) {
-        Ok(r) => r,
-        Err(_) => {
-            let _ = abi::vmo::unmap(data_va);
-            let _ = abi::handle::close(data_vmo);
-
-            return;
-        }
-    };
-
-    if read_reply.is_error() || read_reply.payload.len() < store_service::ReadReply::SIZE {
-        let _ = abi::vmo::unmap(data_va);
-        let _ = abi::handle::close(data_vmo);
-
-        return;
-    }
-
-    let rr = store_service::ReadReply::read_from(read_reply.payload);
-    let bytes_read = rr.bytes_read as usize;
-
-    if bytes_read == 0 {
-        let _ = abi::vmo::unmap(data_va);
-        let _ = abi::handle::close(data_vmo);
-
-        return;
-    }
-
-    let _ = abi::vmo::unmap(data_va);
 
     server.audio_ep = audio_ep;
     server.audio_vmo = data_vmo;
