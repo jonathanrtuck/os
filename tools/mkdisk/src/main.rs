@@ -85,6 +85,11 @@ const ASSETS: &[AssetSpec] = &[
         media_type: "audio/wav",
         name: "click",
     },
+    AssetSpec {
+        filename: "video.avi",
+        media_type: "video/avi",
+        name: "video",
+    },
 ];
 
 fn main() {

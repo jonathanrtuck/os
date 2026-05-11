@@ -20,7 +20,10 @@ extern crate alloc;
 extern crate heap;
 
 use alloc::vec::Vec;
-use core::panic::PanicInfo;
+use core::{
+    panic::PanicInfo,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use abi::types::{Handle, Rights};
 use ipc::server::{Dispatch, Incoming};
@@ -45,6 +48,11 @@ struct VideoDecoder {
     decode_buf_size: usize,
     width: u32,
     height: u32,
+    output_gen: u64,
+    playing: bool,
+    current_frame: u32,
+    ns_per_frame: u64,
+    next_frame_ns: u64,
 }
 
 impl VideoDecoder {
@@ -100,7 +108,8 @@ impl VideoDecoder {
             }
         };
         let pixel_size = info.width as usize * info.height as usize * 4;
-        let output_buf_size = pixel_size.next_multiple_of(PAGE_SIZE);
+        let output_buf_size =
+            (video_decoder::GEN_HEADER_SIZE + pixel_size).next_multiple_of(PAGE_SIZE);
         let output_vmo = match abi::vmo::create(output_buf_size, 0) {
             Ok(h) => h,
             Err(_) => {
@@ -196,6 +205,13 @@ impl VideoDecoder {
         self.decode_buf_size = decode_buf_size;
         self.width = info.width;
         self.height = info.height;
+        self.output_gen = 0;
+        self.playing = false;
+        self.current_frame = 0;
+        self.ns_per_frame = info.ns_per_frame();
+        self.next_frame_ns = 0;
+
+        self.decode_and_publish(0);
 
         let total = self.frame_index.len() as u32;
 
@@ -214,6 +230,60 @@ impl VideoDecoder {
         let _ = msg.reply_ok(&reply_buf, &[output_dup.0]);
     }
 
+    fn decode_and_publish(&mut self, idx: u32) {
+        if self.file_va == 0 || self.frame_index.is_empty() {
+            return;
+        }
+
+        let idx = idx as usize;
+
+        if idx >= self.frame_index.len() {
+            return;
+        }
+
+        let frame_ref = &self.frame_index[idx];
+        // SAFETY: file_va is a valid mapping of file_size bytes.
+        let file_data =
+            unsafe { core::slice::from_raw_parts(self.file_va as *const u8, self.file_size) };
+        let jpeg_data = match avi::frame_data(file_data, frame_ref) {
+            Some(d) => d,
+            None => return,
+        };
+        // SAFETY: decode_buf_va is a valid RW mapping of decode_buf_size bytes.
+        let decode_buf = unsafe {
+            core::slice::from_raw_parts_mut(self.decode_buf_va as *mut u8, self.decode_buf_size)
+        };
+        let header = match jpeg::jpeg_decode(jpeg_data, decode_buf) {
+            Ok(h) => h,
+            Err(_) => return,
+        };
+        let pixel_size = header.width as usize * header.height as usize * 4;
+        let max_pixels = self
+            .output_buf_size
+            .saturating_sub(video_decoder::GEN_HEADER_SIZE);
+
+        // SAFETY: output_va is a valid RW mapping. Pixels written at offset 8
+        // (after the generation counter header).
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                self.decode_buf_va as *const u8,
+                (self.output_va + video_decoder::GEN_HEADER_SIZE) as *mut u8,
+                pixel_size.min(max_pixels),
+            );
+        }
+
+        self.output_gen = self.output_gen.wrapping_add(1);
+        self.current_frame = idx as u32;
+
+        // SAFETY: output_va is 8-byte aligned (page-aligned VMO). Release
+        // ordering ensures pixel writes above are visible before the gen bump.
+        unsafe {
+            let gen_ptr = self.output_va as *const AtomicU64;
+
+            (*gen_ptr).store(self.output_gen, Ordering::Release);
+        }
+    }
+
     fn handle_decode_frame(&mut self, msg: Incoming<'_>) {
         if msg.payload.len() < video_decoder::DecodeFrameRequest::SIZE {
             let _ = msg.reply_error(ipc::STATUS_INVALID);
@@ -228,55 +298,19 @@ impl VideoDecoder {
         }
 
         let req = video_decoder::DecodeFrameRequest::read_from(msg.payload);
-        let idx = req.frame_index as usize;
 
-        if idx >= self.frame_index.len() {
+        if req.frame_index as usize >= self.frame_index.len() {
             let _ = msg.reply_error(ipc::STATUS_INVALID);
 
             return;
         }
 
-        let frame_ref = &self.frame_index[idx];
-        // SAFETY: file_va is a valid mapping of file_size bytes.
-        let file_data =
-            unsafe { core::slice::from_raw_parts(self.file_va as *const u8, self.file_size) };
-        let jpeg_data = match avi::frame_data(file_data, frame_ref) {
-            Some(d) => d,
-            None => {
-                let _ = msg.reply_error(ipc::STATUS_INVALID);
+        self.decode_and_publish(req.frame_index);
 
-                return;
-            }
-        };
-        // SAFETY: decode_buf_va is a valid RW mapping of decode_buf_size bytes.
-        let decode_buf = unsafe {
-            core::slice::from_raw_parts_mut(self.decode_buf_va as *mut u8, self.decode_buf_size)
-        };
-        let header = match jpeg::jpeg_decode(jpeg_data, decode_buf) {
-            Ok(h) => h,
-            Err(_) => {
-                let _ = msg.reply_error(ipc::STATUS_INVALID);
-
-                return;
-            }
-        };
-        let pixel_size = header.width as usize * header.height as usize * 4;
-
-        // SAFETY: output_va is a valid RW mapping, pixel_size fits within output_buf_size.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                self.decode_buf_va as *const u8,
-                self.output_va as *mut u8,
-                pixel_size.min(self.output_buf_size),
-            );
-        }
-
+        let pixel_size = self.width * self.height * 4;
         let mut reply_buf = [0u8; video_decoder::DecodeFrameReply::SIZE];
 
-        video_decoder::DecodeFrameReply {
-            pixel_size: pixel_size as u32,
-        }
-        .write_to(&mut reply_buf);
+        video_decoder::DecodeFrameReply { pixel_size }.write_to(&mut reply_buf);
 
         let _ = msg.reply_ok(&reply_buf, &[]);
     }
@@ -327,6 +361,17 @@ impl Dispatch for VideoDecoder {
 
                 let _ = msg.reply_empty();
             }
+            video_decoder::PLAY => {
+                self.playing = true;
+                self.next_frame_ns = abi::system::clock_read().unwrap_or(0);
+
+                let _ = msg.reply_empty();
+            }
+            video_decoder::PAUSE => {
+                self.playing = false;
+
+                let _ = msg.reply_empty();
+            }
             _ => {
                 let _ = msg.reply_error(ipc::STATUS_UNSUPPORTED);
             }
@@ -358,9 +403,44 @@ extern "C" fn _start() -> ! {
         decode_buf_size: 0,
         width: 0,
         height: 0,
+        output_gen: 0,
+        playing: false,
+        current_frame: 0,
+        ns_per_frame: 0,
+        next_frame_ns: 0,
     };
 
-    ipc::server::serve(HANDLE_SVC_EP, &mut decoder);
+    loop {
+        if decoder.playing && decoder.ns_per_frame > 0 {
+            let deadline = decoder.next_frame_ns;
+
+            match ipc::server::serve_one_timed(HANDLE_SVC_EP, &mut decoder, deadline) {
+                Ok(()) | Err(abi::types::SyscallError::TimedOut) => {}
+                Err(_) => break,
+            }
+        } else {
+            match ipc::server::serve_one(HANDLE_SVC_EP, &mut decoder) {
+                Ok(()) => {}
+                Err(_) => break,
+            }
+        }
+
+        if decoder.playing && decoder.ns_per_frame > 0 {
+            let now = abi::system::clock_read().unwrap_or(0);
+
+            if now >= decoder.next_frame_ns {
+                let total = decoder.frame_index.len() as u32;
+
+                if total > 0 {
+                    let next = (decoder.current_frame + 1) % total;
+
+                    decoder.decode_and_publish(next);
+                }
+
+                decoder.next_frame_ns = now + decoder.ns_per_frame;
+            }
+        }
+    }
 
     abi::thread::exit(0);
 }

@@ -218,7 +218,6 @@ impl Presenter {
         self.sticky_col = None;
         self.blink_start = abi::system::clock_read().unwrap_or(0);
         self.build_scene();
-        self.request_render();
     }
 
     pub(crate) fn handle_pointer_drag(&mut self, abs_x: u32, abs_y: u32) {
@@ -310,6 +309,5 @@ impl Presenter {
 
         self.blink_start = abi::system::clock_read().unwrap_or(0);
         self.build_scene();
-        self.request_render();
     }
 }

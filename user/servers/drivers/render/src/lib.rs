@@ -580,9 +580,6 @@ pub mod comp {
     /// Reply includes display dimensions.
     pub const SETUP: u32 = 1;
 
-    /// Trigger scene graph read + GPU frame render.
-    pub const RENDER: u32 = 2;
-
     /// Query display dimensions and frame count.
     pub const GET_INFO: u32 = 3;
 
@@ -596,10 +593,8 @@ pub mod comp {
     /// Handle[0]: BGRA8 pixel VMO (mapped RO by compositor).
     pub const UPLOAD_IMAGE: u32 = 6;
 
-    /// Re-upload pixels from the already-mapped image VMO to the GPU
-    /// texture. No handles, no payload. Used for video frame updates
-    /// where the decoder writes new pixels into the same VMO.
-    pub const REFRESH_IMAGE: u32 = 7;
+    pub const IMAGE_FLAG_LIVE: u32 = 1;
+    pub const IMAGE_LIVE_HEADER_SIZE: usize = core::mem::size_of::<u64>();
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct UploadImageRequest {
@@ -607,16 +602,18 @@ pub mod comp {
         pub width: u16,
         pub height: u16,
         pub pixel_size: u32,
+        pub flags: u32,
     }
 
     impl UploadImageRequest {
-        pub const SIZE: usize = 12;
+        pub const SIZE: usize = 16;
 
         pub fn write_to(&self, buf: &mut [u8]) {
             buf[0..4].copy_from_slice(&self.content_id.to_le_bytes());
             buf[4..6].copy_from_slice(&self.width.to_le_bytes());
             buf[6..8].copy_from_slice(&self.height.to_le_bytes());
             buf[8..12].copy_from_slice(&self.pixel_size.to_le_bytes());
+            buf[12..16].copy_from_slice(&self.flags.to_le_bytes());
         }
 
         #[must_use]
@@ -626,6 +623,7 @@ pub mod comp {
                 width: u16::from_le_bytes(buf[4..6].try_into().unwrap()),
                 height: u16::from_le_bytes(buf[6..8].try_into().unwrap()),
                 pixel_size: u32::from_le_bytes(buf[8..12].try_into().unwrap()),
+                flags: u32::from_le_bytes(buf[12..16].try_into().unwrap()),
             }
         }
     }
@@ -716,14 +714,7 @@ pub mod comp {
 
         #[test]
         fn method_ids_distinct() {
-            let methods = [
-                SETUP,
-                RENDER,
-                GET_INFO,
-                POINTER,
-                SET_CURSOR_SHAPE,
-                UPLOAD_IMAGE,
-            ];
+            let methods = [SETUP, GET_INFO, POINTER, SET_CURSOR_SHAPE, UPLOAD_IMAGE];
 
             for i in 0..methods.len() {
                 for j in (i + 1)..methods.len() {
@@ -739,6 +730,7 @@ pub mod comp {
                 width: 800,
                 height: 600,
                 pixel_size: 800 * 600 * 4,
+                flags: IMAGE_FLAG_LIVE,
             };
             let mut buf = [0u8; UploadImageRequest::SIZE];
 

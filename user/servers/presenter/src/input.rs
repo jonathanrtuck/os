@@ -253,7 +253,6 @@ impl Presenter {
             self.last_anim_tick = abi::system::clock_read().unwrap_or(0);
             self.blink_start = self.last_anim_tick;
             self.build_scene();
-            self.request_render();
 
             return;
         }
@@ -292,7 +291,6 @@ impl Presenter {
             self.sticky_col = None;
             self.blink_start = abi::system::clock_read().unwrap_or(0);
             self.build_scene();
-            self.request_render();
 
             return;
         }
@@ -357,6 +355,5 @@ impl Presenter {
 
         self.blink_start = abi::system::clock_read().unwrap_or(0);
         self.build_scene();
-        self.request_render();
     }
 }

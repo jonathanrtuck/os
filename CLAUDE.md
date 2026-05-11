@@ -221,6 +221,9 @@ forward across any rewrite.
 
 ## Key Architectural Principles (Settled)
 
+- All content loads through the document store, never via 9p/fs. The 9p
+  filesystem is a host-guest development bridge, not a content source. New
+  content types are ingested via `mkdisk` and queried via `QUERY_TYPE`.
 - Everything-is-files is architectural, not UX. Users see abstractions
   (documents, conversations, meetings), not files.
 - File paths are metadata, not the organizing principle.

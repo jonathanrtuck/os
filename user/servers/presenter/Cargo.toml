@@ -13,7 +13,6 @@ service = [
     "dep:console",
     "dep:document-service",
     "dep:fonts",
-    "dep:fs-service",
     "dep:heap",
     "dep:icons",
     "dep:init",
@@ -39,7 +38,6 @@ audio-service = { path = "../audio", optional = true }
 console = { path = "../console", optional = true }
 document-service = { path = "../document", optional = true }
 fonts = { path = "../../libraries/fonts", optional = true }
-fs-service = { path = "../fs", optional = true }
 heap = { path = "../../heap", optional = true }
 icons = { path = "../../libraries/icons", optional = true }
 init = { path = "../init", optional = true }

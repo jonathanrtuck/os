@@ -20,6 +20,10 @@ pub use ipc::MAX_PAYLOAD;
 pub const OPEN: u32 = 1;
 pub const DECODE_FRAME: u32 = 2;
 pub const CLOSE: u32 = 3;
+pub const PLAY: u32 = 4;
+pub const PAUSE: u32 = 5;
+
+pub const GEN_HEADER_SIZE: usize = core::mem::size_of::<u64>();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OpenRequest {

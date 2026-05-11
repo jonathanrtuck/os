@@ -9,9 +9,10 @@
 //!
 //! Probes the virtio MMIO region for a Metal GPU device (device ID 22).
 //! Sets up two virtqueues (setup + render), compiles shaders, creates
-//! a render pipeline, and enters a serve loop. The presenter connects
-//! via `comp::SETUP` (passing the scene graph VMO) and triggers frame
-//! renders via `comp::RENDER`.
+//! a render pipeline, and enters a vsync-driven render loop. The
+//! presenter connects via `comp::SETUP` (passing the scene graph VMO).
+//! The compositor self-drives rendering at hardware refresh rate by
+//! polling generation counters on the scene graph VMO and image VMOs.
 
 #![no_std]
 #![no_main]
@@ -116,6 +117,8 @@ const HANDLE_FONT_VMO: Handle = Handle(5);
 const HANDLE_SVC_EP: Handle = Handle(6);
 
 const PAGE_SIZE: usize = virtio::PAGE_SIZE;
+
+const IMAGE_GEN_HEADER_SIZE: usize = render::comp::IMAGE_LIVE_HEADER_SIZE;
 
 // ── MSL shader source ───────────────────────────────────────────────
 
@@ -384,10 +387,10 @@ const DSS_STENCIL_TEST: u32 = 41;
 const TEX_ATLAS: u32 = 20;
 #[allow(dead_code)]
 const TEX_STENCIL: u32 = 21;
-const TEX_IMAGE: u32 = 22;
+const TEX_IMAGE: u32 = 22; // + slot index; occupies 22..22+MAX_IMAGES-1
 const H_FRAG_BLUR: u32 = 18;
 const PIPE_BLUR: u32 = 19;
-const TEX_BLUR: u32 = 23;
+const TEX_BLUR: u32 = TEX_IMAGE + MAX_IMAGES as u32;
 const SAMPLER_NEAREST: u32 = 30;
 const SAMPLER_LINEAR: u32 = 31;
 
@@ -2173,6 +2176,7 @@ struct Compositor {
 
     scene_va: usize,
     frame_count: u32,
+    last_scene_gen: u32,
     walk_ctx: WalkContext,
     atlas_upload_y: u16,
 
@@ -2193,7 +2197,10 @@ struct ImageSlot {
     w: u16,
     h: u16,
     pixel_size: u32,
+    pixel_offset: usize,
+    last_gen: u64,
     tex_created: bool,
+    is_live: bool,
 }
 
 impl ImageSlot {
@@ -2204,7 +2211,10 @@ impl ImageSlot {
         w: 0,
         h: 0,
         pixel_size: 0,
+        pixel_offset: 0,
+        last_gen: 0,
         tex_created: false,
+        is_live: false,
     };
 }
 
@@ -2395,14 +2405,16 @@ impl Compositor {
             self.images[slot].tex_created = true;
         }
 
+        let pixel_offset = self.images[slot].pixel_offset;
         let row_bytes = img_w as usize * 4;
         let cmd_overhead = render::HEADER_SIZE + 16;
         let max_data_per_submit = self.setup_buf_size - cmd_overhead;
         let max_rows_per_submit = (max_data_per_submit / row_bytes).max(1);
         let total_rows = img_h as usize;
-        // SAFETY: img_va is a valid RO mapping of the pixel VMO.
-        let pixels =
-            unsafe { core::slice::from_raw_parts(img_va as *const u8, pixel_size as usize) };
+        // SAFETY: img_va + pixel_offset is the start of pixel data.
+        let pixels = unsafe {
+            core::slice::from_raw_parts((img_va + pixel_offset) as *const u8, pixel_size as usize)
+        };
 
         let mut y: usize = 0;
 
@@ -2438,6 +2450,57 @@ impl Compositor {
 
             y += rows;
         }
+    }
+
+    fn check_scene_dirty(&mut self) -> bool {
+        if self.scene_va == 0 {
+            return false;
+        }
+
+        // SAFETY: scene_va is a valid RO mapping of at least SCENE_SIZE bytes.
+        let scene_buf =
+            unsafe { core::slice::from_raw_parts(self.scene_va as *const u8, SCENE_SIZE) };
+        let reader = SceneReader::new(scene_buf);
+
+        match reader.begin_read() {
+            Some(current) if current != self.last_scene_gen => {
+                self.last_scene_gen = current;
+
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn refresh_live_images(&mut self) -> bool {
+        let mut changed = false;
+
+        for i in 0..MAX_IMAGES {
+            let img = &self.images[i];
+
+            if img.va == 0 || !img.is_live || !img.tex_created {
+                continue;
+            }
+
+            // SAFETY: va is a valid RO mapping. The generation counter is an
+            // aligned u64 at offset 0. Acquire ordering ensures subsequent
+            // pixel reads see data written before the gen store.
+            let current_gen = unsafe {
+                let ptr = img.va as *const core::sync::atomic::AtomicU64;
+
+                (*ptr).load(core::sync::atomic::Ordering::Acquire)
+            };
+
+            if current_gen != img.last_gen {
+                self.images[i].last_gen = current_gen;
+
+                self.upload_image_slot(i);
+
+                changed = true;
+            }
+        }
+
+        changed
     }
 
     fn find_or_alloc_image_slot(&self, content_id: u32) -> Option<usize> {
@@ -2497,6 +2560,8 @@ impl Compositor {
         if !reader.end_read(scene_gen) {
             return self.walk_ctx.frame_interval_ns;
         }
+
+        self.last_scene_gen = scene_gen;
 
         draws.finalize();
 
@@ -2960,11 +3025,6 @@ impl Dispatch for Compositor {
                     }
                 }
             }
-            render::comp::RENDER => {
-                self.render_frame();
-
-                let _ = msg.reply_empty();
-            }
             render::comp::GET_INFO => {
                 let reply = render::comp::InfoReply {
                     display_width: self.logical_w,
@@ -3006,6 +3066,8 @@ impl Dispatch for Compositor {
                 {
                     let req = render::comp::UploadImageRequest::read_from(msg.payload);
                     let vmo = Handle(msg.handles[0]);
+                    let live = req.flags & render::comp::IMAGE_FLAG_LIVE != 0;
+                    let pixel_offset = if live { IMAGE_GEN_HEADER_SIZE } else { 0 };
 
                     if let Ok(va) = abi::vmo::map(vmo, 0, Rights::READ_MAP) {
                         let slot = self.find_or_alloc_image_slot(req.content_id);
@@ -3018,33 +3080,16 @@ impl Dispatch for Compositor {
                                 w: req.width,
                                 h: req.height,
                                 pixel_size: req.pixel_size,
+                                pixel_offset,
+                                last_gen: 0,
                                 tex_created: false,
+                                is_live: live,
                             };
 
                             self.upload_image_slot(idx);
 
                             console::write(self.console_ep, b"render: image uploaded\n");
                         }
-                    }
-                }
-
-                let _ = msg.reply_empty();
-            }
-            render::comp::REFRESH_IMAGE => {
-                let target_id = if msg.payload.len() >= 4 {
-                    u32::from_le_bytes(msg.payload[0..4].try_into().unwrap())
-                } else {
-                    0
-                };
-
-                for i in 0..MAX_IMAGES {
-                    let img = &self.images[i];
-
-                    if img.va != 0
-                        && img.tex_created
-                        && (target_id == 0 || img.content_id == target_id)
-                    {
-                        self.upload_image_slot(i);
                     }
                 }
 
@@ -3226,6 +3271,7 @@ extern "C" fn _start() -> ! {
         refresh_hz,
         scene_va: 0,
         frame_count: 0,
+        last_scene_gen: 0,
         walk_ctx,
         atlas_upload_y: 0,
         cursor_uploaded: false,
@@ -3233,17 +3279,78 @@ extern "C" fn _start() -> ! {
         cursor_shape: scene::CURSOR_DEFAULT,
         images: [ImageSlot::EMPTY; MAX_IMAGES],
     };
-    let mut next_deadline: u64 = 0;
+
+    {
+        // SAFETY: render_dma.va is a valid DMA allocation.
+        let dma_buf = unsafe {
+            core::slice::from_raw_parts_mut(compositor.render_dma.va as *mut u8, render_buf_size)
+        };
+        let len = {
+            let mut w = CommandWriter::new(dma_buf);
+
+            w.begin_render_pass(
+                render::DRAWABLE_HANDLE,
+                0,
+                0,
+                render::LOAD_CLEAR,
+                render::STORE_STORE,
+                0,
+                0,
+                srgb_to_linear(32.0 / 255.0),
+                srgb_to_linear(32.0 / 255.0),
+                srgb_to_linear(32.0 / 255.0),
+                1.0,
+            );
+            w.end_render_pass();
+            w.present_and_commit(0);
+
+            w.len()
+        };
+
+        submit_and_wait(
+            &compositor.device,
+            &mut compositor.render_vq,
+            compositor.irq_event,
+            render::VIRTQ_RENDER,
+            compositor.render_dma.pa,
+            len,
+        );
+    }
+
+    let frame_interval = compositor.walk_ctx.frame_interval_ns;
+    let mut next_vsync = abi::system::clock_read().unwrap_or(0) + frame_interval;
+    let mut render_deadline: u64 = 0;
 
     loop {
-        match ipc::server::serve_one_timed(HANDLE_SVC_EP, &mut compositor, next_deadline) {
-            Ok(()) => {
-                next_deadline = compositor.walk_ctx.next_deadline;
-            }
-            Err(abi::types::SyscallError::TimedOut) => {
-                next_deadline = compositor.render_frame();
-            }
+        let deadline = if render_deadline > 0 && render_deadline < next_vsync {
+            render_deadline
+        } else {
+            next_vsync
+        };
+
+        match ipc::server::serve_one_timed(HANDLE_SVC_EP, &mut compositor, deadline) {
+            Ok(()) | Err(abi::types::SyscallError::TimedOut) => {}
             Err(_) => break,
+        }
+
+        let now = abi::system::clock_read().unwrap_or(0);
+
+        if now < next_vsync && (render_deadline == 0 || now < render_deadline) {
+            continue;
+        }
+
+        let images_changed = compositor.refresh_live_images();
+        let scene_changed = compositor.check_scene_dirty();
+        let timer_due = render_deadline > 0 && now >= render_deadline;
+
+        if scene_changed || images_changed || timer_due {
+            let next = compositor.render_frame();
+
+            render_deadline = if next > now { next } else { 0 };
+        }
+
+        if now >= next_vsync {
+            next_vsync = now + frame_interval;
         }
     }
 

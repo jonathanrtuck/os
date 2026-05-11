@@ -1755,10 +1755,6 @@ impl super::Presenter {
         true
     }
 
-    pub(crate) fn request_render(&self) {
-        let _ = ipc::client::call_simple(self.render_ep, render::comp::RENDER, &[]);
-    }
-
     pub(crate) fn make_info_reply(&self) -> presenter_service::InfoReply {
         let scene = SceneWriter::from_existing(unsafe {
             core::slice::from_raw_parts_mut(self.scene_buf.as_ptr() as *mut u8, SCENE_SIZE)

@@ -117,17 +117,6 @@ name = "fs"
 version = "0.1.0"
 
 [[package]]
-name = "fs-service"
-version = "0.1.0"
-dependencies = [
- "abi",
- "console",
- "ipc",
- "name",
- "virtio-9p",
-]
-
-[[package]]
 name = "harfrust"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -244,7 +233,6 @@ dependencies = [
  "console",
  "document-service",
  "fonts",
- "fs-service",
  "heap",
  "icons",
  "init",
@@ -396,18 +384,6 @@ dependencies = [
 [[package]]
 name = "virtio"
 version = "0.1.0"
-
-[[package]]
-name = "virtio-9p"
-version = "0.1.0"
-dependencies = [
- "abi",
- "console",
- "init",
- "ipc",
- "name",
- "virtio",
-]
 
 [[package]]
 name = "wav"
