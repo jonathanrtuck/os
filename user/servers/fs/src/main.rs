@@ -30,10 +30,17 @@ const SHARED_VMO_SIZE: usize = PAGE_SIZE * 256;
 struct FsServer {
     ninep_ep: Handle,
     ninep_shared_va: usize,
+    available: bool,
 }
 
 impl Dispatch for FsServer {
     fn dispatch(&mut self, msg: Incoming<'_>) {
+        if !self.available {
+            let _ = msg.reply_error(ipc::STATUS_UNSUPPORTED);
+
+            return;
+        }
+
         match msg.method {
             fs_service::READ_FILE => self.handle_read_file(msg),
             fs_service::STAT => self.handle_stat(msg),
@@ -269,25 +276,27 @@ extern "C" fn _start() -> ! {
 
     console::write(console_ep, b"  fs: starting\n");
 
-    let ninep_ep = match lookup_with_timeout(HANDLE_NS_EP, b"9p", 50) {
-        Some(h) => h,
-        None => {
-            console::write(console_ep, b"  fs: no 9p driver, exiting\n");
-            abi::thread::exit(0);
-        }
-    };
-    let (shared_va, _shared_vmo) = match setup_9p_shared_vmo(ninep_ep) {
-        Some(v) => v,
-        None => {
-            console::write(console_ep, b"  fs: 9p setup failed\n");
-            abi::thread::exit(0xE003);
-        }
-    };
-    console::write(console_ep, b"  fs: ready\n");
+    let backend = lookup_with_timeout(HANDLE_NS_EP, b"9p", 50)
+        .and_then(|ep| setup_9p_shared_vmo(ep).map(|(va, _vmo)| (ep, va)));
+    let mut server = match backend {
+        Some((ninep_ep, shared_va)) => {
+            console::write(console_ep, b"  fs: ready\n");
 
-    let mut server = FsServer {
-        ninep_ep,
-        ninep_shared_va: shared_va,
+            FsServer {
+                ninep_ep,
+                ninep_shared_va: shared_va,
+                available: true,
+            }
+        }
+        None => {
+            console::write(console_ep, b"  fs: no backend, serving errors\n");
+
+            FsServer {
+                ninep_ep: Handle(0),
+                ninep_shared_va: 0,
+                available: false,
+            }
+        }
     };
 
     ipc::server::serve(HANDLE_SVC_EP, &mut server);

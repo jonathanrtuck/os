@@ -544,6 +544,22 @@ impl NinePServer {
     }
 }
 
+struct StubServer;
+
+impl Dispatch for StubServer {
+    fn dispatch(&mut self, msg: Incoming<'_>) {
+        let _ = msg.reply_error(ipc::STATUS_UNSUPPORTED);
+    }
+}
+
+fn serve_stub() -> ! {
+    let mut stub = StubServer;
+
+    ipc::server::serve(HANDLE_SVC_EP, &mut stub);
+
+    abi::thread::exit(0);
+}
+
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.boot")]
 extern "C" fn _start() -> ! {
@@ -554,7 +570,7 @@ extern "C" fn _start() -> ! {
     };
     let (device, slot) = match virtio::find_device(virtio_va, virtio::DEVICE_9P) {
         Some(d) => d,
-        None => abi::thread::exit(0),
+        None => serve_stub(),
     };
     let (ok, _accepted) = device.negotiate_features(VIRTIO_9P_F_MOUNT_TAG);
 
