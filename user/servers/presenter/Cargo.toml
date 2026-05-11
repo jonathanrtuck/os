@@ -22,6 +22,7 @@ service = [
     "dep:name",
     "dep:piecetable",
     "dep:jpeg-decoder",
+    "dep:video-decoder",
     "dep:render",
     "dep:store-service",
     "dep:scene",
@@ -51,5 +52,6 @@ render = { path = "../drivers/render", optional = true }
 scene = { path = "../../libraries/scene", optional = true }
 store-service = { path = "../store", optional = true }
 text-editor = { path = "../../editors/text", optional = true }
+video-decoder = { path = "../video-decoder", optional = true }
 
 [workspace]

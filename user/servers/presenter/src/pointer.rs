@@ -105,6 +105,7 @@ impl Presenter {
                 let node = scene.node(hit_id);
 
                 if node.role == scene::ROLE_BUTTON {
+                    self.toggle_video_playback();
                     self.play_audio_clip();
 
                     return;

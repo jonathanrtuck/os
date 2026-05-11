@@ -596,6 +596,11 @@ pub mod comp {
     /// Handle[0]: BGRA8 pixel VMO (mapped RO by compositor).
     pub const UPLOAD_IMAGE: u32 = 6;
 
+    /// Re-upload pixels from the already-mapped image VMO to the GPU
+    /// texture. No handles, no payload. Used for video frame updates
+    /// where the decoder writes new pixels into the same VMO.
+    pub const REFRESH_IMAGE: u32 = 7;
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct UploadImageRequest {
         pub content_id: u32,

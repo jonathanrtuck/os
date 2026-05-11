@@ -24,6 +24,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "avi"
+version = "0.1.0"
+
+[[package]]
 name = "bitflags"
 version = "2.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -254,6 +258,7 @@ dependencies = [
  "scene",
  "store-service",
  "text-editor",
+ "video-decoder",
 ]
 
 [[package]]
@@ -374,6 +379,19 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "video-decoder"
+version = "0.1.0"
+dependencies = [
+ "abi",
+ "avi",
+ "console",
+ "heap",
+ "ipc",
+ "jpeg",
+ "name",
+]
 
 [[package]]
 name = "virtio"

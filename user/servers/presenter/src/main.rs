@@ -355,6 +355,16 @@ pub(crate) struct Presenter {
     pub(crate) audio_vmo: Handle,
     pub(crate) audio_data_len: u32,
 
+    pub(crate) video_decoder_ep: Handle,
+    pub(crate) video_frame_vmo: Handle,
+    pub(crate) video_frame_va: usize,
+    pub(crate) video_total_frames: u32,
+    pub(crate) video_current_frame: u32,
+    pub(crate) video_ns_per_frame: u64,
+    pub(crate) video_pixel_size: u32,
+    pub(crate) video_playing: bool,
+    pub(crate) video_next_frame_ns: u64,
+
     pub(crate) console_ep: Handle,
 }
 
@@ -820,6 +830,220 @@ fn load_and_decode_image(server: &mut Presenter, render_ep: Handle) {
     console::write(server.console_ep, b"presenter: image loaded from store\n");
 }
 
+// ── Video loading from filesystem ───────────────────────────────
+
+const VIDEO_CONTENT_ID: u32 = 2;
+const VIDEO_PATH: &[u8] = b"video.avi";
+
+fn load_video(server: &mut Presenter, render_ep: Handle) {
+    let fs_ep = match name::lookup(HANDLE_NS_EP, b"fs") {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+    let decoder_ep = match name::lookup(HANDLE_NS_EP, b"video-decoder") {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+    let mut call_buf = [0u8; ipc::message::MSG_SIZE];
+    let stat_req = fs_service::StatRequest::new(VIDEO_PATH);
+    let mut stat_buf = [0u8; fs_service::StatRequest::SIZE];
+
+    stat_req.write_to(&mut stat_buf);
+
+    let stat_reply = match ipc::client::call(
+        fs_ep,
+        fs_service::STAT,
+        &stat_buf,
+        &[],
+        &mut [],
+        &mut call_buf,
+    ) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+
+    if stat_reply.is_error() || stat_reply.payload.len() < fs_service::StatReply::SIZE {
+        return;
+    }
+
+    let sr = fs_service::StatReply::read_from(stat_reply.payload);
+
+    if sr.exists == 0 || sr.size == 0 {
+        return;
+    }
+
+    let read_req = fs_service::ReadFileRequest::new(VIDEO_PATH);
+    let mut read_buf = [0u8; fs_service::ReadFileRequest::SIZE];
+
+    read_req.write_to(&mut read_buf);
+
+    let mut read_handles = [0u32; 4];
+    let read_reply = match ipc::client::call(
+        fs_ep,
+        fs_service::READ_FILE,
+        &read_buf,
+        &[],
+        &mut read_handles,
+        &mut call_buf,
+    ) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+
+    if read_reply.is_error()
+        || read_reply.payload.len() < fs_service::ReadFileReply::SIZE
+        || read_handles[0] == 0
+    {
+        return;
+    }
+
+    let rr = fs_service::ReadFileReply::read_from(read_reply.payload);
+    let file_vmo = Handle(read_handles[0]);
+    let file_size = rr.bytes_read;
+
+    if file_size == 0 {
+        let _ = abi::handle::close(file_vmo);
+
+        return;
+    }
+
+    let open_req = video_decoder::OpenRequest { file_size };
+    let mut open_buf = [0u8; video_decoder::OpenRequest::SIZE];
+
+    open_req.write_to(&mut open_buf);
+
+    let mut open_handles = [0u32; 4];
+    let open_reply = match ipc::client::call(
+        decoder_ep,
+        video_decoder::OPEN,
+        &open_buf,
+        &[file_vmo.0],
+        &mut open_handles,
+        &mut call_buf,
+    ) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+
+    if open_reply.is_error()
+        || open_reply.payload.len() < video_decoder::OpenReply::SIZE
+        || open_handles[0] == 0
+    {
+        return;
+    }
+
+    let or = video_decoder::OpenReply::read_from(open_reply.payload);
+    let frame_vmo = Handle(open_handles[0]);
+
+    if or.total_frames == 0 {
+        let _ = abi::handle::close(frame_vmo);
+
+        return;
+    }
+
+    let frame_va = match abi::vmo::map(frame_vmo, 0, Rights(Rights::READ.0 | Rights::MAP.0)) {
+        Ok(va) => va,
+        Err(_) => {
+            let _ = abi::handle::close(frame_vmo);
+
+            return;
+        }
+    };
+
+    server.video_decoder_ep = decoder_ep;
+    server.video_frame_vmo = frame_vmo;
+    server.video_frame_va = frame_va;
+    server.video_total_frames = or.total_frames;
+    server.video_ns_per_frame = or.ns_per_frame;
+    server.image_width = or.width as u16;
+    server.image_height = or.height as u16;
+
+    decode_video_frame(server, 0);
+    upload_video_frame(server, render_ep);
+
+    console::write(
+        server.console_ep,
+        b"presenter: video loaded from filesystem\n",
+    );
+}
+
+fn decode_video_frame(server: &mut Presenter, index: u32) {
+    let req = video_decoder::DecodeFrameRequest { frame_index: index };
+    let mut req_buf = [0u8; video_decoder::DecodeFrameRequest::SIZE];
+
+    req.write_to(&mut req_buf);
+
+    let mut call_buf = [0u8; ipc::message::MSG_SIZE];
+    let reply = match ipc::client::call(
+        server.video_decoder_ep,
+        video_decoder::DECODE_FRAME,
+        &req_buf,
+        &[],
+        &mut [],
+        &mut call_buf,
+    ) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+
+    if reply.is_error() || reply.payload.len() < video_decoder::DecodeFrameReply::SIZE {
+        return;
+    }
+
+    let dr = video_decoder::DecodeFrameReply::read_from(reply.payload);
+
+    server.video_pixel_size = dr.pixel_size;
+    server.video_current_frame = index;
+}
+
+fn upload_video_frame(server: &mut Presenter, render_ep: Handle) {
+    if server.video_pixel_size == 0 || server.video_frame_va == 0 {
+        return;
+    }
+
+    if server.image_content_id != VIDEO_CONTENT_ID {
+        let frame_dup = match abi::handle::dup(
+            server.video_frame_vmo,
+            Rights(Rights::READ.0 | Rights::MAP.0),
+        ) {
+            Ok(h) => h,
+            Err(_) => return,
+        };
+        let upload_req = render::comp::UploadImageRequest {
+            content_id: VIDEO_CONTENT_ID,
+            width: server.image_width,
+            height: server.image_height,
+            pixel_size: server.video_pixel_size,
+        };
+        let mut upload_buf = [0u8; render::comp::UploadImageRequest::SIZE];
+
+        upload_req.write_to(&mut upload_buf);
+
+        let mut reply_buf = [0u8; ipc::message::MSG_SIZE];
+        let mut upload_handles = [0u32; 4];
+        let _ = ipc::client::call(
+            render_ep,
+            render::comp::UPLOAD_IMAGE,
+            &upload_buf,
+            &[frame_dup.0],
+            &mut upload_handles,
+            &mut reply_buf,
+        );
+
+        server.image_content_id = VIDEO_CONTENT_ID;
+    } else {
+        let mut reply_buf = [0u8; ipc::message::MSG_SIZE];
+        let _ = ipc::client::call(
+            render_ep,
+            render::comp::REFRESH_IMAGE,
+            &[],
+            &[],
+            &mut [],
+            &mut reply_buf,
+        );
+    }
+}
+
 // ── Audio clip loading from store ─────────────────────────────────
 
 const AUDIO_MEDIA_TYPE: &[u8] = b"audio/wav";
@@ -1031,6 +1255,18 @@ impl Presenter {
         let entry = play_thread_entry as extern "C" fn(usize) -> ! as usize;
         let _ = abi::thread::create(entry, stack_top, arg_ptr);
     }
+
+    fn toggle_video_playback(&mut self) {
+        if self.video_decoder_ep.0 == 0 || self.video_total_frames == 0 {
+            return;
+        }
+
+        self.video_playing = !self.video_playing;
+
+        if self.video_playing {
+            self.video_next_frame_ns = abi::system::clock_read().unwrap_or(0);
+        }
+    }
 }
 
 // ── Entry point ───────────────────────────────────────────────────
@@ -1238,10 +1474,20 @@ extern "C" fn _start() -> ! {
         audio_ep: Handle(0),
         audio_vmo: Handle(0),
         audio_data_len: 0,
+        video_decoder_ep: Handle(0),
+        video_frame_vmo: Handle(0),
+        video_frame_va: 0,
+        video_total_frames: 0,
+        video_current_frame: 0,
+        video_ns_per_frame: 0,
+        video_pixel_size: 0,
+        video_playing: false,
+        video_next_frame_ns: 0,
         console_ep,
     };
 
     load_and_decode_image(&mut server, render_ep);
+    load_video(&mut server, render_ep);
     load_audio_clip(&mut server);
 
     // Space 0 = text, 1 = image, 2 = showcase.
@@ -1259,7 +1505,7 @@ extern "C" fn _start() -> ! {
 
     loop {
         let now = abi::system::clock_read().unwrap_or(0);
-        let needs_anim = server.slide_animating || server.active_space == 2;
+        let needs_anim = server.slide_animating || server.active_space == 2 || server.video_playing;
         let deadline = if needs_anim {
             if next_frame <= now {
                 next_frame = now + frame_ns;
@@ -1316,6 +1562,25 @@ extern "C" fn _start() -> ! {
                 server.build_scene();
 
                 needs_render = true;
+            }
+
+            if server.video_playing {
+                let now = abi::system::clock_read().unwrap_or(0);
+
+                if now >= server.video_next_frame_ns {
+                    let next = (server.video_current_frame + 1) % server.video_total_frames;
+
+                    decode_video_frame(&mut server, next);
+                    upload_video_frame(&mut server, render_ep);
+
+                    server.video_next_frame_ns = now + server.video_ns_per_frame;
+
+                    if server.active_space == 1 {
+                        server.build_scene();
+
+                        needs_render = true;
+                    }
+                }
             }
 
             if server.update_clock() {

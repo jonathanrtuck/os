@@ -2983,6 +2983,13 @@ impl Dispatch for Compositor {
 
                 let _ = msg.reply_empty();
             }
+            render::comp::REFRESH_IMAGE => {
+                if self.image_va != 0 && self.image_tex_created {
+                    self.upload_image();
+                }
+
+                let _ = msg.reply_empty();
+            }
             _ => {
                 let _ = msg.reply_error(ipc::STATUS_UNSUPPORTED);
             }
