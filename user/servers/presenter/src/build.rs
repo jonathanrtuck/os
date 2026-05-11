@@ -1073,6 +1073,7 @@ impl super::Presenter {
         let icon_mimetype = match self.active_space {
             0 => Some("text/rich"),
             1 => Some("image/jpeg"),
+            2 => Some("video/avi"),
             _ => None,
         };
         let icon = icons::get("document", icon_mimetype);

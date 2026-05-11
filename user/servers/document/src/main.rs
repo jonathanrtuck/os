@@ -281,6 +281,19 @@ impl DocumentServer {
         let (new_content_len, new_cursor_pos) = {
             let buf = self.pt_buf_mut();
 
+            // Inherit style from surrounding text (left-affinity):
+            // position > 0 → style of preceding character;
+            // position 0   → style of first character (if any).
+            let inherit = if offset > 0 {
+                piecetable::style_at(buf, (offset - 1) as u32)
+            } else {
+                piecetable::style_at(buf, 0)
+            };
+
+            if let Some(sid) = inherit {
+                piecetable::set_current_style(buf, sid);
+            }
+
             if !piecetable::insert_bytes(buf, offset as u32, data) {
                 return false;
             }
