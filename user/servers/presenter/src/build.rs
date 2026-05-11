@@ -932,7 +932,7 @@ fn build_showcase_nodes(
             n.corner_radius = 24;
             n.role = scene::ROLE_BUTTON;
             n.state = scene::STATE_FOCUSABLE;
-            n.cursor_shape = scene::CURSOR_HAND;
+            n.cursor_shape = scene::CURSOR_PRESSABLE;
             n.name = name_ref;
 
             scene.add_child(container, btn_id);
@@ -1694,7 +1694,7 @@ impl super::Presenter {
             return scene::CURSOR_TEXT;
         }
 
-        scene::CURSOR_POINTER
+        scene::CURSOR_DEFAULT
     }
 
     pub(crate) fn update_cursor_shape(&mut self) {

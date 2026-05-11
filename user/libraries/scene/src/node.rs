@@ -66,12 +66,14 @@ pub fn mpt_round_pt(mpt: Mpt) -> Mpt {
 
 /// Inherit cursor shape from the nearest ancestor with a declaration.
 pub const CURSOR_INHERIT: u8 = 0;
-/// Pointer/arrow cursor (default for non-interactive regions).
-pub const CURSOR_POINTER: u8 = 1;
+/// Default arrow cursor (non-interactive regions).
+pub const CURSOR_DEFAULT: u8 = 1;
 /// Text/I-beam cursor (text content regions).
 pub const CURSOR_TEXT: u8 = 2;
-/// Hand/finger cursor (clickable interactive elements).
-pub const CURSOR_HAND: u8 = 3;
+/// Pressable cursor (clickable interactive elements).
+pub const CURSOR_PRESSABLE: u8 = 3;
+/// Disabled cursor (non-interactive/unavailable elements).
+pub const CURSOR_DISABLED: u8 = 4;
 
 // ── Semantic roles ──────────────────────────────────────────────────
 //

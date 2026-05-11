@@ -449,7 +449,8 @@ next rendering milestone.
    (`resolve_cursor_shape`) depth-first walks nodes, inherits `cursor_shape` up
    the ancestor chain. Viewport (text area) node annotated with `CURSOR_TEXT`.
    Compositor re-rasterizes cursor icon on `SET_CURSOR_SHAPE` IPC — arrow for
-   `CURSOR_POINTER`, I-beam for `CURSOR_TEXT`.
+   `CURSOR_DEFAULT`, I-beam for `CURSOR_TEXT`, pointer-plus for
+   `CURSOR_PRESSABLE`, pointer-x for `CURSOR_DISABLED`.
 
 2. **Click-to-place cursor** — DONE. `POINTER_BUTTON` protocol message from
    input driver (button press/release with absolute position). `xy_to_byte()`

@@ -1909,11 +1909,10 @@ fn rasterize_cursor_icon(icon_name: &str, scale: u32) -> (alloc::vec::Vec<u8>, u
 
     let path_data = offset_path(&combined_path, margin_vb, margin_vb);
     let raster_scale = px_scale;
-    let stroke_only = !icon.all_paths_closed();
-    // For closed paths (arrow): fill = black body, stroke = white outline.
-    // For open paths (I-beam): fill is garbage (implicit closure artifacts),
-    // so use stroke as black body with a wider outline stroke for white border.
-    let (body, outline) = if stroke_only {
+    let has_closed = icon.paths.iter().any(|p| p.is_closed());
+    let has_open = icon.paths.iter().any(|p| !p.is_closed());
+    let (body, outline) = if !has_closed {
+        // All open (I-beam): stroke as black body, wider stroke as white outline.
         let body_expanded = scene::stroke::expand_stroke(&path_data, stroke_w);
         let body = path::rasterize_path(
             &path_data,
@@ -1934,7 +1933,8 @@ fn rasterize_cursor_icon(icon_name: &str, scale: u32) -> (alloc::vec::Vec<u8>, u
         );
 
         (body, outline)
-    } else {
+    } else if !has_open {
+        // All closed (arrow): fill as black body, stroke as white outline.
         let fill = path::rasterize_path(
             &path_data,
             tex_sz,
@@ -1954,8 +1954,68 @@ fn rasterize_cursor_icon(icon_name: &str, scale: u32) -> (alloc::vec::Vec<u8>, u
         );
 
         (fill, stroke)
-    };
+    } else {
+        // Mixed (arrow + badge): fill only closed shapes, stroke open
+        // shapes separately, union. Each group gets its own outline width.
+        let mut closed_cmds = alloc::vec::Vec::new();
+        let mut open_cmds = alloc::vec::Vec::new();
 
+        for path in icon.paths {
+            if path.is_closed() {
+                closed_cmds.extend_from_slice(path.commands);
+            } else {
+                open_cmds.extend_from_slice(path.commands);
+            }
+        }
+
+        let closed_data = offset_path(&closed_cmds, margin_vb, margin_vb);
+        let open_data = offset_path(&open_cmds, margin_vb, margin_vb);
+        let fill = path::rasterize_path(
+            &closed_data,
+            tex_sz,
+            tex_sz,
+            raster_scale,
+            scene::FillRule::Winding,
+            None,
+        );
+        let closed_outline_exp = scene::stroke::expand_stroke(&closed_data, stroke_w);
+        let closed_outline = path::rasterize_path(
+            &closed_data,
+            tex_sz,
+            tex_sz,
+            raster_scale,
+            scene::FillRule::Winding,
+            Some(&closed_outline_exp),
+        );
+        let open_body_exp = scene::stroke::expand_stroke(&open_data, stroke_w);
+        let open_body = path::rasterize_path(
+            &open_data,
+            tex_sz,
+            tex_sz,
+            raster_scale,
+            scene::FillRule::Winding,
+            Some(&open_body_exp),
+        );
+        let open_outline_exp = scene::stroke::expand_stroke(&open_data, stroke_w + 2.0);
+        let open_outline = path::rasterize_path(
+            &open_data,
+            tex_sz,
+            tex_sz,
+            raster_scale,
+            scene::FillRule::Winding,
+            Some(&open_outline_exp),
+        );
+        let n = (tex_sz * tex_sz) as usize;
+        let mut body = fill;
+        let mut outline = closed_outline;
+
+        for i in 0..n {
+            body[i] = body[i].max(open_body[i]);
+            outline[i] = outline[i].max(open_outline[i]);
+        }
+
+        (body, outline)
+    };
     // Rasterize shadow: same shape at offset, then blur.
     let shadow_ox = (CURSOR_SHADOW_DX * px_scale) as i32;
     let shadow_oy = (CURSOR_SHADOW_DY * px_scale) as i32;
@@ -2195,7 +2255,8 @@ impl Compositor {
     fn cursor_icon_name(&self) -> &'static str {
         match self.cursor_shape {
             scene::CURSOR_TEXT => "cursor-text",
-            scene::CURSOR_HAND => "hand-finger",
+            scene::CURSOR_PRESSABLE => "pointer-plus",
+            scene::CURSOR_DISABLED => "pointer-x",
             _ => "pointer",
         }
     }
@@ -3102,7 +3163,7 @@ extern "C" fn _start() -> ! {
         atlas_upload_y: 0,
         cursor_uploaded: false,
         cursor_visible: false,
-        cursor_shape: scene::CURSOR_POINTER,
+        cursor_shape: scene::CURSOR_DEFAULT,
         image_va: 0,
         image_w: 0,
         image_h: 0,

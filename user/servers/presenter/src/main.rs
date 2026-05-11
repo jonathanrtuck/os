@@ -182,6 +182,7 @@ pub(crate) fn scale_icon_paths(
                     buf.extend_from_slice(&tag.to_le_bytes());
                     buf.extend_from_slice(&x.to_le_bytes());
                     buf.extend_from_slice(&y.to_le_bytes());
+
                     pos += 12;
                 }
                 2 => {
@@ -212,6 +213,7 @@ pub(crate) fn scale_icon_paths(
                 }
                 3 => {
                     buf.extend_from_slice(&3u32.to_le_bytes());
+
                     pos += 4;
                 }
                 _ => break,
@@ -394,7 +396,6 @@ impl FrameStats {
         let min_us = self.min_ns / 1000;
         let max_us = self.max_ns / 1000;
         let fps = 1_000_000u64.checked_div(avg_us).unwrap_or(0);
-
         let mut buf = [0u8; 80];
         let mut pos = 0;
 
@@ -1241,7 +1242,7 @@ extern "C" fn _start() -> ! {
         rtc_va,
         pointer_x: 0.0,
         pointer_y: 0.0,
-        cursor_shape_name: scene::CURSOR_POINTER,
+        cursor_shape_name: scene::CURSOR_DEFAULT,
         last_click_ms: 0,
         last_click_x: 0,
         last_click_y: 0,
