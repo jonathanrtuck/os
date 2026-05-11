@@ -74,11 +74,18 @@ struct AssetSpec {
     name: &'static str,
 }
 
-const ASSETS: &[AssetSpec] = &[AssetSpec {
-    filename: "zoey.jpg",
-    media_type: "image/jpeg",
-    name: "zoey",
-}];
+const ASSETS: &[AssetSpec] = &[
+    AssetSpec {
+        filename: "zoey.jpg",
+        media_type: "image/jpeg",
+        name: "zoey",
+    },
+    AssetSpec {
+        filename: "click.wav",
+        media_type: "audio/wav",
+        name: "click",
+    },
+];
 
 fn main() {
     let args: Vec<String> = env::args().collect();

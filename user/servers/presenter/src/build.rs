@@ -700,6 +700,7 @@ fn build_showcase_nodes(
     display_width: u32,
     content_h: u32,
     now_ns: u64,
+    has_audio: bool,
 ) {
     let base_x = (display_width * 2) as i32;
     let container = match scene.alloc_node() {
@@ -909,6 +910,61 @@ fn build_showcase_nodes(
             n.corner_radius = 3;
 
             scene.add_child(container, id);
+        }
+    }
+
+    // ── Play button ──
+    if has_audio {
+        let btn_w = 48u32;
+        let btn_h = 48u32;
+        let btn_x = (400 - btn_w as i32) / 2 + 20;
+        let btn_y = demo_y + easings.len() as i32 * row_h + 24;
+
+        if let Some(btn_id) = scene.alloc_node() {
+            let name_ref = scene.push_data(b"Play sound");
+            let n = scene.node_mut(btn_id);
+
+            n.x = pt(btn_x);
+            n.y = pt(btn_y);
+            n.width = upt(btn_w);
+            n.height = upt(btn_h);
+            n.background = Color::rgba(255, 255, 255, 20);
+            n.corner_radius = 24;
+            n.role = scene::ROLE_BUTTON;
+            n.state = scene::STATE_FOCUSABLE;
+            n.cursor_shape = scene::CURSOR_POINTER;
+            n.name = name_ref;
+
+            scene.add_child(container, btn_id);
+
+            // Play triangle icon (▶) centered in the button.
+            let mut path_buf = alloc::vec::Vec::new();
+            let cx = btn_w as f32 / 2.0;
+            let cy = btn_h as f32 / 2.0;
+            let tri_size = 12.0;
+
+            scene::path_move_to(&mut path_buf, cx - tri_size * 0.4, cy - tri_size);
+            scene::path_line_to(&mut path_buf, cx + tri_size * 0.8, cy);
+            scene::path_line_to(&mut path_buf, cx - tri_size * 0.4, cy + tri_size);
+            scene::path_close(&mut path_buf);
+
+            let path_ref = scene.push_data(&path_buf);
+
+            if let Some(icon_id) = scene.alloc_node() {
+                let icon = scene.node_mut(icon_id);
+
+                icon.width = upt(btn_w);
+                icon.height = upt(btn_h);
+                icon.content = Content::Path {
+                    color: Color::rgba(255, 255, 255, 200),
+                    stroke_color: Color::TRANSPARENT,
+                    fill_rule: FillRule::Winding,
+                    stroke_width: 0,
+                    contours: path_ref,
+                };
+
+                scene.add_child(btn_id, icon_id);
+            }
         }
     }
 }
@@ -1525,8 +1581,16 @@ impl super::Presenter {
 
         // Space 2: Rendering showcase.
         let now_ns = abi::system::clock_read().unwrap_or(0);
+        let has_audio = self.audio_ep.0 != 0;
 
-        build_showcase_nodes(&mut scene, strip, self.display_width, content_h, now_ns);
+        build_showcase_nodes(
+            &mut scene,
+            strip,
+            self.display_width,
+            content_h,
+            now_ns,
+            has_audio,
+        );
 
         scene.commit();
 

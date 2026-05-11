@@ -349,6 +349,10 @@ pub(crate) struct Presenter {
     pub(crate) image_width: u16,
     pub(crate) image_height: u16,
 
+    pub(crate) audio_ep: Handle,
+    pub(crate) audio_vmo: Handle,
+    pub(crate) audio_data_len: u32,
+
     pub(crate) console_ep: Handle,
 }
 
@@ -845,6 +849,219 @@ fn load_and_decode_image(server: &mut Presenter, render_ep: Handle) {
     console::write(server.console_ep, b"presenter: image loaded from store\n");
 }
 
+// ── Audio clip loading from store ─────────────────────────────────
+
+const AUDIO_MEDIA_TYPE: &[u8] = b"audio/wav";
+
+fn load_audio_clip(server: &mut Presenter) {
+    let store_ep = match name::lookup(HANDLE_NS_EP, b"store") {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+    let audio_ep = match name::lookup(HANDLE_NS_EP, b"audio") {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+    let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
+    let mut call_buf = [0u8; ipc::message::MSG_SIZE];
+    let mut query_buf = [0u8; store_service::QueryTypeRequest::SIZE + 10];
+    let qt_req = store_service::QueryTypeRequest {
+        media_type_len: AUDIO_MEDIA_TYPE.len() as u16,
+    };
+
+    qt_req.write_to(&mut query_buf);
+    query_buf[store_service::QueryTypeRequest::SIZE..][..AUDIO_MEDIA_TYPE.len()]
+        .copy_from_slice(AUDIO_MEDIA_TYPE);
+
+    let query_len = store_service::QueryTypeRequest::SIZE + AUDIO_MEDIA_TYPE.len();
+    let query_reply = match ipc::client::call(
+        store_ep,
+        store_service::QUERY_TYPE,
+        &query_buf[..query_len],
+        &[],
+        &mut [],
+        &mut call_buf,
+    ) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+
+    if query_reply.is_error() || query_reply.payload.len() < store_service::QueryTypeReply::SIZE {
+        return;
+    }
+
+    let qt = store_service::QueryTypeReply::read_from(query_reply.payload);
+    let file_id = qt.file_id;
+    let file_size = qt.size as usize;
+
+    if file_size == 0 {
+        return;
+    }
+
+    let vmo_size = file_size.next_multiple_of(PAGE_SIZE);
+    let data_vmo = match abi::vmo::create(vmo_size, 0) {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+    let data_va = match abi::vmo::map(data_vmo, 0, rw) {
+        Ok(va) => va,
+        Err(_) => {
+            let _ = abi::handle::close(data_vmo);
+
+            return;
+        }
+    };
+    let shared_dup = match abi::handle::dup(data_vmo, rw) {
+        Ok(h) => h,
+        Err(_) => {
+            let _ = abi::vmo::unmap(data_va);
+            let _ = abi::handle::close(data_vmo);
+
+            return;
+        }
+    };
+    let setup_reply = ipc::client::call(
+        store_ep,
+        store_service::SETUP,
+        &[],
+        &[shared_dup.0],
+        &mut [],
+        &mut call_buf,
+    );
+
+    if setup_reply.is_err() {
+        let _ = abi::vmo::unmap(data_va);
+        let _ = abi::handle::close(data_vmo);
+
+        return;
+    }
+
+    let read_req = store_service::ReadRequest {
+        file_id,
+        offset: 0,
+        vmo_offset: 0,
+        max_len: file_size as u32,
+    };
+    let mut read_buf = [0u8; store_service::ReadRequest::SIZE];
+
+    read_req.write_to(&mut read_buf);
+
+    let read_reply = match ipc::client::call(
+        store_ep,
+        store_service::READ_DOC,
+        &read_buf,
+        &[],
+        &mut [],
+        &mut call_buf,
+    ) {
+        Ok(r) => r,
+        Err(_) => {
+            let _ = abi::vmo::unmap(data_va);
+            let _ = abi::handle::close(data_vmo);
+
+            return;
+        }
+    };
+
+    if read_reply.is_error() || read_reply.payload.len() < store_service::ReadReply::SIZE {
+        let _ = abi::vmo::unmap(data_va);
+        let _ = abi::handle::close(data_vmo);
+
+        return;
+    }
+
+    let rr = store_service::ReadReply::read_from(read_reply.payload);
+    let bytes_read = rr.bytes_read as usize;
+
+    if bytes_read == 0 {
+        let _ = abi::vmo::unmap(data_va);
+        let _ = abi::handle::close(data_vmo);
+
+        return;
+    }
+
+    let _ = abi::vmo::unmap(data_va);
+
+    server.audio_ep = audio_ep;
+    server.audio_vmo = data_vmo;
+    server.audio_data_len = bytes_read as u32;
+
+    console::write(server.console_ep, b"presenter: audio clip loaded\n");
+}
+
+// ── Audio playback (threaded to avoid blocking the event loop) ───
+
+#[repr(C)]
+struct PlayArgs {
+    audio_ep: u32,
+    vmo_dup: u32,
+    data_len: u32,
+}
+
+extern "C" fn play_thread_entry(arg: usize) -> ! {
+    // SAFETY: arg is a pointer to a heap-allocated PlayArgs.
+    let args = unsafe { &*(arg as *const PlayArgs) };
+    let ep = Handle(args.audio_ep);
+    let vmo_dup = Handle(args.vmo_dup);
+    let data_len = args.data_len;
+    let req = audio_service::PlayRequest {
+        format: audio_service::FORMAT_WAV,
+        data_len,
+    };
+    let mut payload = [0u8; audio_service::PlayRequest::SIZE];
+
+    req.write_to(&mut payload);
+
+    let mut buf = [0u8; ipc::message::MSG_SIZE];
+    let total = ipc::message::write_request(&mut buf, audio_service::PLAY, &payload);
+    let _ = abi::ipc::call(ep, &mut buf, total, &[vmo_dup.0], &mut []);
+
+    // SAFETY: arg was heap-allocated in play_audio_clip; we own it.
+    unsafe {
+        let _ = alloc::boxed::Box::from_raw(arg as *mut PlayArgs);
+    }
+
+    abi::thread::exit(0);
+}
+
+const PLAY_THREAD_STACK_SIZE: usize = PAGE_SIZE;
+
+impl Presenter {
+    fn play_audio_clip(&self) {
+        if self.audio_ep.0 == 0 || self.audio_vmo.0 == 0 {
+            return;
+        }
+
+        let ro = Rights(Rights::READ.0 | Rights::MAP.0);
+        let vmo_dup = match abi::handle::dup(self.audio_vmo, ro) {
+            Ok(h) => h,
+            Err(_) => return,
+        };
+        let args = alloc::boxed::Box::new(PlayArgs {
+            audio_ep: self.audio_ep.0,
+            vmo_dup: vmo_dup.0,
+            data_len: self.audio_data_len,
+        });
+        let arg_ptr = alloc::boxed::Box::into_raw(args) as usize;
+        let stack_layout = alloc::alloc::Layout::from_size_align(PLAY_THREAD_STACK_SIZE, PAGE_SIZE);
+        let stack_layout = match stack_layout {
+            Ok(l) => l,
+            Err(_) => return,
+        };
+
+        // SAFETY: layout is non-zero size with valid alignment.
+        let stack_base = unsafe { alloc::alloc::alloc(stack_layout) };
+
+        if stack_base.is_null() {
+            return;
+        }
+
+        let stack_top = stack_base as usize + PLAY_THREAD_STACK_SIZE;
+        let entry = play_thread_entry as extern "C" fn(usize) -> ! as usize;
+        let _ = abi::thread::create(entry, stack_top, arg_ptr);
+    }
+}
+
 // ── Entry point ───────────────────────────────────────────────────
 
 #[unsafe(no_mangle)]
@@ -1047,10 +1264,14 @@ extern "C" fn _start() -> ! {
         image_content_id: 0,
         image_width: 0,
         image_height: 0,
+        audio_ep: Handle(0),
+        audio_vmo: Handle(0),
+        audio_data_len: 0,
         console_ep,
     };
 
     load_and_decode_image(&mut server, render_ep);
+    load_audio_clip(&mut server);
 
     // Space 0 = text, 1 = image, 2 = showcase.
     server.num_spaces = 3;

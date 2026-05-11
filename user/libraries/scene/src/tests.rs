@@ -1125,3 +1125,204 @@ fn from_existing_preserves_state() {
     assert_eq!(w2.node_count(), 1);
     assert_eq!(w2.node(0).x, pt(42));
 }
+
+// ── Hit testing ────────────────────────────────────────────────────
+
+#[test]
+fn hit_test_empty_scene() {
+    let mut buf = make_scene_buf();
+    let w = SceneWriter::new(&mut buf);
+
+    assert_eq!(w.hit_test(50.0, 50.0), None);
+}
+
+#[test]
+fn hit_test_single_focusable_node() {
+    let mut buf = make_scene_buf();
+    let mut w = SceneWriter::new(&mut buf);
+    let root = w.alloc_node().unwrap();
+
+    w.set_root(root);
+
+    {
+        let n = w.node_mut(root);
+
+        n.width = upt(100);
+        n.height = upt(100);
+        n.state = STATE_FOCUSABLE;
+    }
+
+    assert_eq!(w.hit_test(50.0, 50.0), Some(root));
+    assert_eq!(w.hit_test(150.0, 50.0), None);
+}
+
+#[test]
+fn hit_test_non_focusable_not_hit() {
+    let mut buf = make_scene_buf();
+    let mut w = SceneWriter::new(&mut buf);
+    let root = w.alloc_node().unwrap();
+
+    w.set_root(root);
+
+    {
+        let n = w.node_mut(root);
+
+        n.width = upt(100);
+        n.height = upt(100);
+        // No STATE_FOCUSABLE — should not be hit.
+    }
+
+    assert_eq!(w.hit_test(50.0, 50.0), None);
+}
+
+#[test]
+fn hit_test_child_in_front() {
+    let mut buf = make_scene_buf();
+    let mut w = SceneWriter::new(&mut buf);
+    let root = w.alloc_node().unwrap();
+    let child_a = w.alloc_node().unwrap();
+    let child_b = w.alloc_node().unwrap();
+
+    w.set_root(root);
+
+    {
+        let n = w.node_mut(root);
+
+        n.width = upt(200);
+        n.height = upt(200);
+        n.state = STATE_FOCUSABLE;
+    }
+    {
+        let a = w.node_mut(child_a);
+
+        a.x = pt(10);
+        a.y = pt(10);
+        a.width = upt(80);
+        a.height = upt(80);
+        a.state = STATE_FOCUSABLE;
+    }
+    {
+        let b = w.node_mut(child_b);
+
+        b.x = pt(50);
+        b.y = pt(50);
+        b.width = upt(80);
+        b.height = upt(80);
+        b.state = STATE_FOCUSABLE;
+    }
+
+    w.add_child(root, child_a);
+    w.add_child(root, child_b);
+
+    // Point (60, 60) is in both children — child_b is last (frontmost).
+    assert_eq!(w.hit_test(60.0, 60.0), Some(child_b));
+    // Point (15, 15) is only in child_a.
+    assert_eq!(w.hit_test(15.0, 15.0), Some(child_a));
+    // Point (150, 150) is only in root.
+    assert_eq!(w.hit_test(150.0, 150.0), Some(root));
+}
+
+#[test]
+fn hit_test_clips_children() {
+    let mut buf = make_scene_buf();
+    let mut w = SceneWriter::new(&mut buf);
+    let root = w.alloc_node().unwrap();
+    let child = w.alloc_node().unwrap();
+
+    w.set_root(root);
+
+    {
+        let n = w.node_mut(root);
+
+        n.width = upt(100);
+        n.height = upt(100);
+        n.flags = NodeFlags::VISIBLE.union(NodeFlags::CLIPS_CHILDREN);
+    }
+    {
+        let c = w.node_mut(child);
+
+        c.x = pt(80);
+        c.y = pt(0);
+        c.width = upt(40);
+        c.height = upt(40);
+        c.state = STATE_FOCUSABLE;
+    }
+
+    w.add_child(root, child);
+
+    // Point (90, 20) is within the child but also within the clipping parent.
+    assert_eq!(w.hit_test(90.0, 20.0), Some(child));
+    // Point (110, 20) is within the child but outside the clipping parent.
+    assert_eq!(w.hit_test(110.0, 20.0), None);
+}
+
+#[test]
+fn hit_test_with_transform() {
+    let mut buf = make_scene_buf();
+    let mut w = SceneWriter::new(&mut buf);
+    let root = w.alloc_node().unwrap();
+    let child = w.alloc_node().unwrap();
+
+    w.set_root(root);
+
+    {
+        let n = w.node_mut(root);
+
+        n.width = upt(200);
+        n.height = upt(200);
+    }
+    {
+        let c = w.node_mut(child);
+
+        c.x = pt(50);
+        c.y = pt(50);
+        c.width = upt(40);
+        c.height = upt(40);
+        c.state = STATE_FOCUSABLE;
+        c.transform = AffineTransform::scale(2.0, 2.0);
+    }
+
+    w.add_child(root, child);
+
+    // Without scale, the child covers [50, 90) × [50, 90).
+    // With 2x scale, hit testing inverts the transform:
+    // a point at (70, 70) becomes (10, 10) in local space, which is inside [0, 40).
+    assert_eq!(w.hit_test(70.0, 70.0), Some(child));
+    // Point (95, 70) becomes (22.5, 10) in local space — still inside [0, 40).
+    assert_eq!(w.hit_test(95.0, 70.0), Some(child));
+}
+
+#[test]
+fn hit_test_with_child_offset() {
+    let mut buf = make_scene_buf();
+    let mut w = SceneWriter::new(&mut buf);
+    let root = w.alloc_node().unwrap();
+    let child = w.alloc_node().unwrap();
+
+    w.set_root(root);
+
+    {
+        let n = w.node_mut(root);
+
+        n.width = upt(200);
+        n.height = upt(200);
+        n.child_offset_x = 100.0; // scroll right by 100
+    }
+    {
+        let c = w.node_mut(child);
+
+        c.x = pt(10);
+        c.y = pt(10);
+        c.width = upt(40);
+        c.height = upt(40);
+        c.state = STATE_FOCUSABLE;
+    }
+
+    w.add_child(root, child);
+
+    // Child at (10,10) but parent has child_offset_x=100,
+    // so the child appears at (110, 10). Hit at (110, 20) should miss
+    // because hit_test subtracts child_offset, giving (10, 20) which hits.
+    assert_eq!(w.hit_test(110.0, 20.0), Some(child));
+    assert_eq!(w.hit_test(20.0, 20.0), None);
+}

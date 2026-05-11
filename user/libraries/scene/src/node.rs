@@ -128,7 +128,11 @@ pub const ROLE_CODE: u8 = 52;
 // System UI: status-bar, menu-bar, menu, menu-item, tooltip,
 //   notification, landmark
 //
-// Widgets (80-119): button, toggle-button, text-field, search-field,
+// Widgets (80-119)
+/// Clickable button.
+pub const ROLE_BUTTON: u8 = 80;
+
+// Future widget roles: toggle-button, text-field, search-field,
 //   checkbox, radio-button, switch, slider, progress, spinner,
 //   combobox, dropdown, tab-list, tab, tab-panel, dialog, alert
 //
@@ -153,6 +157,8 @@ pub const STATE_EDITABLE: u32 = 1 << 3;
 pub const STATE_READ_ONLY: u32 = 1 << 4;
 /// Node is loading, decoding, or processing.
 pub const STATE_BUSY: u32 = 1 << 5;
+/// Pointer is currently over this node.
+pub const STATE_HOVERED: u32 = 1 << 6;
 
 // Future state flags (bits not yet assigned):
 //

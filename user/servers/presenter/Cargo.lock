@@ -11,6 +11,19 @@ name = "animation"
 version = "0.1.0"
 
 [[package]]
+name = "audio-service"
+version = "0.1.0"
+dependencies = [
+ "abi",
+ "console",
+ "init",
+ "ipc",
+ "name",
+ "snd",
+ "wav",
+]
+
+[[package]]
 name = "bitflags"
 version = "2.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -198,6 +211,7 @@ version = "0.1.0"
 dependencies = [
  "abi",
  "animation",
+ "audio-service",
  "console",
  "document-service",
  "fonts",
@@ -275,6 +289,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
+name = "snd"
+version = "0.1.0"
+dependencies = [
+ "abi",
+ "console",
+ "init",
+ "ipc",
+ "name",
+ "virtio",
+]
+
+[[package]]
 name = "store"
 version = "0.1.0"
 dependencies = [
@@ -339,3 +365,7 @@ dependencies = [
  "name",
  "virtio",
 ]
+
+[[package]]
+name = "wav"
+version = "0.1.0"

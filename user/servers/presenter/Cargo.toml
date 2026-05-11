@@ -9,6 +9,7 @@ default = ["service"]
 service = [
     "dep:abi",
     "dep:animation",
+    "dep:audio-service",
     "dep:console",
     "dep:document-service",
     "dep:fonts",
@@ -33,6 +34,7 @@ ipc = { path = "../../ipc", default-features = false }
 
 abi = { path = "../../abi", optional = true }
 animation = { path = "../../libraries/animation", optional = true }
+audio-service = { path = "../audio", optional = true }
 console = { path = "../console", optional = true }
 document-service = { path = "../document", optional = true }
 fonts = { path = "../../libraries/fonts", optional = true }
