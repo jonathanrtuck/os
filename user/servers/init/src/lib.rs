@@ -28,8 +28,10 @@ pub const SERVICE_9P: u16 = 11;
 pub const SERVICE_FS: u16 = 12;
 pub const SERVICE_JPEG_DECODER: u16 = 13;
 pub const SERVICE_RNG: u16 = 14;
+pub const SERVICE_SND: u16 = 15;
+pub const SERVICE_AUDIO: u16 = 16;
 
-pub const SERVICE_COUNT: usize = 15;
+pub const SERVICE_COUNT: usize = 17;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BootstrapConfig {

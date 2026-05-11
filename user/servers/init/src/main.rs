@@ -46,6 +46,8 @@ const BLK_SVC: &[u8] = b"blk";
 const RENDER_SVC: &[u8] = b"render";
 const NINEP_SVC: &[u8] = b"9p";
 const RNG_SVC: &[u8] = b"rng";
+const SND_SVC: &[u8] = b"snd";
+const AUDIO_SVC: &[u8] = b"audio";
 const PRESENTER_SVC: &[u8] = b"presenter";
 const LAYOUT_SVC: &[u8] = b"layout";
 
@@ -170,7 +172,12 @@ fn spawn_from_pack(pack_data: &[u8], ns_ep: Handle, init_ep: Handle, font_vmo: H
                 &entry,
                 &[ns_ep, HANDLE_VIRTIO_VMO, init_ep, dup_ro(font_vmo), ep],
             );
-        } else if name == INPUT_SVC || name == BLK_SVC || name == NINEP_SVC || name == RNG_SVC {
+        } else if name == INPUT_SVC
+            || name == BLK_SVC
+            || name == NINEP_SVC
+            || name == RNG_SVC
+            || name == SND_SVC
+        {
             let ep = register_for(ns_ep, name);
             let _ = spawn_service(pack_data, &entry, &[ns_ep, HANDLE_VIRTIO_VMO, init_ep, ep]);
         } else if name == PRESENTER_SVC {
@@ -189,6 +196,7 @@ fn spawn_from_pack(pack_data: &[u8], ns_ep: Handle, init_ep: Handle, font_vmo: H
             || name == PNG_DECODER_SVC
             || name == JPEG_DECODER_SVC
             || name == FS_SVC
+            || name == AUDIO_SVC
         {
             let ep = register_for(ns_ep, name);
             let _ = spawn_service(pack_data, &entry, &[ns_ep, ep]);

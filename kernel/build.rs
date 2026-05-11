@@ -71,6 +71,14 @@ fn build_init(kernel_dir: &std::path::Path) {
     println!("cargo:rerun-if-changed=../user/servers/drivers/rng/src/lib.rs");
     println!("cargo:rerun-if-changed=../user/servers/drivers/rng/link.ld");
     println!("cargo:rerun-if-changed=../user/servers/drivers/rng/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/servers/drivers/snd/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/servers/drivers/snd/src/lib.rs");
+    println!("cargo:rerun-if-changed=../user/servers/drivers/snd/link.ld");
+    println!("cargo:rerun-if-changed=../user/servers/drivers/snd/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/servers/audio/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/servers/audio/src/lib.rs");
+    println!("cargo:rerun-if-changed=../user/servers/audio/link.ld");
+    println!("cargo:rerun-if-changed=../user/servers/audio/Cargo.toml");
     println!("cargo:rerun-if-changed=../user/servers/drivers/render/src/main.rs");
     println!("cargo:rerun-if-changed=../user/servers/drivers/render/link.ld");
     println!("cargo:rerun-if-changed=../user/servers/drivers/render/Cargo.toml");
@@ -278,6 +286,16 @@ const SERVICES: &[ServiceDef] = &[
         name: "rng",
         dir: "../user/servers/drivers/rng",
         crate_name: "rng",
+    },
+    ServiceDef {
+        name: "snd",
+        dir: "../user/servers/drivers/snd",
+        crate_name: "snd",
+    },
+    ServiceDef {
+        name: "audio",
+        dir: "../user/servers/audio",
+        crate_name: "audio-service",
     },
     ServiceDef {
         name: "9p",
