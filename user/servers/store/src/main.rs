@@ -567,7 +567,7 @@ impl Dispatch for StoreServer {
 
                 let _ = abi::vmo::unmap(va);
 
-                let ro = Rights(Rights::READ.0 | Rights::MAP.0);
+                let ro = Rights(Rights::READ.0 | Rights::MAP.0 | Rights::DUP.0);
                 let transfer = match abi::handle::dup(vmo, ro) {
                     Ok(h) => {
                         let _ = abi::handle::close(vmo);

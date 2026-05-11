@@ -24,7 +24,7 @@ pub const QUERY_TYPE: u32 = 11;
 
 /// Load a file by media type in one round-trip.
 /// Request: QueryTypeRequest + inline media type bytes.
-/// Reply: QueryTypeReply (file_id, size) + handle[0] = data VMO (READ | MAP).
+/// Reply: QueryTypeReply (file_id, size) + handle[0] = data VMO (READ | MAP | DUP).
 pub const LOAD_TYPE: u32 = 12;
 
 /// Create request — media type as inline bytes after the header.
