@@ -1,0 +1,16 @@
+[package]
+name = "video-decoder"
+version = "0.1.0"
+edition = "2024"
+license = "Unlicense"
+
+[dependencies]
+abi = { path = "../../abi" }
+avi = { path = "../../libraries/avi" }
+console = { path = "../console" }
+heap = { path = "../../heap" }
+ipc = { path = "../../ipc" }
+jpeg = { path = "../../libraries/jpeg" }
+name = { path = "../name" }
+
+[workspace]

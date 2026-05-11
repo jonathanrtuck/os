@@ -13,6 +13,7 @@ members = [
     "user/libraries/render",
     "user/libraries/png",
     "user/libraries/jpeg",
+    "user/libraries/avi",
 ]
 exclude = ["kernel/fuzz", "user/init", "user/abi", "tools/mkdisk"]
 resolver = "3"
