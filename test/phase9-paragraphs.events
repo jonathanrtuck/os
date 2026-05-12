@@ -288,5 +288,6 @@
 278 key t
 279 key .
 280 key return
-281 capture /tmp/os-p9-para.png
-281 exit
+282 key cmd+up
+284 capture /tmp/os-p9-para.png
+284 exit

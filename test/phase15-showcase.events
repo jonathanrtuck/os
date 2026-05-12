@@ -1,8 +1,9 @@
 # Phase 15 — showcase space: play button render and interaction.
-# Space 0 = text, Space 1 = image, Space 2 = showcase.
+# Space 0 = text, Space 1 = image, Space 2 = video, Space 3 = showcase.
 0 text hi
 6 key ctrl+tab
 7 key ctrl+tab
+8 key ctrl+tab
 # Frame 50: showcase space with play button visible.
 50 capture /tmp/p15-showcase.png
 # Frame 60: move pointer to play button center (~196,730 in 1x points).

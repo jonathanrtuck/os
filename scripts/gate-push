@@ -1,0 +1,25 @@
+#!/bin/bash
+# Pre-push verification gate.
+#
+# Runs `make gate` (clippy + tests + build + visual regression) before
+# allowing a push. Blocks the push if any check fails.
+#
+# Install as git pre-push hook:
+#   ln -sf ../../scripts/gate-push .git/hooks/pre-push
+
+set -eo pipefail
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+DIM='\033[2m'
+BOLD='\033[1m'
+RESET='\033[0m'
+
+printf "${BOLD}pre-push${RESET}  running make gate (clippy + tests + build + visual)...\n"
+
+if make gate; then
+    printf "${GREEN}pre-push${RESET}  gate passed — push allowed\n"
+else
+    printf "${RED}pre-push${RESET}  gate failed — push blocked\n"
+    exit 1
+fi
