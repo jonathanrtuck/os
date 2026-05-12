@@ -238,8 +238,16 @@ impl VideoDecoder {
     }
 
     fn setup_hardware_session(&mut self) {
-        if self.codec_ep.0 == 0 || self.width == 0 || self.height == 0 {
+        if self.width == 0 || self.height == 0 {
             return;
+        }
+
+        if self.codec_ep.0 == 0 {
+            self.codec_ep = name::lookup(HANDLE_NS_EP, b"codec-decode").unwrap_or(Handle(0));
+
+            if self.codec_ep.0 == 0 {
+                return;
+            }
         }
 
         // Create shared VMO for compressed data transfer
@@ -286,7 +294,6 @@ impl VideoDecoder {
             Ok(h) => h,
             Err(_) => return,
         };
-
         let req = video::CreateSessionRequest {
             codec: video::CODEC_MJPEG,
             width: self.width,
@@ -524,9 +531,6 @@ extern "C" fn _start() -> ! {
     };
 
     console::write(console_ep, b"  video-decoder: starting\n");
-
-    let codec_ep = name::lookup(HANDLE_NS_EP, b"codec-decode").unwrap_or(Handle(0));
-
     console::write(console_ep, b"  video-decoder: ready\n");
 
     let mut decoder = VideoDecoder {
@@ -547,7 +551,7 @@ extern "C" fn _start() -> ! {
         current_frame: 0,
         ns_per_frame: 0,
         next_frame_ns: 0,
-        codec_ep,
+        codec_ep: Handle(0),
         codec_session_id: 0,
         shared_vmo: Handle(0),
         shared_va: 0,

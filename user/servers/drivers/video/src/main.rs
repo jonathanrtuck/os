@@ -228,7 +228,6 @@ impl VideoDriver {
 
         let _ = abi::event::clear(self.irq_event, 0x1);
         let _ = self.decode_vq.pop_used();
-
         // Read 24-byte status response:
         // [status: u32][bytes_written: u32][timestamp_ns: u64][duration_ns: u64]
         // SAFETY: device has written 24-byte response at status_buf_va.
@@ -276,9 +275,9 @@ impl Dispatch for VideoServer {
                 }
 
                 let vmo = Handle(msg.handles[0]);
-                let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
+                let ro = Rights(Rights::READ.0 | Rights::MAP.0);
 
-                match abi::vmo::map(vmo, 0, rw) {
+                match abi::vmo::map(vmo, 0, ro) {
                     Ok(va) => {
                         self.driver.shared_va = va;
                         self.driver.shared_len = PAGE_SIZE * COMPRESSED_BUF_PAGES;
