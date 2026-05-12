@@ -9,6 +9,12 @@
 //!   → Ok(pixel_size)
 //!   | Error(status)
 //!
+//! Toggle()
+//!   → Ok(playing)
+//!
+//! Pause()
+//!   → Ok()
+//!
 //! Close()
 //!   → Ok()
 //! ```
@@ -20,10 +26,28 @@ pub use ipc::MAX_PAYLOAD;
 pub const OPEN: u32 = 1;
 pub const DECODE_FRAME: u32 = 2;
 pub const CLOSE: u32 = 3;
-pub const PLAY: u32 = 4;
+pub const TOGGLE: u32 = 4;
 pub const PAUSE: u32 = 5;
 
-pub const GEN_HEADER_SIZE: usize = core::mem::size_of::<u64>();
+pub const GEN_HEADER_SIZE: usize = 2 * core::mem::size_of::<u64>();
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToggleReply {
+    pub playing: u8,
+}
+
+impl ToggleReply {
+    pub const SIZE: usize = 1;
+
+    pub fn write_to(&self, buf: &mut [u8]) {
+        buf[0] = self.playing;
+    }
+
+    #[must_use]
+    pub fn read_from(buf: &[u8]) -> Self {
+        Self { playing: buf[0] }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OpenRequest {
@@ -168,10 +192,21 @@ mod tests {
     }
 
     #[test]
+    fn toggle_reply_round_trip() {
+        let reply = ToggleReply { playing: 1 };
+        let mut buf = [0u8; ToggleReply::SIZE];
+
+        reply.write_to(&mut buf);
+
+        assert_eq!(ToggleReply::read_from(&buf), reply);
+    }
+
+    #[test]
     fn sizes_fit_payload() {
         assert!(OpenRequest::SIZE <= MAX_PAYLOAD);
         assert!(OpenReply::SIZE <= MAX_PAYLOAD);
         assert!(DecodeFrameRequest::SIZE <= MAX_PAYLOAD);
         assert!(DecodeFrameReply::SIZE <= MAX_PAYLOAD);
+        assert!(ToggleReply::SIZE <= MAX_PAYLOAD);
     }
 }

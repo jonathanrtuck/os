@@ -9,7 +9,7 @@
 //! calls DECODE_FRAME with offset/size. The driver submits to the virtio
 //! decode queue and returns decoded frame status.
 
-pub const PIXEL_OFFSET: usize = 8;
+pub const PIXEL_OFFSET: usize = 16;
 
 // Codec constants
 pub const CODEC_MJPEG: u8 = 0;
@@ -113,16 +113,18 @@ pub struct DecodeFrameRequest {
     pub offset: u32,
     pub size: u32,
     pub timestamp_ns: u64,
+    pub output_pixel_offset: u32,
 }
 
 impl DecodeFrameRequest {
-    pub const SIZE: usize = 20;
+    pub const SIZE: usize = 24;
 
     pub fn write_to(&self, buf: &mut [u8]) {
         buf[0..4].copy_from_slice(&self.session_id.to_le_bytes());
         buf[4..8].copy_from_slice(&self.offset.to_le_bytes());
         buf[8..12].copy_from_slice(&self.size.to_le_bytes());
         buf[12..20].copy_from_slice(&self.timestamp_ns.to_le_bytes());
+        buf[20..24].copy_from_slice(&self.output_pixel_offset.to_le_bytes());
     }
 
     #[must_use]
@@ -132,6 +134,7 @@ impl DecodeFrameRequest {
             offset: u32::from_le_bytes(buf[4..8].try_into().unwrap()),
             size: u32::from_le_bytes(buf[8..12].try_into().unwrap()),
             timestamp_ns: u64::from_le_bytes(buf[12..20].try_into().unwrap()),
+            output_pixel_offset: u32::from_le_bytes(buf[20..24].try_into().unwrap()),
         }
     }
 }

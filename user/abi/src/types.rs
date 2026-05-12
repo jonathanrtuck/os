@@ -4,6 +4,10 @@
 #[repr(transparent)]
 pub struct Handle(pub u32);
 
+impl Handle {
+    pub const SELF: Self = Self(u32::MAX);
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct Rights(pub u32);

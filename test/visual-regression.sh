@@ -136,7 +136,7 @@ end_test $ok "phase9: scroll"
 
 begin_test "image space (phase14: three-space document switching)"
 hypervisor "$KERNEL" --events test/phase14-three-spaces.events \
-    --drive "$DISK" --background --resolution "$RES" --timeout 30 \
+    --drive "$DISK" --video-decode --background --resolution "$RES" --timeout 30 \
     >/dev/null 2>&1
 ok=true
 # Multi-capture: "p14-back" prefix → -NNN.png per frame_id.
@@ -150,7 +150,7 @@ end_test $ok "phase14: image space"
 
 begin_test "showcase play button (phase15: render, cursor, hit test)"
 hypervisor "$KERNEL" --events test/phase15-showcase.events \
-    --drive "$DISK" --audio --background --resolution "$RES" --timeout 30 \
+    --drive "$DISK" --audio --video-decode --background --resolution "$RES" --timeout 30 \
     >/dev/null 2>&1
 ok=true
 # Multi-capture: "p15-clicked" prefix → -NNN.png per frame_id.

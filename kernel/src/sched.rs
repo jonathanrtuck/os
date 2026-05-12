@@ -107,6 +107,19 @@ pub fn wake(thread_id: ThreadId, core_id: usize) {
         .enqueue(thread_id, priority);
 }
 
+/// Preempt the current thread if another thread is ready to run.
+/// Called from the timer IRQ handler after waking deadline threads.
+/// Re-enqueues the current thread and switches to the highest-priority
+/// runnable thread (which may be the just-woken deadline thread or the
+/// current thread itself if nothing higher is ready).
+pub fn preempt_if_needed(core_id: usize) {
+    let Some(current) = state::schedulers().core(core_id).lock().current() else {
+        return;
+    };
+
+    yield_current(current, core_id);
+}
+
 /// Yield the current thread — move it to the back of its run queue and
 /// switch to the next runnable thread.
 pub fn yield_current(current: ThreadId, core_id: usize) {

@@ -1271,6 +1271,7 @@ fn sys_event_bind_irq(
     let handle_id = HandleId(args[0] as u32);
     let intid = args[1] as u32;
     let signal_bits = args[2];
+    let flags = args[3] as u32;
     let space_id = space_id.ok_or(SyscallError::InvalidArgument)?;
     let handle = lookup_handle(space_id, handle_id)?;
 
@@ -1286,7 +1287,13 @@ fn sys_event_bind_irq(
     state::irqs().lock().bind(intid, event_id, signal_bits)?;
 
     #[cfg(target_os = "none")]
-    crate::frame::arch::gic::unmask_spi(intid);
+    {
+        if flags & crate::irq::IRQ_MODE_EDGE != 0 {
+            crate::frame::arch::gic::configure_spi_edge(intid);
+        }
+
+        crate::frame::arch::gic::unmask_spi(intid);
+    }
 
     Ok(0)
 }
@@ -1602,7 +1609,11 @@ fn sys_event_wait_deadline(
         let deadline_nanos = deadline_tick % 1_000_000_000;
         let raw_ticks = deadline_secs * freq + deadline_nanos * freq / 1_000_000_000;
 
-        crate::sched::block_with_deadline(current, core_id, raw_ticks);
+        crate::sched::block_with_deadline(
+            current,
+            core_id,
+            if raw_ticks == 0 { 1 } else { raw_ticks },
+        );
     }
 
     let timed_out = state::threads()
@@ -2082,8 +2093,9 @@ fn sys_recv_timed(
         let freq = crate::frame::arch::timer::TIMER_FREQ_HZ;
         let secs = deadline_ns / 1_000_000_000;
         let nanos = deadline_ns % 1_000_000_000;
+        let ticks = secs * freq + nanos * freq / 1_000_000_000;
 
-        secs * freq + nanos * freq / 1_000_000_000
+        if ticks == 0 { 1 } else { ticks }
     };
 
     loop {
@@ -3267,20 +3279,13 @@ fn print_smp_bench_results(args: &[u64; 6]) {
 
 #[inline(never)]
 fn sys_thread_set_priority(
-    _current: ThreadId,
+    current: ThreadId,
     space_id: Option<AddressSpaceId>,
     _core_id: usize,
     args: &[u64; 6],
 ) -> Result<u64, SyscallError> {
     let handle_id = HandleId(args[0] as u32);
     let priority_val = args[1] as u8;
-    let space_id = space_id.ok_or(SyscallError::InvalidArgument)?;
-    let handle = lookup_handle(space_id, handle_id)?;
-
-    if handle.object_type != ObjectType::Thread {
-        return Err(SyscallError::WrongHandleType);
-    }
-
     let priority = match priority_val {
         0 => Priority::Idle,
         1 => Priority::Low,
@@ -3288,9 +3293,21 @@ fn sys_thread_set_priority(
         3 => Priority::High,
         _ => return Err(SyscallError::InvalidArgument),
     };
+    let target = if handle_id.0 == u32::MAX {
+        current.0
+    } else {
+        let space_id = space_id.ok_or(SyscallError::InvalidArgument)?;
+        let handle = lookup_handle(space_id, handle_id)?;
+
+        if handle.object_type != ObjectType::Thread {
+            return Err(SyscallError::WrongHandleType);
+        }
+
+        handle.object_id
+    };
 
     state::threads()
-        .write(handle.object_id)
+        .write(target)
         .ok_or(SyscallError::InvalidHandle)?
         .set_priority(priority);
 

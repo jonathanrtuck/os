@@ -185,7 +185,9 @@ pub fn handle_data_abort(current: ThreadId, fault_addr: usize, is_write: bool) -
 
                 return FaultAction::Resolved;
             }
-            None => return FaultAction::Kill,
+            None => {
+                return FaultAction::Kill;
+            }
         }
     }
 

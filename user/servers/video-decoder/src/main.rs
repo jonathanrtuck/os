@@ -43,6 +43,7 @@ struct VideoDecoder {
     file_va: usize,
     file_size: usize,
     frame_index: Vec<avi::FrameRef>,
+    frame_pts_ns: Vec<u64>,
     output_vmo: Handle,
     output_va: usize,
     output_buf_size: usize,
@@ -52,12 +53,21 @@ struct VideoDecoder {
     playing: bool,
     current_frame: u32,
     ns_per_frame: u64,
-    next_frame_ns: u64,
+    play_start_ns: u64,
     codec_ep: Handle,
     codec_session_id: u32,
     shared_vmo: Handle,
     shared_va: usize,
     codec: u8,
+    stats: PlaybackStats,
+}
+
+struct PlaybackStats {
+    frames_decoded: u32,
+    frames_skipped: u32,
+    total_decode_ns: u64,
+    max_decode_ns: u64,
+    play_start_ns: u64,
 }
 
 fn reformat_avcc(avcc: &[u8], out: &mut [u8]) -> usize {
@@ -205,6 +215,8 @@ impl VideoDecoder {
                 return;
             }
         };
+        let ns_per = info.ns_per_frame();
+        let frame_pts_ns: Vec<u64> = (0..frame_index.len() as u64).map(|i| i * ns_per).collect();
 
         self.finish_open(
             msg,
@@ -213,8 +225,9 @@ impl VideoDecoder {
             file_vmo,
             info.width,
             info.height,
-            info.ns_per_frame(),
+            ns_per,
             frame_index,
+            frame_pts_ns,
             video::CODEC_MJPEG,
             b"  video-decoder: opened AVI\n",
         );
@@ -240,13 +253,22 @@ impl VideoDecoder {
             return;
         }
 
-        let frame_index: Vec<avi::FrameRef> = mp4_info
-            .samples()
-            .map(|s| avi::FrameRef {
+        let timescale = mp4_info.timescale as u64;
+        let mut frame_index: Vec<avi::FrameRef> = Vec::new();
+        let mut frame_pts_ns: Vec<u64> = Vec::new();
+
+        for s in mp4_info.samples() {
+            frame_index.push(avi::FrameRef {
                 offset: s.offset as u32,
                 size: s.size,
-            })
-            .collect();
+            });
+
+            let pts_ns = (s.pts_ticks * 1_000_000_000)
+                .checked_div(timescale)
+                .unwrap_or(0);
+
+            frame_pts_ns.push(pts_ns);
+        }
 
         self.finish_open(
             msg,
@@ -257,6 +279,7 @@ impl VideoDecoder {
             mp4_info.height,
             mp4_info.ns_per_frame(),
             frame_index,
+            frame_pts_ns,
             video::CODEC_H264,
             b"  video-decoder: opened MP4\n",
         );
@@ -273,6 +296,7 @@ impl VideoDecoder {
         height: u32,
         ns_per_frame: u64,
         frame_index: Vec<avi::FrameRef>,
+        frame_pts_ns: Vec<u64>,
         codec: u8,
         log_msg: &[u8],
     ) {
@@ -320,6 +344,7 @@ impl VideoDecoder {
         self.file_va = file_va;
         self.file_size = file_size;
         self.frame_index = frame_index;
+        self.frame_pts_ns = frame_pts_ns;
         self.output_vmo = output_vmo;
         self.output_va = output_va;
         self.output_buf_size = output_buf_size;
@@ -329,7 +354,7 @@ impl VideoDecoder {
         self.playing = false;
         self.current_frame = 0;
         self.ns_per_frame = ns_per_frame;
-        self.next_frame_ns = 0;
+        self.play_start_ns = 0;
         self.codec = codec;
 
         self.setup_hardware_session();
@@ -413,7 +438,6 @@ impl VideoDecoder {
         } else {
             0
         };
-
         let output_dup = match abi::handle::dup(
             self.output_vmo,
             Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0 | Rights::DUP.0),
@@ -508,7 +532,6 @@ impl VideoDecoder {
             Some(d) => d,
             None => return,
         };
-
         if self.shared_va != 0 && frame_data.len() <= SHARED_VMO_SIZE {
             // SAFETY: shared_va is a valid RW mapping of SHARED_VMO_SIZE bytes.
             unsafe {
@@ -519,12 +542,17 @@ impl VideoDecoder {
                 );
             }
 
-            let ts_ns = idx as u64 * self.ns_per_frame;
+            let pts_ns = self
+                .frame_pts_ns
+                .get(idx)
+                .copied()
+                .unwrap_or(idx as u64 * self.ns_per_frame);
             let req = video::DecodeFrameRequest {
                 session_id: self.codec_session_id,
                 offset: 0,
                 size: frame_data.len() as u32,
-                timestamp_ns: ts_ns,
+                timestamp_ns: pts_ns,
+                output_pixel_offset: video_decoder::GEN_HEADER_SIZE as u32,
             };
             let mut req_buf = [0u8; video::DecodeFrameRequest::SIZE];
 
@@ -536,13 +564,52 @@ impl VideoDecoder {
         self.output_gen = self.output_gen.wrapping_add(1);
         self.current_frame = idx as u32;
 
-        // SAFETY: output_va is 8-byte aligned (page-aligned VMO). Release
-        // ordering ensures pixel writes above are visible before the gen bump.
+        // SAFETY: output_va is page-aligned. Release ordering ensures pixel
+        // writes are visible before the gen bump makes the buffer readable.
         unsafe {
             let gen_ptr = self.output_va as *const AtomicU64;
 
             (*gen_ptr).store(self.output_gen, Ordering::Release);
         }
+    }
+
+    fn publish_status(&self) {
+        if self.output_va == 0 {
+            return;
+        }
+
+        // SAFETY: output_va + 8 is within the 16-byte header (page-aligned VMO).
+        unsafe {
+            let flags_ptr = (self.output_va + 8) as *const AtomicU64;
+
+            (*flags_ptr).store(u64::from(self.playing), Ordering::Release);
+        }
+    }
+
+    fn report_stats(&self) {
+        if self.stats.frames_decoded == 0 {
+            return;
+        }
+
+        let avg_us = (self.stats.total_decode_ns / self.stats.frames_decoded as u64) / 1000;
+        let max_us = self.stats.max_decode_ns / 1000;
+        let elapsed_ms = if self.stats.play_start_ns > 0 {
+            let now = abi::system::clock_read().unwrap_or(0);
+
+            now.saturating_sub(self.stats.play_start_ns) / 1_000_000
+        } else {
+            0
+        };
+        let target_us = self.ns_per_frame / 1000;
+
+        console::write(self.console_ep, b"  video-decoder: ");
+        console::write_u32(self.console_ep, b"decoded=", self.stats.frames_decoded);
+        console::write_u32(self.console_ep, b" skipped=", self.stats.frames_skipped);
+        console::write_u32(self.console_ep, b" avg=", avg_us as u32);
+        console::write_u32(self.console_ep, b"us max=", max_us as u32);
+        console::write_u32(self.console_ep, b"us budget=", target_us as u32);
+        console::write_u32(self.console_ep, b"us wall=", elapsed_ms as u32);
+        console::write(self.console_ep, b"ms\n");
     }
 
     fn handle_decode_frame(&mut self, msg: Incoming<'_>) {
@@ -551,7 +618,6 @@ impl VideoDecoder {
 
             return;
         }
-
         if self.file_va == 0 || self.frame_index.is_empty() {
             let _ = msg.reply_error(ipc::STATUS_INVALID);
 
@@ -594,6 +660,7 @@ impl VideoDecoder {
         }
 
         self.frame_index.clear();
+        self.frame_pts_ns.clear();
         self.file_size = 0;
         self.output_buf_size = 0;
         self.width = 0;
@@ -612,14 +679,41 @@ impl Dispatch for VideoDecoder {
 
                 let _ = msg.reply_empty();
             }
-            video_decoder::PLAY => {
-                self.playing = true;
-                self.next_frame_ns = abi::system::clock_read().unwrap_or(0);
+            video_decoder::TOGGLE => {
+                if self.playing {
+                    self.report_stats();
+                }
 
-                let _ = msg.reply_empty();
+                self.playing = !self.playing;
+
+                if self.playing {
+                    let now = abi::system::clock_read().unwrap_or(0);
+
+                    self.play_start_ns = now;
+                    self.stats = PlaybackStats {
+                        frames_decoded: 0,
+                        frames_skipped: 0,
+                        total_decode_ns: 0,
+                        max_decode_ns: 0,
+                        play_start_ns: now,
+                    };
+                }
+
+                self.publish_status();
+
+                let mut reply_buf = [0u8; video_decoder::ToggleReply::SIZE];
+
+                video_decoder::ToggleReply {
+                    playing: u8::from(self.playing),
+                }
+                .write_to(&mut reply_buf);
+
+                let _ = msg.reply_ok(&reply_buf, &[]);
             }
             video_decoder::PAUSE => {
                 self.playing = false;
+
+                self.publish_status();
 
                 let _ = msg.reply_empty();
             }
@@ -638,6 +732,8 @@ extern "C" fn _start() -> ! {
         Err(_) => abi::thread::exit(EXIT_CONSOLE_NOT_FOUND),
     };
 
+    let _ = abi::thread::set_priority(Handle::SELF, abi::types::Priority::High);
+
     console::write(console_ep, b"  video-decoder: starting\n");
     console::write(console_ep, b"  video-decoder: ready\n");
 
@@ -646,6 +742,7 @@ extern "C" fn _start() -> ! {
         file_va: 0,
         file_size: 0,
         frame_index: Vec::new(),
+        frame_pts_ns: Vec::new(),
         output_vmo: Handle(0),
         output_va: 0,
         output_buf_size: 0,
@@ -655,17 +752,31 @@ extern "C" fn _start() -> ! {
         playing: false,
         current_frame: 0,
         ns_per_frame: 0,
-        next_frame_ns: 0,
+        play_start_ns: 0,
         codec_ep: Handle(0),
         codec_session_id: 0,
         shared_vmo: Handle(0),
         shared_va: 0,
         codec: 0,
+        stats: PlaybackStats {
+            frames_decoded: 0,
+            frames_skipped: 0,
+            total_decode_ns: 0,
+            max_decode_ns: 0,
+            play_start_ns: 0,
+        },
     };
 
     loop {
-        if decoder.playing && decoder.ns_per_frame > 0 {
-            let deadline = decoder.next_frame_ns;
+        if decoder.playing && !decoder.frame_pts_ns.is_empty() {
+            let next = (decoder.current_frame + 1) as usize;
+            let deadline = if next < decoder.frame_pts_ns.len() {
+                decoder.play_start_ns + decoder.frame_pts_ns[next]
+            } else {
+                decoder.play_start_ns
+                    + decoder.frame_pts_ns.last().copied().unwrap_or(0)
+                    + decoder.ns_per_frame
+            };
 
             match ipc::server::serve_one_timed(HANDLE_SVC_EP, &mut decoder, deadline) {
                 Ok(()) | Err(abi::types::SyscallError::TimedOut) => {}
@@ -678,19 +789,47 @@ extern "C" fn _start() -> ! {
             }
         }
 
-        if decoder.playing && decoder.ns_per_frame > 0 {
+        if decoder.playing && !decoder.frame_pts_ns.is_empty() {
             let now = abi::system::clock_read().unwrap_or(0);
+            let elapsed = now.saturating_sub(decoder.play_start_ns);
+            let total = decoder.frame_pts_ns.len() as u32;
+            let mut target = decoder.current_frame;
 
-            if now >= decoder.next_frame_ns {
-                let total = decoder.frame_index.len() as u32;
-
-                if total > 0 {
-                    let next = (decoder.current_frame + 1) % total;
-
-                    decoder.decode_and_publish(next);
+            while (target + 1) < total {
+                if decoder.frame_pts_ns[(target + 1) as usize] > elapsed {
+                    break;
                 }
 
-                decoder.next_frame_ns = now + decoder.ns_per_frame;
+                target += 1;
+            }
+
+            if target > decoder.current_frame {
+                let skipped = target - decoder.current_frame - 1;
+
+                if skipped > 0 {
+                    decoder.stats.frames_skipped += skipped;
+                }
+
+                let t0 = abi::system::clock_read().unwrap_or(0);
+
+                decoder.decode_and_publish(target);
+
+                let dt = abi::system::clock_read().unwrap_or(0).saturating_sub(t0);
+
+                decoder.stats.frames_decoded += 1;
+                decoder.stats.total_decode_ns += dt;
+
+                if dt > decoder.stats.max_decode_ns {
+                    decoder.stats.max_decode_ns = dt;
+                }
+            }
+
+            if decoder.current_frame >= total - 1 {
+                decoder.playing = false;
+
+                decoder.decode_and_publish(0);
+                decoder.publish_status();
+                decoder.report_stats();
             }
         }
     }

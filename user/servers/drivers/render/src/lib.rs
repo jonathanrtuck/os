@@ -594,7 +594,7 @@ pub mod comp {
     pub const UPLOAD_IMAGE: u32 = 6;
 
     pub const IMAGE_FLAG_LIVE: u32 = 1;
-    pub const IMAGE_LIVE_HEADER_SIZE: usize = core::mem::size_of::<u64>();
+    pub const IMAGE_LIVE_HEADER_SIZE: usize = 2 * core::mem::size_of::<u64>();
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct UploadImageRequest {

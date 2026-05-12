@@ -78,13 +78,23 @@ pub fn wait_deadline(
     Ok(Handle(handle_id as u32))
 }
 
+pub const IRQ_MODE_EDGE: u32 = 1;
+
 pub fn bind_irq(event: Handle, intid: u32, bits: u64) -> Result<(), SyscallError> {
+    bind_irq_flags(event, intid, bits, 0)
+}
+
+pub fn bind_irq_edge(event: Handle, intid: u32, bits: u64) -> Result<(), SyscallError> {
+    bind_irq_flags(event, intid, bits, IRQ_MODE_EDGE)
+}
+
+fn bind_irq_flags(event: Handle, intid: u32, bits: u64, flags: u32) -> Result<(), SyscallError> {
     check(raw::syscall(
         num::EVENT_BIND_IRQ,
         event.0 as u64,
         intid as u64,
         bits,
-        0,
+        flags as u64,
         0,
         0,
     ))

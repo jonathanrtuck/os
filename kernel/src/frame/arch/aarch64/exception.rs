@@ -181,6 +181,8 @@ fn irq_handler(_frame: &mut TrapFrame) {
 
             super::timer::handle_deadline(core);
 
+            let mut woke_any = false;
+
             for entry in super::timer::drain_expired(core) {
                 let Some(tid) = entry else { break };
 
@@ -192,6 +194,8 @@ fn irq_handler(_frame: &mut TrapFrame) {
                     drop(t);
 
                     crate::sched::wake(tid, core);
+
+                    woke_any = true;
                 }
             }
 
@@ -199,6 +203,13 @@ fn irq_handler(_frame: &mut TrapFrame) {
             // SAFETY: percpu() valid — IRQ handlers fire after boot.
             unsafe {
                 watchdog_check(super::cpu::percpu());
+            }
+
+            if woke_any {
+                super::gic::end_of_interrupt(intid);
+                crate::sched::preempt_if_needed(core);
+
+                return;
             }
         }
         32.. => {
@@ -711,7 +722,7 @@ fn handle_data_abort(frame: &mut TrapFrame) {
     let handler: fn(u64, bool, u64) -> FaultAction = unsafe { core::mem::transmute(handler_addr) };
 
     match handler(far, is_write, esr) {
-        FaultAction::Resolved => {} // Return to EL0, retry the instruction.
+        FaultAction::Resolved => {}
         FaultAction::Kill => {
             unimplemented_el0(frame, "data abort (killed)");
         }

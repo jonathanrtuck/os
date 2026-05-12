@@ -15,6 +15,7 @@ use crate::{
 };
 
 pub const DEVICE_IRQ_BASE: u32 = 32;
+pub const IRQ_MODE_EDGE: u32 = 1;
 
 #[derive(Debug, Clone, Copy)]
 struct IrqBinding {

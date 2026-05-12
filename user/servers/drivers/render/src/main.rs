@@ -3107,6 +3107,8 @@ impl Dispatch for Compositor {
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.boot")]
 extern "C" fn _start() -> ! {
+    let _ = abi::thread::set_priority(Handle::SELF, abi::types::Priority::High);
+
     unsafe {
         FONT_VA = abi::vmo::map(HANDLE_FONT_VMO, 0, Rights::READ_MAP).unwrap_or(0);
     }

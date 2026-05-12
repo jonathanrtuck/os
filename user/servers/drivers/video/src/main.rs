@@ -216,6 +216,7 @@ impl VideoDriver {
         session_id: u32,
         compressed_data: &[u8],
         timestamp_ns: u64,
+        output_pixel_offset: usize,
     ) -> video::DecodeFrameReply {
         let data_len = compressed_data.len().min(self.compressed_len);
 
@@ -289,14 +290,15 @@ impl VideoDriver {
         };
 
         if reply.status == 0 && use_pixel_output && self.output_va != 0 {
-            let copy_len = pixel_size.min(self.output_len.saturating_sub(video::PIXEL_OFFSET));
+            let out_off = output_pixel_offset;
+            let copy_len = pixel_size.min(self.output_len.saturating_sub(out_off));
 
             // SAFETY: pixel_dma_va holds decoded BGRA from the host.
-            // output_va + PIXEL_OFFSET is within the mapped output VMO.
+            // output_va + out_off is within the mapped output VMO.
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     self.pixel_dma_va as *const u8,
-                    (self.output_va + video::PIXEL_OFFSET) as *mut u8,
+                    (self.output_va + out_off) as *mut u8,
                     copy_len,
                 );
             }
@@ -448,9 +450,12 @@ impl Dispatch for VideoServer {
                 let compressed = unsafe {
                     core::slice::from_raw_parts((self.driver.shared_va + offset) as *const u8, size)
                 };
-                let reply = self
-                    .driver
-                    .decode_frame(req.session_id, compressed, req.timestamp_ns);
+                let reply = self.driver.decode_frame(
+                    req.session_id,
+                    compressed,
+                    req.timestamp_ns,
+                    req.output_pixel_offset as usize,
+                );
                 let mut data = [0u8; video::DecodeFrameReply::SIZE];
 
                 reply.write_to(&mut data);

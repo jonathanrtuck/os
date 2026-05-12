@@ -126,6 +126,10 @@ impl Device {
         self.magic() == VIRTIO_MAGIC && self.version() == 2
     }
 
+    pub fn read_isr(&self) -> u32 {
+        self.read(REG_INTERRUPT_STATUS)
+    }
+
     pub fn ack_interrupt(&self) -> u32 {
         let status = self.read(REG_INTERRUPT_STATUS);
 
@@ -140,6 +144,10 @@ impl Device {
 
     pub fn config_read32(&self, offset: usize) -> u32 {
         read32(self.base + REG_CONFIG + offset)
+    }
+
+    pub fn config_write32(&self, offset: usize, val: u32) {
+        write32(self.base + REG_CONFIG + offset, val);
     }
 
     pub fn config_read64(&self, offset: usize) -> u64 {

@@ -38,6 +38,7 @@ const GICD_CTLR: usize = 0x0000;
 const GICD_IGROUPR: usize = 0x0080; // + 4*n, 1 bit/interrupt
 const GICD_ISENABLER: usize = 0x0100; // + 4*n, 1 bit/interrupt
 const GICD_ICENABLER: usize = 0x0180; // + 4*n, 1 bit/interrupt (clear-enable)
+const GICD_ICFGR: usize = 0x0C00; // + 4*n, 2 bits/interrupt (level/edge)
 const GICD_IPRIORITYR: usize = 0x0400; // + n, 1 byte/interrupt
 
 const GICD_CTLR_ENABLE_GRP1_NS: u32 = 1 << 1;
@@ -246,6 +247,21 @@ pub fn unmask_spi(intid: u32) {
     let (reg_off, bit) = spi_reg_bit(intid);
 
     mmio::write32(dist + GICD_ISENABLER + reg_off, 1 << bit);
+}
+
+/// Configure an SPI as edge-triggered (rising edge). Default is
+/// level-sensitive. GICD_ICFGR uses 2 bits per INTID: bit [2n+1] = 1
+/// selects edge-triggered. Must be called before unmasking.
+pub fn configure_spi_edge(intid: u32) {
+    debug_assert!(intid >= 32, "configure_spi_edge: PPIs/SGIs not supported");
+
+    let dist = DIST_BASE.load(Ordering::Relaxed);
+    let reg_index = (intid / 16) as usize;
+    let field_shift = (intid % 16) * 2 + 1;
+    let reg_addr = dist + GICD_ICFGR + reg_index * 4;
+    let val = mmio::read32(reg_addr);
+
+    mmio::write32(reg_addr, val | (1 << field_shift));
 }
 
 // ---------------------------------------------------------------------------
