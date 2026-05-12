@@ -4,8 +4,8 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::{
     node::{
-        DATA_BUFFER_SIZE, DATA_OFFSET, GENERATION_OFFSET, MAX_NODES, NODES_OFFSET, Node, NodeId,
-        SCENE_SIZE, SceneHeader,
+        DATA_BUFFER_SIZE, DATA_OFFSET, DamageRect, GENERATION_OFFSET, MAX_DAMAGE_RECTS, MAX_NODES,
+        NODES_OFFSET, Node, NodeId, SCENE_SIZE, SceneHeader,
     },
     primitives::{DataRef, ShapedGlyph},
 };
@@ -113,6 +113,30 @@ impl<'a> SceneReader<'a> {
     pub fn node_count(&self) -> u16 {
         self.header().node_count
     }
+    pub fn damage_count(&self) -> u8 {
+        self.header().damage_count
+    }
+
+    pub fn damage_rects(&self) -> &[DamageRect] {
+        let count = (self.header().damage_count as usize).min(MAX_DAMAGE_RECTS);
+
+        &self.header().damage_rects[..count]
+    }
+
+    pub fn write_reader_gen(&self, gen: u32) {
+        // SAFETY: reader_gen is at a fixed offset in SceneHeader. The atomic
+        // store ensures the presenter sees it. This is the only field the
+        // reader writes — it does not alias with any writer field during the
+        // seqlock read window.
+        unsafe {
+            let base = self.buf.as_ptr() as *const u8;
+            let offset = core::mem::offset_of!(SceneHeader, reader_gen);
+            let ptr = base.add(offset) as *const AtomicU32;
+
+            (*ptr).store(gen, Ordering::Release);
+        }
+    }
+
     pub fn root(&self) -> NodeId {
         self.header().root
     }

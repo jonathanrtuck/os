@@ -2494,6 +2494,9 @@ impl Compositor {
         self.walk_ctx.next_deadline = 0;
         self.walk_ctx.images = self.images;
 
+        let mut use_blit_retained = false;
+        let mut scissor: Option<(u32, u32, u32, u32)> = None;
+
         if rebuild || self.cached_draws.is_none() {
             // SAFETY: scene_va is a valid RO mapping of at least SCENE_SIZE bytes.
             let scene_buf =
@@ -2507,6 +2510,52 @@ impl Compositor {
 
             if reader.node_count() == 0 || root == NULL {
                 return 0;
+            }
+
+            let damage_count = reader.damage_count();
+            let damage_rects = reader.damage_rects();
+
+            if damage_count > 0 && !damage_rects.is_empty() && self.frame_count > 0 {
+                let scale = self.scale as f32;
+                let mpt = scene::MPT_PER_PT as f32;
+                let mut min_x = f32::MAX;
+                let mut min_y = f32::MAX;
+                let mut max_x = f32::MIN;
+                let mut max_y = f32::MIN;
+
+                for r in damage_rects {
+                    let rx = r.x as f32 / mpt * scale;
+                    let ry = r.y as f32 / mpt * scale;
+                    let rw = r.w as f32 / mpt * scale;
+                    let rh = r.h as f32 / mpt * scale;
+
+                    if rx < min_x {
+                        min_x = rx;
+                    }
+                    if ry < min_y {
+                        min_y = ry;
+                    }
+                    if rx + rw > max_x {
+                        max_x = rx + rw;
+                    }
+                    if ry + rh > max_y {
+                        max_y = ry + rh;
+                    }
+                }
+
+                let phys_w = (self.logical_w * self.scale) as f32;
+                let phys_h = (self.logical_h * self.scale) as f32;
+                let sx = (min_x.max(0.0)) as u32;
+                let sy = (min_y.max(0.0)) as u32;
+                let sw = ((max_x - min_x) as u32 + 2).min(phys_w as u32 - sx);
+                let sh = ((max_y - min_y) as u32 + 2).min(phys_h as u32 - sy);
+                let damage_area = sw as u64 * sh as u64;
+                let screen_area = phys_w as u64 * phys_h as u64;
+
+                if damage_area * 5 < screen_area {
+                    use_blit_retained = true;
+                    scissor = Some((sx, sy, sw, sh));
+                }
             }
 
             let root_node = reader.node(root);
@@ -2530,6 +2579,7 @@ impl Compositor {
                 return self.walk_ctx.frame_interval_ns;
             }
 
+            reader.write_reader_gen(scene_gen);
             self.last_scene_gen = scene_gen;
 
             draws.finalize();
@@ -2853,7 +2903,9 @@ impl Compositor {
                 let batch_start = op_idx;
                 let len = {
                     let mut w = CommandWriter::new(dma_buf);
-                    let load = if first {
+                    let load = if first && use_blit_retained {
+                        render::LOAD_BLIT_RETAINED
+                    } else if first {
                         render::LOAD_CLEAR
                     } else {
                         render::LOAD_LOAD
@@ -2872,6 +2924,10 @@ impl Compositor {
                         clear_b,
                         1.0,
                     );
+
+                    if let Some((sx, sy, sw, sh)) = scissor.filter(|_| first && use_blit_retained) {
+                        w.set_scissor(sx, sy, sw, sh);
+                    }
 
                     while op_idx < draws.ops.len() {
                         let op = &draws.ops[op_idx];

@@ -10,7 +10,7 @@ use crate::{
     stroke::expand_stroke,
     svg_path::parse_svg_path,
     transform::AffineTransform,
-    triple::{TripleWriter, TRIPLE_SCENE_SIZE},
+    triple::{TRIPLE_SCENE_SIZE, TripleWriter},
     writer::SceneWriter,
 };
 
@@ -51,8 +51,8 @@ fn node_size_is_176() {
 }
 
 #[test]
-fn header_size_is_80() {
-    assert_eq!(core::mem::size_of::<SceneHeader>(), 80);
+fn header_size_is_152() {
+    assert_eq!(core::mem::size_of::<SceneHeader>(), 152);
 }
 
 #[test]

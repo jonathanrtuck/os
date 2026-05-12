@@ -81,6 +81,7 @@ pub const TEX_USAGE_RENDER_TARGET: u8 = 0x04;
 pub const LOAD_DONT_CARE: u8 = 0;
 pub const LOAD_LOAD: u8 = 1;
 pub const LOAD_CLEAR: u8 = 2;
+pub const LOAD_BLIT_RETAINED: u8 = 3;
 pub const STORE_DONT_CARE: u8 = 0;
 pub const STORE_STORE: u8 = 1;
 

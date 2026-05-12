@@ -1720,6 +1720,7 @@ impl super::Presenter {
             }
         }
 
+        scene.write_damage_full();
         scene.commit();
 
         self.last_line_count = line_count as u32;
@@ -1781,6 +1782,15 @@ impl super::Presenter {
         let mut scene = SceneWriter::from_existing(self.scene_buf);
 
         scene.write_shaped_glyphs_at(self.clock_glyph_ref, &self.glyphs[..8]);
+
+        let clock_node = scene.node(self.clock_node_id);
+
+        scene.write_damage_rects(&[scene::DamageRect {
+            x: clock_node.x,
+            y: clock_node.y,
+            w: clock_node.width,
+            h: clock_node.height,
+        }]);
         scene.commit();
 
         true

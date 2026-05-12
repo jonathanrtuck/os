@@ -4,8 +4,8 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::{
     node::{
-        Node, NodeId, SceneHeader, DATA_BUFFER_SIZE, DATA_OFFSET, DIRTY_BITMAP_WORDS,
-        GENERATION_OFFSET, MAX_NODES, NODES_OFFSET, NULL, SCENE_SIZE,
+        DamageRect, Node, NodeId, SceneHeader, DATA_BUFFER_SIZE, DATA_OFFSET, DIRTY_BITMAP_WORDS,
+        GENERATION_OFFSET, MAX_DAMAGE_RECTS, MAX_NODES, NODES_OFFSET, NULL, SCENE_SIZE,
     },
     primitives::{Content, DataRef, ShapedGlyph},
 };
@@ -414,6 +414,35 @@ impl<'a> SceneWriter<'a> {
 
         self.header_mut().data_used = 0;
     }
+    pub fn write_damage_full(&mut self) {
+        let h = self.header_mut();
+
+        h.damage_count = 0;
+        h.damage_rects = [DamageRect::default(); MAX_DAMAGE_RECTS];
+    }
+
+    pub fn write_damage_rects(&mut self, rects: &[DamageRect]) {
+        let count = rects.len().min(MAX_DAMAGE_RECTS);
+        let h = self.header_mut();
+
+        h.damage_count = count as u8;
+
+        let mut i = 0;
+
+        while i < count {
+            h.damage_rects[i] = rects[i];
+            i += 1;
+        }
+        while i < MAX_DAMAGE_RECTS {
+            h.damage_rects[i] = DamageRect::default();
+            i += 1;
+        }
+    }
+
+    pub fn reader_gen(&self) -> u32 {
+        self.header().reader_gen
+    }
+
     pub fn root(&self) -> NodeId {
         self.header().root
     }

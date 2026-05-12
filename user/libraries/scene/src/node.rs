@@ -374,7 +374,19 @@ pub const GENERATION_OFFSET: usize = 0;
 /// Number of u64 words in the dirty bitmap (512 bits / 64 = 8 words).
 pub const DIRTY_BITMAP_WORDS: usize = 8;
 
-const _: () = assert!(core::mem::size_of::<SceneHeader>() == 80);
+pub const MAX_DAMAGE_RECTS: usize = 4;
+
+const _: () = assert!(core::mem::size_of::<SceneHeader>() == 152);
+
+/// Axis-aligned damage rectangle in millipoints.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(C)]
+pub struct DamageRect {
+    pub x: Mpt,
+    pub y: Mpt,
+    pub w: Umpt,
+    pub h: Umpt,
+}
 
 /// Header at the start of the shared memory region.
 #[derive(Clone, Copy, Debug)]
@@ -392,4 +404,12 @@ pub struct SceneHeader {
     /// node `i` was modified since the last frame. All bits set means
     /// full repaint (e.g., after `clear()`).
     pub dirty_bits: [u64; DIRTY_BITMAP_WORDS],
+    /// Number of damage rects (0 = full repaint, 1-4 = partial).
+    pub damage_count: u8,
+    pub _pad: [u8; 3],
+    /// Up to 4 damage rects in millipoints.
+    pub damage_rects: [DamageRect; MAX_DAMAGE_RECTS],
+    /// Last generation the compositor successfully read. The presenter
+    /// uses this to accumulate damage across skipped generations.
+    pub reader_gen: u32,
 }
