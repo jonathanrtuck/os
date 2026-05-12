@@ -220,6 +220,64 @@ impl HandleTable {
     pub fn free_slot_count(&self) -> usize {
         config::MAX_HANDLES - self.count
     }
+
+    /// Extract all handles, resetting the table to empty. Returns a
+    /// fixed-size buffer of `(ObjectType, object_id)` pairs for the
+    /// caller to release. Used by thread exit to clean up a dead
+    /// process's handle table without holding the space lock during
+    /// object teardown.
+    pub fn take_all(&mut self) -> TakenHandles {
+        let mut taken = TakenHandles::new();
+
+        for slot in &mut self.entries {
+            if let Some(handle) = slot.take() {
+                taken.push(handle.object_type, handle.object_id);
+            }
+        }
+
+        self.count = 0;
+        self.free_head = if config::MAX_HANDLES > 0 { 0 } else { EMPTY };
+
+        for i in 0..config::MAX_HANDLES {
+            self.free_next[i] = if i + 1 < config::MAX_HANDLES {
+                (i + 1) as u32
+            } else {
+                EMPTY
+            };
+        }
+
+        taken
+    }
+}
+
+/// Fixed-size buffer of extracted handle references from `take_all`.
+pub struct TakenHandles {
+    entries: [(ObjectType, u32); config::MAX_HANDLES],
+    len: usize,
+}
+
+impl TakenHandles {
+    fn new() -> Self {
+        TakenHandles {
+            entries: [(ObjectType::Vmo, 0); config::MAX_HANDLES],
+            len: 0,
+        }
+    }
+
+    fn push(&mut self, object_type: ObjectType, object_id: u32) {
+        if self.len < config::MAX_HANDLES {
+            self.entries[self.len] = (object_type, object_id);
+            self.len += 1;
+        }
+    }
+
+    pub fn as_slice(&self) -> &[(ObjectType, u32)] {
+        &self.entries[..self.len]
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
 }
 
 #[cfg(test)]
@@ -419,5 +477,48 @@ mod tests {
 
         assert!(next == HandleId(1) || next == HandleId(3));
         assert_eq!(t.count(), 4);
+    }
+
+    #[test]
+    fn take_all_extracts_and_resets() {
+        let mut t = make_table();
+
+        t.allocate(ObjectType::Vmo, 10, Rights::ALL, 0).unwrap();
+        t.allocate(ObjectType::Endpoint, 20, Rights::ALL, 0)
+            .unwrap();
+        t.allocate(ObjectType::Event, 30, Rights::ALL, 0).unwrap();
+
+        assert_eq!(t.count(), 3);
+
+        let taken = t.take_all();
+
+        assert_eq!(taken.as_slice().len(), 3);
+        assert_eq!(t.count(), 0);
+
+        let types: alloc::vec::Vec<_> = taken.as_slice().iter().map(|(ty, _)| *ty).collect();
+
+        assert!(types.contains(&ObjectType::Vmo));
+        assert!(types.contains(&ObjectType::Endpoint));
+        assert!(types.contains(&ObjectType::Event));
+
+        let ids: alloc::vec::Vec<_> = taken.as_slice().iter().map(|(_, id)| *id).collect();
+
+        assert!(ids.contains(&10));
+        assert!(ids.contains(&20));
+        assert!(ids.contains(&30));
+
+        // Table is usable again after take_all.
+        let new_id = t.allocate(ObjectType::Vmo, 99, Rights::ALL, 0).unwrap();
+
+        assert_eq!(t.lookup(new_id).unwrap().object_id, 99);
+    }
+
+    #[test]
+    fn take_all_empty_table() {
+        let mut t = make_table();
+        let taken = t.take_all();
+
+        assert!(taken.is_empty());
+        assert_eq!(t.count(), 0);
     }
 }

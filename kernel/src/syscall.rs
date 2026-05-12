@@ -496,6 +496,24 @@ fn close_endpoint_peer(ep_id: u32, core_id: usize) {
     }
 }
 
+/// Drain all handles from a dead process's address space. Takes the
+/// handle table contents while holding the space lock, drops the lock,
+/// then releases each object ref. This triggers endpoint close_peer
+/// (waking blocked callers), VMO cleanup, and event destruction.
+fn teardown_space_handles(space_id: AddressSpaceId, core_id: usize) {
+    let taken = {
+        let Some(mut space) = state::spaces().write(space_id.0) else {
+            return;
+        };
+
+        space.handles_mut().take_all()
+    };
+
+    for &(object_type, object_id) in taken.as_slice() {
+        release_object_ref(object_type, object_id, core_id);
+    }
+}
+
 fn destroy_event(event_id: u32) {
     let bound_ep = state::events()
         .read(event_id)
@@ -3039,6 +3057,25 @@ fn sys_thread_exit(
     for &evt_id in &wait_evts[..wait_n as usize] {
         if let Some(mut e) = state::events().write(evt_id) {
             e.remove_waiter(current);
+        }
+    }
+
+    // Unlink this thread from its address space. If it was the last
+    // thread, drain the handle table so kernel objects (endpoints, VMOs,
+    // events) are released. Without this, a dead process's endpoint
+    // handles keep refcounts alive and callers block forever.
+    if let Some(space_id) = state::threads()
+        .read(current.0)
+        .and_then(|t| t.address_space())
+    {
+        unlink_thread_from_space(current.0, space_id);
+
+        let is_last = state::spaces()
+            .read(space_id.0)
+            .is_some_and(|s| s.thread_head().is_none());
+
+        if is_last {
+            teardown_space_handles(space_id, core_id);
         }
     }
 
