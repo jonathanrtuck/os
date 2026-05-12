@@ -12,5 +12,6 @@ heap = { path = "../../heap" }
 ipc = { path = "../../ipc" }
 jpeg = { path = "../../libraries/jpeg" }
 name = { path = "../name" }
+video = { path = "../drivers/video" }
 
 [workspace]

@@ -60,6 +60,13 @@ struct VideoDriver {
     shared_va: usize,
     shared_len: usize,
     next_session_id: u32,
+    output_va: usize,
+    output_len: usize,
+    pixel_dma_va: usize,
+    pixel_dma_pa: u64,
+    pixel_dma_len: usize,
+    session_width: u32,
+    session_height: u32,
 }
 
 impl VideoDriver {
@@ -190,21 +197,29 @@ impl VideoDriver {
             core::ptr::write_bytes(hdr.add(12), 0, 4);
             core::ptr::copy_nonoverlapping(timestamp_ns.to_le_bytes().as_ptr(), hdr.add(16), 8);
         }
-
         // Zero the status buffer before submission.
         // SAFETY: status_buf_va is a PAGE_SIZE DMA buffer.
         unsafe { core::ptr::write_bytes(self.status_buf_va as *mut u8, 0, 24) };
 
-        // Push 3-descriptor chain on decodeq:
-        //   header (readable, 20 bytes)
-        //   compressed data (readable, data_len bytes)
-        //   status (writable, 24 bytes)
-        self.decode_vq.push_chain(&[
-            (self.frame_hdr_pa, 20, false),
-            (self.compressed_pa, data_len as u32, false),
-            (self.status_buf_pa, 24, true),
-        ]);
+        let pixel_size = self.session_width as usize * self.session_height as usize * 4;
+        let use_pixel_output = self.pixel_dma_len >= pixel_size && pixel_size > 0;
 
+        if use_pixel_output {
+            // 4-descriptor chain: header, compressed, pixel output, status
+            self.decode_vq.push_chain(&[
+                (self.frame_hdr_pa, 20, false),
+                (self.compressed_pa, data_len as u32, false),
+                (self.pixel_dma_pa, pixel_size as u32, true),
+                (self.status_buf_pa, 24, true),
+            ]);
+        } else {
+            // 3-descriptor chain: header, compressed, status (zero-copy only)
+            self.decode_vq.push_chain(&[
+                (self.frame_hdr_pa, 20, false),
+                (self.compressed_pa, data_len as u32, false),
+                (self.status_buf_pa, 24, true),
+            ]);
+        }
         self.device.notify(DECODEQ);
 
         let _ = abi::event::wait(&[(self.irq_event, 0x1)]);
@@ -217,7 +232,7 @@ impl VideoDriver {
         // Read 24-byte status response:
         // [status: u32][bytes_written: u32][timestamp_ns: u64][duration_ns: u64]
         // SAFETY: device has written 24-byte response at status_buf_va.
-        unsafe {
+        let reply = unsafe {
             let va = self.status_buf_va;
 
             video::DecodeFrameReply {
@@ -226,7 +241,23 @@ impl VideoDriver {
                 timestamp_ns: core::ptr::read_volatile((va + 8) as *const u64),
                 duration_ns: core::ptr::read_volatile((va + 16) as *const u64),
             }
+        };
+
+        if reply.status == 0 && use_pixel_output && self.output_va != 0 {
+            let copy_len = pixel_size.min(self.output_len.saturating_sub(video::PIXEL_OFFSET));
+
+            // SAFETY: pixel_dma_va holds decoded BGRA from the host.
+            // output_va + PIXEL_OFFSET is within the mapped output VMO.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    self.pixel_dma_va as *const u8,
+                    (self.output_va + video::PIXEL_OFFSET) as *mut u8,
+                    copy_len,
+                );
+            }
         }
+
+        reply
     }
 }
 
@@ -279,6 +310,36 @@ impl Dispatch for VideoServer {
                 }
 
                 let req = video::CreateSessionRequest::read_from(msg.payload);
+
+                // Map the output VMO if the client sent one
+                if !msg.handles.is_empty() {
+                    let output_vmo = Handle(msg.handles[0]);
+                    let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
+
+                    if let Ok(va) = abi::vmo::map(output_vmo, 0, rw) {
+                        let pixel_size = req.width as usize * req.height as usize * 4;
+                        let output_len =
+                            (video::PIXEL_OFFSET + pixel_size).next_multiple_of(PAGE_SIZE);
+
+                        self.driver.output_va = va;
+                        self.driver.output_len = output_len;
+                        self.driver.session_width = req.width;
+                        self.driver.session_height = req.height;
+
+                        // Allocate DMA buffer for decoded pixel output
+                        let dma_size = pixel_size.next_multiple_of(PAGE_SIZE);
+
+                        if let Ok(dma) = init::request_dma(HANDLE_INIT_EP, dma_size) {
+                            // SAFETY: DMA allocation is valid; zeroing before use.
+                            unsafe { core::ptr::write_bytes(dma.va as *mut u8, 0, dma_size) };
+
+                            self.driver.pixel_dma_va = dma.va;
+                            self.driver.pixel_dma_pa = dma.va as u64;
+                            self.driver.pixel_dma_len = dma_size;
+                        }
+                    }
+                }
+
                 let (status, session_id, texture_handle) =
                     self.driver.create_session(req.codec, req.width, req.height);
 
@@ -466,7 +527,6 @@ extern "C" fn _start() -> ! {
         Some(vq) => vq,
         None => abi::thread::exit(4),
     };
-
     // Allocate DMA buffers.
     let ctrl_dma = match init::request_dma(HANDLE_INIT_EP, PAGE_SIZE) {
         Ok(d) => d,
@@ -518,13 +578,11 @@ extern "C" fn _start() -> ! {
     let supported_codecs = device.config_read32(0);
     let max_width = device.config_read32(4);
     let max_height = device.config_read32(8);
-
     // Watch for console service to log readiness.
     let console_ep = match name::watch(HANDLE_NS_EP, b"console") {
         Ok(h) => h,
         Err(_) => abi::thread::exit(8),
     };
-
     // Build log message: "codec-decode: ready (codecs=0xNN)\n"
     let mut log_buf = [0u8; 64];
     let prefix = b"codec-decode: ready (codecs=";
@@ -560,6 +618,13 @@ extern "C" fn _start() -> ! {
             shared_va: 0,
             shared_len: 0,
             next_session_id: 1,
+            output_va: 0,
+            output_len: 0,
+            pixel_dma_va: 0,
+            pixel_dma_pa: 0,
+            pixel_dma_len: 0,
+            session_width: 0,
+            session_height: 0,
         },
     };
 

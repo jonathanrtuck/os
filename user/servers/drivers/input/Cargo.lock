@@ -369,6 +369,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
+name = "video"
+version = "0.1.0"
+dependencies = [
+ "abi",
+ "console",
+ "init",
+ "ipc",
+ "name",
+ "virtio",
+]
+
+[[package]]
 name = "video-decoder"
 version = "0.1.0"
 dependencies = [
@@ -379,6 +391,7 @@ dependencies = [
  "ipc",
  "jpeg",
  "name",
+ "video",
 ]
 
 [[package]]

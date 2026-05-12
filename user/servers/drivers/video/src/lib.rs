@@ -9,6 +9,8 @@
 //! calls DECODE_FRAME with offset/size. The driver submits to the virtio
 //! decode queue and returns decoded frame status.
 
+pub const PIXEL_OFFSET: usize = 8;
+
 // Codec constants
 pub const CODEC_MJPEG: u8 = 0;
 pub const CODEC_H264: u8 = 1;

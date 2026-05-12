@@ -35,6 +35,8 @@ const PAGE_SIZE: usize = 16384;
 
 const EXIT_CONSOLE_NOT_FOUND: u32 = 0xE001;
 
+const SHARED_VMO_SIZE: usize = PAGE_SIZE * 64; // 1 MiB for compressed data
+
 struct VideoDecoder {
     console_ep: Handle,
     file_va: usize,
@@ -53,6 +55,10 @@ struct VideoDecoder {
     current_frame: u32,
     ns_per_frame: u64,
     next_frame_ns: u64,
+    codec_ep: Handle,
+    codec_session_id: u32,
+    shared_vmo: Handle,
+    shared_va: usize,
 }
 
 impl VideoDecoder {
@@ -211,6 +217,7 @@ impl VideoDecoder {
         self.ns_per_frame = info.ns_per_frame();
         self.next_frame_ns = 0;
 
+        self.setup_hardware_session();
         self.decode_and_publish(0);
 
         let total = self.frame_index.len() as u32;
@@ -228,6 +235,87 @@ impl VideoDecoder {
         reply.write_to(&mut reply_buf);
 
         let _ = msg.reply_ok(&reply_buf, &[output_dup.0]);
+    }
+
+    fn setup_hardware_session(&mut self) {
+        if self.codec_ep.0 == 0 || self.width == 0 || self.height == 0 {
+            return;
+        }
+
+        // Create shared VMO for compressed data transfer
+        if self.shared_vmo.0 == 0 {
+            let vmo = match abi::vmo::create(SHARED_VMO_SIZE, 0) {
+                Ok(h) => h,
+                Err(_) => return,
+            };
+            let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
+            let va = match abi::vmo::map(vmo, 0, rw) {
+                Ok(va) => va,
+                Err(_) => {
+                    let _ = abi::handle::close(vmo);
+                    return;
+                }
+            };
+
+            self.shared_vmo = vmo;
+            self.shared_va = va;
+
+            // Send shared VMO to driver via SETUP
+            let shared_dup =
+                match abi::handle::dup(vmo, Rights(Rights::READ.0 | Rights::MAP.0 | Rights::DUP.0))
+                {
+                    Ok(h) => h,
+                    Err(_) => return,
+                };
+            let mut setup_buf = [0u8; ipc::message::MSG_SIZE];
+            let _ = ipc::client::call(
+                self.codec_ep,
+                video::SETUP,
+                &[],
+                &[shared_dup.0],
+                &mut [],
+                &mut setup_buf,
+            );
+        }
+
+        // Create decode session, sending output VMO to the driver
+        let output_dup = match abi::handle::dup(
+            self.output_vmo,
+            Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0 | Rights::DUP.0),
+        ) {
+            Ok(h) => h,
+            Err(_) => return,
+        };
+
+        let req = video::CreateSessionRequest {
+            codec: video::CODEC_MJPEG,
+            width: self.width,
+            height: self.height,
+        };
+        let mut req_buf = [0u8; video::CreateSessionRequest::SIZE];
+
+        req.write_to(&mut req_buf);
+
+        let mut call_buf = [0u8; ipc::message::MSG_SIZE];
+        let reply = match ipc::client::call(
+            self.codec_ep,
+            video::CREATE_SESSION,
+            &req_buf,
+            &[output_dup.0],
+            &mut [],
+            &mut call_buf,
+        ) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+
+        if reply.is_error() || reply.payload.len() < video::CreateSessionReply::SIZE {
+            return;
+        }
+
+        let cr = video::CreateSessionReply::read_from(reply.payload);
+
+        self.codec_session_id = cr.session_id;
     }
 
     fn decode_and_publish(&mut self, idx: u32) {
@@ -249,6 +337,66 @@ impl VideoDecoder {
             Some(d) => d,
             None => return,
         };
+
+        if self.codec_session_id != 0 {
+            self.decode_hardware(jpeg_data, idx);
+        } else {
+            self.decode_software(jpeg_data);
+        }
+
+        self.output_gen = self.output_gen.wrapping_add(1);
+        self.current_frame = idx as u32;
+
+        // SAFETY: output_va is 8-byte aligned (page-aligned VMO). Release
+        // ordering ensures pixel writes above are visible before the gen bump.
+        unsafe {
+            let gen_ptr = self.output_va as *const AtomicU64;
+
+            (*gen_ptr).store(self.output_gen, Ordering::Release);
+        }
+    }
+
+    fn decode_hardware(&mut self, jpeg_data: &[u8], frame_idx: usize) {
+        if self.shared_va == 0 || jpeg_data.len() > SHARED_VMO_SIZE {
+            self.decode_software(jpeg_data);
+            return;
+        }
+
+        // Copy compressed JPEG data to shared VMO
+        // SAFETY: shared_va is a valid RW mapping of SHARED_VMO_SIZE bytes.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                jpeg_data.as_ptr(),
+                self.shared_va as *mut u8,
+                jpeg_data.len(),
+            );
+        }
+
+        let ts_ns = frame_idx as u64 * self.ns_per_frame;
+        let req = video::DecodeFrameRequest {
+            session_id: self.codec_session_id,
+            offset: 0,
+            size: jpeg_data.len() as u32,
+            timestamp_ns: ts_ns,
+        };
+        let mut req_buf = [0u8; video::DecodeFrameRequest::SIZE];
+
+        req.write_to(&mut req_buf);
+
+        match ipc::client::call_simple(self.codec_ep, video::DECODE_FRAME, &req_buf) {
+            Ok((0, _payload)) => {}
+            _ => {
+                // Fallback to software decode on hardware failure
+                self.decode_software(jpeg_data);
+            }
+        }
+    }
+
+    fn decode_software(&mut self, jpeg_data: &[u8]) {
+        if self.decode_buf_va == 0 {
+            return;
+        }
+
         // SAFETY: decode_buf_va is a valid RW mapping of decode_buf_size bytes.
         let decode_buf = unsafe {
             core::slice::from_raw_parts_mut(self.decode_buf_va as *mut u8, self.decode_buf_size)
@@ -262,25 +410,13 @@ impl VideoDecoder {
             .output_buf_size
             .saturating_sub(video_decoder::GEN_HEADER_SIZE);
 
-        // SAFETY: output_va is a valid RW mapping. Pixels written at offset 8
-        // (after the generation counter header).
+        // SAFETY: output_va is a valid RW mapping.
         unsafe {
             core::ptr::copy_nonoverlapping(
                 self.decode_buf_va as *const u8,
                 (self.output_va + video_decoder::GEN_HEADER_SIZE) as *mut u8,
                 pixel_size.min(max_pixels),
             );
-        }
-
-        self.output_gen = self.output_gen.wrapping_add(1);
-        self.current_frame = idx as u32;
-
-        // SAFETY: output_va is 8-byte aligned (page-aligned VMO). Release
-        // ordering ensures pixel writes above are visible before the gen bump.
-        unsafe {
-            let gen_ptr = self.output_va as *const AtomicU64;
-
-            (*gen_ptr).store(self.output_gen, Ordering::Release);
         }
     }
 
@@ -388,6 +524,9 @@ extern "C" fn _start() -> ! {
     };
 
     console::write(console_ep, b"  video-decoder: starting\n");
+
+    let codec_ep = name::lookup(HANDLE_NS_EP, b"codec-decode").unwrap_or(Handle(0));
+
     console::write(console_ep, b"  video-decoder: ready\n");
 
     let mut decoder = VideoDecoder {
@@ -408,6 +547,10 @@ extern "C" fn _start() -> ! {
         current_frame: 0,
         ns_per_frame: 0,
         next_frame_ns: 0,
+        codec_ep,
+        codec_session_id: 0,
+        shared_vmo: Handle(0),
+        shared_va: 0,
     };
 
     loop {
