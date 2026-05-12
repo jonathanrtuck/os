@@ -91,9 +91,9 @@ const ASSETS: &[AssetSpec] = &[
         name: "video",
     },
     AssetSpec {
-        filename: "video.mp4",
+        filename: "zoey.mp4",
         media_type: "video/mp4",
-        name: "video-h264",
+        name: "zoey-video",
     },
 ];
 
@@ -107,8 +107,8 @@ fn main() {
 
     let output_path = Path::new(&args[1]);
     let assets_dir = args.get(2).map(|s| Path::new(s.as_str()));
-    // 4096 blocks = 64 MiB when assets are included, 512 = 8 MiB otherwise.
-    let blocks: u32 = if assets_dir.is_some() { 4096 } else { 512 };
+    // 8192 blocks = 128 MiB when assets are included, 512 = 8 MiB otherwise.
+    let blocks: u32 = if assets_dir.is_some() { 8192 } else { 512 };
     let device = FileDevice::create(output_path, blocks).unwrap_or_else(|e| {
         eprintln!("error: failed to create {}: {e}", output_path.display());
         process::exit(1);

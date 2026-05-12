@@ -1891,4 +1891,30 @@ mod tests {
 
         assert!(refs[0].is_keyframe);
     }
+
+    #[test]
+    fn parse_zoey_1080p_mp4() {
+        let data = include_bytes!("/Users/user/Sites/os/assets/zoey.mp4");
+        let mp4 = parse(data).expect("parse zoey.mp4");
+
+        assert_eq!(mp4.width, 1920);
+        assert_eq!(mp4.height, 1080);
+        assert_eq!(mp4.total_samples, 534);
+        assert!(mp4.timescale > 0);
+
+        let (nal_len, config) = mp4.avc_config().expect("avcC");
+
+        assert_eq!(nal_len, 4);
+        assert!(!config.is_empty());
+
+        let refs: Vec<SampleRef> = mp4.samples().collect();
+
+        assert_eq!(refs.len(), 534);
+        assert!(refs[0].is_keyframe);
+        assert!(refs[0].size > 0);
+
+        let first = mp4.sample_data(&refs[0]).expect("first sample data");
+
+        assert_eq!(first.len(), refs[0].size as usize);
+    }
 }
