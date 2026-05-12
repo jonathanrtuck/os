@@ -3357,8 +3357,11 @@ extern "C" fn _start() -> ! {
     }
 
     let frame_interval = compositor.walk_ctx.frame_interval_ns;
-    let mut next_vsync = abi::system::clock_read().unwrap_or(0) + frame_interval;
+    let mut last_vsync_counter: u32 = compositor.device.config_read32(0x10);
+    let mut vsync_time = abi::system::clock_read().unwrap_or(0);
+    let mut next_vsync = vsync_time + frame_interval;
     let mut render_deadline: u64 = 0;
+    let mut render_budget_ns: u64 = frame_interval / 4;
 
     loop {
         let deadline = if render_deadline > 0 && render_deadline < next_vsync {
@@ -3373,6 +3376,13 @@ extern "C" fn _start() -> ! {
         }
 
         let now = abi::system::clock_read().unwrap_or(0);
+        let counter = compositor.device.config_read32(0x10);
+
+        if counter != last_vsync_counter {
+            vsync_time = now;
+            last_vsync_counter = counter;
+            next_vsync = vsync_time + frame_interval - render_budget_ns;
+        }
 
         if now < next_vsync && (render_deadline == 0 || now < render_deadline) {
             continue;
@@ -3383,13 +3393,22 @@ extern "C" fn _start() -> ! {
         let timer_due = render_deadline > 0 && now >= render_deadline;
 
         if scene_changed || images_changed || timer_due {
+            let before = abi::system::clock_read().unwrap_or(now);
             let next = compositor.render_frame();
+            let after = abi::system::clock_read().unwrap_or(before);
+            let elapsed = after.saturating_sub(before);
 
-            render_deadline = if next > now { next } else { 0 };
+            render_budget_ns = render_budget_ns / 2 + elapsed / 2;
+
+            render_deadline = if next > after { next } else { 0 };
         }
 
         if now >= next_vsync {
-            next_vsync = now + frame_interval;
+            next_vsync = vsync_time + frame_interval - render_budget_ns;
+
+            if next_vsync <= now {
+                next_vsync = now + frame_interval;
+            }
         }
     }
 
