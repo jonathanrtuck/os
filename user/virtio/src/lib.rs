@@ -50,9 +50,10 @@ pub const DEVICE_9P: u32 = 9;
 pub const DEVICE_INPUT: u32 = 18;
 pub const DEVICE_METAL: u32 = 22;
 pub const DEVICE_SND: u32 = 25;
+pub const DEVICE_VIDEO_DECODE: u32 = 30;
 
 pub const MMIO_STRIDE: usize = 0x200;
-pub const MAX_DEVICES: usize = 8;
+pub const MAX_DEVICES: usize = 10;
 pub const SPI_BASE_INTID: u32 = 48;
 
 #[repr(C)]

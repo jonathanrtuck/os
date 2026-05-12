@@ -75,6 +75,10 @@ fn build_init(kernel_dir: &std::path::Path) {
     println!("cargo:rerun-if-changed=../user/servers/drivers/snd/src/lib.rs");
     println!("cargo:rerun-if-changed=../user/servers/drivers/snd/link.ld");
     println!("cargo:rerun-if-changed=../user/servers/drivers/snd/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/servers/drivers/video/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/servers/drivers/video/src/lib.rs");
+    println!("cargo:rerun-if-changed=../user/servers/drivers/video/link.ld");
+    println!("cargo:rerun-if-changed=../user/servers/drivers/video/Cargo.toml");
     println!("cargo:rerun-if-changed=../user/servers/audio/src/main.rs");
     println!("cargo:rerun-if-changed=../user/servers/audio/src/lib.rs");
     println!("cargo:rerun-if-changed=../user/servers/audio/link.ld");
@@ -309,6 +313,11 @@ const SERVICES: &[ServiceDef] = &[
         name: "snd",
         dir: "../user/servers/drivers/snd",
         crate_name: "snd",
+    },
+    ServiceDef {
+        name: "codec-decode",
+        dir: "../user/servers/drivers/video",
+        crate_name: "video",
     },
     ServiceDef {
         name: "audio",
