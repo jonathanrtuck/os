@@ -233,6 +233,7 @@ impl GlyphAtlas {
             self.row_y += self.row_h;
             self.row_x = 0;
             self.row_h = 0;
+
             self.record_shelf();
         }
 
@@ -432,6 +433,7 @@ impl GlyphAtlas {
         self.shelf_count = 0;
         self.frame_counter = 0;
         self.dirty = None;
+
         self.record_shelf();
     }
 }

@@ -2580,6 +2580,7 @@ impl Compositor {
             }
 
             reader.write_reader_gen(scene_gen);
+
             self.last_scene_gen = scene_gen;
 
             draws.finalize();
