@@ -2158,6 +2158,8 @@ struct Compositor {
     frame_count: u32,
     last_scene_gen: u32,
     walk_ctx: WalkContext,
+    cached_draws: Option<DrawList>,
+    cached_bg: scene::Color,
 
     cursor_uploaded: bool,
     cursor_visible: bool,
@@ -2479,7 +2481,7 @@ impl Compositor {
             .or_else(|| (0..MAX_IMAGES).find(|&i| self.images[i].content_id == 0))
     }
 
-    fn render_frame(&mut self) -> u64 {
+    fn render_frame(&mut self, rebuild: bool) -> u64 {
         if self.scene_va == 0 {
             return 0;
         }
@@ -2492,47 +2494,53 @@ impl Compositor {
         self.walk_ctx.next_deadline = 0;
         self.walk_ctx.images = self.images;
 
-        // SAFETY: scene_va is a valid RO mapping of at least SCENE_SIZE bytes.
-        let scene_buf =
-            unsafe { core::slice::from_raw_parts(self.scene_va as *const u8, SCENE_SIZE) };
-        let reader = SceneReader::new(scene_buf);
+        if rebuild || self.cached_draws.is_none() {
+            // SAFETY: scene_va is a valid RO mapping of at least SCENE_SIZE bytes.
+            let scene_buf =
+                unsafe { core::slice::from_raw_parts(self.scene_va as *const u8, SCENE_SIZE) };
+            let reader = SceneReader::new(scene_buf);
+            let scene_gen = match reader.begin_read() {
+                Some(g) => g,
+                None => return self.walk_ctx.frame_interval_ns,
+            };
+            let root = reader.root();
 
-        let scene_gen = match reader.begin_read() {
-            Some(g) => g,
-            None => return self.walk_ctx.frame_interval_ns,
-        };
+            if reader.node_count() == 0 || root == NULL {
+                return 0;
+            }
 
-        let root = reader.root();
+            let root_node = reader.node(root);
 
-        if reader.node_count() == 0 || root == NULL {
-            return 0;
+            self.cached_bg = root_node.background;
+
+            let mut draws = DrawList::new(self.logical_w as f32, self.logical_h as f32);
+
+            walk_node(
+                &reader,
+                root,
+                0.0,
+                0.0,
+                None,
+                &mut draws,
+                &mut self.walk_ctx,
+                true,
+            );
+
+            if !reader.end_read(scene_gen) {
+                return self.walk_ctx.frame_interval_ns;
+            }
+
+            self.last_scene_gen = scene_gen;
+
+            draws.finalize();
+
+            self.upload_atlas_dirty();
+
+            self.cached_draws = Some(draws);
         }
 
-        let root_node = reader.node(root);
-        let bg = root_node.background;
-        let mut draws = DrawList::new(self.logical_w as f32, self.logical_h as f32);
-
-        walk_node(
-            &reader,
-            root,
-            0.0,
-            0.0,
-            None,
-            &mut draws,
-            &mut self.walk_ctx,
-            true,
-        );
-
-        if !reader.end_read(scene_gen) {
-            return self.walk_ctx.frame_interval_ns;
-        }
-
-        self.last_scene_gen = scene_gen;
-
-        draws.finalize();
-
-        self.upload_atlas_dirty();
-
+        let draws = self.cached_draws.take().unwrap();
+        let bg = self.cached_bg;
         let clear_r = srgb_to_linear(bg.r as f32 / 255.0);
         let clear_g = srgb_to_linear(bg.g as f32 / 255.0);
         let clear_b = srgb_to_linear(bg.b as f32 / 255.0);
@@ -2952,6 +2960,7 @@ impl Compositor {
         }
 
         self.frame_count += 1;
+        self.cached_draws = Some(draws);
 
         self.walk_ctx.next_deadline
     }
@@ -3272,6 +3281,13 @@ extern "C" fn _start() -> ! {
         frame_count: 0,
         last_scene_gen: 0,
         walk_ctx,
+        cached_draws: None,
+        cached_bg: scene::Color {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 0,
+        },
         cursor_uploaded: false,
         cursor_visible: false,
         cursor_shape: scene::CURSOR_DEFAULT,
@@ -3352,8 +3368,9 @@ extern "C" fn _start() -> ! {
         let timer_due = render_deadline > 0 && now >= render_deadline;
 
         if scene_changed || images_changed || timer_due {
+            let rebuild = scene_changed || timer_due;
             let before = abi::system::clock_read().unwrap_or(now);
-            let next = compositor.render_frame();
+            let next = compositor.render_frame(rebuild);
             let after = abi::system::clock_read().unwrap_or(before);
             let elapsed = after.saturating_sub(before);
 
