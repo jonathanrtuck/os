@@ -770,36 +770,6 @@ fn load_image_space(render_ep: Handle, console_ep: Handle) -> Option<Space> {
     })
 }
 
-fn bind_host_texture(
-    render_ep: Handle,
-    status_vmo: Handle,
-    content_id: u32,
-    texture_handle: u32,
-    width: u16,
-    height: u16,
-) {
-    let req = render::comp::BindHostTextureRequest {
-        content_id,
-        texture_handle,
-        width,
-        height,
-    };
-    let mut req_buf = [0u8; render::comp::BindHostTextureRequest::SIZE];
-
-    req.write_to(&mut req_buf);
-
-    let mut reply_buf = [0u8; ipc::message::MSG_SIZE];
-    let mut reply_handles = [0u32; 4];
-    let _ = ipc::client::call(
-        render_ep,
-        render::comp::BIND_HOST_TEXTURE,
-        &req_buf,
-        &[status_vmo.0],
-        &mut reply_handles,
-        &mut reply_buf,
-    );
-}
-
 fn upload_image_to_compositor(
     render_ep: Handle,
     pixel_vmo: Handle,
@@ -898,6 +868,7 @@ fn try_open_video(render_ep: Handle, console_ep: Handle, media_type: &[u8]) -> O
             return None;
         }
     };
+    let pixel_size = width as u32 * height as u32 * 4;
     let frame_va = match abi::vmo::map(frame_vmo, 0, Rights(Rights::READ.0 | Rights::MAP.0)) {
         Ok(va) => va,
         Err(_) => {
@@ -909,30 +880,15 @@ fn try_open_video(render_ep: Handle, console_ep: Handle, media_type: &[u8]) -> O
         }
     };
 
-    let texture_handle = or.texture_handle;
-
-    if texture_handle != 0 {
-        bind_host_texture(
-            render_ep,
-            frame_dup,
-            content_id,
-            texture_handle,
-            width,
-            height,
-        );
-    } else {
-        let pixel_size = width as u32 * height as u32 * 4;
-
-        upload_image_to_compositor(
-            render_ep,
-            frame_dup,
-            content_id,
-            width,
-            height,
-            pixel_size,
-            render::comp::IMAGE_FLAG_LIVE,
-        );
-    }
+    upload_image_to_compositor(
+        render_ep,
+        frame_dup,
+        content_id,
+        width,
+        height,
+        pixel_size,
+        render::comp::IMAGE_FLAG_LIVE,
+    );
 
     console::write(console_ep, b"presenter: video loaded from store\n");
 
@@ -1286,7 +1242,7 @@ extern "C" fn _start() -> ! {
         slide_spring: {
             let mut s = animation::Spring::new(0.0, 600.0, 49.0, 1.0);
 
-            s.set_settle_threshold(2.0);
+            s.set_settle_threshold(0.5);
 
             s
         },

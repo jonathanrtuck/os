@@ -400,7 +400,7 @@ const FILTER_LINEAR: u8 = 1;
 const ATLAS_WIDTH: u16 = 2048;
 const ATLAS_HEIGHT: u16 = 2048;
 
-const SETUP_BUF_PAGES: usize = 64;
+const SETUP_BUF_PAGES: usize = 8;
 const RENDER_BUF_PAGES: usize = 8;
 
 // ── Vertex data ─────────────────────────────────────────────────────
@@ -979,29 +979,6 @@ fn submit_and_wait(
     vq.pop_used();
 }
 
-fn submit_async(
-    device: &virtio::Device,
-    vq: &mut virtio::Virtqueue,
-    queue_index: u32,
-    dma_pa: u64,
-    cmd_len: usize,
-) {
-    vq.push(dma_pa, cmd_len as u32, false);
-    device.notify(queue_index);
-}
-
-fn ensure_completed(vq: &mut virtio::Virtqueue, irq_event: Handle, device: &virtio::Device) {
-    if vq.pop_used().is_none() {
-        let _ = abi::event::wait(&[(irq_event, 0x1)]);
-
-        device.ack_interrupt();
-
-        let _ = abi::event::clear(irq_event, 0x1);
-
-        vq.pop_used();
-    }
-}
-
 // ── GPU pipeline setup ──────────────────────────────────────────────
 
 fn setup_pipeline(
@@ -1168,6 +1145,8 @@ struct WalkContext {
     font_metrics: [FontMetricsEntry; 3],
     scale: u32,
     frame_interval_ns: u64,
+    atlas_dirty: bool,
+    atlas_full: bool,
     now_tick: u64,
     next_deadline: u64,
     images: [ImageSlot; MAX_IMAGES],
@@ -1616,7 +1595,7 @@ fn lookup_or_rasterize(
     style_id: u32,
 ) -> Option<atlas::AtlasEntry> {
     if let Some(entry) = ctx.atlas.lookup(glyph_id, font_size, style_id) {
-        return Some(entry);
+        return Some(*entry);
     }
 
     let font_data = font_for_style(style_id);
@@ -1651,18 +1630,28 @@ fn lookup_or_rasterize(
     )?;
 
     if metrics.width == 0 || metrics.height == 0 {
-        let entry = atlas::AtlasEntry {
+        ctx.atlas.insert(
+            glyph_id,
+            font_size,
+            style_id,
+            atlas::AtlasEntry {
+                u: 0,
+                v: 0,
+                width: 0,
+                height: 0,
+                bearing_x: 0,
+                bearing_y: 0,
+            },
+        );
+
+        return Some(atlas::AtlasEntry {
             u: 0,
             v: 0,
             width: 0,
             height: 0,
             bearing_x: metrics.bearing_x as i16,
             bearing_y: metrics.bearing_y as i16,
-        };
-
-        ctx.atlas.insert_zero(glyph_id, font_size, style_id, entry);
-
-        return Some(entry);
+        });
     }
 
     let ok = ctx.atlas.pack(
@@ -1677,8 +1666,12 @@ fn lookup_or_rasterize(
     );
 
     if ok {
-        ctx.atlas.lookup(glyph_id, font_size, style_id)
+        ctx.atlas_dirty = true;
+
+        ctx.atlas.lookup(glyph_id, font_size, style_id).copied()
     } else {
+        ctx.atlas_full = true;
+
         None
     }
 }
@@ -1808,13 +1801,13 @@ fn lookup_or_rasterize_path(
     cache_hash: u32,
 ) -> Option<atlas::AtlasEntry> {
     if let Some(entry) = ctx.atlas.lookup(1, cache_size, cache_hash) {
-        return Some(entry);
+        return Some(*entry);
     }
 
     let coverage = path::rasterize_path(path_data, pw, ph, scale, fill_rule, stroke_data);
 
     if coverage.is_empty() {
-        ctx.atlas.insert_zero(
+        ctx.atlas.insert(
             1,
             cache_size,
             cache_hash,
@@ -1836,8 +1829,12 @@ fn lookup_or_rasterize_path(
     );
 
     if ok {
-        ctx.atlas.lookup(1, cache_size, cache_hash)
+        ctx.atlas_dirty = true;
+
+        ctx.atlas.lookup(1, cache_size, cache_hash).copied()
     } else {
+        ctx.atlas_full = true;
+
         None
     }
 }
@@ -2167,9 +2164,7 @@ struct Compositor {
     irq_event: Handle,
 
     setup_dma: init::DmaBuf,
-    render_dma: [init::DmaBuf; 2],
-    render_buf_idx: usize,
-    render_in_flight: bool,
+    render_dma: init::DmaBuf,
     setup_buf_size: usize,
     render_buf_size: usize,
 
@@ -2183,8 +2178,7 @@ struct Compositor {
     frame_count: u32,
     last_scene_gen: u32,
     walk_ctx: WalkContext,
-    cached_draws: Option<DrawList>,
-    cached_bg: scene::Color,
+    atlas_upload_y: u16,
 
     cursor_uploaded: bool,
     cursor_visible: bool,
@@ -2207,7 +2201,6 @@ struct ImageSlot {
     last_gen: u64,
     tex_created: bool,
     is_live: bool,
-    is_host: bool,
 }
 
 impl ImageSlot {
@@ -2222,18 +2215,28 @@ impl ImageSlot {
         last_gen: 0,
         tex_created: false,
         is_live: false,
-        is_host: false,
     };
 }
 
 impl Compositor {
     fn upload_atlas_dirty(&mut self) {
-        let rect = match self.walk_ctx.atlas.dirty.take() {
-            Some(r) => r,
-            None => return,
-        };
+        if !self.walk_ctx.atlas_dirty {
+            return;
+        }
 
-        if rect.h == 0 {
+        let atlas = &self.walk_ctx.atlas;
+        let max_y = atlas.row_y + atlas.row_h;
+
+        if max_y == 0 {
+            return;
+        }
+
+        let start_y = self.atlas_upload_y;
+        let height = max_y - start_y;
+
+        if height == 0 {
+            self.walk_ctx.atlas_dirty = false;
+
             return;
         }
 
@@ -2245,14 +2248,13 @@ impl Compositor {
         let cmd_overhead = render::HEADER_SIZE + 16;
         let max_data_per_submit = self.setup_buf_size - cmd_overhead;
         let max_rows_per_submit = max_data_per_submit / row_bytes;
-        let mut y = rect.y;
-        let end_y = rect.y + rect.h;
+        let mut y = start_y;
 
-        while y < end_y {
-            let rows = ((end_y - y) as usize).min(max_rows_per_submit) as u16;
+        while y < max_y {
+            let rows = ((max_y - y) as usize).min(max_rows_per_submit) as u16;
             let src_offset = y as usize * row_bytes;
             let pixel_count = rows as usize * row_bytes;
-            let pixel_data = &self.walk_ctx.atlas.pixels[src_offset..src_offset + pixel_count];
+            let pixel_data = &atlas.pixels[src_offset..src_offset + pixel_count];
             let len = {
                 let mut w = CommandWriter::new(dma_buf);
 
@@ -2280,6 +2282,9 @@ impl Compositor {
 
             y += rows;
         }
+
+        self.atlas_upload_y = atlas.row_y;
+        self.walk_ctx.atlas_dirty = false;
     }
 
     fn cursor_icon_name(&self) -> &'static str {
@@ -2302,13 +2307,9 @@ impl Compositor {
         if bgra.is_empty() {
             return;
         }
-
         // SAFETY: render_dma.va is a valid DMA allocation.
         let dma_buf = unsafe {
-            core::slice::from_raw_parts_mut(
-                self.render_dma[self.render_buf_idx].va as *mut u8,
-                self.render_buf_size,
-            )
+            core::slice::from_raw_parts_mut(self.render_dma.va as *mut u8, self.render_buf_size)
         };
         let len = {
             let mut w = CommandWriter::new(dma_buf);
@@ -2324,7 +2325,7 @@ impl Compositor {
             &mut self.render_vq,
             self.irq_event,
             render::VIRTQ_RENDER,
-            self.render_dma[self.render_buf_idx].pa,
+            self.render_dma.pa,
             len,
         );
 
@@ -2337,10 +2338,7 @@ impl Compositor {
 
         // SAFETY: render_dma.va is a valid DMA allocation.
         let dma_buf = unsafe {
-            core::slice::from_raw_parts_mut(
-                self.render_dma[self.render_buf_idx].va as *mut u8,
-                self.render_buf_size,
-            )
+            core::slice::from_raw_parts_mut(self.render_dma.va as *mut u8, self.render_buf_size)
         };
         let len = {
             let mut w = CommandWriter::new(dma_buf);
@@ -2355,7 +2353,7 @@ impl Compositor {
             &mut self.render_vq,
             self.irq_event,
             render::VIRTQ_RENDER,
-            self.render_dma[self.render_buf_idx].pa,
+            self.render_dma.pa,
             len,
         );
     }
@@ -2478,15 +2476,15 @@ impl Compositor {
         let mut changed = false;
 
         for i in 0..MAX_IMAGES {
-            let img = self.images[i];
+            let img = &self.images[i];
 
-            if img.va == 0 || !img.is_live {
+            if img.va == 0 || !img.is_live || !img.tex_created {
                 continue;
             }
 
             // SAFETY: va is a valid RO mapping. The generation counter is an
             // aligned u64 at offset 0. Acquire ordering ensures subsequent
-            // reads see data written before the gen store.
+            // pixel reads see data written before the gen store.
             let current_gen = unsafe {
                 let ptr = img.va as *const core::sync::atomic::AtomicU64;
 
@@ -2496,9 +2494,7 @@ impl Compositor {
             if current_gen != img.last_gen {
                 self.images[i].last_gen = current_gen;
 
-                if !img.is_host {
-                    self.upload_image_slot(i);
-                }
+                self.upload_image_slot(i);
 
                 changed = true;
             }
@@ -2513,20 +2509,16 @@ impl Compositor {
             .or_else(|| (0..MAX_IMAGES).find(|&i| self.images[i].content_id == 0))
     }
 
-    fn render_frame(&mut self, rebuild: bool) -> u64 {
+    fn render_frame(&mut self) -> u64 {
         if self.scene_va == 0 {
             return 0;
         }
 
-        if self.render_in_flight {
-            ensure_completed(&mut self.render_vq, self.irq_event, &self.device);
-
-            self.render_in_flight = false;
+        if self.walk_ctx.atlas_full {
+            self.walk_ctx.atlas.reset();
+            self.walk_ctx.atlas_full = false;
+            self.atlas_upload_y = 0;
         }
-
-        self.render_buf_idx ^= 1;
-
-        self.walk_ctx.atlas.begin_frame();
 
         let now = abi::system::clock_read().unwrap_or(0);
 
@@ -2534,104 +2526,47 @@ impl Compositor {
         self.walk_ctx.next_deadline = 0;
         self.walk_ctx.images = self.images;
 
-        let mut use_blit_retained = false;
-        let mut scissor: Option<(u32, u32, u32, u32)> = None;
+        // SAFETY: scene_va is a valid RO mapping of at least SCENE_SIZE bytes.
+        let scene_buf =
+            unsafe { core::slice::from_raw_parts(self.scene_va as *const u8, SCENE_SIZE) };
+        let reader = SceneReader::new(scene_buf);
 
-        if rebuild || self.cached_draws.is_none() {
-            // SAFETY: scene_va is a valid RO mapping of at least SCENE_SIZE bytes.
-            let scene_buf =
-                unsafe { core::slice::from_raw_parts(self.scene_va as *const u8, SCENE_SIZE) };
-            let reader = SceneReader::new(scene_buf);
-            let scene_gen = match reader.begin_read() {
-                Some(g) => g,
-                None => return self.walk_ctx.frame_interval_ns,
-            };
-            let root = reader.root();
+        let scene_gen = match reader.begin_read() {
+            Some(g) => g,
+            None => return self.walk_ctx.frame_interval_ns,
+        };
 
-            if reader.node_count() == 0 || root == NULL {
-                return 0;
-            }
+        let root = reader.root();
 
-            let damage_count = reader.damage_count();
-            let damage_rects = reader.damage_rects();
-
-            if damage_count > 0 && !damage_rects.is_empty() && self.frame_count > 0 {
-                let scale = self.scale as f32;
-                let mpt = scene::MPT_PER_PT as f32;
-                let mut min_x = f32::MAX;
-                let mut min_y = f32::MAX;
-                let mut max_x = f32::MIN;
-                let mut max_y = f32::MIN;
-
-                for r in damage_rects {
-                    let rx = r.x as f32 / mpt * scale;
-                    let ry = r.y as f32 / mpt * scale;
-                    let rw = r.w as f32 / mpt * scale;
-                    let rh = r.h as f32 / mpt * scale;
-
-                    if rx < min_x {
-                        min_x = rx;
-                    }
-                    if ry < min_y {
-                        min_y = ry;
-                    }
-                    if rx + rw > max_x {
-                        max_x = rx + rw;
-                    }
-                    if ry + rh > max_y {
-                        max_y = ry + rh;
-                    }
-                }
-
-                let phys_w = (self.logical_w * self.scale) as f32;
-                let phys_h = (self.logical_h * self.scale) as f32;
-                let sx = (min_x.max(0.0)) as u32;
-                let sy = (min_y.max(0.0)) as u32;
-                let sw = ((max_x - min_x) as u32 + 2).min(phys_w as u32 - sx);
-                let sh = ((max_y - min_y) as u32 + 2).min(phys_h as u32 - sy);
-                let damage_area = sw as u64 * sh as u64;
-                let screen_area = phys_w as u64 * phys_h as u64;
-
-                if damage_area * 5 < screen_area {
-                    use_blit_retained = true;
-                    scissor = Some((sx, sy, sw, sh));
-                }
-            }
-
-            let root_node = reader.node(root);
-
-            self.cached_bg = root_node.background;
-
-            let mut draws = DrawList::new(self.logical_w as f32, self.logical_h as f32);
-
-            walk_node(
-                &reader,
-                root,
-                0.0,
-                0.0,
-                None,
-                &mut draws,
-                &mut self.walk_ctx,
-                true,
-            );
-
-            if !reader.end_read(scene_gen) {
-                return self.walk_ctx.frame_interval_ns;
-            }
-
-            reader.write_reader_gen(scene_gen);
-
-            self.last_scene_gen = scene_gen;
-
-            draws.finalize();
-
-            self.upload_atlas_dirty();
-
-            self.cached_draws = Some(draws);
+        if reader.node_count() == 0 || root == NULL {
+            return 0;
         }
 
-        let draws = self.cached_draws.take().unwrap();
-        let bg = self.cached_bg;
+        let root_node = reader.node(root);
+        let bg = root_node.background;
+        let mut draws = DrawList::new(self.logical_w as f32, self.logical_h as f32);
+
+        walk_node(
+            &reader,
+            root,
+            0.0,
+            0.0,
+            None,
+            &mut draws,
+            &mut self.walk_ctx,
+            true,
+        );
+
+        if !reader.end_read(scene_gen) {
+            return self.walk_ctx.frame_interval_ns;
+        }
+
+        self.last_scene_gen = scene_gen;
+
+        draws.finalize();
+
+        self.upload_atlas_dirty();
+
         let clear_r = srgb_to_linear(bg.r as f32 / 255.0);
         let clear_g = srgb_to_linear(bg.g as f32 / 255.0);
         let clear_b = srgb_to_linear(bg.b as f32 / 255.0);
@@ -2639,10 +2574,7 @@ impl Compositor {
         if draws.ops.is_empty() {
             // SAFETY: render_dma.va is a valid DMA allocation of render_buf_size bytes.
             let dma_buf = unsafe {
-                core::slice::from_raw_parts_mut(
-                    self.render_dma[self.render_buf_idx].va as *mut u8,
-                    self.render_buf_size,
-                )
+                core::slice::from_raw_parts_mut(self.render_dma.va as *mut u8, self.render_buf_size)
             };
             let len = {
                 let mut w = CommandWriter::new(dma_buf);
@@ -2666,14 +2598,14 @@ impl Compositor {
                 w.len()
             };
 
-            submit_async(
+            submit_and_wait(
                 &self.device,
                 &mut self.render_vq,
+                self.irq_event,
                 render::VIRTQ_RENDER,
-                self.render_dma[self.render_buf_idx].pa,
+                self.render_dma.pa,
                 len,
             );
-            self.render_in_flight = true;
         } else {
             let mut first = true;
             let mut active_pipe: Option<Pipe> = None;
@@ -2683,7 +2615,7 @@ impl Compositor {
                 // SAFETY: render_dma.va is a valid DMA allocation of render_buf_size bytes.
                 let dma_buf = unsafe {
                     core::slice::from_raw_parts_mut(
-                        self.render_dma[self.render_buf_idx].va as *mut u8,
+                        self.render_dma.va as *mut u8,
                         self.render_buf_size,
                     )
                 };
@@ -2879,7 +2811,7 @@ impl Compositor {
                         &mut self.render_vq,
                         self.irq_event,
                         render::VIRTQ_RENDER,
-                        self.render_dma[self.render_buf_idx].pa,
+                        self.render_dma.pa,
                         len,
                     );
 
@@ -2927,26 +2859,14 @@ impl Compositor {
                         w.len()
                     };
 
-                    if is_last {
-                        submit_async(
-                            &self.device,
-                            &mut self.render_vq,
-                            render::VIRTQ_RENDER,
-                            self.render_dma[self.render_buf_idx].pa,
-                            len,
-                        );
-
-                        self.render_in_flight = true;
-                    } else {
-                        submit_and_wait(
-                            &self.device,
-                            &mut self.render_vq,
-                            self.irq_event,
-                            render::VIRTQ_RENDER,
-                            self.render_dma[self.render_buf_idx].pa,
-                            len,
-                        );
-                    }
+                    submit_and_wait(
+                        &self.device,
+                        &mut self.render_vq,
+                        self.irq_event,
+                        render::VIRTQ_RENDER,
+                        self.render_dma.pa,
+                        len,
+                    );
 
                     first = false;
                     active_pipe = None;
@@ -2959,9 +2879,7 @@ impl Compositor {
                 let batch_start = op_idx;
                 let len = {
                     let mut w = CommandWriter::new(dma_buf);
-                    let load = if first && use_blit_retained {
-                        render::LOAD_BLIT_RETAINED
-                    } else if first {
+                    let load = if first {
                         render::LOAD_CLEAR
                     } else {
                         render::LOAD_LOAD
@@ -2980,10 +2898,6 @@ impl Compositor {
                         clear_b,
                         1.0,
                     );
-
-                    if let Some((sx, sy, sw, sh)) = scissor.filter(|_| first && use_blit_retained) {
-                        w.set_scissor(sx, sy, sw, sh);
-                    }
 
                     while op_idx < draws.ops.len() {
                         let op = &draws.ops[op_idx];
@@ -3049,35 +2963,21 @@ impl Compositor {
 
                     w.end_render_pass();
 
-                    let is_final = op_idx == draws.ops.len();
-
-                    if is_final {
+                    if op_idx == draws.ops.len() {
                         w.present_and_commit(self.frame_count);
                     }
 
                     w.len()
                 };
 
-                if op_idx == draws.ops.len() {
-                    submit_async(
-                        &self.device,
-                        &mut self.render_vq,
-                        render::VIRTQ_RENDER,
-                        self.render_dma[self.render_buf_idx].pa,
-                        len,
-                    );
-
-                    self.render_in_flight = true;
-                } else {
-                    submit_and_wait(
-                        &self.device,
-                        &mut self.render_vq,
-                        self.irq_event,
-                        render::VIRTQ_RENDER,
-                        self.render_dma[self.render_buf_idx].pa,
-                        len,
-                    );
-                }
+                submit_and_wait(
+                    &self.device,
+                    &mut self.render_vq,
+                    self.irq_event,
+                    render::VIRTQ_RENDER,
+                    self.render_dma.pa,
+                    len,
+                );
 
                 if op_idx == batch_start {
                     op_idx += 1;
@@ -3086,7 +2986,6 @@ impl Compositor {
         }
 
         self.frame_count += 1;
-        self.cached_draws = Some(draws);
 
         self.walk_ctx.next_deadline
     }
@@ -3185,44 +3084,11 @@ impl Dispatch for Compositor {
                                 last_gen: 0,
                                 tex_created: false,
                                 is_live: live,
-                                is_host: false,
                             };
 
                             self.upload_image_slot(idx);
 
                             console::write(self.console_ep, b"render: image uploaded\n");
-                        }
-                    }
-                }
-
-                let _ = msg.reply_empty();
-            }
-            render::comp::BIND_HOST_TEXTURE => {
-                if msg.payload.len() >= render::comp::BindHostTextureRequest::SIZE
-                    && !msg.handles.is_empty()
-                {
-                    let req = render::comp::BindHostTextureRequest::read_from(msg.payload);
-                    let status_vmo = Handle(msg.handles[0]);
-
-                    if let Ok(va) = abi::vmo::map(status_vmo, 0, Rights::READ_MAP) {
-                        let slot = self.find_or_alloc_image_slot(req.content_id);
-
-                        if let Some(idx) = slot {
-                            self.images[idx] = ImageSlot {
-                                content_id: req.content_id,
-                                tex_id: req.texture_handle,
-                                va,
-                                w: req.width,
-                                h: req.height,
-                                pixel_size: 0,
-                                pixel_offset: 0,
-                                last_gen: 0,
-                                tex_created: true,
-                                is_live: true,
-                                is_host: true,
-                            };
-
-                            console::write(self.console_ep, b"render: host texture bound\n");
                         }
                     }
                 }
@@ -3328,11 +3194,7 @@ extern "C" fn _start() -> ! {
         Err(_) => abi::thread::exit(6),
     };
     let render_buf_size = PAGE_SIZE * RENDER_BUF_PAGES;
-    let render_dma_0 = match init::request_dma(HANDLE_INIT_EP, render_buf_size) {
-        Ok(d) => d,
-        Err(_) => abi::thread::exit(7),
-    };
-    let render_dma_1 = match init::request_dma(HANDLE_INIT_EP, render_buf_size) {
+    let render_dma = match init::request_dma(HANDLE_INIT_EP, render_buf_size) {
         Ok(d) => d,
         Err(_) => abi::thread::exit(7),
     };
@@ -3384,12 +3246,15 @@ extern "C" fn _start() -> ! {
         ],
         scale,
         frame_interval_ns,
+        atlas_dirty: false,
+        atlas_full: false,
         now_tick: 0,
         next_deadline: 0,
         images: [ImageSlot::EMPTY; MAX_IMAGES],
     };
 
     console::write(console_ep, b"render: atlas ready\n");
+
     console::write(console_ep, b"render: ready\n");
 
     let mut compositor = Compositor {
@@ -3398,9 +3263,7 @@ extern "C" fn _start() -> ! {
         render_vq,
         irq_event,
         setup_dma,
-        render_dma: [render_dma_0, render_dma_1],
-        render_buf_idx: 0,
-        render_in_flight: false,
+        render_dma,
         setup_buf_size,
         render_buf_size,
         console_ep,
@@ -3412,13 +3275,7 @@ extern "C" fn _start() -> ! {
         frame_count: 0,
         last_scene_gen: 0,
         walk_ctx,
-        cached_draws: None,
-        cached_bg: scene::Color {
-            r: 0,
-            g: 0,
-            b: 0,
-            a: 0,
-        },
+        atlas_upload_y: 0,
         cursor_uploaded: false,
         cursor_visible: false,
         cursor_shape: scene::CURSOR_DEFAULT,
@@ -3426,9 +3283,9 @@ extern "C" fn _start() -> ! {
     };
 
     {
-        // SAFETY: render_dma[0].va is a valid DMA allocation.
+        // SAFETY: render_dma.va is a valid DMA allocation.
         let dma_buf = unsafe {
-            core::slice::from_raw_parts_mut(compositor.render_dma[0].va as *mut u8, render_buf_size)
+            core::slice::from_raw_parts_mut(compositor.render_dma.va as *mut u8, render_buf_size)
         };
         let len = {
             let mut w = CommandWriter::new(dma_buf);
@@ -3457,17 +3314,14 @@ extern "C" fn _start() -> ! {
             &mut compositor.render_vq,
             compositor.irq_event,
             render::VIRTQ_RENDER,
-            compositor.render_dma[0].pa,
+            compositor.render_dma.pa,
             len,
         );
     }
 
     let frame_interval = compositor.walk_ctx.frame_interval_ns;
-    let mut last_vsync_counter: u32 = compositor.device.config_read32(0x10);
-    let mut vsync_time = abi::system::clock_read().unwrap_or(0);
-    let mut next_vsync = vsync_time + frame_interval;
+    let mut next_vsync = abi::system::clock_read().unwrap_or(0) + frame_interval;
     let mut render_deadline: u64 = 0;
-    let mut render_budget_ns: u64 = frame_interval / 4;
 
     loop {
         let deadline = if render_deadline > 0 && render_deadline < next_vsync {
@@ -3482,13 +3336,6 @@ extern "C" fn _start() -> ! {
         }
 
         let now = abi::system::clock_read().unwrap_or(0);
-        let counter = compositor.device.config_read32(0x10);
-
-        if counter != last_vsync_counter {
-            vsync_time = now;
-            last_vsync_counter = counter;
-            next_vsync = vsync_time + frame_interval - render_budget_ns;
-        }
 
         if now < next_vsync && (render_deadline == 0 || now < render_deadline) {
             continue;
@@ -3499,22 +3346,13 @@ extern "C" fn _start() -> ! {
         let timer_due = render_deadline > 0 && now >= render_deadline;
 
         if scene_changed || images_changed || timer_due {
-            let rebuild = scene_changed || timer_due;
-            let before = abi::system::clock_read().unwrap_or(now);
-            let next = compositor.render_frame(rebuild);
-            let after = abi::system::clock_read().unwrap_or(before);
-            let elapsed = after.saturating_sub(before);
+            let next = compositor.render_frame();
 
-            render_budget_ns = render_budget_ns / 2 + elapsed / 2;
-            render_deadline = if next > after { next } else { 0 };
+            render_deadline = if next > now { next } else { 0 };
         }
 
         if now >= next_vsync {
-            next_vsync = vsync_time + frame_interval - render_budget_ns;
-
-            if next_vsync <= now {
-                next_vsync = now + frame_interval;
-            }
+            next_vsync = now + frame_interval;
         }
     }
 

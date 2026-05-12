@@ -81,7 +81,6 @@ pub const TEX_USAGE_RENDER_TARGET: u8 = 0x04;
 pub const LOAD_DONT_CARE: u8 = 0;
 pub const LOAD_LOAD: u8 = 1;
 pub const LOAD_CLEAR: u8 = 2;
-pub const LOAD_BLIT_RETAINED: u8 = 3;
 pub const STORE_DONT_CARE: u8 = 0;
 pub const STORE_STORE: u8 = 1;
 
@@ -597,42 +596,6 @@ pub mod comp {
     pub const IMAGE_FLAG_LIVE: u32 = 1;
     pub const IMAGE_LIVE_HEADER_SIZE: usize = 2 * core::mem::size_of::<u64>();
 
-    /// Bind a host-managed texture (zero-copy video decode path).
-    /// The texture_handle is a host-assigned TextureRegistry handle from
-    /// the codec-decode session. The compositor references it directly in
-    /// fragment texture commands — no pixel upload needed.
-    /// Payload: BindHostTextureRequest. Handle[0]: status VMO (gen + flags).
-    pub const BIND_HOST_TEXTURE: u32 = 7;
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct BindHostTextureRequest {
-        pub content_id: u32,
-        pub texture_handle: u32,
-        pub width: u16,
-        pub height: u16,
-    }
-
-    impl BindHostTextureRequest {
-        pub const SIZE: usize = 12;
-
-        pub fn write_to(&self, buf: &mut [u8]) {
-            buf[0..4].copy_from_slice(&self.content_id.to_le_bytes());
-            buf[4..8].copy_from_slice(&self.texture_handle.to_le_bytes());
-            buf[8..10].copy_from_slice(&self.width.to_le_bytes());
-            buf[10..12].copy_from_slice(&self.height.to_le_bytes());
-        }
-
-        #[must_use]
-        pub fn read_from(buf: &[u8]) -> Self {
-            Self {
-                content_id: u32::from_le_bytes(buf[0..4].try_into().unwrap()),
-                texture_handle: u32::from_le_bytes(buf[4..8].try_into().unwrap()),
-                width: u16::from_le_bytes(buf[8..10].try_into().unwrap()),
-                height: u16::from_le_bytes(buf[10..12].try_into().unwrap()),
-            }
-        }
-    }
-
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct UploadImageRequest {
         pub content_id: u32,
@@ -750,30 +713,8 @@ pub mod comp {
         }
 
         #[test]
-        fn bind_host_texture_request_round_trip() {
-            let req = BindHostTextureRequest {
-                content_id: 3,
-                texture_handle: 0x8000_0001,
-                width: 1920,
-                height: 1080,
-            };
-            let mut buf = [0u8; BindHostTextureRequest::SIZE];
-
-            req.write_to(&mut buf);
-
-            assert_eq!(BindHostTextureRequest::read_from(&buf), req);
-        }
-
-        #[test]
         fn method_ids_distinct() {
-            let methods = [
-                SETUP,
-                GET_INFO,
-                POINTER,
-                SET_CURSOR_SHAPE,
-                UPLOAD_IMAGE,
-                BIND_HOST_TEXTURE,
-            ];
+            let methods = [SETUP, GET_INFO, POINTER, SET_CURSOR_SHAPE, UPLOAD_IMAGE];
 
             for i in 0..methods.len() {
                 for j in (i + 1)..methods.len() {
