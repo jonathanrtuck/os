@@ -83,6 +83,7 @@ impl<'a> SceneWriter<'a> {
         // buffer. The shared borrow on `self` prevents concurrent mutation.
         unsafe { &*(self.buf.as_ptr() as *const SceneHeader) }
     }
+
     pub(crate) fn header_mut(&mut self) -> &mut SceneHeader {
         // SAFETY: SceneHeader is repr(C) at offset 0 within the SCENE_SIZE
         // buffer. The exclusive borrow on `self` prevents aliasing.
@@ -116,6 +117,7 @@ impl<'a> SceneWriter<'a> {
 
         self.node_mut(cur).next_sibling = child;
     }
+
     /// Allocate a new node slot. Returns `None` if the array is full.
     /// The node is initialized to `Node::EMPTY`.
     pub fn alloc_node(&mut self) -> Option<NodeId> {
@@ -139,6 +141,7 @@ impl<'a> SceneWriter<'a> {
 
         Some(id)
     }
+
     /// Reset node count and data usage for a full rebuild.
     ///
     /// Sets an odd generation (mutation-in-progress signal) so that
@@ -153,12 +156,26 @@ impl<'a> SceneWriter<'a> {
         self.header_mut().node_count = 0;
         self.header_mut().data_used = 0;
         self.header_mut().root = NULL;
+
         self.set_all_dirty();
     }
+
+    /// Reset for double-buffer writes. Zeroes node_count, data_used,
+    /// and root without touching the generation counter (which lives
+    /// in the separate SwapHeader for double-buffered mode).
+    pub fn reset(&mut self) {
+        self.header_mut().node_count = 0;
+        self.header_mut().data_used = 0;
+        self.header_mut().root = NULL;
+
+        self.set_all_dirty();
+    }
+
     /// Zero all dirty bits (no nodes marked dirty).
     pub fn clear_dirty(&mut self) {
         self.header_mut().dirty_bits = [0u64; DIRTY_BITMAP_WORDS];
     }
+
     /// Count the number of dirty bits set (popcount across all words).
     pub fn dirty_count(&self) -> u32 {
         let bits = &self.header().dirty_bits;
@@ -172,34 +189,45 @@ impl<'a> SceneWriter<'a> {
 
         count
     }
+
     /// Publish the scene: stores an even generation with release ordering.
     ///
-    /// Pairs with `clear()` which sets the odd generation. Together they
-    /// form a seqlock: readers spin on odd, read on even, verify unchanged.
+    /// After `clear()` (odd gen): advances to next even.
+    /// Without `clear()` (even gen, incremental update): jumps by 2 to
+    /// the next even, ensuring the reader always sees the change.
     pub fn commit(&mut self) {
         let gen = self.header().generation;
-        let even = gen.wrapping_add(1) & !1;
+        let next = if gen & 1 != 0 {
+            gen.wrapping_add(1)
+        } else {
+            gen.wrapping_add(2)
+        };
 
-        self.store_generation_release(even);
+        self.store_generation_release(next);
     }
+
     /// Get the used portion of the data buffer as a read-only slice.
     pub fn data_buf(&self) -> &[u8] {
         let used = (self.data_used() as usize).min(DATA_BUFFER_SIZE);
 
         &self.buf[DATA_OFFSET..DATA_OFFSET + used]
     }
+
     pub fn data_used(&self) -> u32 {
         self.header().data_used
     }
+
     /// Wrap a previously initialized buffer without resetting state.
     pub fn from_existing(buf: &'a mut [u8]) -> Self {
         assert!(buf.len() >= SCENE_SIZE);
 
         Self { buf }
     }
+
     pub fn generation(&self) -> u32 {
         self.header().generation
     }
+
     /// Test whether a node is marked dirty.
     pub fn is_dirty(&self, node_id: NodeId) -> bool {
         let idx = node_id as usize;
@@ -213,6 +241,7 @@ impl<'a> SceneWriter<'a> {
 
         (self.header().dirty_bits[word] & (1u64 << bit)) != 0
     }
+
     /// Mark a single node as dirty in the bitmap.
     pub fn mark_dirty(&mut self, node_id: NodeId) {
         let idx = node_id as usize;
@@ -226,6 +255,7 @@ impl<'a> SceneWriter<'a> {
 
         self.header_mut().dirty_bits[word] |= 1u64 << bit;
     }
+
     /// Get a shared reference to a node by ID.
     pub fn node(&self, id: NodeId) -> &Node {
         assert!((id as usize) < MAX_NODES, "NodeId out of bounds");
@@ -237,9 +267,11 @@ impl<'a> SceneWriter<'a> {
         // repr(C) with size NODE_SIZE. Shared borrow prevents mutation.
         unsafe { &*(self.buf.as_ptr().add(offset) as *const Node) }
     }
+
     pub fn node_count(&self) -> u16 {
         self.header().node_count
     }
+
     /// Truncate the node array to `count` nodes.
     ///
     /// Nodes with IDs >= `count` are logically freed. Any surviving node
@@ -265,6 +297,7 @@ impl<'a> SceneWriter<'a> {
             }
         }
     }
+
     /// Get a mutable reference to a node by ID.
     pub fn node_mut(&mut self, id: NodeId) -> &mut Node {
         assert!((id as usize) < MAX_NODES, "NodeId out of bounds");
@@ -275,6 +308,7 @@ impl<'a> SceneWriter<'a> {
         // `self` prevents aliasing.
         unsafe { &mut *(self.buf.as_mut_ptr().add(offset) as *mut Node) }
     }
+
     /// Get all live nodes as a read-only slice.
     pub fn nodes(&self) -> &[Node] {
         let count = self.node_count() as usize;
@@ -286,6 +320,7 @@ impl<'a> SceneWriter<'a> {
         // Shared borrow on `self` prevents concurrent mutation.
         unsafe { core::slice::from_raw_parts(ptr, count) }
     }
+
     /// Append bytes to the data buffer. Returns a `DataRef`.
     /// If the buffer is full, truncates to fit.
     pub fn push_data(&mut self, bytes: &[u8]) -> DataRef {
@@ -309,6 +344,7 @@ impl<'a> SceneWriter<'a> {
             length: actual as u32,
         }
     }
+
     /// Push serialized path commands into the data buffer.
     /// Ensures 4-byte alignment (f32 alignment) before writing.
     /// Returns a `DataRef` covering the path command data.
@@ -327,6 +363,7 @@ impl<'a> SceneWriter<'a> {
 
         self.push_data(commands)
     }
+
     /// Push an array of `ShapedGlyph` structs into the data buffer.
     /// Aligns the write offset to `align_of::<ShapedGlyph>()` first.
     /// Returns a `DataRef` covering the glyph data.
@@ -382,10 +419,12 @@ impl<'a> SceneWriter<'a> {
     pub fn push_data_replacing(&mut self, bytes: &[u8]) -> DataRef {
         self.push_data(bytes)
     }
+
     /// Check if the data buffer has room for `bytes` more bytes.
     pub fn has_data_space(&self, bytes: usize) -> bool {
         (self.header().data_used as usize) + bytes <= DATA_BUFFER_SIZE
     }
+
     /// Reset the data buffer usage counter (bump allocator rewind).
     ///
     /// Also clears `Content` on surviving nodes whose content references
@@ -414,17 +453,21 @@ impl<'a> SceneWriter<'a> {
 
         self.header_mut().data_used = 0;
     }
+
     pub fn root(&self) -> NodeId {
         self.header().root
     }
+
     /// Set all dirty bits to `u64::MAX` (every node slot marked dirty).
     /// Used after `clear()` to signal a full repaint.
     pub fn set_all_dirty(&mut self) {
         self.header_mut().dirty_bits = [u64::MAX; DIRTY_BITMAP_WORDS];
     }
+
     pub fn set_root(&mut self, id: NodeId) {
         self.header_mut().root = id;
     }
+
     /// Overwrite an existing DataRef in place (must be same length).
     /// Returns true on success, false if lengths don't match.
     pub fn update_data(&mut self, dref: DataRef, bytes: &[u8]) -> bool {

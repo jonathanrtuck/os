@@ -29,7 +29,21 @@ pub const CMD_CREATE_DEPTH_STENCIL_STATE: u16 = 0x0012;
 pub const CMD_CREATE_SAMPLER: u16 = 0x0013;
 pub const CMD_CREATE_TEXTURE: u16 = 0x0020;
 pub const CMD_UPLOAD_TEXTURE: u16 = 0x0021;
+pub const CMD_BIND_HOST_TEXTURE: u16 = 0x0022;
 pub const CMD_DESTROY_OBJECT: u16 = 0x00FF;
+
+// ── Compute commands (virtqueue 1) ───────────────────────────────
+
+pub const CMD_BEGIN_COMPUTE_PASS: u16 = 0x0200;
+pub const CMD_END_COMPUTE_PASS: u16 = 0x0201;
+pub const CMD_SET_COMPUTE_PIPELINE: u16 = 0x0210;
+pub const CMD_SET_COMPUTE_TEXTURE: u16 = 0x0211;
+pub const CMD_SET_COMPUTE_BYTES: u16 = 0x0212;
+pub const CMD_DISPATCH_THREADS: u16 = 0x0220;
+
+// ── Compute setup (virtqueue 0) ─────────────────────────────────
+
+pub const CMD_CREATE_COMPUTE_PIPELINE: u16 = 0x0011;
 
 // ── Render commands (virtqueue 1) ───────────────────────────────────
 
@@ -388,6 +402,66 @@ impl<'a> CommandWriter<'a> {
         self.put_bytes(data);
     }
 
+    pub fn bind_host_texture(&mut self, guest_tex_id: u32, host_handle: u32) {
+        self.header(CMD_BIND_HOST_TEXTURE, 8);
+        self.put_u32(guest_tex_id);
+        self.put_u32(host_handle);
+    }
+
+    pub fn create_compute_pipeline(&mut self, handle: u32, function: u32) {
+        self.header(CMD_CREATE_COMPUTE_PIPELINE, 8);
+        self.put_u32(handle);
+        self.put_u32(function);
+    }
+
+    pub fn begin_compute_pass(&mut self) {
+        self.header(CMD_BEGIN_COMPUTE_PASS, 0);
+    }
+
+    pub fn end_compute_pass(&mut self) {
+        self.header(CMD_END_COMPUTE_PASS, 0);
+    }
+
+    pub fn set_compute_pipeline(&mut self, handle: u32) {
+        self.header(CMD_SET_COMPUTE_PIPELINE, 4);
+        self.put_u32(handle);
+    }
+
+    pub fn set_compute_texture(&mut self, handle: u32, index: u8) {
+        self.header(CMD_SET_COMPUTE_TEXTURE, 8);
+        self.put_u32(handle);
+        self.put_u8(index);
+        self.put_u8(0);
+        self.put_u16(0);
+    }
+
+    pub fn set_compute_bytes(&mut self, buffer_index: u8, data: &[u8]) {
+        self.header(CMD_SET_COMPUTE_BYTES, 8 + data.len() as u32);
+        self.put_u8(buffer_index);
+        self.put_u8(0);
+        self.put_u16(0);
+        self.put_u32(data.len() as u32);
+        self.put_bytes(data);
+    }
+
+    pub fn dispatch_threads(
+        &mut self,
+        grid_x: u16,
+        grid_y: u16,
+        grid_z: u16,
+        group_x: u16,
+        group_y: u16,
+        group_z: u16,
+    ) {
+        self.header(CMD_DISPATCH_THREADS, 12);
+        self.put_u16(grid_x);
+        self.put_u16(grid_y);
+        self.put_u16(grid_z);
+        self.put_u16(group_x);
+        self.put_u16(group_y);
+        self.put_u16(group_z);
+    }
+
     pub fn create_sampler(&mut self, handle: u32, min_filter: u8, mag_filter: u8) {
         self.header(CMD_CREATE_SAMPLER, 8);
         self.put_u32(handle);
@@ -593,8 +667,39 @@ pub mod comp {
     /// Handle[0]: BGRA8 pixel VMO (mapped RO by compositor).
     pub const UPLOAD_IMAGE: u32 = 6;
 
+    pub const BIND_HOST_TEXTURE: u32 = 7;
+
     pub const IMAGE_FLAG_LIVE: u32 = 1;
     pub const IMAGE_LIVE_HEADER_SIZE: usize = 2 * core::mem::size_of::<u64>();
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct BindHostTextureRequest {
+        pub content_id: u32,
+        pub host_handle: u32,
+        pub width: u16,
+        pub height: u16,
+    }
+
+    impl BindHostTextureRequest {
+        pub const SIZE: usize = 12;
+
+        pub fn write_to(&self, buf: &mut [u8]) {
+            buf[0..4].copy_from_slice(&self.content_id.to_le_bytes());
+            buf[4..8].copy_from_slice(&self.host_handle.to_le_bytes());
+            buf[8..10].copy_from_slice(&self.width.to_le_bytes());
+            buf[10..12].copy_from_slice(&self.height.to_le_bytes());
+        }
+
+        #[must_use]
+        pub fn read_from(buf: &[u8]) -> Self {
+            Self {
+                content_id: u32::from_le_bytes(buf[0..4].try_into().unwrap()),
+                host_handle: u32::from_le_bytes(buf[4..8].try_into().unwrap()),
+                width: u16::from_le_bytes(buf[8..10].try_into().unwrap()),
+                height: u16::from_le_bytes(buf[10..12].try_into().unwrap()),
+            }
+        }
+    }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct UploadImageRequest {

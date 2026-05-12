@@ -303,6 +303,8 @@ pub(crate) enum Space {
         height: u16,
         total_frames: u32,
         playing: bool,
+        #[allow(dead_code)]
+        host_texture_handle: u32,
     },
     Showcase,
 }
@@ -360,8 +362,10 @@ pub(crate) struct Presenter {
     pub(crate) results_reader: ipc::register::Reader,
     pub(crate) results_buf: [u8; layout_service::RESULTS_VALUE_SIZE],
 
-    pub(crate) scene_buf: &'static mut [u8],
-    pub(crate) scene_vmo: Handle,
+    pub(crate) scene_bufs: [&'static mut [u8]; 2],
+    pub(crate) scene_vmos: [Handle; 2],
+    pub(crate) swap_va: usize,
+    pub(crate) swap_gen: u32,
 
     pub(crate) viewport_va: usize,
 
@@ -481,6 +485,37 @@ impl FrameStats {
 }
 
 impl Presenter {
+    fn read_active_index(&self) -> usize {
+        // SAFETY: swap_va is a valid mapping of a SceneSwapHeader.
+        unsafe {
+            let hdr = self.swap_va as *const scene::SceneSwapHeader;
+
+            (*hdr)
+                .active_index
+                .load(core::sync::atomic::Ordering::Acquire) as usize
+        }
+    }
+
+    fn swap_scene(&mut self) {
+        let active = self.read_active_index();
+        let back = 1 - active;
+
+        self.swap_gen = self.swap_gen.wrapping_add(1);
+
+        // SAFETY: swap_va is a valid RW mapping. Release ordering ensures
+        // all scene writes are visible before the compositor sees the swap.
+        unsafe {
+            let hdr = self.swap_va as *const scene::SceneSwapHeader;
+
+            (*hdr)
+                .generation
+                .store(self.swap_gen, core::sync::atomic::Ordering::Release);
+            (*hdr)
+                .active_index
+                .store(back as u32, core::sync::atomic::Ordering::Release);
+        }
+    }
+
     fn text_area_dims(&self) -> (u32, u32) {
         let content_h = self
             .display_height
@@ -568,22 +603,26 @@ impl Presenter {
 impl Dispatch for Presenter {
     fn dispatch(&mut self, msg: Incoming<'_>) {
         match msg.method {
-            presenter_service::SETUP => match abi::handle::dup(self.scene_vmo, Rights::READ_MAP) {
-                Ok(dup) => {
-                    let reply = presenter_service::SetupReply {
-                        display_width: self.display_width,
-                        display_height: self.display_height,
-                    };
-                    let mut data = [0u8; presenter_service::SetupReply::SIZE];
+            presenter_service::SETUP => {
+                let active = self.read_active_index();
 
-                    reply.write_to(&mut data);
+                match abi::handle::dup(self.scene_vmos[active], Rights::READ_MAP) {
+                    Ok(dup) => {
+                        let reply = presenter_service::SetupReply {
+                            display_width: self.display_width,
+                            display_height: self.display_height,
+                        };
+                        let mut data = [0u8; presenter_service::SetupReply::SIZE];
 
-                    let _ = msg.reply_ok(&data, &[dup.0]);
+                        reply.write_to(&mut data);
+
+                        let _ = msg.reply_ok(&data, &[dup.0]);
+                    }
+                    Err(_) => {
+                        let _ = msg.reply_error(ipc::STATUS_INVALID);
+                    }
                 }
-                Err(_) => {
-                    let _ = msg.reply_error(ipc::STATUS_INVALID);
-                }
-            },
+            }
             presenter_service::BUILD => {
                 self.build_scene();
 
@@ -859,36 +898,74 @@ fn try_open_video(render_ep: Handle, console_ep: Handle, media_type: &[u8]) -> O
     let content_id = alloc_content_id();
     let width = or.width as u16;
     let height = or.height as u16;
-    let frame_dup = match abi::handle::dup(frame_vmo, Rights(Rights::READ.0 | Rights::MAP.0)) {
-        Ok(h) => h,
-        Err(_) => {
-            let _ = abi::handle::close(decoder_ep);
-            let _ = abi::handle::close(frame_vmo);
-
-            return None;
-        }
-    };
-    let pixel_size = width as u32 * height as u32 * 4;
+    let host_texture_handle = or.host_texture_handle;
     let frame_va = match abi::vmo::map(frame_vmo, 0, Rights(Rights::READ.0 | Rights::MAP.0)) {
         Ok(va) => va,
         Err(_) => {
             let _ = abi::handle::close(decoder_ep);
             let _ = abi::handle::close(frame_vmo);
-            let _ = abi::handle::close(frame_dup);
 
             return None;
         }
     };
 
-    upload_image_to_compositor(
-        render_ep,
-        frame_dup,
-        content_id,
-        width,
-        height,
-        pixel_size,
-        render::comp::IMAGE_FLAG_LIVE,
-    );
+    if host_texture_handle != 0 {
+        // Zero-copy: bind the host's IOSurface-backed texture directly.
+        // The frame VMO is kept as a 16-byte signal buffer (gen counter + flags).
+        let frame_dup = match abi::handle::dup(frame_vmo, Rights(Rights::READ.0 | Rights::MAP.0)) {
+            Ok(h) => h,
+            Err(_) => {
+                let _ = abi::handle::close(decoder_ep);
+                let _ = abi::vmo::unmap(frame_va);
+                let _ = abi::handle::close(frame_vmo);
+
+                return None;
+            }
+        };
+        let bind_req = render::comp::BindHostTextureRequest {
+            content_id,
+            host_handle: host_texture_handle,
+            width,
+            height,
+        };
+        let mut bind_buf = [0u8; render::comp::BindHostTextureRequest::SIZE];
+
+        bind_req.write_to(&mut bind_buf);
+
+        let mut reply_buf = [0u8; ipc::message::MSG_SIZE];
+        let mut bind_handles = [0u32; 4];
+        let _ = ipc::client::call(
+            render_ep,
+            render::comp::BIND_HOST_TEXTURE,
+            &bind_buf,
+            &[frame_dup.0],
+            &mut bind_handles,
+            &mut reply_buf,
+        );
+    } else {
+        // Fallback: pixel upload path for codecs without host textures.
+        let frame_dup = match abi::handle::dup(frame_vmo, Rights(Rights::READ.0 | Rights::MAP.0)) {
+            Ok(h) => h,
+            Err(_) => {
+                let _ = abi::handle::close(decoder_ep);
+                let _ = abi::vmo::unmap(frame_va);
+                let _ = abi::handle::close(frame_vmo);
+
+                return None;
+            }
+        };
+        let pixel_size = width as u32 * height as u32 * 4;
+
+        upload_image_to_compositor(
+            render_ep,
+            frame_dup,
+            content_id,
+            width,
+            height,
+            pixel_size,
+            render::comp::IMAGE_FLAG_LIVE,
+        );
+    }
 
     console::write(console_ep, b"presenter: video loaded from store\n");
 
@@ -901,6 +978,7 @@ fn try_open_video(render_ep: Handle, console_ep: Handle, media_type: &[u8]) -> O
         height,
         total_frames: or.total_frames,
         playing: false,
+        host_texture_handle,
     })
 }
 
@@ -1128,20 +1206,53 @@ extern "C" fn _start() -> ! {
     let results_reader = unsafe {
         ipc::register::Reader::new(results_va as *const u8, layout_service::RESULTS_VALUE_SIZE)
     };
-    let scene_vmo_size = SCENE_SIZE.next_multiple_of(PAGE_SIZE);
-    let scene_vmo = match abi::vmo::create(scene_vmo_size, 0) {
+    // Double-buffered scene graph: swap header VMO + 2 scene buffer VMOs.
+    let swap_vmo = match abi::vmo::create(PAGE_SIZE, 0) {
         Ok(h) => h,
         Err(_) => abi::thread::exit(EXIT_SCENE_CREATE),
     };
-    let scene_va = match abi::vmo::map(scene_vmo, 0, Rights::READ_WRITE_MAP) {
+    let swap_va = match abi::vmo::map(swap_vmo, 0, Rights::READ_WRITE_MAP) {
         Ok(va) => va,
         Err(_) => abi::thread::exit(EXIT_SCENE_MAP),
     };
-    // SAFETY: scene_va is a valid RW mapping of at least SCENE_SIZE
-    // bytes. The presenter is the sole writer.
-    let scene_buf = unsafe { core::slice::from_raw_parts_mut(scene_va as *mut u8, SCENE_SIZE) };
-    let _ = SceneWriter::new(scene_buf);
-    // Connect to compositor — send scene graph VMO so it can read our output.
+
+    // SAFETY: swap_va is page-aligned, at least 16 bytes. Zero-init sets
+    // active_index=0, generation=0.
+    unsafe {
+        core::ptr::write_bytes(swap_va as *mut u8, 0, 16);
+    }
+
+    let scene_vmo_size = SCENE_SIZE.next_multiple_of(PAGE_SIZE);
+    let scene_vmos = [
+        match abi::vmo::create(scene_vmo_size, 0) {
+            Ok(h) => h,
+            Err(_) => abi::thread::exit(EXIT_SCENE_CREATE),
+        },
+        match abi::vmo::create(scene_vmo_size, 0) {
+            Ok(h) => h,
+            Err(_) => abi::thread::exit(EXIT_SCENE_CREATE),
+        },
+    ];
+    let scene_vas = [
+        match abi::vmo::map(scene_vmos[0], 0, Rights::READ_WRITE_MAP) {
+            Ok(va) => va,
+            Err(_) => abi::thread::exit(EXIT_SCENE_MAP),
+        },
+        match abi::vmo::map(scene_vmos[1], 0, Rights::READ_WRITE_MAP) {
+            Ok(va) => va,
+            Err(_) => abi::thread::exit(EXIT_SCENE_MAP),
+        },
+    ];
+    // SAFETY: scene_vas are valid RW mappings of at least SCENE_SIZE bytes.
+    let scene_bufs: [&'static mut [u8]; 2] = unsafe {
+        [
+            core::slice::from_raw_parts_mut(scene_vas[0] as *mut u8, SCENE_SIZE),
+            core::slice::from_raw_parts_mut(scene_vas[1] as *mut u8, SCENE_SIZE),
+        ]
+    };
+    let _ = SceneWriter::new(scene_bufs[0]);
+    let _ = SceneWriter::new(scene_bufs[1]);
+    // Connect to compositor — send swap header + both scene buffer VMOs.
     let render_ep = match name::watch(HANDLE_NS_EP, b"render") {
         Ok(h) => h,
         Err(_) => {
@@ -1150,7 +1261,15 @@ extern "C" fn _start() -> ! {
             abi::thread::exit(EXIT_RENDER_NOT_FOUND);
         }
     };
-    let scene_dup = match abi::handle::dup(scene_vmo, Rights::READ_MAP) {
+    let swap_dup = match abi::handle::dup(swap_vmo, Rights::READ_MAP) {
+        Ok(h) => h,
+        Err(_) => abi::thread::exit(EXIT_RENDER_SETUP),
+    };
+    let scene_dup0 = match abi::handle::dup(scene_vmos[0], Rights::READ_MAP) {
+        Ok(h) => h,
+        Err(_) => abi::thread::exit(EXIT_RENDER_SETUP),
+    };
+    let scene_dup1 = match abi::handle::dup(scene_vmos[1], Rights::READ_MAP) {
         Ok(h) => h,
         Err(_) => abi::thread::exit(EXIT_RENDER_SETUP),
     };
@@ -1160,7 +1279,7 @@ extern "C" fn _start() -> ! {
         render_ep,
         render::comp::SETUP,
         &[],
-        &[scene_dup.0],
+        &[swap_dup.0, scene_dup0.0, scene_dup1.0],
         &mut recv_handles,
         &mut reply_buf,
     ) {
@@ -1196,8 +1315,10 @@ extern "C" fn _start() -> ! {
         layout_ep,
         results_reader,
         results_buf: [0u8; layout_service::RESULTS_VALUE_SIZE],
-        scene_buf,
-        scene_vmo,
+        scene_bufs,
+        scene_vmos,
+        swap_va,
+        swap_gen: 0,
         viewport_va,
         display_width,
         display_height,

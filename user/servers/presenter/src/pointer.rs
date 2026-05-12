@@ -97,12 +97,43 @@ impl Presenter {
         let click_x = (btn.abs_x as u64 * self.display_width as u64 / 32768) as u32;
         let click_y = (btn.abs_y as u64 * self.display_height as u64 / 32768) as u32;
 
-        // Hit-test at click time — same algorithm as pointer-move hover.
         {
-            let scene = scene::SceneWriter::from_existing(self.scene_buf);
+            let mut dbg = [0u8; 60];
+            let mut p = 0;
+
+            p += super::copy_into(&mut dbg[p..], b"click: x=");
+            p += console::format_u32(click_x, &mut dbg[p..]);
+            p += super::copy_into(&mut dbg[p..], b" y=");
+            p += console::format_u32(click_y, &mut dbg[p..]);
+            p += super::copy_into(&mut dbg[p..], b" sp=");
+            p += console::format_u32(self.active_space as u32, &mut dbg[p..]);
+
+            dbg[p] = b'\n';
+
+            p += 1;
+
+            console::write(self.console_ep, &dbg[..p]);
+        }
+        {
+            let active = self.read_active_index();
+            let scene = scene::SceneWriter::from_existing(unsafe {
+                core::slice::from_raw_parts_mut(
+                    self.scene_bufs[active].as_ptr() as *mut u8,
+                    scene::SCENE_SIZE,
+                )
+            });
 
             if let Some(hit_id) = scene.hit_test(click_x as f32, click_y as f32) {
                 let node = scene.node(hit_id);
+
+                console::write(
+                    self.console_ep,
+                    if node.role == scene::ROLE_BUTTON {
+                        b"click: HIT BUTTON\n"
+                    } else {
+                        b"click: hit non-btn\n"
+                    },
+                );
 
                 if node.role == scene::ROLE_BUTTON {
                     if matches!(
@@ -116,6 +147,8 @@ impl Presenter {
 
                     return;
                 }
+            } else {
+                console::write(self.console_ep, b"click: no hit\n");
             }
         }
 

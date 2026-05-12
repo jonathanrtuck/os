@@ -393,3 +393,21 @@ pub struct SceneHeader {
     /// full repaint (e.g., after `clear()`).
     pub dirty_bits: [u64; DIRTY_BITMAP_WORDS],
 }
+
+/// Double-buffer swap header shared between presenter and compositor.
+///
+/// Lives in its own VMO (1 page). The presenter writes to the back
+/// buffer, then atomically swaps by updating `active_index` and
+/// bumping `generation` with Release ordering. The compositor reads
+/// `generation` with Acquire ordering to detect changes, then reads
+/// from `scene_bufs[active_index]`.
+#[repr(C)]
+pub struct SceneSwapHeader {
+    /// Which buffer the compositor should read (0 or 1).
+    pub active_index: core::sync::atomic::AtomicU32,
+    /// Bumped on every swap so the compositor can detect changes.
+    pub generation: core::sync::atomic::AtomicU32,
+    pub _pad: [u8; 8],
+}
+
+const _: () = assert!(core::mem::size_of::<SceneSwapHeader>() == 16);

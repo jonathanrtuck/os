@@ -57,6 +57,7 @@ struct VideoDecoder {
     play_start_ns: u64,
     codec_ep: Handle,
     codec_session_id: u32,
+    codec_texture_handle: u32,
     shared_vmo: Handle,
     shared_va: usize,
     codec: u8,
@@ -69,6 +70,14 @@ struct PlaybackStats {
     total_decode_ns: u64,
     max_decode_ns: u64,
     play_start_ns: u64,
+}
+
+fn copy_into(dst: &mut [u8], src: &[u8]) -> usize {
+    let len = src.len().min(dst.len());
+
+    dst[..len].copy_from_slice(&src[..len]);
+
+    len
 }
 
 fn reformat_avcc(avcc: &[u8], out: &mut [u8]) -> usize {
@@ -383,6 +392,7 @@ impl VideoDecoder {
             height,
             ns_per_frame,
             total_frames: total,
+            host_texture_handle: self.codec_texture_handle,
         };
 
         reply.write_to(&mut reply_buf);
@@ -480,6 +490,7 @@ impl VideoDecoder {
         let cr = video::CreateSessionReply::read_from(reply.payload);
 
         self.codec_session_id = cr.session_id;
+        self.codec_texture_handle = cr.texture_handle;
     }
 
     fn write_codec_data(&self) -> usize {
@@ -706,6 +717,22 @@ impl Dispatch for VideoDecoder {
                         max_decode_ns: 0,
                         play_start_ns: now,
                     };
+
+                    let mut buf = [0u8; 60];
+                    let mut p = 0;
+
+                    p += copy_into(&mut buf[p..], b"vdec: PLAY total=");
+                    p += console::format_u32(self.frame_index.len() as u32, &mut buf[p..]);
+                    p += copy_into(&mut buf[p..], b" nsf=");
+                    p += console::format_u32((self.ns_per_frame / 1000) as u32, &mut buf[p..]);
+
+                    buf[p] = b'\n';
+
+                    p += 1;
+
+                    console::write(self.console_ep, &buf[..p]);
+                } else {
+                    console::write(self.console_ep, b"vdec: PAUSE\n");
                 }
 
                 self.publish_status();
@@ -765,6 +792,7 @@ extern "C" fn _start() -> ! {
         play_start_ns: 0,
         codec_ep: Handle(0),
         codec_session_id: 0,
+        codec_texture_handle: 0,
         shared_vmo: Handle(0),
         shared_va: 0,
         codec: 0,
@@ -787,19 +815,21 @@ extern "C" fn _start() -> ! {
                     + decoder.frame_pts_ns.last().copied().unwrap_or(0)
                     + decoder.ns_per_frame
             };
-
-            match ipc::server::serve_one_timed(HANDLE_SVC_EP, &mut decoder, deadline) {
-                Ok(()) | Err(abi::types::SyscallError::TimedOut) => {}
+            let wait_t0 = abi::system::clock_read().unwrap_or(0);
+            let got_ipc = match ipc::server::serve_one_timed(HANDLE_SVC_EP, &mut decoder, deadline)
+            {
+                Ok(()) => true,
+                Err(abi::types::SyscallError::TimedOut) => false,
                 Err(_) => break,
-            }
-        } else {
-            match ipc::server::serve_one(HANDLE_SVC_EP, &mut decoder) {
-                Ok(()) => {}
-                Err(_) => break,
-            }
-        }
+            };
+            let wait_dt = abi::system::clock_read()
+                .unwrap_or(0)
+                .saturating_sub(wait_t0);
 
-        if decoder.playing && !decoder.frame_pts_ns.is_empty() {
+            if got_ipc {
+                continue;
+            }
+
             let now = abi::system::clock_read().unwrap_or(0);
             let elapsed = now.saturating_sub(decoder.play_start_ns);
             let total = decoder.frame_pts_ns.len() as u32;
@@ -832,6 +862,31 @@ extern "C" fn _start() -> ! {
                 if dt > decoder.stats.max_decode_ns {
                     decoder.stats.max_decode_ns = dt;
                 }
+
+                let dt_us = (dt / 1000) as u32;
+                let el_ms = (elapsed / 1_000_000) as u32;
+                let wait_us = (wait_dt / 1000) as u32;
+                let mut buf = [0u8; 100];
+                let mut p = 0;
+
+                p += copy_into(&mut buf[p..], b"vdec: f=");
+                p += console::format_u32(target, &mut buf[p..]);
+                p += copy_into(&mut buf[p..], b"/");
+                p += console::format_u32(total, &mut buf[p..]);
+                p += copy_into(&mut buf[p..], b" dec=");
+                p += console::format_u32(dt_us, &mut buf[p..]);
+                p += copy_into(&mut buf[p..], b"us wait=");
+                p += console::format_u32(wait_us, &mut buf[p..]);
+                p += copy_into(&mut buf[p..], b"us el=");
+                p += console::format_u32(el_ms, &mut buf[p..]);
+                p += copy_into(&mut buf[p..], b"ms g=");
+                p += console::format_u32(decoder.output_gen as u32, &mut buf[p..]);
+
+                buf[p] = b'\n';
+
+                p += 1;
+
+                console::write(decoder.console_ep, &buf[..p]);
             }
 
             if decoder.current_frame >= total - 1 {
@@ -840,6 +895,11 @@ extern "C" fn _start() -> ! {
                 decoder.decode_and_publish(0);
                 decoder.publish_status();
                 decoder.report_stats();
+            }
+        } else {
+            match ipc::server::serve_one(HANDLE_SVC_EP, &mut decoder) {
+                Ok(()) => {}
+                Err(_) => break,
             }
         }
     }

@@ -969,6 +969,27 @@ fn build_showcase_nodes(
 // ── Presenter scene methods ──────────────────────────────────────
 
 impl super::Presenter {
+    pub(crate) fn visible_space_range(&self) -> (usize, usize) {
+        let last = self.spaces.len().saturating_sub(1);
+
+        if self.slide_animating {
+            let current = self.slide_spring.value();
+            let target = self.slide_spring.target();
+            let dw = self.display_width as f32;
+            let lo = (current.min(target) / dw) as usize;
+            let hi_raw = current.max(target) / dw;
+            let hi = if hi_raw != hi_raw as usize as f32 {
+                hi_raw as usize + 1
+            } else {
+                hi_raw as usize
+            };
+
+            (lo.min(last), hi.min(last))
+        } else {
+            (self.active_space, self.active_space)
+        }
+    }
+
     pub(crate) fn build_scene(&mut self) {
         let _ = ipc::client::call_simple(self.layout_ep, layout_service::RECOMPUTE, &[]);
         // SAFETY: doc_va is a valid RO mapping of the document buffer.
@@ -1036,9 +1057,17 @@ impl super::Presenter {
         let has_selection = sel_anchor != cursor_pos;
         let sel_start = sel_anchor.min(cursor_pos);
         let sel_end = sel_anchor.max(cursor_pos);
-        let mut scene = SceneWriter::from_existing(self.scene_buf);
+        let (vis_lo, vis_hi) = self.visible_space_range();
+        let back_idx = 1 - self.read_active_index();
+        // SAFETY: scene_bufs[back_idx] is a valid &mut [u8] of SCENE_SIZE
+        // bytes. We create a reborrow via raw pointer to split the borrow
+        // from self, since SceneWriter only touches this buffer.
+        let back_buf = unsafe {
+            core::slice::from_raw_parts_mut(self.scene_bufs[back_idx].as_mut_ptr(), SCENE_SIZE)
+        };
+        let mut scene = SceneWriter::from_existing(back_buf);
 
-        scene.clear();
+        scene.reset();
 
         let title_bar_h = presenter_service::TITLE_BAR_H;
         let page_margin = presenter_service::PAGE_MARGIN_V;
@@ -1229,12 +1258,11 @@ impl super::Presenter {
 
         scene.add_child(content_area, strip);
 
-        // Render each space into the strip.
+        // Render only visible spaces into the strip.
         let now_ns = abi::system::clock_read().unwrap_or(0);
         let has_audio = self.audio_ep.0 != 0;
-        let num_spaces = self.spaces.len();
 
-        for space_idx in 0..num_spaces {
+        for space_idx in vis_lo..=vis_hi {
             let base_x = (self.display_width * space_idx as u32) as i32;
 
             match &self.spaces[space_idx] {
@@ -1720,7 +1748,7 @@ impl super::Presenter {
             }
         }
 
-        scene.commit();
+        self.swap_scene();
 
         self.last_line_count = line_count as u32;
         self.last_cursor_line = cursor_line_idx as u32;
@@ -1743,10 +1771,6 @@ impl super::Presenter {
     }
 
     pub(crate) fn update_clock(&mut self) -> bool {
-        if self.clock_node_id == scene::NULL {
-            return false;
-        }
-
         let clock_secs = self.current_clock_secs();
 
         if clock_secs == self.last_clock_secs {
@@ -1755,45 +1779,20 @@ impl super::Presenter {
 
         self.last_clock_secs = clock_secs;
 
-        let hours = (clock_secs / 3600) % 24;
-        let minutes = (clock_secs / 60) % 60;
-        let seconds = clock_secs % 60;
-        let clock_chars: [u8; 8] = [
-            b'0' + (hours / 10) as u8,
-            b'0' + (hours % 10) as u8,
-            b':',
-            b'0' + (minutes / 10) as u8,
-            b'0' + (minutes % 10) as u8,
-            b':',
-            b'0' + (seconds / 10) as u8,
-            b'0' + (seconds % 10) as u8,
-        ];
-        let clock_text = core::str::from_utf8(&clock_chars).unwrap_or("00:00:00");
-        let tnum = fonts::Feature::new(fonts::Tag::new(b"tnum"), 1, ..);
-        let (clock_count, _) = shape_text(
-            font(init::FONT_IDX_SANS),
-            clock_text,
-            presenter_service::FONT_SIZE,
-            &[tnum],
-            &mut self.glyphs,
-        );
-        let _ = clock_count;
-        let mut scene = SceneWriter::from_existing(self.scene_buf);
-
-        scene.write_shaped_glyphs_at(self.clock_glyph_ref, &self.glyphs[..8]);
-        scene.commit();
+        self.build_scene();
 
         true
     }
 
     pub(crate) fn make_info_reply(&self) -> presenter_service::InfoReply {
+        let active = self.read_active_index();
         let scene = SceneWriter::from_existing(unsafe {
-            core::slice::from_raw_parts_mut(self.scene_buf.as_ptr() as *mut u8, SCENE_SIZE)
+            core::slice::from_raw_parts_mut(self.scene_bufs[active].as_ptr() as *mut u8, SCENE_SIZE)
         });
 
         presenter_service::InfoReply {
             node_count: scene.node_count(),
-            generation: scene.generation(),
+            generation: self.swap_gen,
             line_count: self.last_line_count,
             cursor_line: self.last_cursor_line,
             cursor_col: self.last_cursor_col,
@@ -1805,8 +1804,9 @@ impl super::Presenter {
     // ── Cursor shape resolution ──────────────────────────────────
 
     pub(crate) fn resolve_cursor_shape(&self) -> u8 {
+        let active = self.read_active_index();
         let scene = SceneWriter::from_existing(unsafe {
-            core::slice::from_raw_parts_mut(self.scene_buf.as_ptr() as *mut u8, SCENE_SIZE)
+            core::slice::from_raw_parts_mut(self.scene_bufs[active].as_ptr() as *mut u8, SCENE_SIZE)
         });
 
         if let Some(hit_id) = scene.hit_test(self.pointer_x, self.pointer_y) {

@@ -75,16 +75,18 @@ pub struct OpenReply {
     pub height: u32,
     pub ns_per_frame: u64,
     pub total_frames: u32,
+    pub host_texture_handle: u32,
 }
 
 impl OpenReply {
-    pub const SIZE: usize = 20;
+    pub const SIZE: usize = 24;
 
     pub fn write_to(&self, buf: &mut [u8]) {
         buf[0..4].copy_from_slice(&self.width.to_le_bytes());
         buf[4..8].copy_from_slice(&self.height.to_le_bytes());
         buf[8..16].copy_from_slice(&self.ns_per_frame.to_le_bytes());
         buf[16..20].copy_from_slice(&self.total_frames.to_le_bytes());
+        buf[20..24].copy_from_slice(&self.host_texture_handle.to_le_bytes());
     }
 
     #[must_use]
@@ -94,6 +96,7 @@ impl OpenReply {
             height: u32::from_le_bytes(buf[4..8].try_into().unwrap()),
             ns_per_frame: u64::from_le_bytes(buf[8..16].try_into().unwrap()),
             total_frames: u32::from_le_bytes(buf[16..20].try_into().unwrap()),
+            host_texture_handle: u32::from_le_bytes(buf[20..24].try_into().unwrap()),
         }
     }
 }
@@ -161,6 +164,7 @@ mod tests {
             height: 720,
             ns_per_frame: 33_333_000,
             total_frames: 900,
+            host_texture_handle: 0x8000_0001,
         };
         let mut buf = [0u8; OpenReply::SIZE];
 
