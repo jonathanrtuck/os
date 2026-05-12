@@ -800,7 +800,8 @@ fn upload_image_to_compositor(
 // ── Video loading from document store ───────────────────────────
 
 fn load_video_space(render_ep: Handle, console_ep: Handle) -> Option<Space> {
-    let (file_vmo, bytes_read) = store_load_type(b"video/avi")?;
+    let (file_vmo, bytes_read) =
+        store_load_type(b"video/mp4").or_else(|| store_load_type(b"video/avi"))?;
     let decoder_ep = match name::lookup(HANDLE_NS_EP, b"video-decoder") {
         Ok(h) => h,
         Err(_) => {

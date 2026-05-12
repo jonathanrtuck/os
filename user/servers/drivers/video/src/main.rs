@@ -103,7 +103,13 @@ impl VideoDriver {
         let _ = self.ctrl_vq.pop_used();
     }
 
-    fn create_session(&mut self, codec: u8, width: u32, height: u32) -> (u32, u32, u32) {
+    fn create_session(
+        &mut self,
+        codec: u8,
+        width: u32,
+        height: u32,
+        codec_data: &[u8],
+    ) -> (u32, u32, u32) {
         let session_id = self.next_session_id;
 
         self.next_session_id += 1;
@@ -116,23 +122,64 @@ impl VideoDriver {
         //  10: reserved      (u16)
         //  12: width         (u32)
         //  16: height        (u32)
-        //  20: codec_data_size (u32) = 0 (no codec data for V1)
+        //  20: codec_data_size (u32)
+        let codec_data_size = codec_data.len() as u32;
         let mut req = [0u8; 24];
 
         req[0..4].copy_from_slice(&CTRL_CREATE_SESSION.to_le_bytes());
         req[4..8].copy_from_slice(&session_id.to_le_bytes());
         req[8] = codec;
-        req[9] = 0; // pixel_format = BGRA8
+        req[9] = 0;
         req[12..16].copy_from_slice(&width.to_le_bytes());
         req[16..20].copy_from_slice(&height.to_le_bytes());
-        // codec_data_size = 0 (bytes 20..24 already zero)
+        req[20..24].copy_from_slice(&codec_data_size.to_le_bytes());
 
-        self.ctrl_request(&req, 12);
+        let buf = self.ctrl_buf_va as *mut u8;
 
-        // Response (12 bytes): [status: u32][texture_handle: u32][reserved: u32]
-        let resp_va = self.ctrl_buf_va + 24;
+        // SAFETY: ctrl_buf is a PAGE_SIZE DMA buffer.
+        unsafe {
+            core::ptr::copy_nonoverlapping(req.as_ptr(), buf, 24);
 
-        // SAFETY: device has written 12-byte response at resp_va.
+            if !codec_data.is_empty() {
+                core::ptr::copy_nonoverlapping(codec_data.as_ptr(), buf.add(24), codec_data.len());
+                core::ptr::write_bytes(buf.add(24 + codec_data.len()), 0, 12);
+            } else {
+                core::ptr::write_bytes(buf.add(24), 0, 12);
+            }
+        }
+
+        let req_pa = self.ctrl_buf_pa;
+        let resp_offset = if codec_data.is_empty() {
+            24u64
+        } else {
+            24 + codec_data.len() as u64
+        };
+        let resp_pa = self.ctrl_buf_pa + resp_offset;
+
+        if codec_data.is_empty() {
+            self.ctrl_vq
+                .push_chain(&[(req_pa, 24, false), (resp_pa, 12, true)]);
+        } else {
+            let codec_pa = self.ctrl_buf_pa + 24;
+
+            self.ctrl_vq.push_chain(&[
+                (req_pa, 24, false),
+                (codec_pa, codec_data_size, false),
+                (resp_pa, 12, true),
+            ]);
+        }
+
+        self.device.notify(CONTROLQ);
+
+        let _ = abi::event::wait(&[(self.irq_event, 0x1)]);
+
+        self.device.ack_interrupt();
+
+        let _ = abi::event::clear(self.irq_event, 0x1);
+        let _ = self.ctrl_vq.pop_used();
+        let resp_va = self.ctrl_buf_va + resp_offset as usize;
+
+        // SAFETY: device has written 12-byte response.
         unsafe {
             let status = core::ptr::read_volatile(resp_va as *const u32);
             let texture_handle = core::ptr::read_volatile((resp_va + 4) as *const u32);
@@ -339,8 +386,25 @@ impl Dispatch for VideoServer {
                     }
                 }
 
-                let (status, session_id, texture_handle) =
-                    self.driver.create_session(req.codec, req.width, req.height);
+                let codec_data_size = req.codec_data_size as usize;
+                let codec_data_offset = req.codec_data_offset as usize;
+                let codec_data: &[u8] = if codec_data_size > 0
+                    && self.driver.shared_va != 0
+                    && codec_data_offset + codec_data_size <= self.driver.shared_len
+                {
+                    // SAFETY: shared_va is valid, bounds checked above.
+                    unsafe {
+                        core::slice::from_raw_parts(
+                            (self.driver.shared_va + codec_data_offset) as *const u8,
+                            codec_data_size,
+                        )
+                    }
+                } else {
+                    &[]
+                };
+                let (status, session_id, texture_handle) = self
+                    .driver
+                    .create_session(req.codec, req.width, req.height, codec_data);
 
                 if status != 0 {
                     let _ = msg.reply_error(ipc::STATUS_IO_ERROR);

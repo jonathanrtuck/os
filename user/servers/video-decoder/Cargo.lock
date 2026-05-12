@@ -45,6 +45,10 @@ name = "jpeg"
 version = "0.1.0"
 
 [[package]]
+name = "mp4"
+version = "0.1.0"
+
+[[package]]
 name = "name"
 version = "0.1.0"
 dependencies = [
@@ -75,6 +79,7 @@ dependencies = [
  "heap",
  "ipc",
  "jpeg",
+ "mp4",
  "name",
  "video",
 ]

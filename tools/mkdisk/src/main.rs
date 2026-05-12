@@ -90,6 +90,11 @@ const ASSETS: &[AssetSpec] = &[
         media_type: "video/avi",
         name: "video",
     },
+    AssetSpec {
+        filename: "video.mp4",
+        media_type: "video/mp4",
+        name: "video-h264",
+    },
 ];
 
 fn main() {

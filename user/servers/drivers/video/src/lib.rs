@@ -57,15 +57,19 @@ pub struct CreateSessionRequest {
     pub codec: u8,
     pub width: u32,
     pub height: u32,
+    pub codec_data_offset: u32,
+    pub codec_data_size: u32,
 }
 
 impl CreateSessionRequest {
-    pub const SIZE: usize = 12;
+    pub const SIZE: usize = 20;
 
     pub fn write_to(&self, buf: &mut [u8]) {
         buf[0..4].copy_from_slice(&(self.codec as u32).to_le_bytes());
         buf[4..8].copy_from_slice(&self.width.to_le_bytes());
         buf[8..12].copy_from_slice(&self.height.to_le_bytes());
+        buf[12..16].copy_from_slice(&self.codec_data_offset.to_le_bytes());
+        buf[16..20].copy_from_slice(&self.codec_data_size.to_le_bytes());
     }
 
     #[must_use]
@@ -74,6 +78,8 @@ impl CreateSessionRequest {
             codec: u32::from_le_bytes(buf[0..4].try_into().unwrap()) as u8,
             width: u32::from_le_bytes(buf[4..8].try_into().unwrap()),
             height: u32::from_le_bytes(buf[8..12].try_into().unwrap()),
+            codec_data_offset: u32::from_le_bytes(buf[12..16].try_into().unwrap()),
+            codec_data_size: u32::from_le_bytes(buf[16..20].try_into().unwrap()),
         }
     }
 }
@@ -205,6 +211,8 @@ mod tests {
             codec: CODEC_H264,
             width: 1920,
             height: 1080,
+            codec_data_offset: 0,
+            codec_data_size: 64,
         };
         let mut buf = [0u8; CreateSessionRequest::SIZE];
 

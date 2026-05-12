@@ -14,6 +14,7 @@ members = [
     "user/libraries/png",
     "user/libraries/jpeg",
     "user/libraries/avi",
+    "user/libraries/mp4",
 ]
 exclude = ["kernel/fuzz", "user/init", "user/abi", "tools/mkdisk", "tools/mkavi"]
 resolver = "3"
