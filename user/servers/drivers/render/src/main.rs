@@ -979,6 +979,29 @@ fn submit_and_wait(
     vq.pop_used();
 }
 
+fn submit_async(
+    device: &virtio::Device,
+    vq: &mut virtio::Virtqueue,
+    queue_index: u32,
+    dma_pa: u64,
+    cmd_len: usize,
+) {
+    vq.push(dma_pa, cmd_len as u32, false);
+    device.notify(queue_index);
+}
+
+fn ensure_completed(vq: &mut virtio::Virtqueue, irq_event: Handle, device: &virtio::Device) {
+    if vq.pop_used().is_none() {
+        let _ = abi::event::wait(&[(irq_event, 0x1)]);
+
+        device.ack_interrupt();
+
+        let _ = abi::event::clear(irq_event, 0x1);
+
+        vq.pop_used();
+    }
+}
+
 // ── GPU pipeline setup ──────────────────────────────────────────────
 
 fn setup_pipeline(
@@ -2144,7 +2167,9 @@ struct Compositor {
     irq_event: Handle,
 
     setup_dma: init::DmaBuf,
-    render_dma: init::DmaBuf,
+    render_dma: [init::DmaBuf; 2],
+    render_buf_idx: usize,
+    render_in_flight: bool,
     setup_buf_size: usize,
     render_buf_size: usize,
 
@@ -2277,9 +2302,13 @@ impl Compositor {
         if bgra.is_empty() {
             return;
         }
+
         // SAFETY: render_dma.va is a valid DMA allocation.
         let dma_buf = unsafe {
-            core::slice::from_raw_parts_mut(self.render_dma.va as *mut u8, self.render_buf_size)
+            core::slice::from_raw_parts_mut(
+                self.render_dma[self.render_buf_idx].va as *mut u8,
+                self.render_buf_size,
+            )
         };
         let len = {
             let mut w = CommandWriter::new(dma_buf);
@@ -2295,7 +2324,7 @@ impl Compositor {
             &mut self.render_vq,
             self.irq_event,
             render::VIRTQ_RENDER,
-            self.render_dma.pa,
+            self.render_dma[self.render_buf_idx].pa,
             len,
         );
 
@@ -2308,7 +2337,10 @@ impl Compositor {
 
         // SAFETY: render_dma.va is a valid DMA allocation.
         let dma_buf = unsafe {
-            core::slice::from_raw_parts_mut(self.render_dma.va as *mut u8, self.render_buf_size)
+            core::slice::from_raw_parts_mut(
+                self.render_dma[self.render_buf_idx].va as *mut u8,
+                self.render_buf_size,
+            )
         };
         let len = {
             let mut w = CommandWriter::new(dma_buf);
@@ -2323,7 +2355,7 @@ impl Compositor {
             &mut self.render_vq,
             self.irq_event,
             render::VIRTQ_RENDER,
-            self.render_dma.pa,
+            self.render_dma[self.render_buf_idx].pa,
             len,
         );
     }
@@ -2486,6 +2518,14 @@ impl Compositor {
             return 0;
         }
 
+        if self.render_in_flight {
+            ensure_completed(&mut self.render_vq, self.irq_event, &self.device);
+
+            self.render_in_flight = false;
+        }
+
+        self.render_buf_idx ^= 1;
+
         self.walk_ctx.atlas.begin_frame();
 
         let now = abi::system::clock_read().unwrap_or(0);
@@ -2599,7 +2639,10 @@ impl Compositor {
         if draws.ops.is_empty() {
             // SAFETY: render_dma.va is a valid DMA allocation of render_buf_size bytes.
             let dma_buf = unsafe {
-                core::slice::from_raw_parts_mut(self.render_dma.va as *mut u8, self.render_buf_size)
+                core::slice::from_raw_parts_mut(
+                    self.render_dma[self.render_buf_idx].va as *mut u8,
+                    self.render_buf_size,
+                )
             };
             let len = {
                 let mut w = CommandWriter::new(dma_buf);
@@ -2623,14 +2666,14 @@ impl Compositor {
                 w.len()
             };
 
-            submit_and_wait(
+            submit_async(
                 &self.device,
                 &mut self.render_vq,
-                self.irq_event,
                 render::VIRTQ_RENDER,
-                self.render_dma.pa,
+                self.render_dma[self.render_buf_idx].pa,
                 len,
             );
+            self.render_in_flight = true;
         } else {
             let mut first = true;
             let mut active_pipe: Option<Pipe> = None;
@@ -2640,7 +2683,7 @@ impl Compositor {
                 // SAFETY: render_dma.va is a valid DMA allocation of render_buf_size bytes.
                 let dma_buf = unsafe {
                     core::slice::from_raw_parts_mut(
-                        self.render_dma.va as *mut u8,
+                        self.render_dma[self.render_buf_idx].va as *mut u8,
                         self.render_buf_size,
                     )
                 };
@@ -2836,7 +2879,7 @@ impl Compositor {
                         &mut self.render_vq,
                         self.irq_event,
                         render::VIRTQ_RENDER,
-                        self.render_dma.pa,
+                        self.render_dma[self.render_buf_idx].pa,
                         len,
                     );
 
@@ -2884,14 +2927,26 @@ impl Compositor {
                         w.len()
                     };
 
-                    submit_and_wait(
-                        &self.device,
-                        &mut self.render_vq,
-                        self.irq_event,
-                        render::VIRTQ_RENDER,
-                        self.render_dma.pa,
-                        len,
-                    );
+                    if is_last {
+                        submit_async(
+                            &self.device,
+                            &mut self.render_vq,
+                            render::VIRTQ_RENDER,
+                            self.render_dma[self.render_buf_idx].pa,
+                            len,
+                        );
+
+                        self.render_in_flight = true;
+                    } else {
+                        submit_and_wait(
+                            &self.device,
+                            &mut self.render_vq,
+                            self.irq_event,
+                            render::VIRTQ_RENDER,
+                            self.render_dma[self.render_buf_idx].pa,
+                            len,
+                        );
+                    }
 
                     first = false;
                     active_pipe = None;
@@ -2994,21 +3049,35 @@ impl Compositor {
 
                     w.end_render_pass();
 
-                    if op_idx == draws.ops.len() {
+                    let is_final = op_idx == draws.ops.len();
+
+                    if is_final {
                         w.present_and_commit(self.frame_count);
                     }
 
                     w.len()
                 };
 
-                submit_and_wait(
-                    &self.device,
-                    &mut self.render_vq,
-                    self.irq_event,
-                    render::VIRTQ_RENDER,
-                    self.render_dma.pa,
-                    len,
-                );
+                if op_idx == draws.ops.len() {
+                    submit_async(
+                        &self.device,
+                        &mut self.render_vq,
+                        render::VIRTQ_RENDER,
+                        self.render_dma[self.render_buf_idx].pa,
+                        len,
+                    );
+
+                    self.render_in_flight = true;
+                } else {
+                    submit_and_wait(
+                        &self.device,
+                        &mut self.render_vq,
+                        self.irq_event,
+                        render::VIRTQ_RENDER,
+                        self.render_dma[self.render_buf_idx].pa,
+                        len,
+                    );
+                }
 
                 if op_idx == batch_start {
                     op_idx += 1;
@@ -3259,7 +3328,11 @@ extern "C" fn _start() -> ! {
         Err(_) => abi::thread::exit(6),
     };
     let render_buf_size = PAGE_SIZE * RENDER_BUF_PAGES;
-    let render_dma = match init::request_dma(HANDLE_INIT_EP, render_buf_size) {
+    let render_dma_0 = match init::request_dma(HANDLE_INIT_EP, render_buf_size) {
+        Ok(d) => d,
+        Err(_) => abi::thread::exit(7),
+    };
+    let render_dma_1 = match init::request_dma(HANDLE_INIT_EP, render_buf_size) {
         Ok(d) => d,
         Err(_) => abi::thread::exit(7),
     };
@@ -3317,7 +3390,6 @@ extern "C" fn _start() -> ! {
     };
 
     console::write(console_ep, b"render: atlas ready\n");
-
     console::write(console_ep, b"render: ready\n");
 
     let mut compositor = Compositor {
@@ -3326,7 +3398,9 @@ extern "C" fn _start() -> ! {
         render_vq,
         irq_event,
         setup_dma,
-        render_dma,
+        render_dma: [render_dma_0, render_dma_1],
+        render_buf_idx: 0,
+        render_in_flight: false,
         setup_buf_size,
         render_buf_size,
         console_ep,
@@ -3352,9 +3426,9 @@ extern "C" fn _start() -> ! {
     };
 
     {
-        // SAFETY: render_dma.va is a valid DMA allocation.
+        // SAFETY: render_dma[0].va is a valid DMA allocation.
         let dma_buf = unsafe {
-            core::slice::from_raw_parts_mut(compositor.render_dma.va as *mut u8, render_buf_size)
+            core::slice::from_raw_parts_mut(compositor.render_dma[0].va as *mut u8, render_buf_size)
         };
         let len = {
             let mut w = CommandWriter::new(dma_buf);
@@ -3383,7 +3457,7 @@ extern "C" fn _start() -> ! {
             &mut compositor.render_vq,
             compositor.irq_event,
             render::VIRTQ_RENDER,
-            compositor.render_dma.pa,
+            compositor.render_dma[0].pa,
             len,
         );
     }
