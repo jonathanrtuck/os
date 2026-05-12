@@ -449,7 +449,20 @@ impl VideoDecoder {
         self.is_mp4 = is_mp4;
         self.nal_length_size = nal_length_size;
 
-        self.setup_hardware_session();
+        if is_mp4 {
+            self.setup_hardware_session();
+
+            if self.codec_session_id == 0 {
+                self.close_current();
+
+                let _ = abi::vmo::unmap(file_va);
+                let _ = abi::handle::close(file_vmo);
+                let _ = msg.reply_error(ipc::STATUS_UNSUPPORTED);
+
+                return;
+            }
+        }
+
         self.decode_and_publish(0);
 
         let total = self.frame_index.len() as u32;

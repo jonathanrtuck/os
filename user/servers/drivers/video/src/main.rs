@@ -22,7 +22,6 @@ use ipc::server::{Dispatch, Incoming};
 const HANDLE_NS_EP: Handle = Handle(2);
 const HANDLE_VIRTIO_VMO: Handle = Handle(3);
 const HANDLE_INIT_EP: Handle = Handle(4);
-const HANDLE_SVC_EP: Handle = Handle(5);
 
 const PAGE_SIZE: usize = virtio::PAGE_SIZE;
 
@@ -658,6 +657,19 @@ extern "C" fn _start() -> ! {
     log_buf[plen + hex_len] = b')';
     log_buf[plen + hex_len + 1] = b'\n';
 
+    // Self-register: create endpoint and register with the name service.
+    // Only reached after confirming the device exists — no dangling endpoint.
+    let svc_ep = match abi::ipc::endpoint_create() {
+        Ok(h) => h,
+        Err(_) => abi::thread::exit(0xE020),
+    };
+    let svc_dup = match abi::handle::dup(svc_ep, Rights::ALL) {
+        Ok(h) => h,
+        Err(_) => abi::thread::exit(0xE021),
+    };
+
+    name::register(HANDLE_NS_EP, b"codec-decode", svc_dup);
+
     console::write(console_ep, &log_buf[..plen + hex_len + 2]);
 
     let mut server = VideoServer {
@@ -691,7 +703,7 @@ extern "C" fn _start() -> ! {
         },
     };
 
-    ipc::server::serve(HANDLE_SVC_EP, &mut server);
+    ipc::server::serve(svc_ep, &mut server);
 
     abi::thread::exit(0);
 }

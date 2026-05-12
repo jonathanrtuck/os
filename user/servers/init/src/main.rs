@@ -179,10 +179,11 @@ fn spawn_from_pack(pack_data: &[u8], ns_ep: Handle, init_ep: Handle, font_vmo: H
             || name == NINEP_SVC
             || name == RNG_SVC
             || name == SND_SVC
-            || name == CODEC_DECODE_SVC
         {
             let ep = register_for(ns_ep, name);
             let _ = spawn_service(pack_data, &entry, &[ns_ep, HANDLE_VIRTIO_VMO, init_ep, ep]);
+        } else if name == CODEC_DECODE_SVC {
+            let _ = spawn_service(pack_data, &entry, &[ns_ep, HANDLE_VIRTIO_VMO, init_ep]);
         } else if name == PRESENTER_SVC {
             let ep = register_for(ns_ep, name);
             let _ = spawn_service(
