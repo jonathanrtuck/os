@@ -400,7 +400,7 @@ const FILTER_LINEAR: u8 = 1;
 const ATLAS_WIDTH: u16 = 2048;
 const ATLAS_HEIGHT: u16 = 2048;
 
-const SETUP_BUF_PAGES: usize = 8;
+const SETUP_BUF_PAGES: usize = 64;
 const RENDER_BUF_PAGES: usize = 8;
 
 // ── Vertex data ─────────────────────────────────────────────────────
@@ -2201,6 +2201,7 @@ struct ImageSlot {
     last_gen: u64,
     tex_created: bool,
     is_live: bool,
+    is_host: bool,
 }
 
 impl ImageSlot {
@@ -2215,6 +2216,7 @@ impl ImageSlot {
         last_gen: 0,
         tex_created: false,
         is_live: false,
+        is_host: false,
     };
 }
 
@@ -2476,15 +2478,15 @@ impl Compositor {
         let mut changed = false;
 
         for i in 0..MAX_IMAGES {
-            let img = &self.images[i];
+            let img = self.images[i];
 
-            if img.va == 0 || !img.is_live || !img.tex_created {
+            if img.va == 0 || !img.is_live {
                 continue;
             }
 
             // SAFETY: va is a valid RO mapping. The generation counter is an
             // aligned u64 at offset 0. Acquire ordering ensures subsequent
-            // pixel reads see data written before the gen store.
+            // reads see data written before the gen store.
             let current_gen = unsafe {
                 let ptr = img.va as *const core::sync::atomic::AtomicU64;
 
@@ -2494,7 +2496,9 @@ impl Compositor {
             if current_gen != img.last_gen {
                 self.images[i].last_gen = current_gen;
 
-                self.upload_image_slot(i);
+                if !img.is_host {
+                    self.upload_image_slot(i);
+                }
 
                 changed = true;
             }
@@ -3084,11 +3088,44 @@ impl Dispatch for Compositor {
                                 last_gen: 0,
                                 tex_created: false,
                                 is_live: live,
+                                is_host: false,
                             };
 
                             self.upload_image_slot(idx);
 
                             console::write(self.console_ep, b"render: image uploaded\n");
+                        }
+                    }
+                }
+
+                let _ = msg.reply_empty();
+            }
+            render::comp::BIND_HOST_TEXTURE => {
+                if msg.payload.len() >= render::comp::BindHostTextureRequest::SIZE
+                    && !msg.handles.is_empty()
+                {
+                    let req = render::comp::BindHostTextureRequest::read_from(msg.payload);
+                    let status_vmo = Handle(msg.handles[0]);
+
+                    if let Ok(va) = abi::vmo::map(status_vmo, 0, Rights::READ_MAP) {
+                        let slot = self.find_or_alloc_image_slot(req.content_id);
+
+                        if let Some(idx) = slot {
+                            self.images[idx] = ImageSlot {
+                                content_id: req.content_id,
+                                tex_id: req.texture_handle,
+                                va,
+                                w: req.width,
+                                h: req.height,
+                                pixel_size: 0,
+                                pixel_offset: 0,
+                                last_gen: 0,
+                                tex_created: true,
+                                is_live: true,
+                                is_host: true,
+                            };
+
+                            console::write(self.console_ep, b"render: host texture bound\n");
                         }
                     }
                 }

@@ -59,6 +59,7 @@ struct VideoDecoder {
     shared_vmo: Handle,
     shared_va: usize,
     codec: u8,
+    texture_handle: u32,
     stats: PlaybackStats,
 }
 
@@ -165,7 +166,11 @@ impl VideoDecoder {
         let file_vmo = Handle(msg.handles[0]);
         let ro = Rights(Rights::READ.0 | Rights::MAP.0);
         let file_va = match abi::vmo::map(file_vmo, 0, ro) {
-            Ok(va) => va,
+            Ok(va) => {
+                let _ = abi::handle::close(file_vmo);
+
+                va
+            }
             Err(_) => {
                 let _ = abi::handle::close(file_vmo);
                 let _ = msg.reply_error(ipc::STATUS_INVALID);
@@ -179,18 +184,17 @@ impl VideoDecoder {
         let is_avi = file_data.len() >= 4 && file_data[0..4] == RIFF_MAGIC;
 
         if is_avi {
-            self.open_avi(msg, file_va, file_data, file_vmo);
+            self.open_avi(msg, file_va, file_data);
         } else {
-            self.open_mp4(msg, file_va, file_data, file_vmo);
+            self.open_mp4(msg, file_va, file_data);
         }
     }
 
-    fn open_avi(&mut self, msg: Incoming<'_>, file_va: usize, file_data: &[u8], file_vmo: Handle) {
+    fn open_avi(&mut self, msg: Incoming<'_>, file_va: usize, file_data: &[u8]) {
         let info = match avi::parse(file_data) {
             Ok(i) => i,
             Err(_) => {
                 let _ = abi::vmo::unmap(file_va);
-                let _ = abi::handle::close(file_vmo);
                 let _ = msg.reply_error(ipc::STATUS_INVALID);
 
                 return;
@@ -199,7 +203,6 @@ impl VideoDecoder {
 
         if info.codec != avi::FourCC::MJPG && info.codec != avi::FourCC::MJPEG {
             let _ = abi::vmo::unmap(file_va);
-            let _ = abi::handle::close(file_vmo);
             let _ = msg.reply_error(ipc::STATUS_UNSUPPORTED);
 
             return;
@@ -209,7 +212,6 @@ impl VideoDecoder {
             Ok(iter) => iter.collect(),
             Err(_) => {
                 let _ = abi::vmo::unmap(file_va);
-                let _ = abi::handle::close(file_vmo);
                 let _ = msg.reply_error(ipc::STATUS_INVALID);
 
                 return;
@@ -222,7 +224,6 @@ impl VideoDecoder {
             msg,
             file_va,
             file_data.len(),
-            file_vmo,
             info.width,
             info.height,
             ns_per,
@@ -233,12 +234,11 @@ impl VideoDecoder {
         );
     }
 
-    fn open_mp4(&mut self, msg: Incoming<'_>, file_va: usize, file_data: &[u8], file_vmo: Handle) {
+    fn open_mp4(&mut self, msg: Incoming<'_>, file_va: usize, file_data: &[u8]) {
         let mp4_info = match mp4::parse(file_data) {
             Ok(m) => m,
             Err(_) => {
                 let _ = abi::vmo::unmap(file_va);
-                let _ = abi::handle::close(file_vmo);
                 let _ = msg.reply_error(ipc::STATUS_INVALID);
 
                 return;
@@ -247,7 +247,6 @@ impl VideoDecoder {
 
         if mp4_info.total_samples == 0 || mp4_info.avc_config().is_none() {
             let _ = abi::vmo::unmap(file_va);
-            let _ = abi::handle::close(file_vmo);
             let _ = msg.reply_error(ipc::STATUS_INVALID);
 
             return;
@@ -274,7 +273,6 @@ impl VideoDecoder {
             msg,
             file_va,
             file_data.len(),
-            file_vmo,
             mp4_info.width,
             mp4_info.height,
             mp4_info.ns_per_frame(),
@@ -291,7 +289,6 @@ impl VideoDecoder {
         msg: Incoming<'_>,
         file_va: usize,
         file_size: usize,
-        file_vmo: Handle,
         width: u32,
         height: u32,
         ns_per_frame: u64,
@@ -300,54 +297,10 @@ impl VideoDecoder {
         codec: u8,
         log_msg: &[u8],
     ) {
-        let pixel_size = width as usize * height as usize * 4;
-        let output_buf_size =
-            (video_decoder::GEN_HEADER_SIZE + pixel_size).next_multiple_of(PAGE_SIZE);
-        let output_vmo = match abi::vmo::create(output_buf_size, 0) {
-            Ok(h) => h,
-            Err(_) => {
-                let _ = abi::vmo::unmap(file_va);
-                let _ = abi::handle::close(file_vmo);
-                let _ = msg.reply_error(ipc::STATUS_NO_SPACE);
-
-                return;
-            }
-        };
-        let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
-        let output_va = match abi::vmo::map(output_vmo, 0, rw) {
-            Ok(va) => va,
-            Err(_) => {
-                let _ = abi::vmo::unmap(file_va);
-                let _ = abi::handle::close(file_vmo);
-                let _ = abi::handle::close(output_vmo);
-                let _ = msg.reply_error(ipc::STATUS_NO_SPACE);
-
-                return;
-            }
-        };
-        let output_dup = match abi::handle::dup(
-            output_vmo,
-            Rights(Rights::READ.0 | Rights::MAP.0 | Rights::DUP.0),
-        ) {
-            Ok(h) => h,
-            Err(_) => {
-                let _ = abi::vmo::unmap(file_va);
-                let _ = abi::handle::close(file_vmo);
-                let _ = abi::vmo::unmap(output_va);
-                let _ = abi::handle::close(output_vmo);
-                let _ = msg.reply_error(ipc::STATUS_INVALID);
-
-                return;
-            }
-        };
-
         self.file_va = file_va;
         self.file_size = file_size;
         self.frame_index = frame_index;
         self.frame_pts_ns = frame_pts_ns;
-        self.output_vmo = output_vmo;
-        self.output_va = output_va;
-        self.output_buf_size = output_buf_size;
         self.width = width;
         self.height = height;
         self.output_gen = 0;
@@ -367,6 +320,51 @@ impl VideoDecoder {
             return;
         }
 
+        let output_buf_size = video_decoder::GEN_HEADER_SIZE.next_multiple_of(PAGE_SIZE);
+        let output_vmo = match abi::vmo::create(output_buf_size, 0) {
+            Ok(h) => h,
+            Err(_) => {
+                self.close_current();
+
+                let _ = msg.reply_error(ipc::STATUS_NO_SPACE);
+
+                return;
+            }
+        };
+        let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
+        let output_va = match abi::vmo::map(output_vmo, 0, rw) {
+            Ok(va) => va,
+            Err(_) => {
+                let _ = abi::handle::close(output_vmo);
+
+                self.close_current();
+
+                let _ = msg.reply_error(ipc::STATUS_NO_SPACE);
+
+                return;
+            }
+        };
+        let output_dup = match abi::handle::dup(
+            output_vmo,
+            Rights(Rights::READ.0 | Rights::MAP.0 | Rights::DUP.0),
+        ) {
+            Ok(h) => h,
+            Err(_) => {
+                let _ = abi::vmo::unmap(output_va);
+                let _ = abi::handle::close(output_vmo);
+
+                self.close_current();
+
+                let _ = msg.reply_error(ipc::STATUS_INVALID);
+
+                return;
+            }
+        };
+
+        self.output_vmo = output_vmo;
+        self.output_va = output_va;
+        self.output_buf_size = output_buf_size;
+
         self.decode_and_publish(0);
 
         let total = self.frame_index.len() as u32;
@@ -379,6 +377,7 @@ impl VideoDecoder {
             height,
             ns_per_frame,
             total_frames: total,
+            texture_handle: self.texture_handle,
         };
 
         reply.write_to(&mut reply_buf);
@@ -438,13 +437,6 @@ impl VideoDecoder {
         } else {
             0
         };
-        let output_dup = match abi::handle::dup(
-            self.output_vmo,
-            Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0 | Rights::DUP.0),
-        ) {
-            Ok(h) => h,
-            Err(_) => return,
-        };
         let req = video::CreateSessionRequest {
             codec: self.codec,
             width: self.width,
@@ -461,7 +453,7 @@ impl VideoDecoder {
             self.codec_ep,
             video::CREATE_SESSION,
             &req_buf,
-            &[output_dup.0],
+            &[],
             &mut [],
             &mut call_buf,
         ) {
@@ -476,6 +468,7 @@ impl VideoDecoder {
         let cr = video::CreateSessionReply::read_from(reply.payload);
 
         self.codec_session_id = cr.session_id;
+        self.texture_handle = cr.texture_handle;
     }
 
     fn write_codec_data(&self) -> usize {
@@ -552,7 +545,7 @@ impl VideoDecoder {
                 offset: 0,
                 size: frame_data.len() as u32,
                 timestamp_ns: pts_ns,
-                output_pixel_offset: video_decoder::GEN_HEADER_SIZE as u32,
+                output_pixel_offset: 0,
             };
             let mut req_buf = [0u8; video::DecodeFrameRequest::SIZE];
 
@@ -564,8 +557,9 @@ impl VideoDecoder {
         self.output_gen = self.output_gen.wrapping_add(1);
         self.current_frame = idx as u32;
 
-        // SAFETY: output_va is page-aligned. Release ordering ensures pixel
-        // writes are visible before the gen bump makes the buffer readable.
+        // SAFETY: output_va is page-aligned. Release ordering ensures the
+        // host-side texture update is sequenced before the gen bump signals
+        // the render driver to re-composite.
         unsafe {
             let gen_ptr = self.output_va as *const AtomicU64;
 
@@ -758,6 +752,7 @@ extern "C" fn _start() -> ! {
         shared_vmo: Handle(0),
         shared_va: 0,
         codec: 0,
+        texture_handle: 0,
         stats: PlaybackStats {
             frames_decoded: 0,
             frames_skipped: 0,
