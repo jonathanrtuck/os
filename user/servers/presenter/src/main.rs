@@ -311,7 +311,7 @@ impl Space {
         match self {
             Space::Text => Some("text/rich"),
             Space::Image { .. } => Some("image/jpeg"),
-            Space::Video { .. } => Some("video/avi"),
+            Space::Video { .. } => Some("video/mp4"),
             Space::Showcase => None,
         }
     }

@@ -10,7 +10,6 @@ avi = { path = "../../libraries/avi" }
 console = { path = "../console" }
 heap = { path = "../../heap" }
 ipc = { path = "../../ipc" }
-jpeg = { path = "../../libraries/jpeg" }
 mp4 = { path = "../../libraries/mp4" }
 name = { path = "../name" }
 video = { path = "../drivers/video" }

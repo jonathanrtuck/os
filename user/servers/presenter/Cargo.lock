@@ -380,7 +380,6 @@ dependencies = [
  "console",
  "heap",
  "ipc",
- "jpeg",
  "mp4",
  "name",
  "video",

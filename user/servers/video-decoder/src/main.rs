@@ -1,4 +1,4 @@
-//! Video decoder service — decodes MJPEG AVI and H.264 MP4 files to BGRA frames.
+//! Video decoder service — decodes AVI and MP4 video via hardware VideoToolbox.
 //!
 //! Bootstrap handles (from init via thread_create_in):
 //!   Handle 2: name service endpoint
@@ -6,11 +6,10 @@
 //!
 //! Protocol:
 //!   OPEN: client sends a VMO containing file data (AVI or MP4). Service
-//!         parses the container, builds a frame index, allocates a reusable
-//!         output VMO for decoded BGRA frames, and replies with video
-//!         metadata + the output VMO handle.
+//!         parses the container, builds a frame index, creates a hardware
+//!         decode session, and replies with video metadata + output VMO.
 //!   DECODE_FRAME: client sends a frame index. Service decodes that
-//!         frame into the output VMO and replies with pixel size.
+//!         frame via VideoToolbox and replies with pixel size.
 //!   CLOSE: releases the current video state.
 
 #![no_std]
@@ -35,9 +34,8 @@ const PAGE_SIZE: usize = 16384;
 
 const EXIT_CONSOLE_NOT_FOUND: u32 = 0xE001;
 
-const SHARED_VMO_SIZE: usize = PAGE_SIZE * 64; // 1 MiB for compressed data
+const SHARED_VMO_SIZE: usize = PAGE_SIZE * 64;
 
-/// AVI RIFF magic: first 4 bytes of any AVI file.
 const RIFF_MAGIC: [u8; 4] = *b"RIFF";
 
 struct VideoDecoder {
@@ -48,9 +46,6 @@ struct VideoDecoder {
     output_vmo: Handle,
     output_va: usize,
     output_buf_size: usize,
-    decode_buf_vmo: Handle,
-    decode_buf_va: usize,
-    decode_buf_size: usize,
     width: u32,
     height: u32,
     output_gen: u64,
@@ -62,30 +57,9 @@ struct VideoDecoder {
     codec_session_id: u32,
     shared_vmo: Handle,
     shared_va: usize,
-    is_mp4: bool,
-    nal_length_size: u8,
+    codec: u8,
 }
 
-/// Reformat raw avcC configuration record into the driver's codec data format.
-///
-/// Input (ISO 14496-15 avcC box body):
-///   0: configurationVersion (1)
-///   1: AVCProfileIndication
-///   2: profile_compatibility
-///   3: AVCLevelIndication
-///   4: 0xFC | (lengthSizeMinusOne & 0x03)
-///   5: 0xE0 | (numSPS & 0x1F)
-///   For each SPS: u16 spsLength, [spsLength bytes]
-///   u8 numPPS
-///   For each PPS: u16 ppsLength, [ppsLength bytes]
-///
-/// Output (driver codec data protocol):
-///   0: nal_length_size (u8)
-///   1: num_parameter_sets (u8)
-///   2: reserved (u16, zeroed)
-///   Per parameter set: size (u32 LE) + data
-///
-/// Returns the number of bytes written to `out`, or 0 on malformed input.
 fn reformat_avcc(avcc: &[u8], out: &mut [u8]) -> usize {
     if avcc.len() < 7 {
         return 0;
@@ -94,11 +68,8 @@ fn reformat_avcc(avcc: &[u8], out: &mut [u8]) -> usize {
     let nal_length_size = (avcc[4] & 0x03) + 1;
     let num_sps = (avcc[5] & 0x1F) as usize;
     let mut read_pos = 6;
-    // Collect all parameter set (offset, length) pairs first to count them and
-    // validate before writing.
     let mut params: Vec<(usize, usize)> = Vec::new();
 
-    // SPS entries
     for _ in 0..num_sps {
         if read_pos + 2 > avcc.len() {
             return 0;
@@ -117,7 +88,6 @@ fn reformat_avcc(avcc: &[u8], out: &mut [u8]) -> usize {
         read_pos += len;
     }
 
-    // PPS count
     if read_pos >= avcc.len() {
         return 0;
     }
@@ -126,7 +96,6 @@ fn reformat_avcc(avcc: &[u8], out: &mut [u8]) -> usize {
 
     read_pos += 1;
 
-    // PPS entries
     for _ in 0..num_pps {
         if read_pos + 2 > avcc.len() {
             return 0;
@@ -146,14 +115,12 @@ fn reformat_avcc(avcc: &[u8], out: &mut [u8]) -> usize {
     }
 
     let total_params = params.len();
-    // Header: 1 + 1 + 2 = 4 bytes, then per param: 4 + data_len
     let needed = 4 + params.iter().map(|(_, len)| 4 + len).sum::<usize>();
 
     if needed > out.len() {
         return 0;
     }
 
-    // Write header
     out[0] = nal_length_size;
     out[1] = total_params as u8;
     out[2] = 0;
@@ -199,7 +166,6 @@ impl VideoDecoder {
         // SAFETY: kernel mapped the VMO at file_va for file_size bytes.
         let file_data =
             unsafe { core::slice::from_raw_parts(file_va as *const u8, req.file_size as usize) };
-        // Detect container format by magic bytes.
         let is_avi = file_data.len() >= 4 && file_data[0..4] == RIFF_MAGIC;
 
         if is_avi {
@@ -209,7 +175,6 @@ impl VideoDecoder {
         }
     }
 
-    /// Open an AVI/MJPEG file. Existing path, unchanged.
     fn open_avi(&mut self, msg: Incoming<'_>, file_va: usize, file_data: &[u8], file_vmo: Handle) {
         let info = match avi::parse(file_data) {
             Ok(i) => i,
@@ -240,21 +205,6 @@ impl VideoDecoder {
                 return;
             }
         };
-        let first_frame_data = frame_index
-            .first()
-            .and_then(|f| avi::frame_data(file_data, f));
-        let decode_buf_size = match first_frame_data {
-            Some(jpeg_data) => jpeg::jpeg_decode_buf_size(jpeg_data).unwrap_or(0),
-            None => 0,
-        };
-
-        if decode_buf_size == 0 {
-            let _ = abi::vmo::unmap(file_va);
-            let _ = abi::handle::close(file_vmo);
-            let _ = msg.reply_error(ipc::STATUS_INVALID);
-
-            return;
-        }
 
         self.finish_open(
             msg,
@@ -265,14 +215,11 @@ impl VideoDecoder {
             info.height,
             info.ns_per_frame(),
             frame_index,
-            decode_buf_size,
-            false,
-            0,
+            video::CODEC_MJPEG,
             b"  video-decoder: opened AVI\n",
         );
     }
 
-    /// Open an MP4/H.264 file.
     fn open_mp4(&mut self, msg: Incoming<'_>, file_va: usize, file_data: &[u8], file_vmo: Handle) {
         let mp4_info = match mp4::parse(file_data) {
             Ok(m) => m,
@@ -285,7 +232,7 @@ impl VideoDecoder {
             }
         };
 
-        if mp4_info.total_samples == 0 {
+        if mp4_info.total_samples == 0 || mp4_info.avc_config().is_none() {
             let _ = abi::vmo::unmap(file_va);
             let _ = abi::handle::close(file_vmo);
             let _ = msg.reply_error(ipc::STATUS_INVALID);
@@ -300,21 +247,7 @@ impl VideoDecoder {
                 size: s.size,
             })
             .collect();
-        let (nal_length_size, _avcc_body) = match mp4_info.avc_config() {
-            Some(cfg) => cfg,
-            None => {
-                let _ = abi::vmo::unmap(file_va);
-                let _ = abi::handle::close(file_vmo);
-                let _ = msg.reply_error(ipc::STATUS_INVALID);
 
-                return;
-            }
-        };
-        let ns_per_frame = mp4_info.ns_per_frame();
-
-        // H.264 uses hardware decode only; software decode buffer not needed.
-        // Set a minimal decode_buf_size (0 means the finish_open path will skip
-        // software buffer allocation for MP4).
         self.finish_open(
             msg,
             file_va,
@@ -322,16 +255,13 @@ impl VideoDecoder {
             file_vmo,
             mp4_info.width,
             mp4_info.height,
-            ns_per_frame,
+            mp4_info.ns_per_frame(),
             frame_index,
-            0, // no software decode buffer for H.264
-            true,
-            nal_length_size,
+            video::CODEC_H264,
             b"  video-decoder: opened MP4\n",
         );
     }
 
-    /// Common open completion: allocate output VMO, set up state, reply.
     #[allow(clippy::too_many_arguments)]
     fn finish_open(
         &mut self,
@@ -343,9 +273,7 @@ impl VideoDecoder {
         height: u32,
         ns_per_frame: u64,
         frame_index: Vec<avi::FrameRef>,
-        decode_buf_size: usize,
-        is_mp4: bool,
-        nal_length_size: u8,
+        codec: u8,
         log_msg: &[u8],
     ) {
         let pixel_size = width as usize * height as usize * 4;
@@ -373,39 +301,6 @@ impl VideoDecoder {
                 return;
             }
         };
-        // Allocate software decode buffer (MJPEG only — MP4 uses hardware path).
-        let (decode_buf_vmo, decode_buf_va, final_decode_buf_size) = if decode_buf_size > 0 {
-            let aligned = decode_buf_size.next_multiple_of(PAGE_SIZE);
-            let vmo = match abi::vmo::create(aligned, 0) {
-                Ok(h) => h,
-                Err(_) => {
-                    let _ = abi::vmo::unmap(file_va);
-                    let _ = abi::handle::close(file_vmo);
-                    let _ = abi::vmo::unmap(output_va);
-                    let _ = abi::handle::close(output_vmo);
-                    let _ = msg.reply_error(ipc::STATUS_NO_SPACE);
-
-                    return;
-                }
-            };
-            let va = match abi::vmo::map(vmo, 0, rw) {
-                Ok(va) => va,
-                Err(_) => {
-                    let _ = abi::vmo::unmap(file_va);
-                    let _ = abi::handle::close(file_vmo);
-                    let _ = abi::vmo::unmap(output_va);
-                    let _ = abi::handle::close(output_vmo);
-                    let _ = abi::handle::close(vmo);
-                    let _ = msg.reply_error(ipc::STATUS_NO_SPACE);
-
-                    return;
-                }
-            };
-            (vmo, va, aligned)
-        } else {
-            (Handle(0), 0, 0)
-        };
-
         let output_dup = match abi::handle::dup(
             output_vmo,
             Rights(Rights::READ.0 | Rights::MAP.0 | Rights::DUP.0),
@@ -416,14 +311,6 @@ impl VideoDecoder {
                 let _ = abi::handle::close(file_vmo);
                 let _ = abi::vmo::unmap(output_va);
                 let _ = abi::handle::close(output_vmo);
-
-                if decode_buf_va != 0 {
-                    let _ = abi::vmo::unmap(decode_buf_va);
-                }
-                if decode_buf_vmo.0 != 0 {
-                    let _ = abi::handle::close(decode_buf_vmo);
-                }
-
                 let _ = msg.reply_error(ipc::STATUS_INVALID);
 
                 return;
@@ -436,9 +323,6 @@ impl VideoDecoder {
         self.output_vmo = output_vmo;
         self.output_va = output_va;
         self.output_buf_size = output_buf_size;
-        self.decode_buf_vmo = decode_buf_vmo;
-        self.decode_buf_va = decode_buf_va;
-        self.decode_buf_size = final_decode_buf_size;
         self.width = width;
         self.height = height;
         self.output_gen = 0;
@@ -446,21 +330,16 @@ impl VideoDecoder {
         self.current_frame = 0;
         self.ns_per_frame = ns_per_frame;
         self.next_frame_ns = 0;
-        self.is_mp4 = is_mp4;
-        self.nal_length_size = nal_length_size;
+        self.codec = codec;
 
-        if is_mp4 {
-            self.setup_hardware_session();
+        self.setup_hardware_session();
 
-            if self.codec_session_id == 0 {
-                self.close_current();
+        if self.codec_session_id == 0 {
+            self.close_current();
 
-                let _ = abi::vmo::unmap(file_va);
-                let _ = abi::handle::close(file_vmo);
-                let _ = msg.reply_error(ipc::STATUS_UNSUPPORTED);
+            let _ = msg.reply_error(ipc::STATUS_UNSUPPORTED);
 
-                return;
-            }
+            return;
         }
 
         self.decode_and_publish(0);
@@ -495,7 +374,6 @@ impl VideoDecoder {
             }
         }
 
-        // Create shared VMO for compressed data transfer
         if self.shared_vmo.0 == 0 {
             let vmo = match abi::vmo::create(SHARED_VMO_SIZE, 0) {
                 Ok(h) => h,
@@ -513,7 +391,6 @@ impl VideoDecoder {
             self.shared_vmo = vmo;
             self.shared_va = va;
 
-            // Send shared VMO to driver via SETUP
             let shared_dup =
                 match abi::handle::dup(vmo, Rights(Rights::READ.0 | Rights::MAP.0 | Rights::DUP.0))
                 {
@@ -531,14 +408,12 @@ impl VideoDecoder {
             );
         }
 
-        // For H.264: write reformatted avcC data into the shared VMO so the
-        // driver can read it during session creation.
-        let codec_data_size = if self.is_mp4 && self.shared_va != 0 {
+        let codec_data_size = if self.codec == video::CODEC_H264 && self.shared_va != 0 {
             self.write_codec_data()
         } else {
             0
         };
-        // Create decode session, sending output VMO to the driver
+
         let output_dup = match abi::handle::dup(
             self.output_vmo,
             Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0 | Rights::DUP.0),
@@ -547,11 +422,7 @@ impl VideoDecoder {
             Err(_) => return,
         };
         let req = video::CreateSessionRequest {
-            codec: if self.is_mp4 {
-                video::CODEC_H264
-            } else {
-                video::CODEC_MJPEG
-            },
+            codec: self.codec,
             width: self.width,
             height: self.height,
             codec_data_offset: 0,
@@ -583,8 +454,6 @@ impl VideoDecoder {
         self.codec_session_id = cr.session_id;
     }
 
-    /// Write reformatted avcC codec data into the shared VMO for the driver.
-    /// Returns the number of bytes written, or 0 on failure.
     fn write_codec_data(&self) -> usize {
         if self.file_va == 0 || self.shared_va == 0 {
             return 0;
@@ -601,8 +470,6 @@ impl VideoDecoder {
             Some(cfg) => cfg,
             None => return 0,
         };
-        // Use a stack buffer for reformatting. avcC data is small (typically
-        // < 256 bytes: a few SPS/PPS NAL units).
         let mut reformat_buf = vec![0u8; 1024];
         let written = reformat_avcc(avcc_body, &mut reformat_buf);
 
@@ -623,7 +490,7 @@ impl VideoDecoder {
     }
 
     fn decode_and_publish(&mut self, idx: u32) {
-        if self.file_va == 0 || self.frame_index.is_empty() {
+        if self.file_va == 0 || self.frame_index.is_empty() || self.codec_session_id == 0 {
             return;
         }
 
@@ -642,11 +509,28 @@ impl VideoDecoder {
             None => return,
         };
 
-        if self.codec_session_id != 0 {
-            self.decode_hardware(frame_data, idx);
-        } else if !self.is_mp4 {
-            // Software fallback is MJPEG only — H.264 requires hardware decode.
-            self.decode_software(frame_data);
+        if self.shared_va != 0 && frame_data.len() <= SHARED_VMO_SIZE {
+            // SAFETY: shared_va is a valid RW mapping of SHARED_VMO_SIZE bytes.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    frame_data.as_ptr(),
+                    self.shared_va as *mut u8,
+                    frame_data.len(),
+                );
+            }
+
+            let ts_ns = idx as u64 * self.ns_per_frame;
+            let req = video::DecodeFrameRequest {
+                session_id: self.codec_session_id,
+                offset: 0,
+                size: frame_data.len() as u32,
+                timestamp_ns: ts_ns,
+            };
+            let mut req_buf = [0u8; video::DecodeFrameRequest::SIZE];
+
+            req.write_to(&mut req_buf);
+
+            let _ = ipc::client::call_simple(self.codec_ep, video::DECODE_FRAME, &req_buf);
         }
 
         self.output_gen = self.output_gen.wrapping_add(1);
@@ -658,74 +542,6 @@ impl VideoDecoder {
             let gen_ptr = self.output_va as *const AtomicU64;
 
             (*gen_ptr).store(self.output_gen, Ordering::Release);
-        }
-    }
-
-    fn decode_hardware(&mut self, frame_data: &[u8], frame_idx: usize) {
-        if self.shared_va == 0 || frame_data.len() > SHARED_VMO_SIZE {
-            if !self.is_mp4 {
-                self.decode_software(frame_data);
-            }
-            return;
-        }
-
-        // Copy compressed data to shared VMO
-        // SAFETY: shared_va is a valid RW mapping of SHARED_VMO_SIZE bytes.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                frame_data.as_ptr(),
-                self.shared_va as *mut u8,
-                frame_data.len(),
-            );
-        }
-
-        let ts_ns = frame_idx as u64 * self.ns_per_frame;
-        let req = video::DecodeFrameRequest {
-            session_id: self.codec_session_id,
-            offset: 0,
-            size: frame_data.len() as u32,
-            timestamp_ns: ts_ns,
-        };
-        let mut req_buf = [0u8; video::DecodeFrameRequest::SIZE];
-
-        req.write_to(&mut req_buf);
-
-        match ipc::client::call_simple(self.codec_ep, video::DECODE_FRAME, &req_buf) {
-            Ok((0, _payload)) => {}
-            _ => {
-                // Fallback to software decode on hardware failure (MJPEG only)
-                if !self.is_mp4 {
-                    self.decode_software(frame_data);
-                }
-            }
-        }
-    }
-
-    fn decode_software(&mut self, jpeg_data: &[u8]) {
-        if self.decode_buf_va == 0 {
-            return;
-        }
-
-        // SAFETY: decode_buf_va is a valid RW mapping of decode_buf_size bytes.
-        let decode_buf = unsafe {
-            core::slice::from_raw_parts_mut(self.decode_buf_va as *mut u8, self.decode_buf_size)
-        };
-        let header = match jpeg::jpeg_decode(jpeg_data, decode_buf) {
-            Ok(h) => h,
-            Err(_) => return,
-        };
-        let pixel_size = header.width as usize * header.height as usize * 4;
-        let max_pixels = self
-            .output_buf_size
-            .saturating_sub(video_decoder::GEN_HEADER_SIZE);
-
-        // SAFETY: output_va is a valid RW mapping.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                self.decode_buf_va as *const u8,
-                (self.output_va + video_decoder::GEN_HEADER_SIZE) as *mut u8,
-                pixel_size.min(max_pixels),
-            );
         }
     }
 
@@ -776,25 +592,13 @@ impl VideoDecoder {
 
             self.output_vmo = Handle(0);
         }
-        if self.decode_buf_va != 0 {
-            let _ = abi::vmo::unmap(self.decode_buf_va);
-
-            self.decode_buf_va = 0;
-        }
-        if self.decode_buf_vmo.0 != 0 {
-            let _ = abi::handle::close(self.decode_buf_vmo);
-
-            self.decode_buf_vmo = Handle(0);
-        }
 
         self.frame_index.clear();
         self.file_size = 0;
         self.output_buf_size = 0;
-        self.decode_buf_size = 0;
         self.width = 0;
         self.height = 0;
-        self.is_mp4 = false;
-        self.nal_length_size = 0;
+        self.codec = 0;
     }
 }
 
@@ -845,9 +649,6 @@ extern "C" fn _start() -> ! {
         output_vmo: Handle(0),
         output_va: 0,
         output_buf_size: 0,
-        decode_buf_vmo: Handle(0),
-        decode_buf_va: 0,
-        decode_buf_size: 0,
         width: 0,
         height: 0,
         output_gen: 0,
@@ -859,8 +660,7 @@ extern "C" fn _start() -> ! {
         codec_session_id: 0,
         shared_vmo: Handle(0),
         shared_va: 0,
-        is_mp4: false,
-        nal_length_size: 0,
+        codec: 0,
     };
 
     loop {
