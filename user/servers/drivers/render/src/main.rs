@@ -1145,8 +1145,6 @@ struct WalkContext {
     font_metrics: [FontMetricsEntry; 3],
     scale: u32,
     frame_interval_ns: u64,
-    atlas_dirty: bool,
-    atlas_full: bool,
     now_tick: u64,
     next_deadline: u64,
     images: [ImageSlot; MAX_IMAGES],
@@ -1595,7 +1593,7 @@ fn lookup_or_rasterize(
     style_id: u32,
 ) -> Option<atlas::AtlasEntry> {
     if let Some(entry) = ctx.atlas.lookup(glyph_id, font_size, style_id) {
-        return Some(*entry);
+        return Some(entry);
     }
 
     let font_data = font_for_style(style_id);
@@ -1630,28 +1628,18 @@ fn lookup_or_rasterize(
     )?;
 
     if metrics.width == 0 || metrics.height == 0 {
-        ctx.atlas.insert(
-            glyph_id,
-            font_size,
-            style_id,
-            atlas::AtlasEntry {
-                u: 0,
-                v: 0,
-                width: 0,
-                height: 0,
-                bearing_x: 0,
-                bearing_y: 0,
-            },
-        );
-
-        return Some(atlas::AtlasEntry {
+        let entry = atlas::AtlasEntry {
             u: 0,
             v: 0,
             width: 0,
             height: 0,
             bearing_x: metrics.bearing_x as i16,
             bearing_y: metrics.bearing_y as i16,
-        });
+        };
+
+        ctx.atlas.insert_zero(glyph_id, font_size, style_id, entry);
+
+        return Some(entry);
     }
 
     let ok = ctx.atlas.pack(
@@ -1666,12 +1654,8 @@ fn lookup_or_rasterize(
     );
 
     if ok {
-        ctx.atlas_dirty = true;
-
-        ctx.atlas.lookup(glyph_id, font_size, style_id).copied()
+        ctx.atlas.lookup(glyph_id, font_size, style_id)
     } else {
-        ctx.atlas_full = true;
-
         None
     }
 }
@@ -1801,13 +1785,13 @@ fn lookup_or_rasterize_path(
     cache_hash: u32,
 ) -> Option<atlas::AtlasEntry> {
     if let Some(entry) = ctx.atlas.lookup(1, cache_size, cache_hash) {
-        return Some(*entry);
+        return Some(entry);
     }
 
     let coverage = path::rasterize_path(path_data, pw, ph, scale, fill_rule, stroke_data);
 
     if coverage.is_empty() {
-        ctx.atlas.insert(
+        ctx.atlas.insert_zero(
             1,
             cache_size,
             cache_hash,
@@ -1829,12 +1813,8 @@ fn lookup_or_rasterize_path(
     );
 
     if ok {
-        ctx.atlas_dirty = true;
-
-        ctx.atlas.lookup(1, cache_size, cache_hash).copied()
+        ctx.atlas.lookup(1, cache_size, cache_hash)
     } else {
-        ctx.atlas_full = true;
-
         None
     }
 }
@@ -2178,7 +2158,6 @@ struct Compositor {
     frame_count: u32,
     last_scene_gen: u32,
     walk_ctx: WalkContext,
-    atlas_upload_y: u16,
 
     cursor_uploaded: bool,
     cursor_visible: bool,
@@ -2222,23 +2201,12 @@ impl ImageSlot {
 
 impl Compositor {
     fn upload_atlas_dirty(&mut self) {
-        if !self.walk_ctx.atlas_dirty {
-            return;
-        }
+        let rect = match self.walk_ctx.atlas.dirty.take() {
+            Some(r) => r,
+            None => return,
+        };
 
-        let atlas = &self.walk_ctx.atlas;
-        let max_y = atlas.row_y + atlas.row_h;
-
-        if max_y == 0 {
-            return;
-        }
-
-        let start_y = self.atlas_upload_y;
-        let height = max_y - start_y;
-
-        if height == 0 {
-            self.walk_ctx.atlas_dirty = false;
-
+        if rect.h == 0 {
             return;
         }
 
@@ -2250,13 +2218,14 @@ impl Compositor {
         let cmd_overhead = render::HEADER_SIZE + 16;
         let max_data_per_submit = self.setup_buf_size - cmd_overhead;
         let max_rows_per_submit = max_data_per_submit / row_bytes;
-        let mut y = start_y;
+        let mut y = rect.y;
+        let end_y = rect.y + rect.h;
 
-        while y < max_y {
-            let rows = ((max_y - y) as usize).min(max_rows_per_submit) as u16;
+        while y < end_y {
+            let rows = ((end_y - y) as usize).min(max_rows_per_submit) as u16;
             let src_offset = y as usize * row_bytes;
             let pixel_count = rows as usize * row_bytes;
-            let pixel_data = &atlas.pixels[src_offset..src_offset + pixel_count];
+            let pixel_data = &self.walk_ctx.atlas.pixels[src_offset..src_offset + pixel_count];
             let len = {
                 let mut w = CommandWriter::new(dma_buf);
 
@@ -2284,9 +2253,6 @@ impl Compositor {
 
             y += rows;
         }
-
-        self.atlas_upload_y = atlas.row_y;
-        self.walk_ctx.atlas_dirty = false;
     }
 
     fn cursor_icon_name(&self) -> &'static str {
@@ -2518,11 +2484,7 @@ impl Compositor {
             return 0;
         }
 
-        if self.walk_ctx.atlas_full {
-            self.walk_ctx.atlas.reset();
-            self.walk_ctx.atlas_full = false;
-            self.atlas_upload_y = 0;
-        }
+        self.walk_ctx.atlas.begin_frame();
 
         let now = abi::system::clock_read().unwrap_or(0);
 
@@ -3283,8 +3245,6 @@ extern "C" fn _start() -> ! {
         ],
         scale,
         frame_interval_ns,
-        atlas_dirty: false,
-        atlas_full: false,
         now_tick: 0,
         next_deadline: 0,
         images: [ImageSlot::EMPTY; MAX_IMAGES],
@@ -3312,7 +3272,6 @@ extern "C" fn _start() -> ! {
         frame_count: 0,
         last_scene_gen: 0,
         walk_ctx,
-        atlas_upload_y: 0,
         cursor_uploaded: false,
         cursor_visible: false,
         cursor_shape: scene::CURSOR_DEFAULT,
@@ -3399,7 +3358,6 @@ extern "C" fn _start() -> ! {
             let elapsed = after.saturating_sub(before);
 
             render_budget_ns = render_budget_ns / 2 + elapsed / 2;
-
             render_deadline = if next > after { next } else { 0 };
         }
 
