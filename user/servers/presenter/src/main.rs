@@ -285,6 +285,66 @@ pub(crate) fn pack_run_style_id(family: u8, weight: u16, flags: u8) -> u32 {
     pack_style_id(style_id_for_family(family), weight, flags)
 }
 
+// ── Space — a subdocument of the desktop compound document ───────
+
+pub(crate) enum Space {
+    Text,
+    Image {
+        content_id: u32,
+        width: u16,
+        height: u16,
+    },
+    Video {
+        decoder_ep: Handle,
+        frame_vmo: Handle,
+        content_id: u32,
+        width: u16,
+        height: u16,
+        total_frames: u32,
+        playing: bool,
+    },
+    Showcase,
+}
+
+impl Space {
+    pub(crate) fn mimetype(&self) -> Option<&'static str> {
+        match self {
+            Space::Text => Some("text/rich"),
+            Space::Image { .. } => Some("image/jpeg"),
+            Space::Video { .. } => Some("video/avi"),
+            Space::Showcase => None,
+        }
+    }
+
+    pub(crate) fn needs_continuous_render(&self) -> bool {
+        matches!(self, Space::Showcase)
+    }
+}
+
+impl Drop for Space {
+    fn drop(&mut self) {
+        if let Space::Video {
+            decoder_ep,
+            frame_vmo,
+            playing,
+            ..
+        } = self
+        {
+            if *playing {
+                let _ = ipc::client::call_simple(*decoder_ep, video_decoder::PAUSE, &[]);
+
+                *playing = false;
+            }
+            if decoder_ep.0 != 0 {
+                let _ = abi::handle::close(*decoder_ep);
+            }
+            if frame_vmo.0 != 0 {
+                let _ = abi::handle::close(*frame_vmo);
+            }
+        }
+    }
+}
+
 // ── Presenter server ──────────────────────────────────────────────
 
 pub(crate) struct Presenter {
@@ -339,29 +399,17 @@ pub(crate) struct Presenter {
     pub(crate) drag_origin_start: usize,
     pub(crate) drag_origin_end: usize,
 
-    pub(crate) active_space: u8,
-    pub(crate) num_spaces: u8,
+    pub(crate) spaces: alloc::vec::Vec<Space>,
+    pub(crate) active_space: usize,
     pub(crate) slide_spring: animation::Spring,
     pub(crate) slide_animating: bool,
     pub(crate) last_anim_tick: u64,
 
     pub(crate) frame_stats: FrameStats,
 
-    pub(crate) image_content_id: u32,
-    pub(crate) image_width: u16,
-    pub(crate) image_height: u16,
-
     pub(crate) audio_ep: Handle,
     pub(crate) audio_vmo: Handle,
     pub(crate) audio_data_len: u32,
-
-    pub(crate) video_decoder_ep: Handle,
-    pub(crate) video_frame_vmo: Handle,
-    pub(crate) video_content_id: u32,
-    pub(crate) video_width: u16,
-    pub(crate) video_height: u16,
-    pub(crate) video_total_frames: u32,
-    pub(crate) video_playing: bool,
 
     pub(crate) console_ep: Handle,
 }
@@ -649,19 +697,20 @@ fn store_load_type(media_type: &[u8]) -> Option<(Handle, usize)> {
 
 // ── Image loading from store + decode + upload ──────────────────
 
-const IMAGE_CONTENT_ID: u32 = 1;
+static NEXT_CONTENT_ID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1);
 
-fn load_and_decode_image(server: &mut Presenter, render_ep: Handle) {
-    let (file_vmo, bytes_read) = match store_load_type(b"image/jpeg") {
-        Some(r) => r,
-        None => return,
-    };
+fn alloc_content_id() -> u32 {
+    NEXT_CONTENT_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+}
+
+fn load_image_space(render_ep: Handle, console_ep: Handle) -> Option<Space> {
+    let (file_vmo, bytes_read) = store_load_type(b"image/jpeg")?;
     let decoder_ep = match name::lookup(HANDLE_NS_EP, b"jpeg-decoder") {
         Ok(h) => h,
         Err(_) => {
             let _ = abi::handle::close(file_vmo);
 
-            return;
+            return None;
         }
     };
     let decode_req = jpeg_decoder::DecodeRequest {
@@ -682,31 +731,55 @@ fn load_and_decode_image(server: &mut Presenter, render_ep: Handle) {
         &mut call_buf,
     ) {
         Ok(r) => r,
-        Err(_) => return,
+        Err(_) => return None,
     };
 
     if decode_reply.is_error()
         || decode_reply.payload.len() < jpeg_decoder::DecodeReply::SIZE
         || decode_reply.handle_count == 0
     {
-        return;
+        return None;
     }
 
     let dr = jpeg_decoder::DecodeReply::read_from(decode_reply.payload);
     let pixel_vmo = Handle(decode_handles[0]);
+    let content_id = alloc_content_id();
     let width = dr.width as u16;
     let height = dr.height as u16;
     let pixel_size = dr.pixel_size;
     let pixel_dup = match abi::handle::dup(pixel_vmo, Rights::READ_MAP) {
         Ok(h) => h,
-        Err(_) => return,
+        Err(_) => return None,
     };
+
+    upload_image_to_compositor(
+        render_ep, pixel_dup, content_id, width, height, pixel_size, 0,
+    );
+
+    console::write(console_ep, b"presenter: image loaded from store\n");
+
+    Some(Space::Image {
+        content_id,
+        width,
+        height,
+    })
+}
+
+fn upload_image_to_compositor(
+    render_ep: Handle,
+    pixel_vmo: Handle,
+    content_id: u32,
+    width: u16,
+    height: u16,
+    pixel_size: u32,
+    flags: u32,
+) {
     let upload_req = render::comp::UploadImageRequest {
-        content_id: IMAGE_CONTENT_ID,
+        content_id,
         width,
         height,
         pixel_size,
-        flags: 0,
+        flags,
     };
     let mut upload_buf = [0u8; render::comp::UploadImageRequest::SIZE];
 
@@ -718,33 +791,22 @@ fn load_and_decode_image(server: &mut Presenter, render_ep: Handle) {
         render_ep,
         render::comp::UPLOAD_IMAGE,
         &upload_buf,
-        &[pixel_dup.0],
+        &[pixel_vmo.0],
         &mut upload_handles,
         &mut reply_buf,
     );
-
-    server.image_content_id = IMAGE_CONTENT_ID;
-    server.image_width = width;
-    server.image_height = height;
-
-    console::write(server.console_ep, b"presenter: image loaded from store\n");
 }
 
 // ── Video loading from document store ───────────────────────────
 
-const VIDEO_CONTENT_ID: u32 = 2;
-
-fn load_video(server: &mut Presenter, render_ep: Handle) {
-    let (file_vmo, bytes_read) = match store_load_type(b"video/avi") {
-        Some(r) => r,
-        None => return,
-    };
+fn load_video_space(render_ep: Handle, console_ep: Handle) -> Option<Space> {
+    let (file_vmo, bytes_read) = store_load_type(b"video/avi")?;
     let decoder_ep = match name::lookup(HANDLE_NS_EP, b"video-decoder") {
         Ok(h) => h,
         Err(_) => {
             let _ = abi::handle::close(file_vmo);
 
-            return;
+            return None;
         }
     };
     let open_req = video_decoder::OpenRequest {
@@ -765,14 +827,14 @@ fn load_video(server: &mut Presenter, render_ep: Handle) {
         &mut call_buf,
     ) {
         Ok(r) => r,
-        Err(_) => return,
+        Err(_) => return None,
     };
 
     if open_reply.is_error()
         || open_reply.payload.len() < video_decoder::OpenReply::SIZE
         || open_handles[0] == 0
     {
-        return;
+        return None;
     }
 
     let or = video_decoder::OpenReply::read_from(open_reply.payload);
@@ -781,54 +843,44 @@ fn load_video(server: &mut Presenter, render_ep: Handle) {
     if or.total_frames == 0 {
         let _ = abi::handle::close(frame_vmo);
 
-        return;
+        return None;
     }
 
-    server.video_decoder_ep = decoder_ep;
-    server.video_frame_vmo = frame_vmo;
-    server.video_total_frames = or.total_frames;
-    server.video_width = or.width as u16;
-    server.video_height = or.height as u16;
-
-    upload_video_to_compositor(server, render_ep);
-
-    server.num_spaces += 1;
-
-    console::write(server.console_ep, b"presenter: video loaded from store\n");
-}
-
-fn upload_video_to_compositor(server: &mut Presenter, render_ep: Handle) {
-    let frame_dup = match abi::handle::dup(
-        server.video_frame_vmo,
-        Rights(Rights::READ.0 | Rights::MAP.0),
-    ) {
+    let content_id = alloc_content_id();
+    let width = or.width as u16;
+    let height = or.height as u16;
+    let frame_dup = match abi::handle::dup(frame_vmo, Rights(Rights::READ.0 | Rights::MAP.0)) {
         Ok(h) => h,
-        Err(_) => return,
-    };
-    let pixel_size = server.video_width as u32 * server.video_height as u32 * 4;
-    let upload_req = render::comp::UploadImageRequest {
-        content_id: VIDEO_CONTENT_ID,
-        width: server.video_width,
-        height: server.video_height,
-        pixel_size,
-        flags: render::comp::IMAGE_FLAG_LIVE,
-    };
-    let mut upload_buf = [0u8; render::comp::UploadImageRequest::SIZE];
+        Err(_) => {
+            let _ = abi::handle::close(decoder_ep);
+            let _ = abi::handle::close(frame_vmo);
 
-    upload_req.write_to(&mut upload_buf);
+            return None;
+        }
+    };
+    let pixel_size = width as u32 * height as u32 * 4;
 
-    let mut reply_buf = [0u8; ipc::message::MSG_SIZE];
-    let mut upload_handles = [0u32; 4];
-    let _ = ipc::client::call(
+    upload_image_to_compositor(
         render_ep,
-        render::comp::UPLOAD_IMAGE,
-        &upload_buf,
-        &[frame_dup.0],
-        &mut upload_handles,
-        &mut reply_buf,
+        frame_dup,
+        content_id,
+        width,
+        height,
+        pixel_size,
+        render::comp::IMAGE_FLAG_LIVE,
     );
 
-    server.video_content_id = VIDEO_CONTENT_ID;
+    console::write(console_ep, b"presenter: video loaded from store\n");
+
+    Some(Space::Video {
+        decoder_ep,
+        frame_vmo,
+        content_id,
+        width,
+        height,
+        total_frames: or.total_frames,
+        playing: false,
+    })
 }
 
 // ── Audio clip loading from store ─────────────────────────────────
@@ -927,18 +979,28 @@ impl Presenter {
     }
 
     fn toggle_video_playback(&mut self) {
-        if self.video_decoder_ep.0 == 0 || self.video_total_frames == 0 {
-            return;
+        match self.spaces.get_mut(self.active_space) {
+            Some(Space::Video {
+                decoder_ep,
+                total_frames,
+                playing,
+                ..
+            }) => {
+                if decoder_ep.0 == 0 || *total_frames == 0 {
+                    return;
+                }
+
+                *playing = !*playing;
+
+                let method = if *playing {
+                    video_decoder::PLAY
+                } else {
+                    video_decoder::PAUSE
+                };
+                let _ = ipc::client::call_simple(*decoder_ep, method, &[]);
+            }
+            _ => return,
         }
-
-        self.video_playing = !self.video_playing;
-
-        let method = if self.video_playing {
-            video_decoder::PLAY
-        } else {
-            video_decoder::PAUSE
-        };
-        let _ = ipc::client::call_simple(self.video_decoder_ep, method, &[]);
 
         self.build_scene();
     }
@@ -1131,8 +1193,8 @@ extern "C" fn _start() -> ! {
         dragging: false,
         drag_origin_start: 0,
         drag_origin_end: 0,
+        spaces: alloc::vec::Vec::new(),
         active_space: 0,
-        num_spaces: 1,
         slide_spring: {
             let mut s = animation::Spring::new(0.0, 600.0, 49.0, 1.0);
 
@@ -1143,29 +1205,24 @@ extern "C" fn _start() -> ! {
         slide_animating: false,
         last_anim_tick: 0,
         frame_stats: FrameStats::new(),
-        image_content_id: 0,
-        image_width: 0,
-        image_height: 0,
         audio_ep: Handle(0),
         audio_vmo: Handle(0),
         audio_data_len: 0,
-        video_decoder_ep: Handle(0),
-        video_frame_vmo: Handle(0),
-        video_content_id: 0,
-        video_width: 0,
-        video_height: 0,
-        video_total_frames: 0,
-        video_playing: false,
         console_ep,
     };
 
-    // Space 0 = text, 1 = image, last = showcase.
-    server.num_spaces = 3;
+    server.spaces.push(Space::Text);
 
-    load_and_decode_image(&mut server, render_ep);
-    load_video(&mut server, render_ep);
+    if let Some(image_space) = load_image_space(render_ep, console_ep) {
+        server.spaces.push(image_space);
+    }
+    if let Some(video_space) = load_video_space(render_ep, console_ep) {
+        server.spaces.push(video_space);
+    }
+
     load_audio_clip(&mut server);
 
+    server.spaces.push(Space::Showcase);
     server.write_viewport();
     server.build_scene();
 
@@ -1176,8 +1233,11 @@ extern "C" fn _start() -> ! {
 
     loop {
         let now = abi::system::clock_read().unwrap_or(0);
-        let showcase_space = server.num_spaces - 1;
-        let needs_anim = server.slide_animating || server.active_space == showcase_space;
+        let active_needs_render = server
+            .spaces
+            .get(server.active_space)
+            .is_some_and(|s| s.needs_continuous_render());
+        let needs_anim = server.slide_animating || active_needs_render;
         let deadline = if needs_anim {
             if next_frame <= now {
                 next_frame = now + frame_ns;
@@ -1226,7 +1286,7 @@ extern "C" fn _start() -> ! {
                 }
             }
 
-            if !server.slide_animating && server.active_space == showcase_space {
+            if !server.slide_animating && active_needs_render {
                 server.build_scene();
             }
 

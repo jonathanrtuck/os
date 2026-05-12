@@ -237,16 +237,36 @@ impl Presenter {
     pub(crate) fn handle_key_event(&mut self, dispatch: text_editor::KeyDispatch) {
         let ctrl = dispatch.modifiers & text_editor::MOD_CONTROL != 0;
 
-        if dispatch.key_code == text_editor::HID_KEY_TAB && ctrl {
-            if self.num_spaces <= 1 {
+        // Ctrl+W: close the active space.
+        if ctrl && dispatch.character == b'w' {
+            if self.spaces.len() <= 1 {
                 return;
             }
 
-            let new_space = (self.active_space + 1) % self.num_spaces;
+            let _ = self.spaces.remove(self.active_space);
 
-            self.active_space = new_space;
+            if self.active_space >= self.spaces.len() {
+                self.active_space = self.spaces.len() - 1;
+            }
 
-            let target = new_space as f32 * self.display_width as f32;
+            let target = self.active_space as f32 * self.display_width as f32;
+
+            self.slide_spring.reset_to(target);
+            self.slide_animating = false;
+            self.build_scene();
+
+            return;
+        }
+
+        // Ctrl+Tab: cycle to next space.
+        if dispatch.key_code == text_editor::HID_KEY_TAB && ctrl {
+            if self.spaces.len() <= 1 {
+                return;
+            }
+
+            self.active_space = (self.active_space + 1) % self.spaces.len();
+
+            let target = self.active_space as f32 * self.display_width as f32;
 
             self.slide_spring.set_target(target);
             self.slide_animating = true;
@@ -257,7 +277,7 @@ impl Presenter {
             return;
         }
 
-        if self.active_space != 0 {
+        if !matches!(self.spaces.get(self.active_space), Some(super::Space::Text)) {
             return;
         }
 

@@ -701,9 +701,8 @@ fn build_showcase_nodes(
     content_h: u32,
     now_ns: u64,
     has_audio: bool,
-    space_index: u8,
+    base_x: i32,
 ) {
-    let base_x = (display_width * space_index as u32) as i32;
     let container = match scene.alloc_node() {
         Some(id) => id,
         None => return,
@@ -1070,12 +1069,10 @@ impl super::Presenter {
 
         // Document icon — mimetype-aware vector icon in the title bar.
         let icon_size_pt = presenter_service::LINE_HEIGHT + 2;
-        let icon_mimetype = match self.active_space {
-            0 => Some("text/rich"),
-            1 => Some("image/jpeg"),
-            2 => Some("video/avi"),
-            _ => None,
-        };
+        let icon_mimetype = self
+            .spaces
+            .get(self.active_space)
+            .and_then(|s| s.mimetype());
         let icon = icons::get("document", icon_mimetype);
         let (icon_data_ref, icon_hash) = scale_icon_paths(&mut scene, icon, icon_size_pt);
         let icon_sw_pt = icon.stroke_width * (icon_size_pt as f32 / icon.viewbox);
@@ -1225,476 +1222,509 @@ impl super::Presenter {
         {
             let n = scene.node_mut(strip);
 
-            n.width = upt(self.display_width * self.num_spaces as u32);
+            n.width = upt(self.display_width * self.spaces.len() as u32);
             n.height = upt(content_h);
             n.child_offset_x = -self.slide_spring.value();
         }
 
         scene.add_child(content_area, strip);
 
-        // Space 0: Page surface — white, centered, with shadow.
-        let page = match scene.alloc_node() {
-            Some(id) => id,
-            None => return,
-        };
+        // Render each space into the strip.
+        let now_ns = abi::system::clock_read().unwrap_or(0);
+        let has_audio = self.audio_ep.0 != 0;
+        let num_spaces = self.spaces.len();
 
-        {
-            let n = scene.node_mut(page);
+        for space_idx in 0..num_spaces {
+            let base_x = (self.display_width * space_idx as u32) as i32;
 
-            n.x = pt(page_x);
-            n.y = pt(page_y);
-            n.width = upt(page_w);
-            n.height = upt(page_h);
-            n.background = page_bg;
-            n.shadow_color = Color::rgba(0, 0, 0, 255);
-            n.shadow_blur_radius = presenter_service::SHADOW_BLUR_RADIUS;
-            n.shadow_spread = presenter_service::SHADOW_SPREAD;
-            n.cursor_shape = scene::CURSOR_TEXT;
-        }
-
-        scene.add_child(strip, page);
-
-        // Viewport node — clips children, scroll offset, inside page.
-        let viewport = match scene.alloc_node() {
-            Some(id) => id,
-            None => return,
-        };
-
-        {
-            let n = scene.node_mut(viewport);
-
-            n.x = pt(page_padding as i32);
-            n.y = pt(page_padding as i32);
-            n.width = upt(text_area_w);
-            n.height = upt(text_area_h);
-            n.flags = NodeFlags::VISIBLE.union(NodeFlags::CLIPS_CHILDREN);
-            n.child_offset_y = -(self.scroll_y as f32);
-            n.role = scene::ROLE_DOCUMENT;
-        }
-
-        scene.add_child(page, viewport);
-
-        // Selection rectangles — rendered behind text, before glyph nodes.
-        if has_selection && line_count > 0 {
-            if layout_header.format == 1 {
-                build_rich_selection_nodes(
-                    &mut scene,
-                    &self.results_buf,
-                    viewport,
-                    &layout_header,
-                    sel_start,
-                    sel_end,
-                    sel_color,
-                    self.doc_va,
-                );
-            } else {
-                let span = SelectionSpan {
-                    start: sel_start,
-                    end: sel_end,
-                    color: sel_color,
-                    char_width: self.char_width,
-                };
-
-                build_selection_nodes(&mut scene, &self.results_buf, viewport, line_count, &span);
-            }
-        }
-
-        // Per-line glyph nodes (plain) or per-run glyph nodes (rich).
-        let mut cursor_line = cursor_line_idx as u32;
-        let mut cursor_col = cursor_col_in_line as u32;
-        let char_advance = (self.char_width * 65536.0) as i32;
-        let is_rich = layout_header.format == 1;
-
-        if is_rich {
-            build_rich_text_nodes(
-                &mut scene,
-                viewport,
-                &layout_header,
-                &self.results_buf,
-                self.doc_va,
-                self.display_width,
-                &mut self.glyphs,
-            );
-        }
-
-        if !is_rich {
-            for i in 0..line_count.min(scene::MAX_NODES - 4) {
-                let line_info = parse_line_at(&self.results_buf, i);
-                let line_start = line_info.byte_offset as usize;
-                let line_len = line_info.byte_length as usize;
-
-                if line_len == 0 {
-                    continue;
-                }
-
-                let line_bytes = if line_start + line_len <= content_len {
-                    &content[line_start..line_start + line_len]
-                } else {
-                    continue;
-                };
-                let glyph_count = line_len.min(MAX_GLYPHS_PER_LINE);
-                let mut needs_fallback = false;
-
-                for (j, &byte) in line_bytes.iter().enumerate().take(glyph_count) {
-                    let mono_gid = if byte < 128 {
-                        self.cmap_mono[byte as usize]
-                    } else {
-                        0
-                    };
-
-                    if mono_gid > 0 {
-                        self.glyphs[j] = ShapedGlyph {
-                            glyph_id: mono_gid,
-                            _pad: STYLE_MONO as u16,
-                            x_advance: char_advance,
-                            x_offset: 0,
-                            y_offset: 0,
-                        };
-                    } else {
-                        let sans_gid = if byte < 128 {
-                            self.cmap_sans[byte as usize]
-                        } else {
-                            0
-                        };
-
-                        if sans_gid > 0 {
-                            self.glyphs[j] = ShapedGlyph {
-                                glyph_id: sans_gid,
-                                _pad: STYLE_SANS as u16,
-                                x_advance: char_advance,
-                                x_offset: 0,
-                                y_offset: 0,
-                            };
-
-                            needs_fallback = true;
-                        } else {
-                            self.glyphs[j] = ShapedGlyph {
-                                glyph_id: 0,
-                                _pad: STYLE_MONO as u16,
-                                x_advance: char_advance,
-                                x_offset: 0,
-                                y_offset: 0,
-                            };
-                        }
-                    }
-                }
-
-                if !needs_fallback {
-                    // Fast path: all glyphs from primary font.
-                    for j in 0..glyph_count {
-                        self.glyphs[j]._pad = 0;
-                    }
-
-                    let glyph_ref = scene.push_shaped_glyphs(&self.glyphs[..glyph_count]);
-                    let line_node = match scene.alloc_node() {
+            match &self.spaces[space_idx] {
+                super::Space::Text => {
+                    let page = match scene.alloc_node() {
                         Some(id) => id,
                         None => break,
                     };
 
                     {
-                        let n = scene.node_mut(line_node);
+                        let n = scene.node_mut(page);
 
-                        n.x = scene::f32_to_mpt(line_info.x);
-                        n.y = pt(line_info.y);
-                        n.width = upt(line_info.width as u32 + 1);
-                        n.height = upt(presenter_service::LINE_HEIGHT);
-                        n.content = Content::Glyphs {
-                            color: text_color,
-                            glyphs: glyph_ref,
-                            glyph_count: glyph_count as u16,
-                            font_size: presenter_service::FONT_SIZE,
-                            style_id: STYLE_MONO,
-                        };
-                        n.role = scene::ROLE_PARAGRAPH;
+                        n.x = pt(base_x + page_x);
+                        n.y = pt(page_y);
+                        n.width = upt(page_w);
+                        n.height = upt(page_h);
+                        n.background = page_bg;
+                        n.shadow_color = Color::rgba(0, 0, 0, 255);
+                        n.shadow_blur_radius = presenter_service::SHADOW_BLUR_RADIUS;
+                        n.shadow_spread = presenter_service::SHADOW_SPREAD;
+                        n.cursor_shape = scene::CURSOR_TEXT;
                     }
 
-                    scene.add_child(viewport, line_node);
-                } else {
-                    // Slow path: split into runs by font for fallback.
-                    let mut run_start = 0;
+                    scene.add_child(strip, page);
 
-                    while run_start < glyph_count {
-                        let run_style = self.glyphs[run_start]._pad as u32;
-                        let mut run_end = run_start + 1;
-
-                        while run_end < glyph_count && self.glyphs[run_end]._pad as u32 == run_style
-                        {
-                            run_end += 1;
-                        }
-
-                        let run_len = run_end - run_start;
-
-                        for j in run_start..run_end {
-                            self.glyphs[j]._pad = 0;
-                        }
-
-                        let glyph_ref = scene.push_shaped_glyphs(&self.glyphs[run_start..run_end]);
-                        let run_node = match scene.alloc_node() {
-                            Some(id) => id,
-                            None => break,
-                        };
-                        let run_x = line_info.x + run_start as f32 * self.char_width;
-
-                        {
-                            let n = scene.node_mut(run_node);
-
-                            n.x = scene::f32_to_mpt(run_x);
-                            n.y = pt(line_info.y);
-                            n.width = upt((run_len as f32 * self.char_width) as u32 + 1);
-                            n.height = upt(presenter_service::LINE_HEIGHT);
-                            n.content = Content::Glyphs {
-                                color: text_color,
-                                glyphs: glyph_ref,
-                                glyph_count: run_len as u16,
-                                font_size: presenter_service::FONT_SIZE,
-                                style_id: run_style,
-                            };
-                            n.role = scene::ROLE_PARAGRAPH;
-                        }
-
-                        scene.add_child(viewport, run_node);
-
-                        run_start = run_end;
-                    }
-                }
-            }
-        } // end if !is_rich
-
-        // Handle cursor past last line.
-        if line_count > 0 && cursor_pos >= content_len {
-            let last = parse_line_at(&self.results_buf, line_count - 1);
-            let last_end = last.byte_offset as usize + last.byte_length as usize;
-
-            if cursor_pos >= last_end && cursor_pos > last.byte_offset as usize {
-                cursor_line = (line_count - 1) as u32;
-                cursor_col = (cursor_pos - last.byte_offset as usize) as u32;
-            }
-        }
-
-        // Cursor position — proportional for rich text, monospace for plain.
-        let (cursor_x, cursor_y, cursor_h, cursor_style_color, cursor_weight, cursor_skew) =
-            if is_rich {
-                let ci =
-                    compute_rich_cursor(&self.results_buf, &layout_header, cursor_pos, self.doc_va);
-
-                (
-                    ci.x,
-                    ci.y,
-                    ci.height,
-                    Some(ci.color_rgba),
-                    ci.weight,
-                    ci.caret_skew,
-                )
-            } else {
-                (
-                    cursor_col as f32 * self.char_width,
-                    cursor_line as i32 * presenter_service::LINE_HEIGHT as i32,
-                    presenter_service::LINE_HEIGHT,
-                    None,
-                    400u16,
-                    0.0f32,
-                )
-            };
-        let effective_cursor_color = match cursor_style_color {
-            Some(rgba) => Color::rgba(
-                ((rgba >> 24) & 0xFF) as u8,
-                ((rgba >> 16) & 0xFF) as u8,
-                ((rgba >> 8) & 0xFF) as u8,
-                (rgba & 0xFF) as u8,
-            ),
-            None => cursor_color,
-        };
-        let cursor_w_f = 1.0 + (cursor_weight.saturating_sub(100) as f32) * 3.0 / 800.0;
-
-        if let Some(cursor_node) = scene.alloc_node() {
-            let n = scene.node_mut(cursor_node);
-
-            n.x = scene::f32_to_mpt(cursor_x);
-            n.y = pt(cursor_y);
-            n.width = (cursor_w_f * scene::MPT_PER_PT as f32) as u32;
-            n.height = upt(cursor_h);
-            n.background = effective_cursor_color;
-
-            if cursor_skew != 0.0 {
-                n.transform = scene::AffineTransform {
-                    a: 1.0,
-                    b: 0.0,
-                    c: cursor_skew,
-                    d: 1.0,
-                    tx: 0.0,
-                    ty: 0.0,
-                };
-            }
-
-            if !has_selection {
-                n.animation = scene::Animation::cursor_blink(self.blink_start);
-            }
-
-            n.role = scene::ROLE_CARET;
-
-            scene.add_child(viewport, cursor_node);
-        }
-
-        // Space 1: Image document node — positioned at x=display_width within the strip.
-        if self.image_content_id != 0 && self.image_width > 0 && self.image_height > 0 {
-            let max_w = self.display_width.saturating_sub(2 * page_margin);
-            let max_h = content_h.saturating_sub(2 * page_margin);
-            let src_w = self.image_width as u32;
-            let src_h = self.image_height as u32;
-            let scale_w = max_w as f32 / src_w as f32;
-            let scale_h = max_h as f32 / src_h as f32;
-            let fit_scale = if scale_w < scale_h { scale_w } else { scale_h };
-            let img_display_w = if fit_scale < 1.0 {
-                (src_w as f32 * fit_scale) as u32
-            } else {
-                src_w
-            };
-            let img_display_h = if fit_scale < 1.0 {
-                (src_h as f32 * fit_scale) as u32
-            } else {
-                src_h
-            };
-            let img_x = self.display_width as i32
-                + ((self.display_width as i32 - img_display_w as i32) / 2);
-            let img_y = ((content_h as i32 - img_display_h as i32) / 2).max(0);
-
-            if let Some(image_node) = scene.alloc_node() {
-                let n = scene.node_mut(image_node);
-
-                n.x = pt(img_x);
-                n.y = pt(img_y);
-                n.width = upt(img_display_w);
-                n.height = upt(img_display_h);
-                n.content = Content::Image {
-                    content_id: self.image_content_id,
-                    src_width: self.image_width,
-                    src_height: self.image_height,
-                };
-                n.shadow_color = Color::rgba(0, 0, 0, 255);
-                n.shadow_blur_radius = presenter_service::SHADOW_BLUR_RADIUS;
-                n.shadow_spread = presenter_service::SHADOW_SPREAD;
-
-                scene.add_child(strip, image_node);
-            }
-        }
-
-        // Space 2 (optional): Video document node.
-        if self.video_content_id != 0 && self.video_width > 0 && self.video_height > 0 {
-            let video_base_x = (self.display_width * 2) as i32;
-            let max_w = self.display_width.saturating_sub(2 * page_margin);
-            let max_h = content_h.saturating_sub(2 * page_margin);
-            let src_w = self.video_width as u32;
-            let src_h = self.video_height as u32;
-            let scale_w = max_w as f32 / src_w as f32;
-            let scale_h = max_h as f32 / src_h as f32;
-            let fit_scale = if scale_w < scale_h { scale_w } else { scale_h };
-            let vid_w = if fit_scale < 1.0 {
-                (src_w as f32 * fit_scale) as u32
-            } else {
-                src_w
-            };
-            let vid_h = if fit_scale < 1.0 {
-                (src_h as f32 * fit_scale) as u32
-            } else {
-                src_h
-            };
-            let vid_x = video_base_x + ((self.display_width as i32 - vid_w as i32) / 2);
-            let vid_y = ((content_h as i32 - vid_h as i32) / 2).max(0);
-
-            if let Some(video_node) = scene.alloc_node() {
-                let n = scene.node_mut(video_node);
-
-                n.x = pt(vid_x);
-                n.y = pt(vid_y);
-                n.width = upt(vid_w);
-                n.height = upt(vid_h);
-                n.content = Content::Image {
-                    content_id: self.video_content_id,
-                    src_width: self.video_width,
-                    src_height: self.video_height,
-                };
-                n.shadow_color = Color::rgba(0, 0, 0, 255);
-                n.shadow_blur_radius = presenter_service::SHADOW_BLUR_RADIUS;
-                n.shadow_spread = presenter_service::SHADOW_SPREAD;
-
-                scene.add_child(strip, video_node);
-            }
-
-            // Play/pause button overlay.
-            if let Some(btn_id) = scene.alloc_node() {
-                let btn_size = 80u32;
-                let btn_x = video_base_x + ((self.display_width as i32 - btn_size as i32) / 2);
-                let btn_y = ((content_h as i32 - btn_size as i32) / 2).max(0);
-                let icon_name = if self.video_playing {
-                    "player-pause"
-                } else {
-                    "player-play"
-                };
-                let name_ref = scene.push_data(b"Play video");
-                let n = scene.node_mut(btn_id);
-
-                n.x = pt(btn_x);
-                n.y = pt(btn_y);
-                n.width = upt(btn_size);
-                n.height = upt(btn_size);
-                n.background = Color::rgba(0, 0, 0, 120);
-                n.corner_radius = 40;
-                n.role = scene::ROLE_BUTTON;
-                n.state = scene::STATE_FOCUSABLE;
-                n.cursor_shape = scene::CURSOR_PRESSABLE;
-                n.name = name_ref;
-
-                scene.add_child(strip, btn_id);
-
-                let icon_data = icons::get(icon_name, None);
-                let icon_padding = 16u32;
-                let icon_size_pt = btn_size - icon_padding * 2;
-                let (icon_data_ref, icon_hash) =
-                    scale_icon_paths(&mut scene, icon_data, icon_size_pt);
-                let icon_sw_pt = icon_data.stroke_width * (icon_size_pt as f32 / icon_data.viewbox);
-                let icon_sw_fixed = (icon_sw_pt * 256.0) as u16;
-
-                if let Some(icon_id) = scene.alloc_node() {
-                    let icon = scene.node_mut(icon_id);
-
-                    icon.x = pt(icon_padding as i32);
-                    icon.y = pt(icon_padding as i32);
-                    icon.width = upt(icon_size_pt);
-                    icon.height = upt(icon_size_pt);
-                    icon.content = Content::Path {
-                        color: Color::TRANSPARENT,
-                        stroke_color: Color::rgba(255, 255, 255, 200),
-                        fill_rule: FillRule::Winding,
-                        stroke_width: icon_sw_fixed,
-                        contours: icon_data_ref,
+                    let viewport = match scene.alloc_node() {
+                        Some(id) => id,
+                        None => break,
                     };
-                    icon.content_hash = icon_hash;
 
-                    scene.add_child(btn_id, icon_id);
+                    {
+                        let n = scene.node_mut(viewport);
+
+                        n.x = pt(page_padding as i32);
+                        n.y = pt(page_padding as i32);
+                        n.width = upt(text_area_w);
+                        n.height = upt(text_area_h);
+                        n.flags = NodeFlags::VISIBLE.union(NodeFlags::CLIPS_CHILDREN);
+                        n.child_offset_y = -(self.scroll_y as f32);
+                        n.role = scene::ROLE_DOCUMENT;
+                    }
+
+                    scene.add_child(page, viewport);
+
+                    if has_selection && line_count > 0 {
+                        if layout_header.format == 1 {
+                            build_rich_selection_nodes(
+                                &mut scene,
+                                &self.results_buf,
+                                viewport,
+                                &layout_header,
+                                sel_start,
+                                sel_end,
+                                sel_color,
+                                self.doc_va,
+                            );
+                        } else {
+                            let span = SelectionSpan {
+                                start: sel_start,
+                                end: sel_end,
+                                color: sel_color,
+                                char_width: self.char_width,
+                            };
+
+                            build_selection_nodes(
+                                &mut scene,
+                                &self.results_buf,
+                                viewport,
+                                line_count,
+                                &span,
+                            );
+                        }
+                    }
+
+                    let mut cursor_line = cursor_line_idx as u32;
+                    let mut cursor_col = cursor_col_in_line as u32;
+                    let char_advance = (self.char_width * 65536.0) as i32;
+                    let is_rich = layout_header.format == 1;
+
+                    if is_rich {
+                        build_rich_text_nodes(
+                            &mut scene,
+                            viewport,
+                            &layout_header,
+                            &self.results_buf,
+                            self.doc_va,
+                            self.display_width,
+                            &mut self.glyphs,
+                        );
+                    }
+
+                    if !is_rich {
+                        for i in 0..line_count.min(scene::MAX_NODES - 4) {
+                            let line_info = parse_line_at(&self.results_buf, i);
+                            let line_start = line_info.byte_offset as usize;
+                            let line_len = line_info.byte_length as usize;
+
+                            if line_len == 0 {
+                                continue;
+                            }
+
+                            let line_bytes = if line_start + line_len <= content_len {
+                                &content[line_start..line_start + line_len]
+                            } else {
+                                continue;
+                            };
+                            let glyph_count = line_len.min(MAX_GLYPHS_PER_LINE);
+                            let mut needs_fallback = false;
+
+                            for (j, &byte) in line_bytes.iter().enumerate().take(glyph_count) {
+                                let mono_gid = if byte < 128 {
+                                    self.cmap_mono[byte as usize]
+                                } else {
+                                    0
+                                };
+
+                                if mono_gid > 0 {
+                                    self.glyphs[j] = ShapedGlyph {
+                                        glyph_id: mono_gid,
+                                        _pad: STYLE_MONO as u16,
+                                        x_advance: char_advance,
+                                        x_offset: 0,
+                                        y_offset: 0,
+                                    };
+                                } else {
+                                    let sans_gid = if byte < 128 {
+                                        self.cmap_sans[byte as usize]
+                                    } else {
+                                        0
+                                    };
+
+                                    if sans_gid > 0 {
+                                        self.glyphs[j] = ShapedGlyph {
+                                            glyph_id: sans_gid,
+                                            _pad: STYLE_SANS as u16,
+                                            x_advance: char_advance,
+                                            x_offset: 0,
+                                            y_offset: 0,
+                                        };
+
+                                        needs_fallback = true;
+                                    } else {
+                                        self.glyphs[j] = ShapedGlyph {
+                                            glyph_id: 0,
+                                            _pad: STYLE_MONO as u16,
+                                            x_advance: char_advance,
+                                            x_offset: 0,
+                                            y_offset: 0,
+                                        };
+                                    }
+                                }
+                            }
+
+                            if !needs_fallback {
+                                for j in 0..glyph_count {
+                                    self.glyphs[j]._pad = 0;
+                                }
+
+                                let glyph_ref =
+                                    scene.push_shaped_glyphs(&self.glyphs[..glyph_count]);
+                                let line_node = match scene.alloc_node() {
+                                    Some(id) => id,
+                                    None => break,
+                                };
+
+                                {
+                                    let n = scene.node_mut(line_node);
+
+                                    n.x = scene::f32_to_mpt(line_info.x);
+                                    n.y = pt(line_info.y);
+                                    n.width = upt(line_info.width as u32 + 1);
+                                    n.height = upt(presenter_service::LINE_HEIGHT);
+                                    n.content = Content::Glyphs {
+                                        color: text_color,
+                                        glyphs: glyph_ref,
+                                        glyph_count: glyph_count as u16,
+                                        font_size: presenter_service::FONT_SIZE,
+                                        style_id: STYLE_MONO,
+                                    };
+                                    n.role = scene::ROLE_PARAGRAPH;
+                                }
+
+                                scene.add_child(viewport, line_node);
+                            } else {
+                                let mut run_start = 0;
+
+                                while run_start < glyph_count {
+                                    let run_style = self.glyphs[run_start]._pad as u32;
+                                    let mut run_end = run_start + 1;
+
+                                    while run_end < glyph_count
+                                        && self.glyphs[run_end]._pad as u32 == run_style
+                                    {
+                                        run_end += 1;
+                                    }
+
+                                    let run_len = run_end - run_start;
+
+                                    for j in run_start..run_end {
+                                        self.glyphs[j]._pad = 0;
+                                    }
+
+                                    let glyph_ref =
+                                        scene.push_shaped_glyphs(&self.glyphs[run_start..run_end]);
+                                    let run_node = match scene.alloc_node() {
+                                        Some(id) => id,
+                                        None => break,
+                                    };
+                                    let run_x = line_info.x + run_start as f32 * self.char_width;
+
+                                    {
+                                        let n = scene.node_mut(run_node);
+
+                                        n.x = scene::f32_to_mpt(run_x);
+                                        n.y = pt(line_info.y);
+                                        n.width =
+                                            upt((run_len as f32 * self.char_width) as u32 + 1);
+                                        n.height = upt(presenter_service::LINE_HEIGHT);
+                                        n.content = Content::Glyphs {
+                                            color: text_color,
+                                            glyphs: glyph_ref,
+                                            glyph_count: run_len as u16,
+                                            font_size: presenter_service::FONT_SIZE,
+                                            style_id: run_style,
+                                        };
+                                        n.role = scene::ROLE_PARAGRAPH;
+                                    }
+
+                                    scene.add_child(viewport, run_node);
+
+                                    run_start = run_end;
+                                }
+                            }
+                        }
+                    }
+
+                    if line_count > 0 && cursor_pos >= content_len {
+                        let last = parse_line_at(&self.results_buf, line_count - 1);
+                        let last_end = last.byte_offset as usize + last.byte_length as usize;
+
+                        if cursor_pos >= last_end && cursor_pos > last.byte_offset as usize {
+                            cursor_line = (line_count - 1) as u32;
+                            cursor_col = (cursor_pos - last.byte_offset as usize) as u32;
+                        }
+                    }
+
+                    let (
+                        cursor_x,
+                        cursor_y,
+                        cursor_h,
+                        cursor_style_color,
+                        cursor_weight,
+                        cursor_skew,
+                    ) = if is_rich {
+                        let ci = compute_rich_cursor(
+                            &self.results_buf,
+                            &layout_header,
+                            cursor_pos,
+                            self.doc_va,
+                        );
+
+                        (
+                            ci.x,
+                            ci.y,
+                            ci.height,
+                            Some(ci.color_rgba),
+                            ci.weight,
+                            ci.caret_skew,
+                        )
+                    } else {
+                        (
+                            cursor_col as f32 * self.char_width,
+                            cursor_line as i32 * presenter_service::LINE_HEIGHT as i32,
+                            presenter_service::LINE_HEIGHT,
+                            None,
+                            400u16,
+                            0.0f32,
+                        )
+                    };
+                    let effective_cursor_color = match cursor_style_color {
+                        Some(rgba) => Color::rgba(
+                            ((rgba >> 24) & 0xFF) as u8,
+                            ((rgba >> 16) & 0xFF) as u8,
+                            ((rgba >> 8) & 0xFF) as u8,
+                            (rgba & 0xFF) as u8,
+                        ),
+                        None => cursor_color,
+                    };
+                    let cursor_w_f = 1.0 + (cursor_weight.saturating_sub(100) as f32) * 3.0 / 800.0;
+
+                    if let Some(cursor_node) = scene.alloc_node() {
+                        let n = scene.node_mut(cursor_node);
+
+                        n.x = scene::f32_to_mpt(cursor_x);
+                        n.y = pt(cursor_y);
+                        n.width = (cursor_w_f * scene::MPT_PER_PT as f32) as u32;
+                        n.height = upt(cursor_h);
+                        n.background = effective_cursor_color;
+
+                        if cursor_skew != 0.0 {
+                            n.transform = scene::AffineTransform {
+                                a: 1.0,
+                                b: 0.0,
+                                c: cursor_skew,
+                                d: 1.0,
+                                tx: 0.0,
+                                ty: 0.0,
+                            };
+                        }
+
+                        if !has_selection {
+                            n.animation = scene::Animation::cursor_blink(self.blink_start);
+                        }
+
+                        n.role = scene::ROLE_CARET;
+
+                        scene.add_child(viewport, cursor_node);
+                    }
+                }
+
+                super::Space::Image {
+                    content_id,
+                    width,
+                    height,
+                } => {
+                    if *width > 0 && *height > 0 {
+                        let max_w = self.display_width.saturating_sub(2 * page_margin);
+                        let max_h = content_h.saturating_sub(2 * page_margin);
+                        let src_w = *width as u32;
+                        let src_h = *height as u32;
+                        let scale_w = max_w as f32 / src_w as f32;
+                        let scale_h = max_h as f32 / src_h as f32;
+                        let fit_scale = if scale_w < scale_h { scale_w } else { scale_h };
+                        let disp_w = if fit_scale < 1.0 {
+                            (src_w as f32 * fit_scale) as u32
+                        } else {
+                            src_w
+                        };
+                        let disp_h = if fit_scale < 1.0 {
+                            (src_h as f32 * fit_scale) as u32
+                        } else {
+                            src_h
+                        };
+                        let img_x = base_x + ((self.display_width as i32 - disp_w as i32) / 2);
+                        let img_y = ((content_h as i32 - disp_h as i32) / 2).max(0);
+
+                        if let Some(image_node) = scene.alloc_node() {
+                            let n = scene.node_mut(image_node);
+
+                            n.x = pt(img_x);
+                            n.y = pt(img_y);
+                            n.width = upt(disp_w);
+                            n.height = upt(disp_h);
+                            n.content = Content::Image {
+                                content_id: *content_id,
+                                src_width: *width,
+                                src_height: *height,
+                            };
+                            n.shadow_color = Color::rgba(0, 0, 0, 255);
+                            n.shadow_blur_radius = presenter_service::SHADOW_BLUR_RADIUS;
+                            n.shadow_spread = presenter_service::SHADOW_SPREAD;
+
+                            scene.add_child(strip, image_node);
+                        }
+                    }
+                }
+
+                super::Space::Video {
+                    content_id,
+                    width,
+                    height,
+                    playing,
+                    ..
+                } => {
+                    if *width > 0 && *height > 0 {
+                        let max_w = self.display_width.saturating_sub(2 * page_margin);
+                        let max_h = content_h.saturating_sub(2 * page_margin);
+                        let src_w = *width as u32;
+                        let src_h = *height as u32;
+                        let scale_w = max_w as f32 / src_w as f32;
+                        let scale_h = max_h as f32 / src_h as f32;
+                        let fit_scale = if scale_w < scale_h { scale_w } else { scale_h };
+                        let vid_w = if fit_scale < 1.0 {
+                            (src_w as f32 * fit_scale) as u32
+                        } else {
+                            src_w
+                        };
+                        let vid_h = if fit_scale < 1.0 {
+                            (src_h as f32 * fit_scale) as u32
+                        } else {
+                            src_h
+                        };
+                        let vid_x = base_x + ((self.display_width as i32 - vid_w as i32) / 2);
+                        let vid_y = ((content_h as i32 - vid_h as i32) / 2).max(0);
+
+                        if let Some(video_node) = scene.alloc_node() {
+                            let n = scene.node_mut(video_node);
+
+                            n.x = pt(vid_x);
+                            n.y = pt(vid_y);
+                            n.width = upt(vid_w);
+                            n.height = upt(vid_h);
+                            n.content = Content::Image {
+                                content_id: *content_id,
+                                src_width: *width,
+                                src_height: *height,
+                            };
+                            n.shadow_color = Color::rgba(0, 0, 0, 255);
+                            n.shadow_blur_radius = presenter_service::SHADOW_BLUR_RADIUS;
+                            n.shadow_spread = presenter_service::SHADOW_SPREAD;
+
+                            scene.add_child(strip, video_node);
+                        }
+
+                        if let Some(btn_id) = scene.alloc_node() {
+                            let btn_size = 80u32;
+                            let btn_x =
+                                base_x + ((self.display_width as i32 - btn_size as i32) / 2);
+                            let btn_y = ((content_h as i32 - btn_size as i32) / 2).max(0);
+                            let icon_name = if *playing {
+                                "player-pause"
+                            } else {
+                                "player-play"
+                            };
+                            let name_ref = scene.push_data(b"Play video");
+                            let n = scene.node_mut(btn_id);
+
+                            n.x = pt(btn_x);
+                            n.y = pt(btn_y);
+                            n.width = upt(btn_size);
+                            n.height = upt(btn_size);
+                            n.background = Color::rgba(0, 0, 0, 120);
+                            n.corner_radius = 40;
+                            n.role = scene::ROLE_BUTTON;
+                            n.state = scene::STATE_FOCUSABLE;
+                            n.cursor_shape = scene::CURSOR_PRESSABLE;
+                            n.name = name_ref;
+
+                            scene.add_child(strip, btn_id);
+
+                            let icon_data = icons::get(icon_name, None);
+                            let icon_padding = 16u32;
+                            let icon_size_pt = btn_size - icon_padding * 2;
+                            let (icon_data_ref, icon_hash) =
+                                scale_icon_paths(&mut scene, icon_data, icon_size_pt);
+                            let icon_sw_pt =
+                                icon_data.stroke_width * (icon_size_pt as f32 / icon_data.viewbox);
+                            let icon_sw_fixed = (icon_sw_pt * 256.0) as u16;
+
+                            if let Some(icon_id) = scene.alloc_node() {
+                                let icon = scene.node_mut(icon_id);
+
+                                icon.x = pt(icon_padding as i32);
+                                icon.y = pt(icon_padding as i32);
+                                icon.width = upt(icon_size_pt);
+                                icon.height = upt(icon_size_pt);
+                                icon.content = Content::Path {
+                                    color: Color::TRANSPARENT,
+                                    stroke_color: Color::rgba(255, 255, 255, 200),
+                                    fill_rule: FillRule::Winding,
+                                    stroke_width: icon_sw_fixed,
+                                    contours: icon_data_ref,
+                                };
+                                icon.content_hash = icon_hash;
+
+                                scene.add_child(btn_id, icon_id);
+                            }
+                        }
+                    }
+                }
+
+                super::Space::Showcase => {
+                    build_showcase_nodes(
+                        &mut scene,
+                        strip,
+                        self.display_width,
+                        content_h,
+                        now_ns,
+                        has_audio,
+                        base_x,
+                    );
                 }
             }
         }
-
-        // Last space: Rendering showcase.
-        let showcase_space = self.num_spaces - 1;
-        let now_ns = abi::system::clock_read().unwrap_or(0);
-        let has_audio = self.audio_ep.0 != 0;
-
-        build_showcase_nodes(
-            &mut scene,
-            strip,
-            self.display_width,
-            content_h,
-            now_ns,
-            has_audio,
-            showcase_space,
-        );
 
         scene.commit();
 
         self.last_line_count = line_count as u32;
-        self.last_cursor_line = cursor_line;
-        self.last_cursor_col = cursor_col;
+        self.last_cursor_line = cursor_line_idx as u32;
+        self.last_cursor_col = cursor_col_in_line as u32;
         self.last_content_len = content_len as u32;
 
         self.update_cursor_shape();
@@ -1787,7 +1817,9 @@ impl super::Presenter {
             }
         }
 
-        if self.active_space == 0 && self.is_on_page(self.pointer_x as u32, self.pointer_y as u32) {
+        if matches!(self.spaces.get(self.active_space), Some(super::Space::Text))
+            && self.is_on_page(self.pointer_x as u32, self.pointer_y as u32)
+        {
             return scene::CURSOR_TEXT;
         }
 
