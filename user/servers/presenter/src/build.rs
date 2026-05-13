@@ -32,6 +32,25 @@ fn build_font_axes(weight: u16, font_size: u16) -> ([fonts::metrics::AxisValue; 
     (axes, count)
 }
 
+fn aspect_fit(src_w: u32, src_h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
+    if src_w == 0 || src_h == 0 {
+        return (0, 0);
+    }
+
+    let w_scaled_h = max_w as u64 * src_h as u64;
+    let h_scaled_w = max_h as u64 * src_w as u64;
+
+    if w_scaled_h <= h_scaled_w {
+        let h = (max_w as u64 * src_h as u64 / src_w as u64) as u32;
+
+        (max_w.min(src_w), h.min(src_h))
+    } else {
+        let w = (max_h as u64 * src_w as u64 / src_h as u64) as u32;
+
+        (w.min(src_w), max_h.min(src_h))
+    }
+}
+
 // ── Selection geometry ────────────────────────────────────────────
 
 pub(crate) struct SelectionSpan {
@@ -889,8 +908,11 @@ fn build_showcase_nodes(
             let icon_padding = 12u32;
             let icon_size_pt = btn_h.min(btn_w) - icon_padding * 2;
             let (icon_data_ref, icon_hash) = scale_icon_paths(scene, icon_data, icon_size_pt);
-            let icon_sw_pt = icon_data.stroke_width * (icon_size_pt as f32 / icon_data.viewbox);
-            let icon_sw_fixed = (icon_sw_pt * 256.0) as u16;
+            let icon_sw_fixed = super::icon_stroke_width_fixed(
+                icon_data.stroke_width.to_bits(),
+                icon_size_pt,
+                icon_data.viewbox.to_bits(),
+            );
 
             if let Some(icon_id) = scene.alloc_node() {
                 let icon = scene.node_mut(icon_id);
@@ -1058,8 +1080,11 @@ impl super::Presenter {
             .and_then(|s| s.mimetype());
         let icon = icons::get("document", icon_mimetype);
         let (icon_data_ref, icon_hash) = scale_icon_paths(&mut scene, icon, icon_size_pt);
-        let icon_sw_pt = icon.stroke_width * (icon_size_pt as f32 / icon.viewbox);
-        let icon_sw_fixed = (icon_sw_pt * 256.0) as u16;
+        let icon_sw_fixed = super::icon_stroke_width_fixed(
+            icon.stroke_width.to_bits(),
+            icon_size_pt,
+            icon.viewbox.to_bits(),
+        );
         let icon_x: i32 = 8;
         let icon_y = ((title_bar_h.saturating_sub(icon_size_pt)) / 2).saturating_sub(1) as i32;
 
@@ -1098,7 +1123,7 @@ impl super::Presenter {
 
             n.x = pt(36);
             n.y = pt(title_text_y as i32);
-            n.width = upt(title_width as u32 + 1);
+            n.width = (title_width as u32).saturating_add(upt(1));
             n.height = upt(presenter_service::LINE_HEIGHT);
             n.content = Content::Glyphs {
                 color: title_color,
@@ -1153,15 +1178,16 @@ impl super::Presenter {
             &mut self.glyphs,
         );
         let clock_glyph_ref = scene.push_shaped_glyphs(&self.glyphs[..clock_count]);
-        let clock_text_w = clock_width as u32 + 1;
-        let clock_x = (self.display_width - 12 - clock_text_w) as i32;
+        let clock_text_w_mpt = (clock_width as u32).saturating_add(upt(1));
+        let clock_x =
+            self.display_width as i32 - 12 - (clock_text_w_mpt / scene::MPT_PER_PT as u32) as i32;
 
         if let Some(clock_node) = scene.alloc_node() {
             let n = scene.node_mut(clock_node);
 
             n.x = pt(clock_x);
             n.y = pt(title_text_y as i32);
-            n.width = upt(clock_text_w);
+            n.width = clock_text_w_mpt;
             n.height = upt(presenter_service::LINE_HEIGHT);
             n.content = Content::Glyphs {
                 color: clock_color,
@@ -1543,19 +1569,7 @@ impl super::Presenter {
                         let max_h = content_h.saturating_sub(2 * page_margin);
                         let src_w = *width as u32;
                         let src_h = *height as u32;
-                        let scale_w = max_w as f32 / src_w as f32;
-                        let scale_h = max_h as f32 / src_h as f32;
-                        let fit_scale = if scale_w < scale_h { scale_w } else { scale_h };
-                        let disp_w = if fit_scale < 1.0 {
-                            (src_w as f32 * fit_scale) as u32
-                        } else {
-                            src_w
-                        };
-                        let disp_h = if fit_scale < 1.0 {
-                            (src_h as f32 * fit_scale) as u32
-                        } else {
-                            src_h
-                        };
+                        let (disp_w, disp_h) = aspect_fit(src_w, src_h, max_w, max_h);
                         let img_x = base_x + ((self.display_width as i32 - disp_w as i32) / 2);
                         let img_y = ((content_h as i32 - disp_h as i32) / 2).max(0);
 
@@ -1592,19 +1606,7 @@ impl super::Presenter {
                         let max_h = content_h.saturating_sub(2 * page_margin);
                         let src_w = *width as u32;
                         let src_h = *height as u32;
-                        let scale_w = max_w as f32 / src_w as f32;
-                        let scale_h = max_h as f32 / src_h as f32;
-                        let fit_scale = if scale_w < scale_h { scale_w } else { scale_h };
-                        let vid_w = if fit_scale < 1.0 {
-                            (src_w as f32 * fit_scale) as u32
-                        } else {
-                            src_w
-                        };
-                        let vid_h = if fit_scale < 1.0 {
-                            (src_h as f32 * fit_scale) as u32
-                        } else {
-                            src_h
-                        };
+                        let (vid_w, vid_h) = aspect_fit(src_w, src_h, max_w, max_h);
                         let vid_x = base_x + ((self.display_width as i32 - vid_w as i32) / 2);
                         let vid_y = ((content_h as i32 - vid_h as i32) / 2).max(0);
 
@@ -1658,9 +1660,11 @@ impl super::Presenter {
                             let icon_size_pt = btn_size - icon_padding * 2;
                             let (icon_data_ref, icon_hash) =
                                 scale_icon_paths(&mut scene, icon_data, icon_size_pt);
-                            let icon_sw_pt =
-                                icon_data.stroke_width * (icon_size_pt as f32 / icon_data.viewbox);
-                            let icon_sw_fixed = (icon_sw_pt * 256.0) as u16;
+                            let icon_sw_fixed = super::icon_stroke_width_fixed(
+                                icon_data.stroke_width.to_bits(),
+                                icon_size_pt,
+                                icon_data.viewbox.to_bits(),
+                            );
 
                             if let Some(icon_id) = scene.alloc_node() {
                                 let icon = scene.node_mut(icon_id);

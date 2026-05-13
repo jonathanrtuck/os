@@ -420,7 +420,11 @@ fn floor_f32(x: f32) -> f32 {
 
     // If x was negative and truncation moved away from negative infinity,
     // subtract 1 to correct.
-    if x < t { t - 1.0 } else { t }
+    if x < t {
+        t - 1.0
+    } else {
+        t
+    }
 }
 
 /// Sine approximation accurate to < 0.0002 absolute error on `[−π, π]`.
@@ -451,6 +455,7 @@ fn exp2(x: f32) -> f32 {
     let x = x.max(-126.0).min(126.0);
     let n = floor_f32(x);
     let f = x - n; // fractional part, in [0, 1)
+
     // Integer power of two via exponent-field bias.
     // f32 exponent bias = 127.  Shift into position 23.
     // SAFETY: n is in [-126, 126], so (n as i32 + 127) is in [1, 253] — a
@@ -646,7 +651,6 @@ impl SpringI32 {
 
         const MAX_SUBSTEP_NS: u64 = 4_000_000; // 4ms
         const BILLION: i64 = 1_000_000_000;
-
         let mut remaining = dt_ns;
 
         while remaining > 0 {
@@ -655,7 +659,6 @@ impl SpringI32 {
             } else {
                 remaining
             };
-
             let displacement = self.value as i64 - self.target as i64;
             let force =
                 -self.stiffness as i64 * displacement - self.damping as i64 * self.velocity as i64;

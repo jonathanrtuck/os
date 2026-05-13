@@ -114,29 +114,29 @@ pub(crate) fn shape_text(
     font_size: u16,
     features: &[fonts::Feature],
     out: &mut [ShapedGlyph],
-) -> (usize, f32) {
+) -> (usize, scene::Mpt) {
     let upem = fonts::metrics::font_metrics(font_data)
         .map(|m| m.units_per_em)
-        .unwrap_or(1000) as f32;
-    let scale = font_size as f32 / upem * 65536.0;
+        .unwrap_or(1000) as i64;
     let shaped = fonts::shape(font_data, text, features);
     let count = shaped.len().min(out.len());
-    let mut total_width = 0.0f32;
+    let fs = font_size as i64;
+    let mut total_advance_fp: i64 = 0;
 
     for (i, sg) in shaped.iter().take(count).enumerate() {
-        let adv = sg.x_advance as f32 * scale;
+        let adv = (sg.x_advance as i64 * fs * 65536 / upem) as i32;
 
         out[i] = ShapedGlyph {
             glyph_id: sg.glyph_id,
             _pad: 0,
-            x_advance: adv as i32,
-            x_offset: (sg.x_offset as f32 * scale) as i32,
-            y_offset: (sg.y_offset as f32 * scale) as i32,
+            x_advance: adv,
+            x_offset: (sg.x_offset as i64 * fs * 65536 / upem) as i32,
+            y_offset: (sg.y_offset as i64 * fs * 65536 / upem) as i32,
         };
-        total_width += adv / 65536.0;
+        total_advance_fp += adv as i64;
     }
 
-    (count, total_width)
+    (count, (total_advance_fp / 64) as scene::Mpt)
 }
 
 pub(crate) fn copy_into(dst: &mut [u8], src: &[u8]) -> usize {
@@ -152,7 +152,7 @@ pub(crate) fn scale_icon_paths(
     icon: &icons::Icon,
     size_pt: u32,
 ) -> (scene::DataRef, u32) {
-    let scale = size_pt as f32 / icon.viewbox;
+    let viewbox_bits = icon.viewbox.to_bits();
     let mut buf = alloc::vec::Vec::new();
 
     for icon_path in icon.paths {
@@ -168,22 +168,15 @@ pub(crate) fn scale_icon_paths(
                         break;
                     }
 
-                    let x = f32::from_le_bytes([
-                        cmds[pos + 4],
-                        cmds[pos + 5],
-                        cmds[pos + 6],
-                        cmds[pos + 7],
-                    ]) * scale;
-                    let y = f32::from_le_bytes([
-                        cmds[pos + 8],
-                        cmds[pos + 9],
-                        cmds[pos + 10],
-                        cmds[pos + 11],
-                    ]) * scale;
-
                     buf.extend_from_slice(&tag.to_le_bytes());
-                    buf.extend_from_slice(&x.to_le_bytes());
-                    buf.extend_from_slice(&y.to_le_bytes());
+                    buf.extend_from_slice(
+                        &scale_f32_bits(read_u32_le(cmds, pos + 4), size_pt, viewbox_bits)
+                            .to_le_bytes(),
+                    );
+                    buf.extend_from_slice(
+                        &scale_f32_bits(read_u32_le(cmds, pos + 8), size_pt, viewbox_bits)
+                            .to_le_bytes(),
+                    );
 
                     pos += scene::PATH_MOVE_TO_SIZE;
                 }
@@ -192,23 +185,15 @@ pub(crate) fn scale_icon_paths(
                         break;
                     }
 
-                    let mut coords = [0f32; 6];
-
-                    for (ci, coord) in coords.iter_mut().enumerate() {
-                        let off = pos + 4 + ci * 4;
-
-                        *coord = f32::from_le_bytes([
-                            cmds[off],
-                            cmds[off + 1],
-                            cmds[off + 2],
-                            cmds[off + 3],
-                        ]) * scale;
-                    }
-
                     buf.extend_from_slice(&scene::PATH_CUBIC_TO.to_le_bytes());
 
-                    for c in &coords {
-                        buf.extend_from_slice(&c.to_le_bytes());
+                    for ci in 0..6 {
+                        let off = pos + 4 + ci * 4;
+
+                        buf.extend_from_slice(
+                            &scale_f32_bits(read_u32_le(cmds, off), size_pt, viewbox_bits)
+                                .to_le_bytes(),
+                        );
                     }
 
                     pos += scene::PATH_CUBIC_TO_SIZE;
@@ -280,6 +265,75 @@ fn f32_bytes_to_mpt(bytes: [u8; 4]) -> scene::Mpt {
     };
 
     sign * result
+}
+
+pub(crate) fn icon_stroke_width_fixed(stroke_bits: u32, size_pt: u32, viewbox_bits: u32) -> u16 {
+    let scaled = scale_f32_bits(stroke_bits, size_pt * 256, viewbox_bits);
+    let exp = ((scaled >> 23) & 0xFF) as i32;
+    let frac = (scaled & 0x7F_FFFF) as u64 | 0x80_0000;
+    let shift = exp - 150;
+
+    if exp == 0 {
+        return 0;
+    }
+
+    let val = if shift >= 0 {
+        frac << shift.min(16)
+    } else {
+        frac >> (-shift).min(24)
+    };
+
+    val.min(u16::MAX as u64) as u16
+}
+
+fn read_u32_le(buf: &[u8], off: usize) -> u32 {
+    u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
+}
+
+fn scale_f32_bits(bits: u32, num: u32, den_bits: u32) -> u32 {
+    if bits & 0x7FFF_FFFF == 0 {
+        return bits;
+    }
+
+    let sign = bits & 0x8000_0000;
+    let exp = (bits >> 23) & 0xFF;
+    let frac = (bits & 0x7F_FFFF) as u64 | 0x80_0000;
+
+    if exp == 0 || exp == 255 {
+        return bits;
+    }
+
+    let den_exp = (den_bits >> 23) & 0xFF;
+    let den_frac = (den_bits & 0x7F_FFFF) as u64 | 0x80_0000;
+
+    if den_exp == 0 {
+        return bits;
+    }
+
+    let product = frac * num as u64;
+    let scaled = (product << 23) / den_frac;
+
+    if scaled == 0 {
+        return 0;
+    }
+
+    let leading = 63 - scaled.leading_zeros();
+    let new_exp = exp as i32 - den_exp as i32 + leading as i32 + 104;
+
+    if new_exp <= 0 {
+        return 0;
+    }
+    if new_exp >= 255 {
+        return sign | 0x7F80_0000;
+    }
+
+    let new_frac = if leading > 23 {
+        (scaled >> (leading - 23)) as u32 & 0x7F_FFFF
+    } else {
+        ((scaled << (23 - leading)) as u32) & 0x7F_FFFF
+    };
+
+    sign | ((new_exp as u32) << 23) | new_frac
 }
 
 pub(crate) fn parse_visible_run_at(buf: &[u8], index: usize) -> layout_service::VisibleRun {
