@@ -38,7 +38,7 @@ pub(crate) struct SelectionSpan {
     pub(crate) start: usize,
     pub(crate) end: usize,
     pub(crate) color: Color,
-    pub(crate) char_width: f32,
+    pub(crate) char_width_mpt: scene::Mpt,
 }
 
 pub(crate) fn build_selection_nodes(
@@ -70,8 +70,8 @@ pub(crate) fn build_selection_nodes(
             continue;
         }
 
-        let x = col_start as f32 * sel.char_width;
-        let w = (col_end - col_start) as f32 * sel.char_width;
+        let x_mpt = col_start as i32 * sel.char_width_mpt;
+        let w_mpt = (col_end - col_start) as i32 * sel.char_width_mpt;
         let sel_node = match scene.alloc_node() {
             Some(id) => id,
             None => return,
@@ -80,9 +80,9 @@ pub(crate) fn build_selection_nodes(
         {
             let n = scene.node_mut(sel_node);
 
-            n.x = scene::f32_to_mpt(x);
+            n.x = x_mpt;
             n.y = pt(line_info.y);
-            n.width = scene::f32_to_mpt(w) as u32;
+            n.width = w_mpt as u32;
             n.height = upt(line_height);
             n.background = sel.color;
             n.role = scene::ROLE_SELECTION;
@@ -681,8 +681,8 @@ fn build_showcase_nodes(
         g.width = upt(400);
         g.height = upt(400);
         g.flags = NodeFlags::VISIBLE.union(NodeFlags::CLIPS_CHILDREN);
-        g.child_offset_x = 48.0;
-        g.child_offset_y = 48.0;
+        g.child_offset_x = scene::pt(48);
+        g.child_offset_y = scene::pt(48);
         g.content = Content::Gradient {
             color_start: Color::rgba(255, 255, 255, 10),
             color_end: Color::rgba(255, 255, 255, 0),
@@ -923,13 +923,13 @@ impl super::Presenter {
         if self.slide_animating {
             let current = self.slide_spring.value();
             let target = self.slide_spring.target();
-            let dw = self.display_width as f32;
-            let lo = (current.min(target) / dw) as usize;
-            let hi_raw = current.max(target) / dw;
-            let hi = if hi_raw != hi_raw as usize as f32 {
-                hi_raw as usize + 1
+            let dw_mpt = pt(self.display_width as i32);
+            let lo = (current.min(target) / dw_mpt) as usize;
+            let hi_val = current.max(target);
+            let hi = if hi_val % dw_mpt != 0 {
+                (hi_val / dw_mpt) as usize + 1
             } else {
-                hi_raw as usize
+                (hi_val / dw_mpt) as usize
             };
 
             (lo.min(last), hi.min(last))
@@ -1255,7 +1255,7 @@ impl super::Presenter {
                         n.width = upt(text_area_w);
                         n.height = upt(text_area_h);
                         n.flags = NodeFlags::VISIBLE.union(NodeFlags::CLIPS_CHILDREN);
-                        n.child_offset_y = -(self.scroll_y as f32);
+                        n.child_offset_y = -pt(self.scroll_y);
                         n.role = scene::ROLE_DOCUMENT;
                     }
 
@@ -1278,7 +1278,7 @@ impl super::Presenter {
                                 start: sel_start,
                                 end: sel_end,
                                 color: sel_color,
-                                char_width: self.char_width,
+                                char_width_mpt: self.char_width_mpt,
                             };
 
                             build_selection_nodes(
@@ -1293,7 +1293,7 @@ impl super::Presenter {
 
                     let mut cursor_line = cursor_line_idx as u32;
                     let mut cursor_col = cursor_col_in_line as u32;
-                    let char_advance = (self.char_width * 65536.0) as i32;
+                    let char_advance = self.char_width_mpt * 64;
                     let is_rich = layout_header.format == 1;
 
                     if is_rich {
@@ -1385,9 +1385,9 @@ impl super::Presenter {
                                 {
                                     let n = scene.node_mut(line_node);
 
-                                    n.x = scene::f32_to_mpt(line_info.x);
+                                    n.x = line_info.x_mpt;
                                     n.y = pt(line_info.y);
-                                    n.width = upt(line_info.width as u32 + 1);
+                                    n.width = (line_info.width_mpt as u32).saturating_add(upt(1));
                                     n.height = upt(presenter_service::LINE_HEIGHT);
                                     n.content = Content::Glyphs {
                                         color: text_color,
@@ -1425,15 +1425,16 @@ impl super::Presenter {
                                         Some(id) => id,
                                         None => break,
                                     };
-                                    let run_x = line_info.x + run_start as f32 * self.char_width;
+                                    let run_x_mpt =
+                                        line_info.x_mpt + run_start as i32 * self.char_width_mpt;
 
                                     {
                                         let n = scene.node_mut(run_node);
 
-                                        n.x = scene::f32_to_mpt(run_x);
+                                        n.x = run_x_mpt;
                                         n.y = pt(line_info.y);
-                                        n.width =
-                                            upt((run_len as f32 * self.char_width) as u32 + 1);
+                                        n.width = (run_len as u32 * self.char_width_mpt as u32)
+                                            .saturating_add(upt(1));
                                         n.height = upt(presenter_service::LINE_HEIGHT);
                                         n.content = Content::Glyphs {
                                             color: text_color,
@@ -1464,29 +1465,29 @@ impl super::Presenter {
                     }
 
                     let (
-                        cursor_x,
+                        cursor_x_mpt,
                         cursor_y,
                         cursor_h,
                         cursor_style_color,
                         cursor_weight,
-                        cursor_skew,
+                        cursor_skew_bits,
                     ) = if let Some(ci) = &rich_cursor_info {
                         (
-                            ci.x,
+                            scene::f32_to_mpt(ci.x),
                             ci.y,
                             ci.height,
                             Some(ci.color_rgba),
                             ci.weight,
-                            ci.caret_skew,
+                            ci.caret_skew.to_bits(),
                         )
                     } else {
                         (
-                            cursor_col as f32 * self.char_width,
+                            cursor_col as i32 * self.char_width_mpt,
                             cursor_line as i32 * presenter_service::LINE_HEIGHT as i32,
                             presenter_service::LINE_HEIGHT,
                             None,
                             400u16,
-                            0.0f32,
+                            0u32,
                         )
                     };
                     let effective_cursor_color = match cursor_style_color {
@@ -1498,22 +1499,24 @@ impl super::Presenter {
                         ),
                         None => cursor_color,
                     };
-                    let cursor_w_f = 1.0 + (cursor_weight.saturating_sub(100) as f32) * 3.0 / 800.0;
+                    let cursor_w_mpt = scene::MPT_PER_PT as u32
+                        + (cursor_weight.saturating_sub(100) as u32) * 3 * scene::MPT_PER_PT as u32
+                            / 800;
 
                     if let Some(cursor_node) = scene.alloc_node() {
                         let n = scene.node_mut(cursor_node);
 
-                        n.x = scene::f32_to_mpt(cursor_x);
+                        n.x = cursor_x_mpt;
                         n.y = pt(cursor_y);
-                        n.width = (cursor_w_f * scene::MPT_PER_PT as f32) as u32;
+                        n.width = cursor_w_mpt;
                         n.height = upt(cursor_h);
                         n.background = effective_cursor_color;
 
-                        if cursor_skew != 0.0 {
+                        if cursor_skew_bits != 0 {
                             n.transform = scene::AffineTransform {
                                 a: 1.0,
                                 b: 0.0,
-                                c: cursor_skew,
+                                c: f32::from_bits(cursor_skew_bits),
                                 d: 1.0,
                                 tx: 0.0,
                                 ty: 0.0,
@@ -1756,7 +1759,7 @@ impl super::Presenter {
             core::slice::from_raw_parts_mut(self.scene_bufs[active].as_ptr() as *mut u8, SCENE_SIZE)
         });
 
-        if let Some(hit_id) = scene.hit_test(self.pointer_x, self.pointer_y) {
+        if let Some(hit_id) = scene.hit_test(pt(self.pointer_x), pt(self.pointer_y)) {
             let shape = scene.node(hit_id).cursor_shape;
 
             if shape != scene::CURSOR_INHERIT {

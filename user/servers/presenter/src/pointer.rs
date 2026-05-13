@@ -35,7 +35,7 @@ impl Presenter {
 
     pub(crate) fn xy_to_byte(&self, px: u32, py: u32, content_len: usize) -> usize {
         let (text_x, text_y) = self.text_origin();
-        let rel_x = px.saturating_sub(text_x) as f32;
+        let rel_x = px.saturating_sub(text_x) as i32;
         let rel_y = py.saturating_sub(text_y) as i32 + self.scroll_y;
 
         if rel_y < 0 {
@@ -53,7 +53,7 @@ impl Presenter {
             return xy_to_byte_rich(
                 &self.results_buf,
                 &header,
-                rel_x,
+                rel_x as f32,
                 rel_y,
                 self.doc_va,
                 content_len,
@@ -62,9 +62,10 @@ impl Presenter {
 
         let line_h = presenter_service::LINE_HEIGHT as i32;
         let target_line = (rel_y / line_h) as usize;
-        let cw = self.char_width;
-        let target_col = if cw > 0.0 {
-            ((rel_x + cw * 0.5) / cw) as usize
+        let cw_mpt = self.char_width_mpt;
+        let rel_x_mpt = rel_x * scene::MPT_PER_PT;
+        let target_col = if cw_mpt > 0 {
+            ((rel_x_mpt + cw_mpt / 2) / cw_mpt) as usize
         } else {
             0
         };
@@ -125,7 +126,9 @@ impl Presenter {
                 )
             });
 
-            if let Some(hit_id) = scene.hit_test(click_x as f32, click_y as f32) {
+            if let Some(hit_id) =
+                scene.hit_test(scene::pt(click_x as i32), scene::pt(click_y as i32))
+            {
                 let node = scene.node(hit_id);
 
                 console::write(

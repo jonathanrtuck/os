@@ -4,7 +4,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::{
     node::{
-        Node, NodeId, SceneHeader, DATA_BUFFER_SIZE, DATA_OFFSET, DIRTY_BITMAP_WORDS,
+        Mpt, Node, NodeId, SceneHeader, DATA_BUFFER_SIZE, DATA_OFFSET, DIRTY_BITMAP_WORDS,
         GENERATION_OFFSET, MAX_NODES, NODES_OFFSET, NULL, SCENE_SIZE,
     },
     primitives::{Content, DataRef, ShapedGlyph},
@@ -501,7 +501,8 @@ impl<'a> SceneWriter<'a> {
     /// inverting transforms at each level and respecting `CLIPS_CHILDREN`.
     /// Returns the `NodeId` of the frontmost focusable node
     /// (`STATE_FOCUSABLE`) whose bounds contain the point, or `None`.
-    pub fn hit_test(&self, x: f32, y: f32) -> Option<NodeId> {
+    /// Hit-test in millipoint coordinates (integer-only on the common path).
+    pub fn hit_test(&self, x: Mpt, y: Mpt) -> Option<NodeId> {
         let root = self.root();
 
         if root == NULL {
@@ -511,7 +512,7 @@ impl<'a> SceneWriter<'a> {
         self.hit_test_node(root, x, y)
     }
 
-    fn hit_test_node(&self, id: NodeId, x: f32, y: f32) -> Option<NodeId> {
+    fn hit_test_node(&self, id: NodeId, x: Mpt, y: Mpt) -> Option<NodeId> {
         use crate::node::{MPT_PER_PT, STATE_FOCUSABLE};
 
         let n = self.node(id);
@@ -520,31 +521,27 @@ impl<'a> SceneWriter<'a> {
             return None;
         }
 
-        let mpt = MPT_PER_PT as f32;
-        let nx = n.x as f32 / mpt;
-        let ny = n.y as f32 / mpt;
-        let nw = n.width as f32 / mpt;
-        let nh = n.height as f32 / mpt;
-        // Transform the test point into this node's local coordinate space.
-        let local_x = x - nx;
-        let local_y = y - ny;
+        let nw = n.width as Mpt;
+        let nh = n.height as Mpt;
+        let local_x = x - n.x;
+        let local_y = y - n.y;
         let (lx, ly) = if n.transform.is_identity() {
             (local_x, local_y)
         } else if let Some(inv) = n.transform.inverse() {
-            inv.transform_point(local_x, local_y)
+            let mpt = MPT_PER_PT as f32;
+            let (fx, fy) = inv.transform_point(local_x as f32 / mpt, local_y as f32 / mpt);
+
+            ((fx * mpt) as Mpt, (fy * mpt) as Mpt)
         } else {
             return None;
         };
 
-        // Clip check: if this node clips children, reject points outside bounds.
-        if n.clips_children() && (lx < 0.0 || ly < 0.0 || lx >= nw || ly >= nh) {
+        if n.clips_children() && (lx < 0 || ly < 0 || lx >= nw || ly >= nh) {
             return None;
         }
 
-        // Apply child_offset (scrolling) before testing children.
         let cx = lx - n.child_offset_x;
         let cy = ly - n.child_offset_y;
-        // Collect children into a stack to iterate last-to-first (front-to-back).
         let mut children = [NULL; 64];
         let mut count = 0usize;
         let mut child = n.first_child;
@@ -555,20 +552,20 @@ impl<'a> SceneWriter<'a> {
             child = self.node(child).next_sibling;
         }
 
-        // Test children in reverse order (last child = frontmost).
         for i in (0..count).rev() {
             if let Some(hit) = self.hit_test_node(children[i], cx, cy) {
                 return Some(hit);
             }
         }
 
-        // No child was hit — test this node itself.
+        let r_mpt = n.corner_radius as Mpt * MPT_PER_PT;
+
         if n.state & STATE_FOCUSABLE != 0
-            && lx >= 0.0
-            && ly >= 0.0
+            && lx >= 0
+            && ly >= 0
             && lx < nw
             && ly < nh
-            && Self::point_in_rounded_rect(lx, ly, nw, nh, n.corner_radius)
+            && Self::point_in_rounded_rect_mpt(lx, ly, nw, nh, r_mpt)
         {
             return Some(id);
         }
@@ -576,12 +573,12 @@ impl<'a> SceneWriter<'a> {
         None
     }
 
-    fn point_in_rounded_rect(x: f32, y: f32, w: f32, h: f32, corner_radius: u8) -> bool {
-        if corner_radius == 0 {
+    fn point_in_rounded_rect_mpt(x: Mpt, y: Mpt, w: Mpt, h: Mpt, r: Mpt) -> bool {
+        if r == 0 {
             return true;
         }
 
-        let r = (corner_radius as f32).min(w * 0.5).min(h * 0.5);
+        let r = r.min(w / 2).min(h / 2);
         let dx = if x < r {
             r - x
         } else if x > w - r {
@@ -597,7 +594,7 @@ impl<'a> SceneWriter<'a> {
             return true;
         };
 
-        dx * dx + dy * dy <= r * r
+        (dx as i64 * dx as i64 + dy as i64 * dy as i64) <= r as i64 * r as i64
     }
 
     fn store_generation_release(&mut self, gen: u32) {

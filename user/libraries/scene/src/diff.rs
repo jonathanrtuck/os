@@ -1,6 +1,6 @@
 //! Scene graph diffing — parent map and absolute bounds computation.
 
-use crate::node::{Node, NodeId, MAX_NODES, NULL};
+use crate::node::{MAX_NODES, NULL, Node, NodeId};
 
 // ── Parent map ──────────────────────────────────────────────────────
 
@@ -54,8 +54,8 @@ pub fn abs_bounds(
         // Add parent position and child_offset.
         // For scroll: child_offset_y is negative, so this effectively subtracts
         // the scroll offset.
-        ax += p.x + crate::node::f32_to_mpt(p.child_offset_x);
-        ay += p.y + crate::node::f32_to_mpt(p.child_offset_y);
+        ax += p.x + p.child_offset_x;
+        ay += p.y + p.child_offset_y;
         cur = parent_map[cur as usize];
     }
 

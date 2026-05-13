@@ -1,7 +1,7 @@
 //! Scene graph node type, header, and memory layout constants.
 
 use crate::{
-    primitives::{bitflags, Animation, Border, Color, Content, DataRef},
+    primitives::{Animation, Border, Color, Content, DataRef, bitflags},
     transform::AffineTransform,
 };
 
@@ -222,10 +222,10 @@ pub struct Node {
     pub width: Umpt,
     pub height: Umpt,
     // ── child offset ──
-    /// Translation applied to children's coordinate space (points).
+    /// Translation applied to children's coordinate space (millipoints).
     /// Used for scrolling and document slide. (0, 0) by default.
-    pub child_offset_x: f32,
-    pub child_offset_y: f32,
+    pub child_offset_x: Mpt,
+    pub child_offset_y: Mpt,
     // ── visual decoration ──
     pub background: Color,
     pub border: Border,
@@ -302,8 +302,8 @@ impl Node {
         y: 0,
         width: 0,
         height: 0,
-        child_offset_x: 0.0,
-        child_offset_y: 0.0,
+        child_offset_x: 0,
+        child_offset_y: 0,
         background: Color::TRANSPARENT,
         border: Border {
             color: Color::TRANSPARENT,

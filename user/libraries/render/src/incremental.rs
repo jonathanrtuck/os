@@ -5,7 +5,7 @@
 //! dirty bitmap from the scene header is compared against previous state to
 //! produce a minimal set of dirty rectangles for partial repaint.
 
-use scene::{abs_bounds, build_parent_map, Node, NodeId, DIRTY_BITMAP_WORDS, MAX_NODES, NULL};
+use scene::{DIRTY_BITMAP_WORDS, MAX_NODES, NULL, Node, NodeId, abs_bounds, build_parent_map};
 
 use crate::damage::DamageTracker;
 
@@ -18,7 +18,7 @@ pub struct IncrementalState {
     /// Bitmap: was node visible last frame? One bit per node.
     pub prev_visible: [u64; DIRTY_BITMAP_WORDS],
     /// Per-node child_offset from the previous frame.
-    pub prev_child_offset: [(f32, f32); MAX_NODES],
+    pub prev_child_offset: [(i32, i32); MAX_NODES],
     /// Per-node content_hash from the previous frame. Used by the render
     /// backends (Tasks 7/8) to detect property-only changes: if a node is
     /// dirty but content_hash is unchanged, the backend can blit from its
@@ -33,7 +33,7 @@ impl IncrementalState {
         Self {
             prev_bounds: [(0, 0, 0, 0); MAX_NODES],
             prev_visible: [0u64; DIRTY_BITMAP_WORDS],
-            prev_child_offset: [(0.0, 0.0); MAX_NODES],
+            prev_child_offset: [(0, 0); MAX_NODES],
             prev_content_hash: [0u32; MAX_NODES],
             first_frame: true,
         }
@@ -140,8 +140,8 @@ impl IncrementalState {
             if node.first_child != NULL
                 && (node.child_offset_x != prev_x || node.child_offset_y != prev_y)
             {
-                let delta_x = node.child_offset_x - prev_x;
-                let delta_y = node.child_offset_y - prev_y;
+                let delta_x = scene::mpt_to_f32(node.child_offset_x - prev_x);
+                let delta_y = scene::mpt_to_f32(node.child_offset_y - prev_y);
 
                 return Some((i as NodeId, delta_x, delta_y));
             }
@@ -177,7 +177,7 @@ impl IncrementalState {
         // Clear state for nodes beyond the current count.
         for i in count..MAX_NODES {
             self.prev_bounds[i] = (0, 0, 0, 0);
-            self.prev_child_offset[i] = (0.0, 0.0);
+            self.prev_child_offset[i] = (0, 0);
             self.prev_content_hash[i] = 0;
             // prev_visible already cleared above.
         }

@@ -1878,8 +1878,8 @@ fn walk_node(
         _ => {}
     }
 
-    let child_x = x + node.child_offset_x;
-    let child_y = y + node.child_offset_y;
+    let child_x = x + scene::mpt_to_f32(node.child_offset_x);
+    let child_y = y + scene::mpt_to_f32(node.child_offset_y);
     let child_clip = if node.clips_children() {
         let node_clip = [x, y, w, h];
 
@@ -3541,8 +3541,8 @@ impl Dispatch for Compositor {
             }
             render::comp::POINTER => {
                 if msg.payload.len() >= 8 {
-                    let x = f32::from_le_bytes(msg.payload[0..4].try_into().unwrap());
-                    let y = f32::from_le_bytes(msg.payload[4..8].try_into().unwrap());
+                    let x = i32::from_le_bytes(msg.payload[0..4].try_into().unwrap()) as f32;
+                    let y = i32::from_le_bytes(msg.payload[4..8].try_into().unwrap()) as f32;
 
                     self.update_cursor_position(x, y);
                 }

@@ -420,11 +420,7 @@ fn floor_f32(x: f32) -> f32 {
 
     // If x was negative and truncation moved away from negative infinity,
     // subtract 1 to correct.
-    if x < t {
-        t - 1.0
-    } else {
-        t
-    }
+    if x < t { t - 1.0 } else { t }
 }
 
 /// Sine approximation accurate to < 0.0002 absolute error on `[−π, π]`.
@@ -455,10 +451,10 @@ fn exp2(x: f32) -> f32 {
     let x = x.max(-126.0).min(126.0);
     let n = floor_f32(x);
     let f = x - n; // fractional part, in [0, 1)
-                   // Integer power of two via exponent-field bias.
-                   // f32 exponent bias = 127.  Shift into position 23.
-                   // SAFETY: n is in [-126, 126], so (n as i32 + 127) is in [1, 253] — a
-                   // valid normalised f32 exponent.
+    // Integer power of two via exponent-field bias.
+    // f32 exponent bias = 127.  Shift into position 23.
+    // SAFETY: n is in [-126, 126], so (n as i32 + 127) is in [1, 253] — a
+    // valid normalised f32 exponent.
     let int_pow: f32 = f32::from_bits(((n as i32 + 127) as u32) << 23);
     // Polynomial approximation of 2^f on [0, 1).
     // Coefficients from a minimax fit; error < 0.0002 on [0, 1).
@@ -597,6 +593,105 @@ impl Spring {
 
     /// Override the settle threshold (default: `0.01`).
     pub const fn set_settle_threshold(&mut self, threshold: f32) {
+        self.settle_threshold = threshold;
+    }
+}
+
+// ── Integer spring ──────────────────────────────────────────────────────────
+
+/// Integer spring — identical physics to [`Spring`] but operates entirely
+/// in caller-chosen integer units (e.g., millipoints) with no floating-point
+/// instructions. Uses i64 intermediates to prevent overflow during the
+/// force × dt products.
+///
+/// Time input is nanoseconds (u64) rather than fractional seconds.
+pub struct SpringI32 {
+    target: i32,
+    value: i32,
+    velocity: i32,
+    stiffness: i32,
+    damping: i32,
+    mass: i32,
+    settle_threshold: i32,
+}
+
+impl SpringI32 {
+    pub const fn new(target: i32, stiffness: i32, damping: i32, mass: i32) -> Self {
+        Self {
+            target,
+            value: 0,
+            velocity: 0,
+            stiffness,
+            damping,
+            mass,
+            settle_threshold: 512,
+        }
+    }
+
+    /// Balanced preset — stiffness 300, damping 20, mass 1.
+    pub const fn default_preset(target: i32) -> Self {
+        Self::new(target, 300, 20, 1)
+    }
+
+    /// Snappy preset — fast, tight response.
+    pub const fn snappy(target: i32) -> Self {
+        Self::new(target, 600, 35, 1)
+    }
+
+    /// Advance the simulation by `dt_ns` nanoseconds.
+    pub fn tick_ns(&mut self, dt_ns: u64) {
+        if dt_ns == 0 {
+            return;
+        }
+
+        const MAX_SUBSTEP_NS: u64 = 4_000_000; // 4ms
+        const BILLION: i64 = 1_000_000_000;
+
+        let mut remaining = dt_ns;
+
+        while remaining > 0 {
+            let step = if remaining > MAX_SUBSTEP_NS {
+                MAX_SUBSTEP_NS
+            } else {
+                remaining
+            };
+
+            let displacement = self.value as i64 - self.target as i64;
+            let force =
+                -self.stiffness as i64 * displacement - self.damping as i64 * self.velocity as i64;
+            let accel = force / self.mass as i64;
+
+            self.velocity += (accel * step as i64 / BILLION) as i32;
+            self.value += (self.velocity as i64 * step as i64 / BILLION) as i32;
+
+            remaining -= step;
+        }
+    }
+
+    pub fn value(&self) -> i32 {
+        self.value
+    }
+
+    pub fn target(&self) -> i32 {
+        self.target
+    }
+
+    pub fn set_target(&mut self, target: i32) {
+        self.target = target;
+    }
+
+    pub fn reset_to(&mut self, position: i32) {
+        self.value = position;
+        self.target = position;
+        self.velocity = 0;
+    }
+
+    pub fn settled(&self) -> bool {
+        (self.value - self.target).abs() < self.settle_threshold
+            && self.velocity.abs() < self.settle_threshold
+    }
+
+    pub const fn set_settle_threshold(&mut self, threshold: i32) {
         self.settle_threshold = threshold;
     }
 }

@@ -93,17 +93,19 @@ fn build_cmap_table(font_data: &[u8]) -> [u16; 128] {
     table
 }
 
-fn compute_char_advance(font_data: &[u8]) -> f32 {
+fn compute_char_advance_mpt(font_data: &[u8]) -> scene::Mpt {
     let gid = fonts::metrics::glyph_id_for_char(font_data, 'M').unwrap_or(0);
 
     if let (Some((advance_fu, _)), Some(fm)) = (
         fonts::metrics::glyph_h_metrics(font_data, gid),
         fonts::metrics::font_metrics(font_data),
     ) {
-        return advance_fu as f32 * presenter_service::FONT_SIZE as f32 / fm.units_per_em as f32;
+        return (advance_fu as i64 * presenter_service::FONT_SIZE as i64 * scene::MPT_PER_PT as i64
+            / fm.units_per_em as i64) as scene::Mpt;
     }
 
-    presenter_service::CHAR_WIDTH_F32
+    // 10.8pt fallback ≈ 11059 mpt (10 * 1024 + 819)
+    11059
 }
 
 pub(crate) fn shape_text(
@@ -233,10 +235,51 @@ pub(crate) fn parse_layout_header(buf: &[u8]) -> layout_service::LayoutHeader {
     layout_service::LayoutHeader::read_from(buf)
 }
 
-pub(crate) fn parse_line_at(buf: &[u8], index: usize) -> layout_service::LineInfo {
-    let offset = layout_service::LayoutHeader::SIZE + index * layout_service::LineInfo::SIZE;
+pub(crate) struct LineInfoMpt {
+    pub byte_offset: u32,
+    pub byte_length: u32,
+    pub x_mpt: scene::Mpt,
+    pub y: i32,
+    pub width_mpt: scene::Mpt,
+}
 
-    layout_service::LineInfo::read_from(&buf[offset..])
+pub(crate) fn parse_line_at(buf: &[u8], index: usize) -> LineInfoMpt {
+    let offset = layout_service::LayoutHeader::SIZE + index * layout_service::LineInfo::SIZE;
+    let b = &buf[offset..];
+
+    LineInfoMpt {
+        byte_offset: u32::from_le_bytes(b[0..4].try_into().unwrap()),
+        byte_length: u32::from_le_bytes(b[4..8].try_into().unwrap()),
+        x_mpt: f32_bytes_to_mpt(b[8..12].try_into().unwrap()),
+        y: i32::from_le_bytes(b[12..16].try_into().unwrap()),
+        width_mpt: f32_bytes_to_mpt(b[16..20].try_into().unwrap()),
+    }
+}
+
+fn f32_bytes_to_mpt(bytes: [u8; 4]) -> scene::Mpt {
+    let bits = u32::from_le_bytes(bytes);
+
+    if bits & 0x7FFF_FFFF == 0 {
+        return 0;
+    }
+
+    let sign: i32 = if bits >> 31 != 0 { -1 } else { 1 };
+    let exp = ((bits >> 23) & 0xFF) as i32;
+
+    if exp == 0 || exp == 255 {
+        return 0;
+    }
+
+    let frac = (bits & 0x7F_FFFF) as i64 | 0x80_0000;
+    let shifted = frac * scene::MPT_PER_PT as i64;
+    let shift = exp - 150;
+    let result = if shift >= 0 {
+        (shifted << shift.min(40)) as i32
+    } else {
+        (shifted >> (-shift).min(40)) as i32
+    };
+
+    sign * result
 }
 
 pub(crate) fn parse_visible_run_at(buf: &[u8], index: usize) -> layout_service::VisibleRun {
@@ -375,7 +418,7 @@ pub(crate) struct Presenter {
     pub(crate) glyphs: [ShapedGlyph; MAX_GLYPHS_PER_LINE],
     pub(crate) cmap_mono: [u16; 128],
     pub(crate) cmap_sans: [u16; 128],
-    pub(crate) char_width: f32,
+    pub(crate) char_width_mpt: scene::Mpt,
 
     pub(crate) blink_start: u64,
 
@@ -396,8 +439,8 @@ pub(crate) struct Presenter {
 
     pub(crate) rtc_va: usize,
 
-    pub(crate) pointer_x: f32,
-    pub(crate) pointer_y: f32,
+    pub(crate) pointer_x: i32,
+    pub(crate) pointer_y: i32,
     pub(crate) cursor_shape_name: u8,
 
     pub(crate) last_click_ms: u64,
@@ -410,7 +453,7 @@ pub(crate) struct Presenter {
 
     pub(crate) spaces: alloc::vec::Vec<Space>,
     pub(crate) active_space: usize,
-    pub(crate) slide_spring: animation::Spring,
+    pub(crate) slide_spring: animation::SpringI32,
     pub(crate) slide_animating: bool,
     pub(crate) last_anim_tick: u64,
 
@@ -563,7 +606,7 @@ impl Presenter {
             scroll_y: self.scroll_y,
             viewport_width: tw,
             viewport_height: th,
-            char_width_fp: layout_service::ViewportState::encode_char_width(self.char_width),
+            char_width_fp: (self.char_width_mpt as u32) * 64,
             line_height: presenter_service::LINE_HEIGHT,
         };
         let mut buf = [0u8; layout_service::ViewportState::SIZE];
@@ -650,8 +693,8 @@ impl Dispatch for Presenter {
             presenter_service::POINTER_EVENT => {
                 if msg.payload.len() >= presenter_service::PointerEvent::SIZE {
                     let event = presenter_service::PointerEvent::read_from(msg.payload);
-                    let px = (event.abs_x as u64 * self.display_width as u64 / 32768) as f32;
-                    let py = (event.abs_y as u64 * self.display_height as u64 / 32768) as f32;
+                    let px = (event.abs_x as u64 * self.display_width as u64 / 32768) as i32;
+                    let py = (event.abs_y as u64 * self.display_height as u64 / 32768) as i32;
 
                     self.pointer_x = px;
                     self.pointer_y = py;
@@ -1316,7 +1359,7 @@ extern "C" fn _start() -> ! {
         }; MAX_GLYPHS_PER_LINE],
         cmap_mono: build_cmap_table(font(init::FONT_IDX_MONO)),
         cmap_sans: build_cmap_table(font(init::FONT_IDX_SANS)),
-        char_width: compute_char_advance(font(init::FONT_IDX_MONO)),
+        char_width_mpt: compute_char_advance_mpt(font(init::FONT_IDX_MONO)),
         blink_start: abi::system::clock_read().unwrap_or(0),
         last_line_count: 0,
         last_cursor_line: 0,
@@ -1333,8 +1376,8 @@ extern "C" fn _start() -> ! {
         render_ep,
         editor_ep,
         rtc_va,
-        pointer_x: 0.0,
-        pointer_y: 0.0,
+        pointer_x: 0,
+        pointer_y: 0,
         cursor_shape_name: scene::CURSOR_DEFAULT,
         last_click_ms: 0,
         last_click_x: 0,
@@ -1346,9 +1389,9 @@ extern "C" fn _start() -> ! {
         spaces: alloc::vec::Vec::new(),
         active_space: 0,
         slide_spring: {
-            let mut s = animation::Spring::new(0.0, 600.0, 49.0, 1.0);
+            let mut s = animation::SpringI32::new(0, 600, 49, 1);
 
-            s.set_settle_threshold(0.5);
+            s.set_settle_threshold(512);
 
             s
         },
@@ -1388,7 +1431,11 @@ extern "C" fn _start() -> ! {
             .spaces
             .get(server.active_space)
             .is_some_and(|s| s.needs_continuous_render());
-        let needs_anim = server.slide_animating || active_needs_render;
+        let video_playing = matches!(
+            server.spaces.get(server.active_space),
+            Some(Space::Video { playing: true, .. })
+        );
+        let needs_anim = server.slide_animating || active_needs_render || video_playing;
         let deadline = if needs_anim {
             if next_frame <= now {
                 let behind = now - next_frame;
@@ -1412,12 +1459,13 @@ extern "C" fn _start() -> ! {
         if frame_due {
             if server.slide_animating {
                 let frame_start = abi::system::clock_read().unwrap_or(0);
-                let dt_ns = frame_start.saturating_sub(server.last_anim_tick);
-                let dt = (dt_ns as f32 / 1_000_000_000.0).min(0.033);
+                let dt_ns = frame_start
+                    .saturating_sub(server.last_anim_tick)
+                    .min(33_000_000);
 
                 server.last_anim_tick = frame_start;
 
-                server.slide_spring.tick(dt);
+                server.slide_spring.tick_ns(dt_ns);
 
                 if server.slide_spring.settled() {
                     server.slide_animating = false;

@@ -243,6 +243,14 @@ __exception_common:
     ldr     x9, [sp, #816]
     msr     sp_el0, x9
 
+    // Mask IRQs before writing ELR/SPSR — an interrupt between
+    // MSR ELR_EL1 and ERET would overwrite ELR with the interrupted
+    // kernel PC, causing ERET to jump to a kernel address at EL0.
+    // This matches the protection in __svc_fast and __enter_userspace.
+    // The window is reachable when a thread is restored via park_loop
+    // (which enables IRQs) → restore_context → returns through here.
+    msr     daifset, #2
+
     // Restore ELR_EL1 and SPSR_EL1 (using x9 as scratch — not yet restored).
     ldr     x9, [sp, #248]
     msr     elr_el1, x9

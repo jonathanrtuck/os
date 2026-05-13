@@ -251,7 +251,7 @@ impl Presenter {
                 self.active_space = self.spaces.len() - 1;
             }
 
-            let target = self.active_space as f32 * self.display_width as f32;
+            let target = scene::pt(self.active_space as i32 * self.display_width as i32);
 
             self.slide_spring.reset_to(target);
             self.slide_animating = false;
@@ -268,7 +268,7 @@ impl Presenter {
 
             self.active_space = (self.active_space + 1) % self.spaces.len();
 
-            let target = self.active_space as f32 * self.display_width as f32;
+            let target = scene::pt(self.active_space as i32 * self.display_width as i32);
 
             self.slide_spring.set_target(target);
             self.slide_animating = true;

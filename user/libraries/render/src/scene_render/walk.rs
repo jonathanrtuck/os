@@ -7,14 +7,14 @@
 use alloc::{vec, vec::Vec};
 
 use drawing::{Color, PixelFormat, Surface};
-use scene::{Content, Node, NodeId, NULL};
+use scene::{Content, NULL, Node, NodeId};
 
 use super::{
+    RenderCtx, SceneGraph,
     coords::{round_f32, scale_coord, scale_size, snap_border},
     path_raster::scene_to_draw_color,
-    RenderCtx, SceneGraph,
 };
-use crate::{cache::NodeCache, surface_pool::SurfacePool, ClipMaskCache, LruRasterizer};
+use crate::{ClipMaskCache, LruRasterizer, cache::NodeCache, surface_pool::SurfacePool};
 
 /// Axis-aligned clip rectangle in absolute (framebuffer) coordinates.
 /// Uses i32 for physical pixel math. virgil-render has an independent f32
@@ -755,11 +755,7 @@ fn render_node_content_translated(
     let phys_radius = if node.corner_radius > 0 {
         let r = round_f32(node.corner_radius as f32 * s);
 
-        if r < 0 {
-            0u32
-        } else {
-            r as u32
-        }
+        if r < 0 { 0u32 } else { r as u32 }
     } else {
         0u32
     };
@@ -1214,8 +1210,8 @@ fn render_clip_path_children(
             w: nw,
             h: nh,
         };
-        let child_ox = draw_x + round_f32(node.child_offset_x * scale);
-        let child_oy = draw_y + round_f32(node.child_offset_y * scale);
+        let child_ox = draw_x + round_f32(scene::mpt_to_f32(node.child_offset_x) * scale);
+        let child_oy = draw_y + round_f32(scene::mpt_to_f32(node.child_offset_y) * scale);
 
         traverse_children(
             fb, graph, ctx, node, child_ox, child_oy, child_clip, scale, lru, cache, clip_cache,
@@ -1241,8 +1237,8 @@ fn render_clip_path_children(
                     w: nw,
                     h: nh,
                 };
-                let child_ox = draw_x + round_f32(node.child_offset_x * scale);
-                let child_oy = draw_y + round_f32(node.child_offset_y * scale);
+                let child_ox = draw_x + round_f32(scene::mpt_to_f32(node.child_offset_x) * scale);
+                let child_oy = draw_y + round_f32(scene::mpt_to_f32(node.child_offset_y) * scale);
 
                 traverse_children(
                     fb, graph, ctx, node, child_ox, child_oy, child_clip, scale, lru, cache,
@@ -1270,8 +1266,8 @@ fn render_clip_path_children(
             w: nw,
             h: nh,
         };
-        let child_ox = round_f32(node.child_offset_x * scale);
-        let child_oy = round_f32(node.child_offset_y * scale);
+        let child_ox = round_f32(scene::mpt_to_f32(node.child_offset_x) * scale);
+        let child_oy = round_f32(scene::mpt_to_f32(node.child_offset_y) * scale);
 
         traverse_children(
             &mut off_fb,
@@ -1343,8 +1339,8 @@ fn render_rounded_clip_children(
             w: nw,
             h: nh,
         };
-        let child_ox = round_f32(node.child_offset_x * scale);
-        let child_oy = round_f32(node.child_offset_y * scale);
+        let child_ox = round_f32(scene::mpt_to_f32(node.child_offset_x) * scale);
+        let child_oy = round_f32(scene::mpt_to_f32(node.child_offset_y) * scale);
 
         traverse_children(
             &mut off_fb,
@@ -1400,8 +1396,8 @@ fn render_children_standard(
     } else {
         visible
     };
-    let child_ox = draw_x + round_f32(node.child_offset_x * scale);
-    let child_oy = draw_y + round_f32(node.child_offset_y * scale);
+    let child_ox = draw_x + round_f32(scene::mpt_to_f32(node.child_offset_x) * scale);
+    let child_oy = draw_y + round_f32(scene::mpt_to_f32(node.child_offset_y) * scale);
 
     traverse_children(
         fb, graph, ctx, node, child_ox, child_oy, child_clip, scale, lru, cache, clip_cache,
