@@ -31,6 +31,7 @@ struct PlaybackState {
     client_vmo: Handle,
     conv_va: usize,
     conv_vmo: Handle,
+    cancel_event: Handle,
 }
 
 struct AudioServer {
@@ -42,11 +43,18 @@ struct AudioServer {
 
 impl AudioServer {
     fn write_next_chunk(&mut self) {
-        let pb = match self.playback.as_mut() {
+        let pb = match self.playback.as_ref() {
             Some(pb) => pb,
             None => return,
         };
 
+        if pb.cancel_event.0 != 0 && abi::event::wait_deadline(pb.cancel_event, 0x1, 1).is_ok() {
+            self.stop_playback();
+
+            return;
+        }
+
+        let pb = self.playback.as_mut().unwrap();
         let chunk = pb.remaining.min(SHARED_SIZE);
 
         if chunk == 0 {
@@ -103,6 +111,9 @@ impl AudioServer {
             if pb.conv_vmo.0 != 0 {
                 let _ = abi::handle::close(pb.conv_vmo);
             }
+            if pb.cancel_event.0 != 0 {
+                let _ = abi::handle::close(pb.cancel_event);
+            }
         }
     }
 
@@ -117,6 +128,11 @@ impl AudioServer {
 
         let req = audio_service::PlayRequest::read_from(msg.payload);
         let data_vmo = Handle(msg.handles[0]);
+        let cancel_event = if msg.handles.len() > 1 && msg.handles[1] != 0 {
+            Handle(msg.handles[1])
+        } else {
+            Handle(0)
+        };
         let ro = Rights(Rights::READ.0 | Rights::MAP.0);
         let data_va = match abi::vmo::map(data_vmo, 0, ro) {
             Ok(va) => va,
@@ -140,6 +156,7 @@ impl AudioServer {
                     client_vmo: data_vmo,
                     conv_va: 0,
                     conv_vmo: Handle(0),
+                    cancel_event,
                 });
             }
             FORMAT_WAV => {
@@ -173,6 +190,7 @@ impl AudioServer {
                                 client_vmo: Handle(0),
                                 conv_va,
                                 conv_vmo,
+                                cancel_event,
                             });
                         } else {
                             let _ = abi::handle::close(conv_vmo);
@@ -183,11 +201,19 @@ impl AudioServer {
                 if self.playback.is_none() {
                     let _ = abi::vmo::unmap(data_va);
                     let _ = abi::handle::close(data_vmo);
+
+                    if cancel_event.0 != 0 {
+                        let _ = abi::handle::close(cancel_event);
+                    }
                 }
             }
             _ => {
                 let _ = abi::vmo::unmap(data_va);
                 let _ = abi::handle::close(data_vmo);
+
+                if cancel_event.0 != 0 {
+                    let _ = abi::handle::close(cancel_event);
+                }
             }
         }
 

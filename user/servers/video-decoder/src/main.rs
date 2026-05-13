@@ -67,6 +67,7 @@ struct VideoDecoder {
     audio_pcm_va: usize,
     audio_pcm_bytes: u32,
     audio_ep: Handle,
+    audio_cancel: Handle,
 }
 
 struct PlaybackStats {
@@ -871,9 +872,12 @@ impl VideoDecoder {
         self.codec = 0;
     }
 
-    fn stop_audio_playback(&self) {
-        if self.audio_ep.0 != 0 {
-            let _ = ipc::client::call_simple(self.audio_ep, audio_service::STOP, &[]);
+    fn stop_audio_playback(&mut self) {
+        if self.audio_cancel.0 != 0 {
+            let _ = abi::event::signal(self.audio_cancel, 0x1);
+            let _ = abi::handle::close(self.audio_cancel);
+
+            self.audio_cancel = Handle(0);
         }
         if self.codec_ep.0 != 0 {
             let _ = ipc::client::call_simple(self.codec_ep, video::STOP_AUDIO, &[]);
@@ -897,6 +901,23 @@ impl VideoDecoder {
                 Ok(h) => h,
                 Err(_) => return,
             };
+        let cancel = match abi::event::create() {
+            Ok(h) => h,
+            Err(_) => {
+                let _ = abi::handle::close(pcm_dup);
+
+                return;
+            }
+        };
+        let cancel_dup = match abi::handle::dup(cancel, Rights::ALL) {
+            Ok(h) => h,
+            Err(_) => {
+                let _ = abi::handle::close(pcm_dup);
+                let _ = abi::handle::close(cancel);
+
+                return;
+            }
+        };
         let current_pts = self
             .frame_pts_ns
             .get(self.current_frame as usize)
@@ -914,14 +935,25 @@ impl VideoDecoder {
         req.write_to(&mut payload);
 
         let mut reply_buf = [0u8; ipc::message::MSG_SIZE];
-        let _ = ipc::client::call(
+
+        if ipc::client::call(
             self.audio_ep,
             audio_service::PLAY,
             &payload,
-            &[pcm_dup.0],
+            &[pcm_dup.0, cancel_dup.0],
             &mut [],
             &mut reply_buf,
-        );
+        )
+        .is_ok()
+        {
+            if self.audio_cancel.0 != 0 {
+                let _ = abi::handle::close(self.audio_cancel);
+            }
+
+            self.audio_cancel = cancel;
+        } else {
+            let _ = abi::handle::close(cancel);
+        }
     }
 }
 
@@ -1054,6 +1086,7 @@ extern "C" fn _start() -> ! {
         audio_pcm_va: 0,
         audio_pcm_bytes: 0,
         audio_ep: Handle(0),
+        audio_cancel: Handle(0),
     };
 
     loop {

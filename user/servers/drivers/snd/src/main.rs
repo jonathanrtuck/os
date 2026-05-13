@@ -155,7 +155,16 @@ impl SndDevice {
             return;
         }
 
-        let _ = abi::event::wait(&[(self.irq_event, 0x1)]);
+        let now = abi::system::clock_read().unwrap_or(0);
+        let deadline = now + 500_000_000;
+
+        if abi::event::wait_deadline(self.irq_event, 0x1, deadline).is_err() {
+            self.tx_pending = false;
+            self.stopped = true;
+            self.started = false;
+
+            return;
+        }
 
         self.device.ack_interrupt();
 
@@ -308,9 +317,14 @@ impl Dispatch for SndServer {
                 }
 
                 if self.snd.stopped {
-                    let _ = msg.reply_error(ipc::STATUS_IO_ERROR);
+                    self.snd.stopped = false;
+                    self.snd.started = false;
 
-                    return;
+                    if !self.snd.prepare() || !self.snd.start() {
+                        let _ = msg.reply_error(ipc::STATUS_IO_ERROR);
+
+                        return;
+                    }
                 }
 
                 while written < f32_count {
