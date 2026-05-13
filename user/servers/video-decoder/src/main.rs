@@ -38,12 +38,6 @@ const SHARED_VMO_SIZE: usize = PAGE_SIZE * 64;
 
 const RIFF_MAGIC: [u8; 4] = *b"RIFF";
 
-struct AudioThreadCleanup {
-    stack_base: *mut u8,
-    stack_layout: alloc::alloc::Layout,
-    death_event: Handle,
-}
-
 struct VideoDecoder {
     console_ep: Handle,
     file_vmo: Handle,
@@ -72,7 +66,7 @@ struct VideoDecoder {
     audio_pcm_vmo: Handle,
     audio_pcm_va: usize,
     audio_pcm_bytes: u32,
-    audio_cleanup: Option<AudioThreadCleanup>,
+    audio_ep: Handle,
 }
 
 struct PlaybackStats {
@@ -835,7 +829,6 @@ impl VideoDecoder {
 
     fn close_current(&mut self) {
         self.stop_audio_playback();
-        self.try_reclaim_audio_stack();
 
         if self.file_va != 0 {
             let _ = abi::vmo::unmap(self.file_va);
@@ -879,26 +872,11 @@ impl VideoDecoder {
     }
 
     fn stop_audio_playback(&self) {
-        if self.codec_ep.0 == 0 {
-            return;
+        if self.audio_ep.0 != 0 {
+            let _ = ipc::client::call_simple(self.audio_ep, audio_service::STOP, &[]);
         }
-
-        let _ = ipc::client::call_simple(self.codec_ep, video::STOP_AUDIO, &[]);
-    }
-
-    fn try_reclaim_audio_stack(&mut self) {
-        if self.audio_cleanup.is_none() {
-            return;
-        }
-
-        let evt = self.audio_cleanup.as_ref().unwrap().death_event;
-
-        if abi::event::wait_deadline(evt, 0x1, 1).is_ok() {
-            let cleanup = self.audio_cleanup.take().unwrap();
-            let _ = abi::handle::close(cleanup.death_event);
-
-            // SAFETY: stack was allocated with this layout; thread has exited.
-            unsafe { alloc::alloc::dealloc(cleanup.stack_base, cleanup.stack_layout) };
+        if self.codec_ep.0 != 0 {
+            let _ = ipc::client::call_simple(self.codec_ep, video::STOP_AUDIO, &[]);
         }
     }
 
@@ -907,20 +885,17 @@ impl VideoDecoder {
             return;
         }
 
-        self.try_reclaim_audio_stack();
+        if self.audio_ep.0 == 0 {
+            self.audio_ep = match name::lookup(HANDLE_NS_EP, b"audio") {
+                Ok(h) => h,
+                Err(_) => return,
+            };
+        }
 
-        let audio_ep = match name::lookup(HANDLE_NS_EP, b"audio") {
-            Ok(h) => h,
-            Err(_) => return,
-        };
         let pcm_dup =
             match abi::handle::dup(self.audio_pcm_vmo, Rights(Rights::READ.0 | Rights::MAP.0)) {
                 Ok(h) => h,
-                Err(_) => {
-                    let _ = abi::handle::close(audio_ep);
-
-                    return;
-                }
+                Err(_) => return,
             };
         let current_pts = self
             .frame_pts_ns
@@ -928,90 +903,26 @@ impl VideoDecoder {
             .copied()
             .unwrap_or(0);
         let pcm_offset = (current_pts * 48000 * 8 / 1_000_000_000) as u32 & !7;
-        let args = alloc::boxed::Box::new(AudioPlayArgs {
-            audio_ep: audio_ep.0,
-            pcm_vmo: pcm_dup.0,
-            pcm_bytes: self.audio_pcm_bytes,
-            pcm_offset,
-        });
-        let arg_ptr = alloc::boxed::Box::into_raw(args) as usize;
-        let stack_layout = match alloc::alloc::Layout::from_size_align(PAGE_SIZE, PAGE_SIZE) {
-            Ok(l) => l,
-            Err(_) => return,
+        let remaining = self.audio_pcm_bytes.saturating_sub(pcm_offset);
+        let req = audio_service::PlayRequest {
+            format: audio_service::FORMAT_F32_STEREO_48K,
+            data_len: remaining,
+            data_offset: pcm_offset,
         };
-        // SAFETY: layout is non-zero size with valid alignment.
-        let stack_base = unsafe { alloc::alloc::alloc(stack_layout) };
+        let mut payload = [0u8; audio_service::PlayRequest::SIZE];
 
-        if stack_base.is_null() {
-            return;
-        }
+        req.write_to(&mut payload);
 
-        let stack_top = stack_base as usize + PAGE_SIZE;
-        let entry = audio_play_thread as extern "C" fn(usize) -> ! as usize;
-        let death_event = match abi::event::create() {
-            Ok(h) => h,
-            Err(_) => {
-                // SAFETY: stack was just allocated with this layout.
-                unsafe { alloc::alloc::dealloc(stack_base, stack_layout) };
-
-                return;
-            }
-        };
-
-        match abi::thread::create(entry, stack_top, arg_ptr) {
-            Ok(thread) => {
-                let _ = abi::event::bind_thread(death_event, thread);
-                let _ = abi::handle::close(thread);
-
-                self.audio_cleanup = Some(AudioThreadCleanup {
-                    stack_base,
-                    stack_layout,
-                    death_event,
-                });
-            }
-            Err(_) => {
-                let _ = abi::handle::close(death_event);
-
-                // SAFETY: thread creation failed; stack is unused.
-                unsafe { alloc::alloc::dealloc(stack_base, stack_layout) };
-            }
-        }
+        let mut reply_buf = [0u8; ipc::message::MSG_SIZE];
+        let _ = ipc::client::call(
+            self.audio_ep,
+            audio_service::PLAY,
+            &payload,
+            &[pcm_dup.0],
+            &mut [],
+            &mut reply_buf,
+        );
     }
-}
-
-#[repr(C)]
-struct AudioPlayArgs {
-    audio_ep: u32,
-    pcm_vmo: u32,
-    pcm_bytes: u32,
-    pcm_offset: u32,
-}
-
-extern "C" fn audio_play_thread(arg: usize) -> ! {
-    // SAFETY: arg is a pointer to a heap-allocated AudioPlayArgs.
-    let args = unsafe { &*(arg as *const AudioPlayArgs) };
-    let ep = Handle(args.audio_ep);
-    let vmo = Handle(args.pcm_vmo);
-    let remaining = args.pcm_bytes.saturating_sub(args.pcm_offset);
-    let req = audio_service::PlayRequest {
-        format: audio_service::FORMAT_F32_STEREO_48K,
-        data_len: remaining,
-        data_offset: args.pcm_offset,
-    };
-    let mut payload = [0u8; audio_service::PlayRequest::SIZE];
-
-    req.write_to(&mut payload);
-
-    let mut buf = [0u8; ipc::message::MSG_SIZE];
-    let total = ipc::message::write_request(&mut buf, audio_service::PLAY, &payload);
-    let _ = abi::ipc::call(ep, &mut buf, total, &[vmo.0], &mut []);
-
-    // SAFETY: arg was heap-allocated in start_audio_playback; we own it.
-    unsafe {
-        let _ = alloc::boxed::Box::from_raw(arg as *mut AudioPlayArgs);
-    }
-
-    abi::thread::exit(0);
 }
 
 impl Dispatch for VideoDecoder {
@@ -1142,7 +1053,7 @@ extern "C" fn _start() -> ! {
         audio_pcm_vmo: Handle(0),
         audio_pcm_va: 0,
         audio_pcm_bytes: 0,
-        audio_cleanup: None,
+        audio_ep: Handle(0),
     };
 
     loop {

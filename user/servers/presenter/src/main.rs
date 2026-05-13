@@ -516,7 +516,6 @@ pub(crate) struct Presenter {
     pub(crate) audio_ep: Handle,
     pub(crate) audio_vmo: Handle,
     pub(crate) audio_data_len: u32,
-    play_cleanup: Option<PlayThreadCleanup>,
 
     pub(crate) console_ep: Handle,
     pub(crate) layout_dirty: bool,
@@ -1108,124 +1107,37 @@ fn load_audio_clip(server: &mut Presenter) {
     console::write(server.console_ep, b"presenter: audio clip loaded\n");
 }
 
-// ── Audio playback (threaded to avoid blocking the event loop) ───
-
-#[repr(C)]
-struct PlayArgs {
-    audio_ep: u32,
-    vmo_dup: u32,
-    data_len: u32,
-}
-
-struct PlayThreadCleanup {
-    stack_base: *mut u8,
-    stack_layout: alloc::alloc::Layout,
-    death_event: Handle,
-}
-
-extern "C" fn play_thread_entry(arg: usize) -> ! {
-    // SAFETY: arg is a pointer to a heap-allocated PlayArgs.
-    let args = unsafe { &*(arg as *const PlayArgs) };
-    let ep = Handle(args.audio_ep);
-    let vmo_dup = Handle(args.vmo_dup);
-    let data_len = args.data_len;
-    let req = audio_service::PlayRequest {
-        format: audio_service::FORMAT_WAV,
-        data_len,
-        data_offset: 0,
-    };
-    let mut payload = [0u8; audio_service::PlayRequest::SIZE];
-
-    req.write_to(&mut payload);
-
-    let mut buf = [0u8; ipc::message::MSG_SIZE];
-    let total = ipc::message::write_request(&mut buf, audio_service::PLAY, &payload);
-    let _ = abi::ipc::call(ep, &mut buf, total, &[vmo_dup.0], &mut []);
-
-    // SAFETY: arg was heap-allocated in play_audio_clip; we own it.
-    unsafe {
-        let _ = alloc::boxed::Box::from_raw(arg as *mut PlayArgs);
-    }
-
-    abi::thread::exit(0);
-}
-
-const PLAY_THREAD_STACK_SIZE: usize = PAGE_SIZE;
+// ── Audio playback ────────────────────────────────────────
 
 impl Presenter {
-    fn try_reclaim_play_stack(&mut self) {
-        if self.play_cleanup.is_none() {
-            return;
-        }
-        let evt = self.play_cleanup.as_ref().unwrap().death_event;
-
-        if abi::event::wait_deadline(evt, 0x1, 1).is_ok() {
-            let cleanup = self.play_cleanup.take().unwrap();
-            let _ = abi::handle::close(cleanup.death_event);
-            // SAFETY: stack was allocated with this layout; thread has exited.
-            unsafe { alloc::alloc::dealloc(cleanup.stack_base, cleanup.stack_layout) };
-        }
-    }
-
-    fn play_audio_clip(&mut self) {
+    fn play_audio_clip(&self) {
         if self.audio_ep.0 == 0 || self.audio_vmo.0 == 0 {
             return;
         }
-
-        self.try_reclaim_play_stack();
 
         let ro = Rights(Rights::READ.0 | Rights::MAP.0);
         let vmo_dup = match abi::handle::dup(self.audio_vmo, ro) {
             Ok(h) => h,
             Err(_) => return,
         };
-        let args = alloc::boxed::Box::new(PlayArgs {
-            audio_ep: self.audio_ep.0,
-            vmo_dup: vmo_dup.0,
+        let req = audio_service::PlayRequest {
+            format: audio_service::FORMAT_WAV,
             data_len: self.audio_data_len,
-        });
-        let arg_ptr = alloc::boxed::Box::into_raw(args) as usize;
-        let stack_layout = alloc::alloc::Layout::from_size_align(PLAY_THREAD_STACK_SIZE, PAGE_SIZE);
-        let stack_layout = match stack_layout {
-            Ok(l) => l,
-            Err(_) => return,
+            data_offset: 0,
         };
+        let mut payload = [0u8; audio_service::PlayRequest::SIZE];
 
-        // SAFETY: layout is non-zero size with valid alignment.
-        let stack_base = unsafe { alloc::alloc::alloc(stack_layout) };
+        req.write_to(&mut payload);
 
-        if stack_base.is_null() {
-            return;
-        }
-
-        let stack_top = stack_base as usize + PLAY_THREAD_STACK_SIZE;
-        let entry = play_thread_entry as extern "C" fn(usize) -> ! as usize;
-        let death_event = match abi::event::create() {
-            Ok(h) => h,
-            Err(_) => {
-                // SAFETY: stack was just allocated with this layout.
-                unsafe { alloc::alloc::dealloc(stack_base, stack_layout) };
-                return;
-            }
-        };
-
-        match abi::thread::create(entry, stack_top, arg_ptr) {
-            Ok(thread) => {
-                let _ = abi::event::bind_thread(death_event, thread);
-                let _ = abi::handle::close(thread);
-
-                self.play_cleanup = Some(PlayThreadCleanup {
-                    stack_base,
-                    stack_layout,
-                    death_event,
-                });
-            }
-            Err(_) => {
-                let _ = abi::handle::close(death_event);
-                // SAFETY: thread creation failed; stack is unused.
-                unsafe { alloc::alloc::dealloc(stack_base, stack_layout) };
-            }
-        }
+        let mut reply_buf = [0u8; ipc::message::MSG_SIZE];
+        let _ = ipc::client::call(
+            self.audio_ep,
+            audio_service::PLAY,
+            &payload,
+            &[vmo_dup.0],
+            &mut [],
+            &mut reply_buf,
+        );
     }
 
     fn toggle_video_playback(&mut self) {
@@ -1500,7 +1412,6 @@ extern "C" fn _start() -> ! {
         audio_ep: Handle(0),
         audio_vmo: Handle(0),
         audio_data_len: 0,
-        play_cleanup: None,
         console_ep,
         layout_dirty: true,
     };

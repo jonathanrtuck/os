@@ -9,6 +9,7 @@
 //! and forwards to the snd driver for playback.
 
 pub const PLAY: u32 = 1;
+pub const STOP: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlayRequest {

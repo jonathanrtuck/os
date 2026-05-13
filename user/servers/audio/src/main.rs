@@ -4,9 +4,9 @@
 //!   Handle 2: name service endpoint
 //!   Handle 3: service endpoint (pre-registered by init as "audio")
 //!
-//! Looks up the "snd" driver via name service. On PLAY: maps the
-//! client's data VMO, decodes if WAV, converts to F32 stereo 48 kHz,
-//! and forwards to the snd driver via shared VMO + WRITE.
+//! Looks up the "snd" driver via name service. Runs an event-driven
+//! loop: when idle, blocks on recv. During playback, writes one chunk
+//! to the snd driver per iteration, polling for STOP between chunks.
 
 #![no_std]
 #![no_main]
@@ -24,120 +24,184 @@ const PAGE_SIZE: usize = 16384;
 const SHARED_PAGES: usize = 4;
 const SHARED_SIZE: usize = PAGE_SIZE * SHARED_PAGES;
 
+struct PlaybackState {
+    src: usize,
+    remaining: usize,
+    client_va: usize,
+    client_vmo: Handle,
+    conv_va: usize,
+    conv_vmo: Handle,
+}
+
 struct AudioServer {
     snd_ep: Handle,
     _shared_vmo: Handle,
     shared_va: usize,
+    playback: Option<PlaybackState>,
 }
 
 impl AudioServer {
-    fn forward_f32(&mut self, f32_data: &[f32]) {
-        let byte_len = f32_data.len() * 4;
-        let mut written = 0;
+    fn write_next_chunk(&mut self) {
+        let pb = match self.playback.as_mut() {
+            Some(pb) => pb,
+            None => return,
+        };
 
-        while written < byte_len {
-            let chunk = (byte_len - written).min(SHARED_SIZE);
-            let src = unsafe {
-                core::slice::from_raw_parts((f32_data.as_ptr() as *const u8).add(written), chunk)
-            };
-            let dst = self.shared_va as *mut u8;
+        let chunk = pb.remaining.min(SHARED_SIZE);
 
-            // SAFETY: shared_va is a mapped VMO of SHARED_SIZE bytes.
-            unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), dst, chunk) };
+        if chunk == 0 {
+            self.stop_playback();
 
-            let req = snd::WriteRequest {
-                offset: 0,
-                len: chunk as u32,
-            };
-            let mut payload = [0u8; snd::WriteRequest::SIZE];
-
-            req.write_to(&mut payload);
-
-            let mut buf = [0u8; ipc::message::MSG_SIZE];
-            let total = ipc::message::write_request(&mut buf, snd::WRITE, &payload);
-            let _ = abi::ipc::call(self.snd_ep, &mut buf, total, &[], &mut []);
-            let reply = ipc::message::Header::read_from(&buf);
-
-            if reply.is_error() {
-                break;
-            }
-
-            written += chunk;
+            return;
         }
+
+        // SAFETY: src points into a mapped VMO; shared_va is SHARED_SIZE bytes.
+        unsafe {
+            core::ptr::copy_nonoverlapping(pb.src as *const u8, self.shared_va as *mut u8, chunk);
+        }
+
+        let req = snd::WriteRequest {
+            offset: 0,
+            len: chunk as u32,
+        };
+        let mut payload = [0u8; snd::WriteRequest::SIZE];
+
+        req.write_to(&mut payload);
+
+        let mut buf = [0u8; ipc::message::MSG_SIZE];
+        let total = ipc::message::write_request(&mut buf, snd::WRITE, &payload);
+        let _ = abi::ipc::call(self.snd_ep, &mut buf, total, &[], &mut []);
+        let reply = ipc::message::Header::read_from(&buf);
+
+        if reply.is_error() {
+            self.stop_playback();
+
+            return;
+        }
+
+        let pb = self.playback.as_mut().unwrap();
+
+        pb.src += chunk;
+        pb.remaining -= chunk;
+
+        if pb.remaining == 0 {
+            self.stop_playback();
+        }
+    }
+
+    fn stop_playback(&mut self) {
+        if let Some(pb) = self.playback.take() {
+            if pb.client_va != 0 {
+                let _ = abi::vmo::unmap(pb.client_va);
+            }
+            if pb.client_vmo.0 != 0 {
+                let _ = abi::handle::close(pb.client_vmo);
+            }
+            if pb.conv_va != 0 {
+                let _ = abi::vmo::unmap(pb.conv_va);
+            }
+            if pb.conv_vmo.0 != 0 {
+                let _ = abi::handle::close(pb.conv_vmo);
+            }
+        }
+    }
+
+    fn handle_play(&mut self, msg: Incoming<'_>) {
+        if msg.payload.len() < audio_service::PlayRequest::SIZE || msg.handles.is_empty() {
+            let _ = msg.reply_error(ipc::STATUS_INVALID);
+
+            return;
+        }
+
+        self.stop_playback();
+
+        let req = audio_service::PlayRequest::read_from(msg.payload);
+        let data_vmo = Handle(msg.handles[0]);
+        let ro = Rights(Rights::READ.0 | Rights::MAP.0);
+        let data_va = match abi::vmo::map(data_vmo, 0, ro) {
+            Ok(va) => va,
+            Err(_) => {
+                let _ = abi::handle::close(data_vmo);
+                let _ = msg.reply_error(ipc::STATUS_INVALID);
+
+                return;
+            }
+        };
+
+        match req.format {
+            FORMAT_F32_STEREO_48K => {
+                let offset = req.data_offset as usize;
+                let len = req.data_len as usize;
+
+                self.playback = Some(PlaybackState {
+                    src: data_va + offset,
+                    remaining: len,
+                    client_va: data_va,
+                    client_vmo: data_vmo,
+                    conv_va: 0,
+                    conv_vmo: Handle(0),
+                });
+            }
+            FORMAT_WAV => {
+                let wav_data = unsafe {
+                    core::slice::from_raw_parts(data_va as *const u8, req.data_len as usize)
+                };
+
+                if let Ok(info) = wav::parse(wav_data) {
+                    let frame_count = wav::frame_count(&info);
+                    let f32_samples = frame_count * 2;
+                    let f32_bytes = f32_samples * 4;
+                    let f32_pages = f32_bytes.div_ceil(PAGE_SIZE);
+
+                    if let Ok(conv_vmo) = abi::vmo::create(f32_pages * PAGE_SIZE, 0) {
+                        let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
+
+                        if let Ok(conv_va) = abi::vmo::map(conv_vmo, 0, rw) {
+                            let out = unsafe {
+                                core::slice::from_raw_parts_mut(conv_va as *mut f32, f32_samples)
+                            };
+
+                            wav::to_f32_stereo_48k(wav_data, &info, out);
+
+                            let _ = abi::vmo::unmap(data_va);
+                            let _ = abi::handle::close(data_vmo);
+
+                            self.playback = Some(PlaybackState {
+                                src: conv_va,
+                                remaining: f32_bytes,
+                                client_va: 0,
+                                client_vmo: Handle(0),
+                                conv_va,
+                                conv_vmo,
+                            });
+                        } else {
+                            let _ = abi::handle::close(conv_vmo);
+                        }
+                    }
+                }
+
+                if self.playback.is_none() {
+                    let _ = abi::vmo::unmap(data_va);
+                    let _ = abi::handle::close(data_vmo);
+                }
+            }
+            _ => {
+                let _ = abi::vmo::unmap(data_va);
+                let _ = abi::handle::close(data_vmo);
+            }
+        }
+
+        let _ = msg.reply_empty();
     }
 }
 
 impl Dispatch for AudioServer {
     fn dispatch(&mut self, msg: Incoming<'_>) {
         match msg.method {
-            audio_service::PLAY => {
-                if msg.payload.len() < audio_service::PlayRequest::SIZE || msg.handles.is_empty() {
-                    let _ = msg.reply_error(ipc::STATUS_INVALID);
+            audio_service::PLAY => self.handle_play(msg),
+            audio_service::STOP => {
+                self.stop_playback();
 
-                    return;
-                }
-
-                let req = audio_service::PlayRequest::read_from(msg.payload);
-                let data_vmo = Handle(msg.handles[0]);
-                let ro = Rights(Rights::READ.0 | Rights::MAP.0);
-                let data_va = match abi::vmo::map(data_vmo, 0, ro) {
-                    Ok(va) => va,
-                    Err(_) => {
-                        let _ = msg.reply_error(ipc::STATUS_INVALID);
-
-                        return;
-                    }
-                };
-                let data_offset = req.data_offset as usize;
-                let data_len = req.data_len as usize;
-
-                match req.format {
-                    FORMAT_F32_STEREO_48K => {
-                        let start = data_offset / 4;
-                        let f32_count = data_len / 4;
-                        let total = start + f32_count;
-                        let f32_data =
-                            unsafe { core::slice::from_raw_parts(data_va as *const f32, total) };
-
-                        self.forward_f32(&f32_data[start..]);
-                    }
-                    FORMAT_WAV => {
-                        let wav_data =
-                            unsafe { core::slice::from_raw_parts(data_va as *const u8, data_len) };
-
-                        if let Ok(info) = wav::parse(wav_data) {
-                            let frame_count = wav::frame_count(&info);
-                            let f32_samples = frame_count * 2;
-                            let f32_bytes = f32_samples * 4;
-                            let f32_pages = f32_bytes.div_ceil(PAGE_SIZE);
-
-                            if let Ok(conv_vmo) = abi::vmo::create(f32_pages * PAGE_SIZE, 0) {
-                                let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
-
-                                if let Ok(conv_va) = abi::vmo::map(conv_vmo, 0, rw) {
-                                    let out = unsafe {
-                                        core::slice::from_raw_parts_mut(
-                                            conv_va as *mut f32,
-                                            f32_samples,
-                                        )
-                                    };
-
-                                    wav::to_f32_stereo_48k(wav_data, &info, out);
-
-                                    self.forward_f32(out);
-
-                                    let _ = abi::vmo::unmap(conv_va);
-                                }
-
-                                let _ = abi::handle::close(conv_vmo);
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-
-                let _ = abi::vmo::unmap(data_va);
-                let _ = abi::handle::close(data_vmo);
                 let _ = msg.reply_empty();
             }
             _ => {
@@ -188,11 +252,18 @@ extern "C" fn _start() -> ! {
         snd_ep,
         _shared_vmo: shared_vmo,
         shared_va,
+        playback: None,
     };
 
-    ipc::server::serve(HANDLE_SVC_EP, &mut server);
+    loop {
+        if server.playback.is_some() {
+            server.write_next_chunk();
 
-    abi::thread::exit(0);
+            let _ = ipc::server::serve_one_timed(HANDLE_SVC_EP, &mut server, 1);
+        } else {
+            let _ = ipc::server::serve_one(HANDLE_SVC_EP, &mut server);
+        }
+    }
 }
 
 #[panic_handler]
