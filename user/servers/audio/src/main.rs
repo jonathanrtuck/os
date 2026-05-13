@@ -56,6 +56,11 @@ impl AudioServer {
             let mut buf = [0u8; ipc::message::MSG_SIZE];
             let total = ipc::message::write_request(&mut buf, snd::WRITE, &payload);
             let _ = abi::ipc::call(self.snd_ep, &mut buf, total, &[], &mut []);
+            let reply = ipc::message::Header::read_from(&buf);
+
+            if reply.is_error() {
+                break;
+            }
 
             written += chunk;
         }
@@ -83,16 +88,18 @@ impl Dispatch for AudioServer {
                         return;
                     }
                 };
+                let data_offset = req.data_offset as usize;
                 let data_len = req.data_len as usize;
 
                 match req.format {
                     FORMAT_F32_STEREO_48K => {
+                        let start = data_offset / 4;
                         let f32_count = data_len / 4;
-                        let f32_data = unsafe {
-                            core::slice::from_raw_parts(data_va as *const f32, f32_count)
-                        };
+                        let total = start + f32_count;
+                        let f32_data =
+                            unsafe { core::slice::from_raw_parts(data_va as *const f32, total) };
 
-                        self.forward_f32(f32_data);
+                        self.forward_f32(&f32_data[start..]);
                     }
                     FORMAT_WAV => {
                         let wav_data =
@@ -118,13 +125,19 @@ impl Dispatch for AudioServer {
                                     wav::to_f32_stereo_48k(wav_data, &info, out);
 
                                     self.forward_f32(out);
+
+                                    let _ = abi::vmo::unmap(conv_va);
                                 }
+
+                                let _ = abi::handle::close(conv_vmo);
                             }
                         }
                     }
                     _ => {}
                 }
 
+                let _ = abi::vmo::unmap(data_va);
+                let _ = abi::handle::close(data_vmo);
                 let _ = msg.reply_empty();
             }
             _ => {

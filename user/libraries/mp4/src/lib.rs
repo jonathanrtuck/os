@@ -1,5 +1,5 @@
-//! MP4 (ISO 14496-12) container parser — extracts H.264 video stream metadata,
-//! AVC decoder configuration, and per-sample data references from MP4 files.
+//! MP4 (ISO 14496-12) container parser — extracts video and audio stream
+//! metadata, codec configuration, and per-sample data references from MP4 files.
 //!
 //! no_std, no alloc. All operations reference the caller's data slice.
 
@@ -25,6 +25,13 @@ pub struct SampleRef {
     pub is_keyframe: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrackType {
+    Video,
+    Audio,
+    Other,
+}
+
 pub struct Mp4<'a> {
     data: &'a [u8],
     pub width: u32,
@@ -47,6 +54,23 @@ pub struct Mp4<'a> {
     co64: bool,
     stss_offset: usize,
     stss_count: u32,
+    // Audio track
+    audio_timescale: u32,
+    audio_duration: u64,
+    audio_total_samples: u32,
+    audio_sample_rate: u32,
+    audio_channels: u16,
+    audio_config_offset: usize,
+    audio_config_size: usize,
+    audio_stts_offset: usize,
+    audio_stts_count: u32,
+    audio_stsc_offset: usize,
+    audio_stsc_count: u32,
+    audio_stsz_offset: usize,
+    audio_stsz_default_size: u32,
+    audio_stco_offset: usize,
+    audio_stco_count: u32,
+    audio_co64: bool,
 }
 
 // ── Read helpers ───────────────────────────────────────────────────
@@ -182,6 +206,22 @@ pub fn parse(data: &[u8]) -> Result<Mp4<'_>, Error> {
         co64: false,
         stss_offset: 0,
         stss_count: 0,
+        audio_timescale: 0,
+        audio_duration: 0,
+        audio_total_samples: 0,
+        audio_sample_rate: 0,
+        audio_channels: 0,
+        audio_config_offset: 0,
+        audio_config_size: 0,
+        audio_stts_offset: 0,
+        audio_stts_count: 0,
+        audio_stsc_offset: 0,
+        audio_stsc_count: 0,
+        audio_stsz_offset: 0,
+        audio_stsz_default_size: 0,
+        audio_stco_offset: 0,
+        audio_stco_count: 0,
+        audio_co64: false,
     };
 
     parse_moov(data, moov_start, moov_end, &mut mp4)?;
@@ -204,15 +244,24 @@ fn parse_moov<'a>(
     mp4: &mut Mp4<'a>,
 ) -> Result<(), Error> {
     let mut found_video = false;
+    let mut found_audio = false;
 
     for (tag, ds, be) in BoxIter::new(data, start, end) {
         match &tag {
             b"mvhd" => parse_mvhd(data, ds, be, mp4),
-            b"trak" if !found_video => {
-                if parse_trak(data, ds, be, mp4)? {
-                    found_video = true;
+            b"trak" => match parse_trak_type(data, ds, be) {
+                TrackType::Video if !found_video => {
+                    if parse_video_trak(data, ds, be, mp4)? {
+                        found_video = true;
+                    }
                 }
-            }
+                TrackType::Audio if !found_audio => {
+                    if parse_audio_trak(data, ds, be, mp4) {
+                        found_audio = true;
+                    }
+                }
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -248,13 +297,26 @@ fn parse_mvhd(data: &[u8], data_start: usize, end: usize, mp4: &mut Mp4<'_>) {
     }
 }
 
-fn parse_trak<'a>(
+fn parse_trak_type(data: &[u8], start: usize, end: usize) -> TrackType {
+    for (tag, ds, be) in BoxIter::new(data, start, end) {
+        if &tag == b"mdia" {
+            for (mtag, mds, mbe) in BoxIter::new(data, ds, be) {
+                if &mtag == b"hdlr" {
+                    return parse_hdlr(data, mds, mbe);
+                }
+            }
+        }
+    }
+
+    TrackType::Other
+}
+
+fn parse_video_trak<'a>(
     data: &'a [u8],
     start: usize,
     end: usize,
     mp4: &mut Mp4<'a>,
 ) -> Result<bool, Error> {
-    let mut is_video = false;
     let mut tkhd_width: u32 = 0;
     let mut tkhd_height: u32 = 0;
     let mut mdia_range: Option<(usize, usize)> = None;
@@ -268,15 +330,17 @@ fn parse_trak<'a>(
     }
 
     if let Some((ms, me)) = mdia_range {
-        is_video = parse_mdia(data, ms, me, mp4)?;
+        if !parse_video_mdia(data, ms, me, mp4)? {
+            return Ok(false);
+        }
+    } else {
+        return Ok(false);
     }
 
-    if is_video {
-        mp4.width = tkhd_width;
-        mp4.height = tkhd_height;
-    }
+    mp4.width = tkhd_width;
+    mp4.height = tkhd_height;
 
-    Ok(is_video)
+    Ok(true)
 }
 
 fn parse_tkhd(data: &[u8], data_start: usize, end: usize, width: &mut u32, height: &mut u32) {
@@ -295,38 +359,30 @@ fn parse_tkhd(data: &[u8], data_start: usize, end: usize, width: &mut u32, heigh
     *height = read_u32(data, wh_offset + 4).unwrap_or(0) >> 16;
 }
 
-fn parse_mdia<'a>(
+fn parse_video_mdia<'a>(
     data: &'a [u8],
     start: usize,
     end: usize,
     mp4: &mut Mp4<'a>,
 ) -> Result<bool, Error> {
-    let mut is_video = false;
     let mut minf_range: Option<(usize, usize)> = None;
 
     for (tag, ds, be) in BoxIter::new(data, start, end) {
         match &tag {
-            b"mdhd" => parse_mdhd(data, ds, be, mp4),
-            b"hdlr" => {
-                is_video = parse_hdlr(data, ds, be);
-            }
+            b"mdhd" => parse_mdhd(data, ds, be, &mut mp4.timescale, &mut mp4.duration),
             b"minf" => minf_range = Some((ds, be)),
             _ => {}
         }
-    }
-
-    if !is_video {
-        return Ok(false);
     }
 
     if let Some((ms, me)) = minf_range {
         parse_minf(data, ms, me, mp4)?;
     }
 
-    Ok(true)
+    Ok(mp4.stts_count > 0)
 }
 
-fn parse_mdhd(data: &[u8], data_start: usize, end: usize, mp4: &mut Mp4<'_>) {
+fn parse_mdhd(data: &[u8], data_start: usize, end: usize, timescale: &mut u32, duration: &mut u64) {
     let Some(pos) = fullbox_payload(data_start, end) else {
         return;
     };
@@ -337,29 +393,32 @@ fn parse_mdhd(data: &[u8], data_start: usize, end: usize, mp4: &mut Mp4<'_>) {
             return;
         }
 
-        mp4.timescale = read_u32(data, pos + 16).unwrap_or(0);
-        mp4.duration = read_u64(data, pos + 20).unwrap_or(0);
+        *timescale = read_u32(data, pos + 16).unwrap_or(0);
+        *duration = read_u64(data, pos + 20).unwrap_or(0);
     } else {
         if pos + 16 > end {
             return;
         }
 
-        mp4.timescale = read_u32(data, pos + 8).unwrap_or(0);
-        mp4.duration = read_u32(data, pos + 12).unwrap_or(0) as u64;
+        *timescale = read_u32(data, pos + 8).unwrap_or(0);
+        *duration = read_u32(data, pos + 12).unwrap_or(0) as u64;
     }
 }
 
-fn parse_hdlr(data: &[u8], data_start: usize, end: usize) -> bool {
+fn parse_hdlr(data: &[u8], data_start: usize, end: usize) -> TrackType {
     let Some(pos) = fullbox_payload(data_start, end) else {
-        return false;
+        return TrackType::Other;
     };
 
-    // handler_type is at offset 4 within the hdlr payload (after pre_defined)
     if pos + 8 > end {
-        return false;
+        return TrackType::Other;
     }
 
-    fourcc(data, pos + 4) == Some(*b"vide")
+    match fourcc(data, pos + 4) {
+        Some(b) if b == *b"vide" => TrackType::Video,
+        Some(b) if b == *b"soun" => TrackType::Audio,
+        _ => TrackType::Other,
+    }
 }
 
 fn parse_minf<'a>(
@@ -537,6 +596,194 @@ fn parse_stss(data: &[u8], data_start: usize, end: usize, mp4: &mut Mp4<'_>) {
     mp4.stss_offset = pos + 4;
 }
 
+// ── Audio track parsing ───────────────────────────────────────────
+
+fn parse_audio_trak(data: &[u8], start: usize, end: usize, mp4: &mut Mp4<'_>) -> bool {
+    for (tag, ds, be) in BoxIter::new(data, start, end) {
+        if &tag == b"mdia" {
+            return parse_audio_mdia(data, ds, be, mp4);
+        }
+    }
+
+    false
+}
+
+fn parse_audio_mdia(data: &[u8], start: usize, end: usize, mp4: &mut Mp4<'_>) -> bool {
+    let mut minf_range: Option<(usize, usize)> = None;
+
+    for (tag, ds, be) in BoxIter::new(data, start, end) {
+        match &tag {
+            b"mdhd" => parse_mdhd(
+                data,
+                ds,
+                be,
+                &mut mp4.audio_timescale,
+                &mut mp4.audio_duration,
+            ),
+            b"minf" => minf_range = Some((ds, be)),
+            _ => {}
+        }
+    }
+
+    if let Some((ms, me)) = minf_range {
+        parse_audio_minf(data, ms, me, mp4)
+    } else {
+        false
+    }
+}
+
+fn parse_audio_minf(data: &[u8], start: usize, end: usize, mp4: &mut Mp4<'_>) -> bool {
+    for (tag, ds, be) in BoxIter::new(data, start, end) {
+        if &tag == b"stbl" {
+            return parse_audio_stbl(data, ds, be, mp4);
+        }
+    }
+
+    false
+}
+
+fn parse_audio_stbl(data: &[u8], start: usize, end: usize, mp4: &mut Mp4<'_>) -> bool {
+    for (tag, ds, be) in BoxIter::new(data, start, end) {
+        match &tag {
+            b"stsd" => parse_audio_stsd(data, ds, be, mp4),
+            b"stts" => {
+                if let Some(pos) = fullbox_payload(ds, be) {
+                    if pos + 4 <= be {
+                        mp4.audio_stts_count = read_u32(data, pos).unwrap_or(0);
+                        mp4.audio_stts_offset = pos + 4;
+                    }
+                }
+            }
+            b"stsc" => {
+                if let Some(pos) = fullbox_payload(ds, be) {
+                    if pos + 4 <= be {
+                        mp4.audio_stsc_count = read_u32(data, pos).unwrap_or(0);
+                        mp4.audio_stsc_offset = pos + 4;
+                    }
+                }
+            }
+            b"stsz" => {
+                if let Some(pos) = fullbox_payload(ds, be) {
+                    if pos + 8 <= be {
+                        mp4.audio_stsz_default_size = read_u32(data, pos).unwrap_or(0);
+                        mp4.audio_total_samples = read_u32(data, pos + 4).unwrap_or(0);
+                        mp4.audio_stsz_offset = pos + 8;
+                    }
+                }
+            }
+            b"stco" => {
+                if let Some(pos) = fullbox_payload(ds, be) {
+                    if pos + 4 <= be {
+                        mp4.audio_stco_count = read_u32(data, pos).unwrap_or(0);
+                        mp4.audio_stco_offset = pos + 4;
+                        mp4.audio_co64 = false;
+                    }
+                }
+            }
+            b"co64" => {
+                if let Some(pos) = fullbox_payload(ds, be) {
+                    if pos + 4 <= be {
+                        mp4.audio_stco_count = read_u32(data, pos).unwrap_or(0);
+                        mp4.audio_stco_offset = pos + 4;
+                        mp4.audio_co64 = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    mp4.audio_stts_count > 0 && mp4.audio_stsc_count > 0 && mp4.audio_stco_count > 0
+}
+
+fn parse_audio_stsd(data: &[u8], data_start: usize, end: usize, mp4: &mut Mp4<'_>) {
+    let Some(pos) = fullbox_payload(data_start, end) else {
+        return;
+    };
+
+    if pos + 4 > end {
+        return;
+    }
+
+    let entry_start = pos + 4;
+
+    for (tag, ds, be) in BoxIter::new(data, entry_start, end) {
+        if &tag == b"mp4a" {
+            parse_mp4a(data, ds, be, mp4);
+
+            return;
+        }
+    }
+}
+
+fn parse_mp4a(data: &[u8], data_start: usize, end: usize, mp4: &mut Mp4<'_>) {
+    // mp4a sample entry (ISO 14496-14):
+    //   6 reserved + 2 data_ref_index + 8 reserved
+    //   2 channel_count + 2 sample_size + 2 pre_defined + 2 reserved
+    //   4 sample_rate (16.16 fixed point)
+    //   child boxes (esds, etc.)
+    let fixed_size = 28;
+
+    if data_start + fixed_size > end {
+        return;
+    }
+
+    mp4.audio_channels = read_u16(data, data_start + 16).unwrap_or(0);
+    mp4.audio_sample_rate = read_u32(data, data_start + 24).unwrap_or(0) >> 16;
+
+    let children_start = data_start + fixed_size;
+
+    for (tag, ds, be) in BoxIter::new(data, children_start, end) {
+        if &tag == b"esds" {
+            parse_esds(data, ds, be, mp4);
+
+            return;
+        }
+    }
+}
+
+fn read_u16(data: &[u8], offset: usize) -> Option<u16> {
+    data.get(offset..offset + 2)
+        .map(|b| u16::from_be_bytes([b[0], b[1]]))
+}
+
+fn read_descriptor_length(data: &[u8], offset: usize, end: usize) -> Option<(u32, usize)> {
+    let mut len: u32 = 0;
+    let mut pos = offset;
+
+    for _ in 0..4 {
+        if pos >= end {
+            return None;
+        }
+
+        let b = data[pos];
+
+        len = (len << 7) | (b & 0x7F) as u32;
+        pos += 1;
+
+        if b & 0x80 == 0 {
+            return Some((len, pos));
+        }
+    }
+
+    None
+}
+
+fn parse_esds(data: &[u8], data_start: usize, end: usize, mp4: &mut Mp4<'_>) {
+    // AudioToolbox's kAudioConverterDecompressionMagicCookie expects the
+    // full ESDS descriptor payload (everything after version+flags).
+    let Some(pos) = fullbox_payload(data_start, end) else {
+        return;
+    };
+
+    if pos >= end || data[pos] != 0x03 {
+        return;
+    }
+
+    mp4.audio_config_offset = pos;
+    mp4.audio_config_size = end - pos;
+}
+
 // ── Public API ─────────────────────────────────────────────────────
 
 impl<'a> Mp4<'a> {
@@ -637,7 +884,101 @@ impl<'a> Mp4<'a> {
     pub fn sample_data(&self, sample: &SampleRef) -> Option<&'a [u8]> {
         let start = sample.offset as usize;
         let end = start + sample.size as usize;
+
         self.data.get(start..end)
+    }
+
+    pub fn has_audio(&self) -> bool {
+        self.audio_total_samples > 0 && self.audio_stts_count > 0
+    }
+
+    pub fn audio_sample_rate(&self) -> u32 {
+        self.audio_sample_rate
+    }
+
+    pub fn audio_channels(&self) -> u16 {
+        self.audio_channels
+    }
+
+    pub fn audio_timescale(&self) -> u32 {
+        self.audio_timescale
+    }
+
+    pub fn audio_duration_ns(&self) -> u64 {
+        if self.audio_timescale == 0 {
+            return 0;
+        }
+
+        self.audio_duration * 1_000_000_000 / self.audio_timescale as u64
+    }
+
+    pub fn audio_config(&self) -> Option<&'a [u8]> {
+        if self.audio_config_size == 0 {
+            return None;
+        }
+
+        self.data
+            .get(self.audio_config_offset..self.audio_config_offset + self.audio_config_size)
+    }
+
+    pub fn audio_samples(&self) -> SampleIter<'a> {
+        let first_chunk_offset = if self.audio_stco_count > 0 {
+            if self.audio_co64 {
+                read_u64(self.data, self.audio_stco_offset).unwrap_or(0)
+            } else {
+                read_u32(self.data, self.audio_stco_offset).unwrap_or(0) as u64
+            }
+        } else {
+            0
+        };
+        let first_samples_per_chunk = if self.audio_stsc_count > 0 {
+            read_u32(self.data, self.audio_stsc_offset + 4).unwrap_or(1)
+        } else {
+            1
+        };
+        let first_stts_delta = if self.audio_stts_count > 0 {
+            read_u32(self.data, self.audio_stts_offset + 4).unwrap_or(0)
+        } else {
+            0
+        };
+        let first_stts_remaining = if self.audio_stts_count > 0 {
+            read_u32(self.data, self.audio_stts_offset).unwrap_or(0)
+        } else {
+            0
+        };
+
+        SampleIter {
+            data: self.data,
+            total_samples: self.audio_total_samples,
+            sample_idx: 0,
+            stsc_offset: self.audio_stsc_offset,
+            stsc_count: self.audio_stsc_count,
+            stsc_idx: 0,
+            samples_per_chunk: first_samples_per_chunk,
+            chunk_idx: 1,
+            sample_in_chunk: 0,
+            chunk_offset: first_chunk_offset,
+            stco_offset: self.audio_stco_offset,
+            stco_count: self.audio_stco_count,
+            co64: self.audio_co64,
+            stsz_offset: self.audio_stsz_offset,
+            stsz_default_size: self.audio_stsz_default_size,
+            stts_offset: self.audio_stts_offset,
+            stts_count: self.audio_stts_count,
+            stts_idx: 0,
+            stts_remaining: first_stts_remaining,
+            stts_delta: first_stts_delta,
+            dts_ticks: 0,
+            ctts_offset: 0,
+            ctts_count: 0,
+            ctts_idx: 0,
+            ctts_remaining: 0,
+            ctts_offset_val: 0,
+            stss_offset: 0,
+            stss_count: 0,
+            stss_idx: 0,
+            stss_next: 0,
+        }
     }
 }
 
@@ -1916,5 +2257,58 @@ mod tests {
         let first = mp4.sample_data(&refs[0]).expect("first sample data");
 
         assert_eq!(first.len(), refs[0].size as usize);
+    }
+
+    #[test]
+    fn parse_zoey_audio_track() {
+        let data = include_bytes!("/Users/user/Sites/os/assets/zoey.mp4");
+        let mp4 = parse(data).expect("parse zoey.mp4");
+
+        assert!(mp4.has_audio());
+        assert_eq!(mp4.audio_sample_rate(), 44100);
+        assert_eq!(mp4.audio_channels(), 2);
+        assert_eq!(mp4.audio_timescale(), 44100);
+        assert!(mp4.audio_duration_ns() > 0);
+
+        let config = mp4.audio_config().expect("AAC config");
+
+        assert!(config.len() >= 2);
+
+        let audio_refs: Vec<SampleRef> = mp4.audio_samples().collect();
+
+        assert!(!audio_refs.is_empty());
+        assert!(audio_refs[0].size > 0);
+
+        let first = mp4.sample_data(&audio_refs[0]).expect("first audio sample");
+
+        assert_eq!(first.len(), audio_refs[0].size as usize);
+
+        // All audio samples should be keyframes (no stss = all keyframes)
+        for s in &audio_refs {
+            assert!(s.is_keyframe);
+        }
+    }
+
+    #[test]
+    fn video_only_mp4_has_no_audio() {
+        let data = minimal_mp4(
+            320,
+            240,
+            24000,
+            &[SampleSpec {
+                data: b"frame",
+                duration: 1000,
+            }],
+        );
+        let mp4 = parse(&data).unwrap();
+
+        assert!(!mp4.has_audio());
+        assert_eq!(mp4.audio_sample_rate(), 0);
+        assert_eq!(mp4.audio_channels(), 0);
+        assert!(mp4.audio_config().is_none());
+
+        let audio_refs: Vec<SampleRef> = mp4.audio_samples().collect();
+
+        assert!(audio_refs.is_empty());
     }
 }

@@ -14,14 +14,16 @@ pub const PLAY: u32 = 1;
 pub struct PlayRequest {
     pub format: u32,
     pub data_len: u32,
+    pub data_offset: u32,
 }
 
 impl PlayRequest {
-    pub const SIZE: usize = 8;
+    pub const SIZE: usize = 12;
 
     pub fn write_to(&self, buf: &mut [u8]) {
         buf[0..4].copy_from_slice(&self.format.to_le_bytes());
         buf[4..8].copy_from_slice(&self.data_len.to_le_bytes());
+        buf[8..12].copy_from_slice(&self.data_offset.to_le_bytes());
     }
 
     #[must_use]
@@ -29,6 +31,11 @@ impl PlayRequest {
         Self {
             format: u32::from_le_bytes(buf[0..4].try_into().unwrap()),
             data_len: u32::from_le_bytes(buf[4..8].try_into().unwrap()),
+            data_offset: if buf.len() >= 12 {
+                u32::from_le_bytes(buf[8..12].try_into().unwrap())
+            } else {
+                0
+            },
         }
     }
 }
@@ -45,6 +52,7 @@ mod tests {
         let req = PlayRequest {
             format: FORMAT_WAV,
             data_len: 19200,
+            data_offset: 0,
         };
         let mut buf = [0u8; PlayRequest::SIZE];
 

@@ -38,6 +38,8 @@ const COMPRESSED_BUF_PAGES: usize = 64;
 const CTRL_CREATE_SESSION: u32 = 1;
 const CTRL_DESTROY_SESSION: u32 = 2;
 const CTRL_FLUSH_SESSION: u32 = 3;
+const CTRL_DECODE_AUDIO: u32 = 4;
+const CTRL_STOP_AUDIO: u32 = 5;
 
 struct VideoDriver {
     device: virtio::Device,
@@ -209,6 +211,83 @@ impl VideoDriver {
 
         // SAFETY: device has written 4-byte status response.
         unsafe { core::ptr::read_volatile((self.ctrl_buf_va + 8) as *const u32) }
+    }
+
+    fn stop_audio(&mut self) {
+        let mut req = [0u8; 8];
+
+        req[0..4].copy_from_slice(&CTRL_STOP_AUDIO.to_le_bytes());
+
+        self.ctrl_request(&req, 4);
+    }
+
+    fn decode_audio(
+        &mut self,
+        req: &video::DecodeAudioRequest,
+        audio_data: &[u8],
+        pcm_dma_pa: u64,
+        pcm_dma_len: usize,
+    ) -> (u32, u32) {
+        let total_input = audio_data.len();
+
+        if total_input > self.compressed_len {
+            return (1, 0);
+        }
+
+        // SAFETY: compressed_va is a DMA buffer of compressed_len bytes.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                audio_data.as_ptr(),
+                self.compressed_va as *mut u8,
+                total_input,
+            );
+        }
+
+        let hdr = self.ctrl_buf_va as *mut u8;
+
+        // SAFETY: ctrl_buf is a PAGE_SIZE DMA buffer.
+        unsafe {
+            core::ptr::write_bytes(hdr, 0, 32);
+            core::ptr::copy_nonoverlapping(CTRL_DECODE_AUDIO.to_le_bytes().as_ptr(), hdr, 4);
+
+            *hdr.add(4) = req.codec;
+            *hdr.add(5) = req.channels;
+
+            core::ptr::copy_nonoverlapping(req.sample_rate.to_le_bytes().as_ptr(), hdr.add(8), 4);
+            core::ptr::copy_nonoverlapping(req.config_size.to_le_bytes().as_ptr(), hdr.add(12), 4);
+            core::ptr::copy_nonoverlapping(req.num_frames.to_le_bytes().as_ptr(), hdr.add(16), 4);
+            core::ptr::copy_nonoverlapping(req.data_size.to_le_bytes().as_ptr(), hdr.add(20), 4);
+        }
+        // Zero the status area (at end of ctrl_buf after header)
+        // SAFETY: ctrl_buf is PAGE_SIZE.
+        unsafe { core::ptr::write_bytes(hdr.add(24), 0, 8) };
+
+        let hdr_pa = self.ctrl_buf_pa;
+        let status_pa = self.ctrl_buf_pa + 24;
+
+        // 4-descriptor chain: header, audio data, PCM output, status
+        self.ctrl_vq.push_chain(&[
+            (hdr_pa, 24, false),
+            (self.compressed_pa, total_input as u32, false),
+            (pcm_dma_pa, pcm_dma_len as u32, true),
+            (status_pa, 8, true),
+        ]);
+        self.device.notify(CONTROLQ);
+
+        let _ = abi::event::wait(&[(self.irq_event, 0x1)]);
+
+        self.device.ack_interrupt();
+
+        let _ = abi::event::clear(self.irq_event, 0x1);
+        let _ = self.ctrl_vq.pop_used();
+
+        // SAFETY: device has written 8-byte status+pcm_bytes.
+        unsafe {
+            let status = core::ptr::read_volatile((self.ctrl_buf_va + 24) as *const u32);
+            let pcm_bytes = core::ptr::read_volatile((self.ctrl_buf_va + 28) as *const u32);
+
+            (status, pcm_bytes)
+        }
     }
 
     fn decode_frame(
@@ -495,6 +574,90 @@ impl Dispatch for VideoServer {
 
                     return;
                 }
+
+                let _ = msg.reply_empty();
+            }
+            video::DECODE_AUDIO => {
+                if msg.payload.len() < video::DecodeAudioRequest::SIZE || msg.handles.is_empty() {
+                    let _ = msg.reply_error(ipc::STATUS_INVALID);
+
+                    return;
+                }
+
+                let req = video::DecodeAudioRequest::read_from(msg.payload);
+                let total_input =
+                    req.config_size as usize + req.num_frames as usize * 4 + req.data_size as usize;
+
+                if self.driver.shared_va == 0 || total_input > self.driver.shared_len {
+                    let _ = msg.reply_error(ipc::STATUS_INVALID);
+
+                    return;
+                }
+
+                // SAFETY: shared_va is valid, total_input checked above.
+                let audio_data = unsafe {
+                    core::slice::from_raw_parts(self.driver.shared_va as *const u8, total_input)
+                };
+                let pcm_vmo = Handle(msg.handles[0]);
+                let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
+                let pcm_va = match abi::vmo::map(pcm_vmo, 0, rw) {
+                    Ok(va) => va,
+                    Err(_) => {
+                        let _ = msg.reply_error(ipc::STATUS_NO_SPACE);
+
+                        return;
+                    }
+                };
+                let pcm_dma_size =
+                    (req.num_frames as usize * 1024 * 2 * 4 * 2).next_multiple_of(PAGE_SIZE);
+                let pcm_dma = match init::request_dma(HANDLE_INIT_EP, pcm_dma_size) {
+                    Ok(d) => d,
+                    Err(_) => {
+                        let _ = abi::vmo::unmap(pcm_va);
+                        let _ = msg.reply_error(ipc::STATUS_NO_SPACE);
+
+                        return;
+                    }
+                };
+
+                // SAFETY: DMA allocation is valid; zeroing before use.
+                unsafe { core::ptr::write_bytes(pcm_dma.va as *mut u8, 0, pcm_dma_size) };
+
+                let (status, pcm_bytes) =
+                    self.driver
+                        .decode_audio(&req, audio_data, pcm_dma.va as u64, pcm_dma_size);
+
+                if status != 0 {
+                    let _ = abi::vmo::unmap(pcm_va);
+                    let _ = msg.reply_error(ipc::STATUS_IO_ERROR);
+
+                    return;
+                }
+
+                let copy_len = (pcm_bytes as usize).min(pcm_dma_size);
+
+                // SAFETY: pcm_dma.va and pcm_va are valid mappings.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        pcm_dma.va as *const u8,
+                        pcm_va as *mut u8,
+                        copy_len,
+                    );
+                }
+
+                let _ = abi::vmo::unmap(pcm_va);
+                let reply = video::DecodeAudioReply {
+                    status: 0,
+                    pcm_bytes,
+                };
+                let mut data = [0u8; video::DecodeAudioReply::SIZE];
+
+                reply.write_to(&mut data);
+
+                let _ = msg.reply_ok(&data, &[]);
+            }
+            video::STOP_AUDIO => {
+                self.driver.stop_audio();
 
                 let _ = msg.reply_empty();
             }

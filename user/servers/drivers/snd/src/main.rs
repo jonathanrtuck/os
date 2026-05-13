@@ -55,6 +55,8 @@ struct SndDevice {
     tx_active: usize,
     tx_pending: bool,
     started: bool,
+    stopped: bool,
+    tx_status_offset: [usize; 2],
 }
 
 struct TxBuf {
@@ -148,6 +150,7 @@ impl SndDevice {
 
         if ok {
             self.started = true;
+            self.stopped = false;
         }
 
         ok
@@ -166,6 +169,16 @@ impl SndDevice {
         let _ = self.tx_vq.pop_used();
 
         self.tx_pending = false;
+
+        let prev = 1 - self.tx_active;
+        let status_va = self.tx_buf[prev].va + self.tx_status_offset[prev];
+        // SAFETY: status_va points to the 8-byte status within the completed TX DMA buffer.
+        let status = unsafe { core::ptr::read_volatile(status_va as *const u32) };
+
+        if status != VIRTIO_SND_S_OK {
+            self.stopped = true;
+            self.started = false;
+        }
     }
 
     fn fill_tx_buf(buf: &TxBuf, f32_data: &[f32]) -> usize {
@@ -197,6 +210,8 @@ impl SndDevice {
     }
 
     fn submit_tx_buf(&mut self, s16_bytes: usize) {
+        self.tx_status_offset[self.tx_active] = 4 + s16_bytes;
+
         let buf = &self.tx_buf[self.tx_active];
         let header_pa = buf.pa;
         let data_pa = buf.pa + 4;
@@ -214,18 +229,25 @@ impl SndDevice {
         self.tx_active ^= 1;
     }
 
-    fn write_pcm(&mut self, f32_data: &[f32]) {
+    fn write_pcm(&mut self, f32_data: &[f32]) -> bool {
         let frame_count = f32_data.len() / 2;
         let s16_bytes = frame_count * FRAME_BYTES;
 
         if s16_bytes > PAGE_SIZE - 12 {
-            return;
+            return true;
         }
 
         let s16_bytes = Self::fill_tx_buf(&self.tx_buf[self.tx_active], f32_data);
 
         self.wait_tx_complete();
+
+        if self.stopped {
+            return false;
+        }
+
         self.submit_tx_buf(s16_bytes);
+
+        true
     }
 }
 
@@ -291,18 +313,30 @@ impl Dispatch for SndServer {
                     return;
                 }
 
+                if self.snd.stopped {
+                    let _ = msg.reply_error(ipc::STATUS_IO_ERROR);
+
+                    return;
+                }
+
                 while written < f32_count {
                     let remaining = f32_count - written;
                     let chunk = remaining.min(chunk_samples);
 
-                    self.snd.write_pcm(&f32_data[written..written + chunk]);
+                    if !self.snd.write_pcm(&f32_data[written..written + chunk]) {
+                        break;
+                    }
 
                     written += chunk;
                 }
 
                 self.snd.wait_tx_complete();
 
-                let _ = msg.reply_empty();
+                if self.snd.stopped {
+                    let _ = msg.reply_error(ipc::STATUS_IO_ERROR);
+                } else {
+                    let _ = msg.reply_empty();
+                }
             }
             snd::GET_INFO => {
                 let reply = snd::InfoReply {
@@ -440,6 +474,8 @@ extern "C" fn _start() -> ! {
         tx_active: 0,
         tx_pending: false,
         started: false,
+        stopped: false,
+        tx_status_offset: [0; 2],
     };
     let console_ep = match name::watch(HANDLE_NS_EP, b"console") {
         Ok(h) => h,

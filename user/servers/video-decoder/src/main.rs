@@ -63,6 +63,9 @@ struct VideoDecoder {
     codec: u8,
     notify_ep: Handle,
     stats: PlaybackStats,
+    audio_pcm_vmo: Handle,
+    audio_pcm_va: usize,
+    audio_pcm_bytes: u32,
 }
 
 struct PlaybackStats {
@@ -178,11 +181,13 @@ impl VideoDecoder {
         if self.notify_ep.0 != 0 {
             let _ = abi::handle::close(self.notify_ep);
         }
+
         self.notify_ep = if msg.handles.len() > 1 && msg.handles[1] != 0 {
             Handle(msg.handles[1])
         } else {
             Handle(0)
         };
+
         let ro = Rights(Rights::READ.0 | Rights::MAP.0);
         let file_va = match abi::vmo::map(file_vmo, 0, ro) {
             Ok(va) => va,
@@ -390,6 +395,10 @@ impl VideoDecoder {
             return;
         }
 
+        if self.codec == video::CODEC_H264 {
+            self.extract_audio();
+        }
+
         self.decode_and_publish(0);
 
         let total = self.frame_index.len() as u32;
@@ -538,6 +547,156 @@ impl VideoDecoder {
         written
     }
 
+    fn extract_audio(&mut self) {
+        if self.file_va == 0 || self.codec_ep.0 == 0 || self.shared_va == 0 {
+            return;
+        }
+
+        // SAFETY: file_va is a valid mapping of file_size bytes.
+        let file_data =
+            unsafe { core::slice::from_raw_parts(self.file_va as *const u8, self.file_size) };
+        let mp4_info = match mp4::parse(file_data) {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+
+        if !mp4_info.has_audio() {
+            return;
+        }
+
+        let config = match mp4_info.audio_config() {
+            Some(c) => c,
+            None => return,
+        };
+        let audio_refs: Vec<mp4::SampleRef> = mp4_info.audio_samples().collect();
+
+        if audio_refs.is_empty() {
+            return;
+        }
+
+        let config_size = config.len();
+        let sizes_size = audio_refs.len() * 4;
+        let data_size: usize = audio_refs.iter().map(|s| s.size as usize).sum();
+        let total = config_size + sizes_size + data_size;
+
+        if total > SHARED_VMO_SIZE {
+            return;
+        }
+
+        // Pack into shared VMO: [config][frame_sizes][compressed_data]
+        let dst = self.shared_va as *mut u8;
+        let mut pos = 0;
+
+        // SAFETY: shared_va is a valid RW mapping of SHARED_VMO_SIZE bytes.
+        unsafe {
+            core::ptr::copy_nonoverlapping(config.as_ptr(), dst.add(pos), config_size);
+        }
+
+        pos += config_size;
+
+        for r in &audio_refs {
+            // SAFETY: pos + 4 <= total <= SHARED_VMO_SIZE.
+            unsafe {
+                core::ptr::copy_nonoverlapping(r.size.to_le_bytes().as_ptr(), dst.add(pos), 4);
+            }
+
+            pos += 4;
+        }
+
+        for r in &audio_refs {
+            let sample = match mp4_info.sample_data(r) {
+                Some(d) => d,
+                None => return,
+            };
+
+            // SAFETY: pos + sample.len() <= total <= SHARED_VMO_SIZE.
+            unsafe {
+                core::ptr::copy_nonoverlapping(sample.as_ptr(), dst.add(pos), sample.len());
+            }
+
+            pos += sample.len();
+        }
+
+        // Allocate PCM output VMO: duration_ns * 48000 * 2ch * 4bytes / 1e9
+        let duration_ns = mp4_info.audio_duration_ns();
+        let pcm_estimate = (duration_ns as usize * 48000 * 8 / 1_000_000_000) + PAGE_SIZE;
+        let pcm_vmo_size = pcm_estimate.next_multiple_of(PAGE_SIZE);
+        let pcm_vmo = match abi::vmo::create(pcm_vmo_size, 0) {
+            Ok(h) => h,
+            Err(_) => return,
+        };
+        let pcm_dup = match abi::handle::dup(
+            pcm_vmo,
+            Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0 | Rights::DUP.0),
+        ) {
+            Ok(h) => h,
+            Err(_) => {
+                let _ = abi::handle::close(pcm_vmo);
+
+                return;
+            }
+        };
+        let req = video::DecodeAudioRequest {
+            codec: video::AUDIO_CODEC_AAC,
+            channels: mp4_info.audio_channels() as u8,
+            sample_rate: mp4_info.audio_sample_rate(),
+            config_size: config_size as u32,
+            num_frames: audio_refs.len() as u32,
+            data_size: data_size as u32,
+        };
+        let mut req_buf = [0u8; video::DecodeAudioRequest::SIZE];
+
+        req.write_to(&mut req_buf);
+
+        let mut call_buf = [0u8; ipc::message::MSG_SIZE];
+        let mut recv_handles = [0u32; 4];
+        let reply = match ipc::client::call(
+            self.codec_ep,
+            video::DECODE_AUDIO,
+            &req_buf,
+            &[pcm_dup.0],
+            &mut recv_handles,
+            &mut call_buf,
+        ) {
+            Ok(r) => r,
+            Err(_) => {
+                let _ = abi::handle::close(pcm_vmo);
+
+                return;
+            }
+        };
+
+        if reply.is_error() || reply.payload.len() < video::DecodeAudioReply::SIZE {
+            let _ = abi::handle::close(pcm_vmo);
+
+            return;
+        }
+
+        let ar = video::DecodeAudioReply::read_from(reply.payload);
+
+        if ar.status != 0 || ar.pcm_bytes == 0 {
+            let _ = abi::handle::close(pcm_vmo);
+
+            return;
+        }
+
+        let ro = Rights(Rights::READ.0 | Rights::MAP.0);
+        let pcm_va = match abi::vmo::map(pcm_vmo, 0, ro) {
+            Ok(va) => va,
+            Err(_) => {
+                let _ = abi::handle::close(pcm_vmo);
+
+                return;
+            }
+        };
+
+        self.audio_pcm_vmo = pcm_vmo;
+        self.audio_pcm_va = pcm_va;
+        self.audio_pcm_bytes = ar.pcm_bytes;
+
+        console::write(self.console_ep, b"  video-decoder: audio extracted\n");
+    }
+
     fn decode_and_publish(&mut self, idx: u32) {
         if self.file_va == 0 || self.frame_index.is_empty() || self.codec_session_id == 0 {
             return;
@@ -668,6 +827,8 @@ impl VideoDecoder {
     }
 
     fn close_current(&mut self) {
+        self.stop_audio_playback();
+
         if self.file_va != 0 {
             let _ = abi::vmo::unmap(self.file_va);
 
@@ -688,7 +849,18 @@ impl VideoDecoder {
 
             self.output_vmo = Handle(0);
         }
+        if self.audio_pcm_va != 0 {
+            let _ = abi::vmo::unmap(self.audio_pcm_va);
 
+            self.audio_pcm_va = 0;
+        }
+        if self.audio_pcm_vmo.0 != 0 {
+            let _ = abi::handle::close(self.audio_pcm_vmo);
+
+            self.audio_pcm_vmo = Handle(0);
+        }
+
+        self.audio_pcm_bytes = 0;
         self.frame_index.clear();
         self.frame_pts_ns.clear();
         self.file_size = 0;
@@ -697,6 +869,99 @@ impl VideoDecoder {
         self.height = 0;
         self.codec = 0;
     }
+
+    fn stop_audio_playback(&self) {
+        if self.codec_ep.0 == 0 {
+            return;
+        }
+
+        let _ = ipc::client::call_simple(self.codec_ep, video::STOP_AUDIO, &[]);
+    }
+
+    fn start_audio_playback(&self) {
+        if self.audio_pcm_vmo.0 == 0 || self.audio_pcm_bytes == 0 {
+            return;
+        }
+
+        let audio_ep = match name::lookup(HANDLE_NS_EP, b"audio") {
+            Ok(h) => h,
+            Err(_) => return,
+        };
+        let pcm_dup =
+            match abi::handle::dup(self.audio_pcm_vmo, Rights(Rights::READ.0 | Rights::MAP.0)) {
+                Ok(h) => h,
+                Err(_) => {
+                    let _ = abi::handle::close(audio_ep);
+
+                    return;
+                }
+            };
+        let current_pts = self
+            .frame_pts_ns
+            .get(self.current_frame as usize)
+            .copied()
+            .unwrap_or(0);
+        let pcm_offset = (current_pts * 48000 * 8 / 1_000_000_000) as u32 & !7;
+        let args = alloc::boxed::Box::new(AudioPlayArgs {
+            audio_ep: audio_ep.0,
+            pcm_vmo: pcm_dup.0,
+            pcm_bytes: self.audio_pcm_bytes,
+            pcm_offset,
+        });
+        let arg_ptr = alloc::boxed::Box::into_raw(args) as usize;
+        let stack_layout = match alloc::alloc::Layout::from_size_align(PAGE_SIZE, PAGE_SIZE) {
+            Ok(l) => l,
+            Err(_) => return,
+        };
+        // SAFETY: layout is non-zero size with valid alignment.
+        let stack_base = unsafe { alloc::alloc::alloc(stack_layout) };
+
+        if stack_base.is_null() {
+            return;
+        }
+
+        let stack_top = stack_base as usize + PAGE_SIZE;
+        let entry = audio_play_thread as extern "C" fn(usize) -> ! as usize;
+
+        if let Ok(thread) = abi::thread::create(entry, stack_top, arg_ptr) {
+            let _ = abi::handle::close(thread);
+        }
+    }
+}
+
+#[repr(C)]
+struct AudioPlayArgs {
+    audio_ep: u32,
+    pcm_vmo: u32,
+    pcm_bytes: u32,
+    pcm_offset: u32,
+}
+
+extern "C" fn audio_play_thread(arg: usize) -> ! {
+    // SAFETY: arg is a pointer to a heap-allocated AudioPlayArgs.
+    let args = unsafe { &*(arg as *const AudioPlayArgs) };
+    let ep = Handle(args.audio_ep);
+    let vmo = Handle(args.pcm_vmo);
+    let remaining = args.pcm_bytes.saturating_sub(args.pcm_offset);
+    let req = audio_service::PlayRequest {
+        format: audio_service::FORMAT_F32_STEREO_48K,
+        data_len: remaining,
+        data_offset: args.pcm_offset,
+    };
+    let mut payload = [0u8; audio_service::PlayRequest::SIZE];
+
+    req.write_to(&mut payload);
+
+    let mut buf = [0u8; ipc::message::MSG_SIZE];
+    let total = ipc::message::write_request(&mut buf, audio_service::PLAY, &payload);
+    let _ = abi::ipc::call(ep, &mut buf, total, &[vmo.0], &mut []);
+
+    // SAFETY: arg was heap-allocated in start_audio_playback; we own it.
+    unsafe {
+        let _ = alloc::boxed::Box::from_raw(arg as *mut AudioPlayArgs);
+    }
+
+    abi::thread::exit(0);
 }
 
 impl Dispatch for VideoDecoder {
@@ -746,7 +1011,11 @@ impl Dispatch for VideoDecoder {
                     p += 1;
 
                     console::write(self.console_ep, &buf[..p]);
+
+                    self.start_audio_playback();
                 } else {
+                    self.stop_audio_playback();
+
                     console::write(self.console_ep, b"vdec: PAUSE\n");
                 }
 
@@ -764,6 +1033,7 @@ impl Dispatch for VideoDecoder {
             video_decoder::PAUSE => {
                 self.playing = false;
 
+                self.stop_audio_playback();
                 self.publish_status();
 
                 let _ = msg.reply_empty();
@@ -819,6 +1089,9 @@ extern "C" fn _start() -> ! {
             max_decode_ns: 0,
             play_start_ns: 0,
         },
+        audio_pcm_vmo: Handle(0),
+        audio_pcm_va: 0,
+        audio_pcm_bytes: 0,
     };
 
     loop {
@@ -879,6 +1152,7 @@ extern "C" fn _start() -> ! {
             if decoder.current_frame >= total - 1 {
                 decoder.playing = false;
 
+                decoder.stop_audio_playback();
                 decoder.decode_and_publish(0);
                 decoder.publish_status();
                 decoder.report_stats();

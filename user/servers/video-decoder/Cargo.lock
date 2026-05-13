@@ -7,6 +7,19 @@ name = "abi"
 version = "0.1.0"
 
 [[package]]
+name = "audio-service"
+version = "0.1.0"
+dependencies = [
+ "abi",
+ "console",
+ "init",
+ "ipc",
+ "name",
+ "snd",
+ "wav",
+]
+
+[[package]]
 name = "avi"
 version = "0.1.0"
 
@@ -54,6 +67,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "snd"
+version = "0.1.0"
+dependencies = [
+ "abi",
+ "console",
+ "init",
+ "ipc",
+ "name",
+ "virtio",
+]
+
+[[package]]
 name = "video"
 version = "0.1.0"
 dependencies = [
@@ -70,6 +95,7 @@ name = "video-decoder"
 version = "0.1.0"
 dependencies = [
  "abi",
+ "audio-service",
  "avi",
  "console",
  "heap",
@@ -81,4 +107,8 @@ dependencies = [
 
 [[package]]
 name = "virtio"
+version = "0.1.0"
+
+[[package]]
+name = "wav"
 version = "0.1.0"

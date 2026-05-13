@@ -1125,6 +1125,7 @@ extern "C" fn play_thread_entry(arg: usize) -> ! {
     let req = audio_service::PlayRequest {
         format: audio_service::FORMAT_WAV,
         data_len,
+        data_offset: 0,
     };
     let mut payload = [0u8; audio_service::PlayRequest::SIZE];
 

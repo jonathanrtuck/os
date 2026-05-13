@@ -18,6 +18,9 @@ pub const CODEC_HEVC: u8 = 2;
 pub const CODEC_VP9: u8 = 3;
 pub const CODEC_AV1: u8 = 4;
 
+// Audio codec constants
+pub const AUDIO_CODEC_AAC: u8 = 0;
+
 // IPC methods
 pub const SETUP: u32 = 1;
 pub const GET_INFO: u32 = 2;
@@ -25,6 +28,8 @@ pub const CREATE_SESSION: u32 = 3;
 pub const DECODE_FRAME: u32 = 4;
 pub const DESTROY_SESSION: u32 = 5;
 pub const FLUSH_SESSION: u32 = 6;
+pub const DECODE_AUDIO: u32 = 7;
+pub const STOP_AUDIO: u32 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InfoReply {
@@ -188,6 +193,71 @@ impl SessionRequest {
     }
 }
 
+/// Batch audio decode request.
+///
+/// The shared VMO layout (set up via SETUP) is:
+///   [config_bytes (config_size)] [frame_sizes (4 * num_frames)] [compressed_data (data_size)]
+///
+/// The caller also passes an output VMO handle for PCM output (F32 stereo interleaved).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecodeAudioRequest {
+    pub codec: u8,
+    pub channels: u8,
+    pub sample_rate: u32,
+    pub config_size: u32,
+    pub num_frames: u32,
+    pub data_size: u32,
+}
+
+impl DecodeAudioRequest {
+    pub const SIZE: usize = 20;
+
+    pub fn write_to(&self, buf: &mut [u8]) {
+        buf[0] = self.codec;
+        buf[1] = self.channels;
+        buf[2..4].copy_from_slice(&[0; 2]);
+        buf[4..8].copy_from_slice(&self.sample_rate.to_le_bytes());
+        buf[8..12].copy_from_slice(&self.config_size.to_le_bytes());
+        buf[12..16].copy_from_slice(&self.num_frames.to_le_bytes());
+        buf[16..20].copy_from_slice(&self.data_size.to_le_bytes());
+    }
+
+    #[must_use]
+    pub fn read_from(buf: &[u8]) -> Self {
+        Self {
+            codec: buf[0],
+            channels: buf[1],
+            sample_rate: u32::from_le_bytes(buf[4..8].try_into().unwrap()),
+            config_size: u32::from_le_bytes(buf[8..12].try_into().unwrap()),
+            num_frames: u32::from_le_bytes(buf[12..16].try_into().unwrap()),
+            data_size: u32::from_le_bytes(buf[16..20].try_into().unwrap()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecodeAudioReply {
+    pub status: u32,
+    pub pcm_bytes: u32,
+}
+
+impl DecodeAudioReply {
+    pub const SIZE: usize = 8;
+
+    pub fn write_to(&self, buf: &mut [u8]) {
+        buf[0..4].copy_from_slice(&self.status.to_le_bytes());
+        buf[4..8].copy_from_slice(&self.pcm_bytes.to_le_bytes());
+    }
+
+    #[must_use]
+    pub fn read_from(buf: &[u8]) -> Self {
+        Self {
+            status: u32::from_le_bytes(buf[0..4].try_into().unwrap()),
+            pcm_bytes: u32::from_le_bytes(buf[4..8].try_into().unwrap()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,6 +358,40 @@ mod tests {
     }
 
     #[test]
+    fn decode_audio_request_round_trip() {
+        let req = DecodeAudioRequest {
+            codec: AUDIO_CODEC_AAC,
+            channels: 2,
+            sample_rate: 44100,
+            config_size: 2,
+            num_frames: 384,
+            data_size: 98304,
+        };
+        let mut buf = [0u8; DecodeAudioRequest::SIZE];
+
+        req.write_to(&mut buf);
+
+        let decoded = DecodeAudioRequest::read_from(&buf);
+
+        assert_eq!(req, decoded);
+    }
+
+    #[test]
+    fn decode_audio_reply_round_trip() {
+        let reply = DecodeAudioReply {
+            status: 0,
+            pcm_bytes: 1_411_200,
+        };
+        let mut buf = [0u8; DecodeAudioReply::SIZE];
+
+        reply.write_to(&mut buf);
+
+        let decoded = DecodeAudioReply::read_from(&buf);
+
+        assert_eq!(reply, decoded);
+    }
+
+    #[test]
     fn method_ids_distinct() {
         let methods = [
             SETUP,
@@ -296,6 +400,7 @@ mod tests {
             DECODE_FRAME,
             DESTROY_SESSION,
             FLUSH_SESSION,
+            DECODE_AUDIO,
         ];
 
         for i in 0..methods.len() {
@@ -324,5 +429,7 @@ mod tests {
         assert!(DecodeFrameRequest::SIZE <= ipc::MAX_PAYLOAD);
         assert!(DecodeFrameReply::SIZE <= ipc::MAX_PAYLOAD);
         assert!(SessionRequest::SIZE <= ipc::MAX_PAYLOAD);
+        assert!(DecodeAudioRequest::SIZE <= ipc::MAX_PAYLOAD);
+        assert!(DecodeAudioReply::SIZE <= ipc::MAX_PAYLOAD);
     }
 }
