@@ -1,0 +1,5 @@
+# Video playback diagnostic.
+# ~107 anim frames + ~1fps clock ticks → frame 115 ≈ 8s after anim.
+1 key ctrl+tab
+30 key ctrl+tab
+115 click 50% 50%

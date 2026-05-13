@@ -78,8 +78,8 @@ documents (files) are first-class citizens and applications are interchangeable
 tools that attach to content. This is a learning/exploration project, not a
 product.
 
-**Current phase: userspace development.** The kernel rewrite is complete (34
-syscalls, 6 object types, 558 tests, 12-phase verification campaign). The
+**Current phase: userspace development.** The kernel rewrite is complete (35
+syscalls, 6 object types, 561 tests, 12-phase verification campaign). The
 previous implementation (v0.1–v0.6, tagged `v0.6-pre-rewrite`) validated the
 design through a working prototype. The kernel was rewritten from first
 principles, guided by `design/research/kernel-userspace-interface.md`. Userspace
@@ -164,7 +164,7 @@ Read these before making any design suggestions:
 ### Kernel Spec (the rewrite target)
 
 - `design/research/kernel-userspace-interface.md` — **The kernel spec.** 6
-  kernel objects (VMO, Endpoint, Event, Thread, Address Space, Resource), 34
+  kernel objects (VMO, Endpoint, Event, Thread, Address Space, Resource), 35
   syscalls, data/control plane split. Derived from first principles, ignoring
   the previous implementation.
 - `design/research/m4-pro-kernel-design.md` — Hardware-specific kernel design

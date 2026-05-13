@@ -64,9 +64,9 @@ endpoints, and runs the startup handshake. Microkernel pattern (cf. Fuchsia
 **Kernel** — manages hardware resources (memory, CPU time, interrupts, process
 isolation). Semantically ignorant — does not know what a document, mimetype, or
 pixel is. Six object types (VMO, Endpoint, Event, Thread, Address Space,
-Resource), each accessed via capability handles with rights attenuation. 34
+Resource), each accessed via capability handles with rights attenuation. 35
 syscalls, SMP with per-core fixed-priority preemptive scheduler (4 priority
-levels), sync IPC (call/recv/reply), GICv3, 16 KiB pages, ~29K LOC Rust.
+levels), sync IPC (call/recv/reply), GICv3, 16 KiB pages, ~30K LOC Rust.
 Framekernel discipline: `unsafe` confined to `frame/` module, enforced at
 compile time. See `kernel/src/`.
 

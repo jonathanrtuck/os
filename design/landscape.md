@@ -24,7 +24,7 @@ The questions a systems programmer would ask on first encounter:
 | GPU?                                | Metal via hypervisor passthrough, scene graph rendering. Implemented.                                                       |
 | Can it run existing software?       | No. No POSIX, no libc, no compatibility layer. Everything is `no_std` Rust.                                                 |
 | Performance?                        | Kernel hot paths cycle-benchmarked on M4 Pro. IPC round-trip, page fault, object lifecycle all baselined.                   |
-| How much code?                      | ~90K LOC Rust (~29K kernel + ~61K userspace). 558 kernel tests, 4 fuzz targets, 33 property tests.                          |
+| How much code?                      | ~101K LOC Rust (~30K kernel + ~72K userspace). 561 kernel tests, 4 fuzz targets, 33 property tests.                         |
 | Is this serious?                    | Design exploration with a verified kernel. Not a product, not a weekend project. Closer to a research OS.                   |
 
 ---
@@ -526,9 +526,9 @@ the codebase is `no_std` with no public crate interface.
 | Dimension             | This OS                    | Fuchsia                 | Redox                   | Haiku                   | seL4                     |
 | --------------------- | -------------------------- | ----------------------- | ----------------------- | ----------------------- | ------------------------ |
 | Active development    | ~4 months                  | ~10 years               | ~11 years               | ~23 years               | ~17 years                |
-| Codebase              | ~90K LOC Rust (29K+61K)    | Millions LOC (C++/Rust) | ~400K LOC Rust          | Millions LOC (C++)      | ~10K LOC C (kernel)      |
-| Tests                 | 558 + 4 fuzz + 33 proptest | Extensive               | Moderate                | Extensive               | Formal proofs + tests    |
-| Content types handled | 3 (text, rich text, PNG)   | N/A (delegated to apps) | N/A (delegated to apps) | N/A (delegated to apps) | N/A                      |
+| Codebase              | ~101K LOC Rust (30K+72K)   | Millions LOC (C++/Rust) | ~400K LOC Rust          | Millions LOC (C++)      | ~10K LOC C (kernel)      |
+| Tests                 | 561 + 4 fuzz + 33 proptest | Extensive               | Moderate                | Extensive               | Formal proofs + tests    |
+| Content types handled | 4 (text, PNG/JPEG, video)  | N/A (delegated to apps) | N/A (delegated to apps) | N/A (delegated to apps) | N/A                      |
 | Self-hosting          | Not a goal                 | Partial                 | In progress             | Yes                     | Not a goal               |
 | Contributors          | 1                          | ~500+                   | ~80+                    | ~100+                   | ~30+                     |
 | Ships to users        | No                         | Yes (Nest Hub, Pixel)   | Alpha ISOs              | Beta releases           | Deployed (defense, auto) |

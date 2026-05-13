@@ -582,6 +582,158 @@ next rendering milestone.
    is smooth. Editor keys suppressed in image space. All 584 kernel tests +
    1,114 library tests pass. Visual regression (Phase 5) passes.
 
+### Phase 15 — Video Playback (COMPLETE)
+
+1. **Desktop as compound document** — DONE. Dynamic space list replaces
+   hard-coded two-space model. Each document gets a space in the strip
+   container. Foundation for N-document switching.
+
+2. **virtio-video-decode driver** (`user/servers/drivers/video/`) — DONE. Probes
+   MMIO for video decode device (device ID 30). Control + decode virtqueues.
+   Create/destroy/flush sessions. Compressed data upload via 1 MiB DMA buffer.
+   Registers as "codec-decode" with name service. 871 LOC, 11 protocol tests.
+   `user/servers/drivers/video/`
+
+3. **Video decoder service** (`user/servers/video-decoder/`) — DONE. Parses AVI
+   (RIFF) and MP4 (ISO BMFF) containers. Builds frame index with PTS timestamps.
+   H.264 hardware decode via codec-decode driver (VideoToolbox on host). Annex B
+   NAL reformatting from AVCC. Zero-copy output: decoder writes to a host-side
+   texture, guest receives a texture handle for direct compositor binding. 1,179
+   LOC, 6 protocol tests.
+
+4. **MP4 container parser** — DONE. Parses moov/trak/mdia/minf/stbl atoms. Reads
+   stts (time-to-sample), stsc (sample-to-chunk), stsz (sample sizes), stco/co64
+   (chunk offsets), stsd (sample description with AVCC). Extracts SPS/PPS from
+   AVCC for decoder configuration. MP4-first with AVI fallback.
+
+5. **PTS-scheduled playback** — DONE. Frame presentation timed by PTS
+   (presentation timestamp) relative to play start. `clock_read` syscall for
+   monotonic nanosecond timing. Frame skipping when decode falls behind
+   schedule. `recv_timed` deadline for next-frame preemption — the video decoder
+   responds to IPC during playback without dedicated threads.
+
+6. **Zero-copy video rendering** — DONE. `BIND_HOST_TEXTURE` protocol:
+   compositor receives a host texture handle from the video decoder (via
+   presenter), binds it directly as a Metal texture. No pixel copy through guest
+   memory. `Content::Image` nodes with `content_id` matching the bound texture.
+   Aspect-preserving scale-to-fit within viewport.
+
+7. **Play/pause toggle** — DONE. Space bar toggles playback. Play icon
+   (triangle) rendered via CPU path rasterizer when paused. Pause resumes from
+   the current frame position (not from the start). Playback-ended notification
+   via `VIDEO_PLAYBACK_ENDED` IPC from video decoder to presenter.
+
+8. **Playback statistics** — DONE. Tracks frames_decoded, frames_skipped,
+   total/max decode latency, and reports via console on playback end.
+
+### Phase 16 — Rendering Pipeline v2 (COMPLETE)
+
+5-phase optimization of the rendering pipeline, driven by video playback
+performance requirements. See `project_video_pipeline_next.md` memory for the
+full plan.
+
+1. **Vsync alignment** — DONE. Guest render loop reads host vsync counter from
+   Metal device config space (offset 0x10). Anchors `next_vsync` to observed
+   vsync time minus exponentially-averaged render budget. Eliminates blind
+   polling.
+
+2. **Damage tracking** — DONE. Scene header extended (80→152 bytes) with
+   `damage_count` + `damage_rects[4]` + `reader_gen`. Presenter writes
+   full-repaint for `build_scene()`, clock-only damage rect for
+   `update_clock()`. Compositor uses `LOAD_BLIT_RETAINED` + scissor when damage
+   < 20% of screen area. TBDR-aware: host blits retained frame to drawable,
+   render pass with `.dontCare` load action.
+
+3. **Async frame submission** — DONE. Double-buffered render DMA: two buffers
+   alternate per frame. `submit_async` (non-blocking final submission).
+   `ensure_completed` at next frame start blocks only if GPU still busy. CPU
+   work on frame N+1 overlaps host GPU work on frame N.
+
+4. **Atlas LRU eviction** — DONE. Shelf-based LRU eviction replaces full atlas
+   reset. Dirty rect tracking narrows upload bandwidth to only changed atlas
+   regions.
+
+5. **Vertex buffer caching** — DONE. `DrawList` cached across frames. Skip
+   `walk_node` when only live images changed. `render_frame(rebuild: bool)`.
+
+6. **GPU compute paths** — DONE. Wave 5 compute shaders for glyph compositing.
+   Split atlas for compute vs. fragment paths.
+
+7. **Single-submission emit** — DONE. Batch all render passes (solid, shadow,
+   glyph, textured, compute) into one command buffer submission. Eliminates
+   per-pass submission overhead.
+
+8. **Integer presenter math** — DONE. Floating-point eliminated from the
+   presenter hot path. All layout coordinates, glyph positioning, and scene
+   graph construction use integer arithmetic. Removes FP context save/restore
+   overhead in the guest kernel's exception path.
+
+**Deferred:**
+
+- Phase 6 (multi-threaded compositor) — needs thread safety audit of static font
+  VA, glyph atlas, images array. Waiting on profiling data.
+- Phase 7 (GPU path rendering) — SDF or Vello-style compute tiling. Needs
+  compute shader virtio-metal protocol extensions. Future.
+
+### Phase 17 — Audio Playback (COMPLETE)
+
+1. **virtio-snd driver** (`user/servers/drivers/snd/`) — DONE. Probes MMIO for
+   virtio sound device (device ID 25). Configures output stream 0 for S16LE
+   stereo 48 kHz. Control + TX virtqueues. PCM write via shared DMA buffer with
+   configurable timeout and recovery on stall. 510 LOC, 3 protocol tests.
+   `user/servers/drivers/snd/`
+
+2. **Audio service** (`user/servers/audio/`) — DONE. Mixer service accepts
+   playback requests (raw PCM or WAV format), forwards chunks to snd driver.
+   Event-driven loop: blocks on `recv` when idle, writes one chunk per iteration
+   during playback, polls for STOP between chunks. Non-blocking stop via cancel
+   event. 298 LOC, 2 protocol tests.
+
+3. **MP4 audio demux + AAC decode** — DONE. Video decoder extracts AAC audio
+   track from MP4 containers (mp4a sample description, ESDS atom with Audio
+   Specific Config). Raw AAC frames sent to hypervisor's AudioConverter for
+   decoding to PCM (F32 stereo 48 kHz). Decoded PCM forwarded to audio service
+   for synchronized playback.
+
+4. **Play/pause/seek audio sync** — DONE. Audio starts with video on play, stops
+   on pause, resumes from correct position (not byte 0). Audio cancel event
+   allows non-blocking stop without waiting for the current chunk to finish
+   playing.
+
+5. **Snd driver timeout + recovery** — DONE. TX virtqueue write has a
+   configurable timeout. On stall, driver logs warning and continues rather than
+   blocking indefinitely.
+
+**Hypervisor-side fix:** AudioConverter workaround eliminated (hypervisor commit
+ca26823). Direct `AudioConverterFillComplexBuffer` replaces the ADTS temp file +
+ExtAudioFile round-trip. Root cause was missing magic cookie (raw ASC bytes from
+ESDS) and wrong `mFramesPerPacket`.
+
+### Bug Fixes (cross-cutting)
+
+- **DmaBuf RAII** — `Drop` impl for DMA buffer handles. Previously leaked VMO
+  handles on service exit.
+- **Thread stack reclaim** — 16 KiB stack VMO leaked per spawned playback
+  thread. Fixed by RAII wrapper.
+- **Handle cleanup on process exit** — kernel cleans up handles when the last
+  thread in an address space exits.
+- **IRQ mask in exception return** — exception return path correctly restores
+  interrupt mask from saved SPSR.
+- **File VMO lifetime** — VMO handle kept alive while mapping is in use
+  (previously closed prematurely, causing use-after-unmap).
+
+### Current Totals
+
+**Production services:** 19 (name, console, input, blk, render, 9p, rng, snd,
+codec-decode, store, document, layout, presenter, text-editor, png-decoder,
+jpeg-decoder, video-decoder, audio, fs).
+
+**Test suite:** 589 tests (561 workspace + 28 render host-target), 4 fuzz
+targets, 33 property tests, 34 bare-metal integration tests.
+
+**Content types:** text/plain (editing), image/png, image/jpeg (viewing),
+video/mp4 + video/avi (playback with audio).
+
 ## Session Resume
 
 To resume work: read this file, check `git log --oneline -20` for recent

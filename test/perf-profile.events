@@ -1,0 +1,26 @@
+# Performance profiling: cycle through all content types.
+# Idle spaces render ~1fps (clock tick). Showcase renders ~60fps.
+# Metrics report fires every ~5s. Need ~6s per space = ~6 frames idle.
+# Space 0=text, 1=image, 2=video, 3=showcase.
+
+# Frame 0: boot + initial text render
+0 text hi
+
+# Frames 1-7: text space idle (~7 seconds of metrics)
+
+# Frame 8: switch to image space
+8 key ctrl+tab
+# ~30 frames animation + 6 idle = frame 44
+
+# Frame 44: switch to video space
+44 key ctrl+tab
+# ~30 frames animation, then play video
+75 click 720 450
+# Video plays at decode rate, presenter ticks once/sec.
+# ~8 idle frames = ~8 seconds of video metrics.
+
+# Frame 84: switch to showcase (animating at ~60fps)
+84 key ctrl+tab
+# ~30 frames animation + ~360 frames at 60fps = ~6 seconds
+475 key ctrl+tab
+505 exit

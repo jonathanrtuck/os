@@ -4,10 +4,11 @@ Research documents informing OS design decisions.
 
 ## Files
 
-- `kernel-userspace-interface.md` -- **The kernel spec.** Ideal kernel-userspace
-  interface derived from first principles. 5 kernel objects, 25 syscalls,
-  data/control plane split, open design tensions. This is the target for the
-  kernel rewrite.
+- `kernel-userspace-interface.md` -- **The original kernel spec.** Ideal
+  kernel-userspace interface derived from first principles. 5 kernel objects, 25
+  syscalls, data/control plane split, open design tensions. The kernel rewrite
+  is complete and grew beyond this spec (6 objects, 35 syscalls). This document
+  captures the initial design reasoning; see `STATUS.md` for current state.
 - `m4-pro-kernel-design.md` -- Hardware-specific kernel design opportunities for
   M4 Pro (companion to interface doc).
 - `cow-filesystems.md` -- COW filesystem designs (Btrfs, ZFS, APFS, HAMMER2)
