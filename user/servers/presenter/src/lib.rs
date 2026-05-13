@@ -39,6 +39,10 @@ pub const POINTER_EVENT: u32 = 6;
 /// Presenter handles click-to-place, double/triple-click, and drag selection.
 pub const POINTER_BUTTON: u32 = 7;
 
+/// Video playback ended notification from video decoder. No payload.
+/// Presenter sets playing=false and rebuilds the scene (play icon).
+pub const VIDEO_PLAYBACK_ENDED: u32 = 8;
+
 // ── Visual constants ────────────────────────────────────────────
 
 pub const DEFAULT_WIDTH: u32 = 1440;

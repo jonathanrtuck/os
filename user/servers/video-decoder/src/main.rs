@@ -61,6 +61,7 @@ struct VideoDecoder {
     shared_vmo: Handle,
     shared_va: usize,
     codec: u8,
+    notify_ep: Handle,
     stats: PlaybackStats,
 }
 
@@ -173,6 +174,15 @@ impl VideoDecoder {
 
         let req = video_decoder::OpenRequest::read_from(msg.payload);
         let file_vmo = Handle(msg.handles[0]);
+
+        if self.notify_ep.0 != 0 {
+            let _ = abi::handle::close(self.notify_ep);
+        }
+        self.notify_ep = if msg.handles.len() > 1 && msg.handles[1] != 0 {
+            Handle(msg.handles[1])
+        } else {
+            Handle(0)
+        };
         let ro = Rights(Rights::READ.0 | Rights::MAP.0);
         let file_va = match abi::vmo::map(file_vmo, 0, ro) {
             Ok(va) => va,
@@ -801,6 +811,7 @@ extern "C" fn _start() -> ! {
         shared_vmo: Handle(0),
         shared_va: 0,
         codec: 0,
+        notify_ep: Handle(0),
         stats: PlaybackStats {
             frames_decoded: 0,
             frames_skipped: 0,
@@ -871,6 +882,16 @@ extern "C" fn _start() -> ! {
                 decoder.decode_and_publish(0);
                 decoder.publish_status();
                 decoder.report_stats();
+
+                if decoder.notify_ep.0 != 0 {
+                    const PRESENTER_VIDEO_PLAYBACK_ENDED: u32 = 8;
+
+                    let _ = ipc::client::call_simple(
+                        decoder.notify_ep,
+                        PRESENTER_VIDEO_PLAYBACK_ENDED,
+                        &[],
+                    );
+                }
             }
         } else {
             match ipc::server::serve_one(HANDLE_SVC_EP, &mut decoder) {

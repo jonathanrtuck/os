@@ -28,6 +28,7 @@ pub const DECODE_FRAME: u32 = 2;
 pub const CLOSE: u32 = 3;
 pub const TOGGLE: u32 = 4;
 pub const PAUSE: u32 = 5;
+pub const PLAYBACK_ENDED: u32 = 6;
 
 pub const GEN_HEADER_SIZE: usize = 2 * core::mem::size_of::<u64>();
 

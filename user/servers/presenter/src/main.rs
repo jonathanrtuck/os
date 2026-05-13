@@ -776,6 +776,15 @@ impl Dispatch for Presenter {
 
                 let _ = msg.reply_empty();
             }
+            presenter_service::VIDEO_PLAYBACK_ENDED => {
+                if let Some(Space::Video { playing, .. }) = self.spaces.get_mut(self.active_space) {
+                    *playing = false;
+                }
+
+                self.build_scene();
+
+                let _ = msg.reply_empty();
+            }
             _ => {
                 let _ = msg.reply_error(ipc::STATUS_UNSUPPORTED);
             }
@@ -947,13 +956,24 @@ fn try_open_video(render_ep: Handle, console_ep: Handle, media_type: &[u8]) -> O
 
     open_req.write_to(&mut open_buf);
 
+    let notify_ep = match abi::handle::dup(HANDLE_SVC_EP, Rights(Rights::READ.0 | Rights::WRITE.0))
+    {
+        Ok(h) => h,
+        Err(_) => {
+            let _ = abi::handle::close(file_vmo);
+            let _ = abi::handle::close(decoder_ep);
+
+            return None;
+        }
+    };
+
     let mut call_buf = [0u8; ipc::message::MSG_SIZE];
     let mut open_handles = [0u32; 4];
     let open_reply = match ipc::client::call(
         decoder_ep,
         video_decoder::OPEN,
         &open_buf,
-        &[file_vmo.0],
+        &[file_vmo.0, notify_ep.0],
         &mut open_handles,
         &mut call_buf,
     ) {
@@ -1157,30 +1177,6 @@ impl Presenter {
         let stack_top = stack_base as usize + PLAY_THREAD_STACK_SIZE;
         let entry = play_thread_entry as extern "C" fn(usize) -> ! as usize;
         let _ = abi::thread::create(entry, stack_top, arg_ptr);
-    }
-
-    fn sync_video_status(&mut self) {
-        if let Some(Space::Video {
-            frame_va, playing, ..
-        }) = self.spaces.get_mut(self.active_space)
-        {
-            if *frame_va == 0 || !*playing {
-                return;
-            }
-
-            // SAFETY: frame_va is a valid RO mapping. The flags field is an
-            // aligned u64 at offset 8. Acquire ordering ensures we see the
-            // decoder's latest state.
-            let decoder_playing = unsafe {
-                let flags_ptr = (*frame_va + 8) as *const core::sync::atomic::AtomicU64;
-
-                (*flags_ptr).load(core::sync::atomic::Ordering::Acquire) != 0
-            };
-
-            if !decoder_playing {
-                *playing = false;
-            }
-        }
     }
 
     fn toggle_video_playback(&mut self) {
@@ -1485,11 +1481,7 @@ extern "C" fn _start() -> ! {
             .spaces
             .get(server.active_space)
             .is_some_and(|s| s.needs_continuous_render());
-        let video_playing = matches!(
-            server.spaces.get(server.active_space),
-            Some(Space::Video { playing: true, .. })
-        );
-        let needs_anim = server.slide_animating || active_needs_render || video_playing;
+        let needs_anim = server.slide_animating || active_needs_render;
         let deadline = if needs_anim {
             if next_frame <= now {
                 let behind = now - next_frame;
@@ -1542,22 +1534,6 @@ extern "C" fn _start() -> ! {
             }
 
             if !server.slide_animating && active_needs_render {
-                server.build_scene();
-            }
-
-            let was_playing = matches!(
-                server.spaces.get(server.active_space),
-                Some(Space::Video { playing: true, .. })
-            );
-
-            server.sync_video_status();
-
-            if was_playing
-                && matches!(
-                    server.spaces.get(server.active_space),
-                    Some(Space::Video { playing: false, .. })
-                )
-            {
                 server.build_scene();
             }
 
