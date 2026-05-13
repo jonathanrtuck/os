@@ -2099,50 +2099,35 @@ fn lookup_or_rasterize_path(
         return Some(*entry);
     }
 
+    // GPU compute path: flatten to segments, reserve space in the GPU
+    // region of the atlas (no CPU pixels written), queue for dispatch.
     if pw > 0 && ph > 0 && pw <= 256 && ph <= 256 {
         let mut seg_buf = alloc::vec![0u8; MAX_GPU_SEGMENTS * 16];
         let seg_count = path::flatten_to_buffer(path_data, scale, stroke_data, &mut seg_buf);
 
-        if seg_count > 0 && seg_count <= MAX_GPU_SEGMENTS {
-            let placeholder = alloc::vec![0u8; (pw * ph) as usize];
-            let ok = ctx.atlas.pack(
-                1,
-                cache_size,
-                cache_hash,
-                pw as u16,
-                ph as u16,
-                0,
-                0,
-                &placeholder,
-            );
+        if seg_count > 0
+            && seg_count <= MAX_GPU_SEGMENTS
+            && ctx
+                .atlas
+                .pack_gpu(1, cache_size, cache_hash, pw as u16, ph as u16)
+            && let Some(e) = ctx.atlas.lookup(1, cache_size, cache_hash)
+        {
+            seg_buf.truncate(seg_count * 16);
 
-            if ok {
-                let entry = ctx.atlas.lookup(1, cache_size, cache_hash).copied();
+            ctx.pending_gpu_paths.push(PendingGpuPath {
+                seg_count: seg_count as u16,
+                atlas_u: e.u,
+                atlas_v: e.v,
+                width: pw as u16,
+                height: ph as u16,
+                seg_buf,
+            });
 
-                if let Some(e) = &entry {
-                    seg_buf.truncate(seg_count * 16);
-
-                    ctx.pending_gpu_paths.push(PendingGpuPath {
-                        seg_count: seg_count as u16,
-                        atlas_u: e.u,
-                        atlas_v: e.v,
-                        width: pw as u16,
-                        height: ph as u16,
-                        seg_buf,
-                    });
-
-                    ctx.atlas_dirty = true;
-                }
-
-                return entry;
-            }
-
-            ctx.atlas_full = true;
-
-            return None;
+            return Some(*e);
         }
     }
 
+    // CPU fallback: rasterize on CPU, pack into the CPU region.
     let coverage = path::rasterize_path(path_data, pw, ph, scale, fill_rule, stroke_data);
 
     if coverage.is_empty() {
@@ -2674,17 +2659,15 @@ impl Compositor {
             return;
         }
 
-        let atlas = &self.walk_ctx.atlas;
-        let max_y = atlas.row_y + atlas.row_h;
+        let max_y = self.walk_ctx.atlas.row_y + self.walk_ctx.atlas.row_h;
 
         if max_y == 0 {
             return;
         }
 
         let start_y = self.atlas_upload_y;
-        let height = max_y - start_y;
 
-        if height == 0 {
+        if max_y <= start_y {
             self.walk_ctx.atlas_dirty = false;
 
             return;
@@ -2704,7 +2687,7 @@ impl Compositor {
             let rows = ((max_y - y) as usize).min(max_rows_per_submit) as u16;
             let src_offset = y as usize * row_bytes;
             let pixel_count = rows as usize * row_bytes;
-            let pixel_data = &atlas.pixels[src_offset..src_offset + pixel_count];
+            let pixel_data = &self.walk_ctx.atlas.pixels[src_offset..src_offset + pixel_count];
             let len = {
                 let mut w = CommandWriter::new(dma_buf);
 
@@ -2733,7 +2716,7 @@ impl Compositor {
             y += rows;
         }
 
-        self.atlas_upload_y = atlas.row_y;
+        self.atlas_upload_y = self.walk_ctx.atlas.row_y;
         self.walk_ctx.atlas_dirty = false;
     }
 

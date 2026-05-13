@@ -708,8 +708,13 @@ impl Dispatch for VideoDecoder {
 
                 if self.playing {
                     let now = abi::system::clock_read().unwrap_or(0);
+                    let current_pts = self
+                        .frame_pts_ns
+                        .get(self.current_frame as usize)
+                        .copied()
+                        .unwrap_or(0);
 
-                    self.play_start_ns = now;
+                    self.play_start_ns = now.saturating_sub(current_pts);
                     self.stats = PlaybackStats {
                         frames_decoded: 0,
                         frames_skipped: 0,

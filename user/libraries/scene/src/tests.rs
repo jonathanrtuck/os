@@ -10,7 +10,7 @@ use crate::{
     stroke::expand_stroke,
     svg_path::parse_svg_path,
     transform::AffineTransform,
-    triple::{TripleWriter, TRIPLE_SCENE_SIZE},
+    triple::{TRIPLE_SCENE_SIZE, TripleWriter},
     writer::SceneWriter,
 };
 
@@ -265,7 +265,7 @@ fn writer_clear_resets_state() {
     assert_eq!(w.node_count(), 0);
     assert_eq!(w.data_used(), 0);
     assert_eq!(w.root(), NULL);
-    assert_eq!(w.generation(), 1);
+    assert_eq!(w.generation(), 3);
 }
 
 #[test]

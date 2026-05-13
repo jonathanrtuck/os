@@ -9,6 +9,7 @@ use alloc::boxed::Box;
 
 pub const ATLAS_WIDTH: u32 = 2048;
 pub const ATLAS_HEIGHT: u32 = 2048;
+pub const GPU_REGION_START: u16 = (ATLAS_HEIGHT - 256) as u16;
 
 const CAPACITY: usize = 16384;
 const EMPTY: u64 = u64::MAX;
@@ -55,6 +56,9 @@ pub struct GlyphAtlas {
     pub row_y: u16,
     pub row_x: u16,
     pub row_h: u16,
+    gpu_row_y: u16,
+    gpu_row_x: u16,
+    gpu_row_h: u16,
 }
 
 impl GlyphAtlas {
@@ -143,7 +147,7 @@ impl GlyphAtlas {
             self.row_x = 0;
             self.row_h = 0;
         }
-        if self.row_y + h > ATLAS_HEIGHT as u16 {
+        if self.row_y + h > GPU_REGION_START {
             return false;
         }
 
@@ -182,6 +186,43 @@ impl GlyphAtlas {
         self.insert(glyph_id, font_size_px, style_id, entry)
     }
 
+    pub fn pack_gpu(
+        &mut self,
+        glyph_id: u16,
+        font_size_px: u16,
+        style_id: u32,
+        w: u16,
+        h: u16,
+    ) -> bool {
+        if self.gpu_row_x + w > ATLAS_WIDTH as u16 {
+            self.gpu_row_y += self.gpu_row_h;
+            self.gpu_row_x = 0;
+            self.gpu_row_h = 0;
+        }
+        if self.gpu_row_y + h > ATLAS_HEIGHT as u16 {
+            return false;
+        }
+
+        let u = self.gpu_row_x;
+        let v = self.gpu_row_y;
+        let entry = AtlasEntry {
+            u,
+            v,
+            width: w,
+            height: h,
+            bearing_x: 0,
+            bearing_y: 0,
+        };
+
+        self.gpu_row_x += w;
+
+        if h > self.gpu_row_h {
+            self.gpu_row_h = h;
+        }
+
+        self.insert(glyph_id, font_size_px, style_id, entry)
+    }
+
     pub fn reset(&mut self) {
         let mut i = 0;
 
@@ -191,8 +232,6 @@ impl GlyphAtlas {
             i += 1;
         }
 
-        // Clear pixel buffer so stale glyph data from the previous generation
-        // cannot leak into the GPU texture upload.
         let mut p = 0;
 
         while p < self.pixels.len() {
@@ -204,5 +243,8 @@ impl GlyphAtlas {
         self.row_y = 0;
         self.row_x = 0;
         self.row_h = 0;
+        self.gpu_row_y = GPU_REGION_START;
+        self.gpu_row_x = 0;
+        self.gpu_row_h = 0;
     }
 }
