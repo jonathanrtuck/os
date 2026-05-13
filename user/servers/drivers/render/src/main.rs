@@ -1013,10 +1013,11 @@ struct PipelineMetrics {
     render_max_ns: u64,
     walk_total_ns: u64,
     walk_max_ns: u64,
-    #[allow(dead_code)]
     atlas_upload_total_ns: u64,
-    gpu_submit_total_ns: u64,
-    gpu_submit_count: u32,
+    atlas_upload_count: u32,
+    gpu_path_total_ns: u64,
+    gpu_path_count: u32,
+    emit_total_ns: u64,
     live_upload_total_ns: u64,
     live_upload_count: u32,
     live_upload_max_ns: u64,
@@ -1041,8 +1042,10 @@ impl PipelineMetrics {
             walk_total_ns: 0,
             walk_max_ns: 0,
             atlas_upload_total_ns: 0,
-            gpu_submit_total_ns: 0,
-            gpu_submit_count: 0,
+            atlas_upload_count: 0,
+            gpu_path_total_ns: 0,
+            gpu_path_count: 0,
+            emit_total_ns: 0,
             live_upload_total_ns: 0,
             live_upload_count: 0,
             live_upload_max_ns: 0,
@@ -1081,40 +1084,57 @@ impl PipelineMetrics {
         } else {
             0
         };
-        let mut buf = [0u8; 200];
+        let e_avg = if self.render_count > 0 {
+            (self.emit_total_ns / self.render_count as u64) / 1000
+        } else {
+            0
+        };
+        let a_avg = if self.atlas_upload_count > 0 {
+            (self.atlas_upload_total_ns / self.atlas_upload_count as u64) / 1000
+        } else {
+            0
+        };
+        let gp_avg = if self.gpu_path_count > 0 {
+            (self.gpu_path_total_ns / self.gpu_path_count as u64) / 1000
+        } else {
+            0
+        };
+        let mut buf = [0u8; 300];
         let mut p = 0;
 
+        // Line 1: frame totals
         p += copy_into_buf(&mut buf[p..], b"comp: ");
         p += console::format_u32(wall_ms as u32, &mut buf[p..]);
         p += copy_into_buf(&mut buf[p..], b"ms r=");
         p += console::format_u32(self.render_count, &mut buf[p..]);
-        p += copy_into_buf(&mut buf[p..], b" walk=");
-        p += console::format_u32(w_avg as u32, &mut buf[p..]);
-        p += copy_into_buf(&mut buf[p..], b"/");
-        p += console::format_u32((self.walk_max_ns / 1000) as u32, &mut buf[p..]);
-        p += copy_into_buf(&mut buf[p..], b"us ren=");
+        p += copy_into_buf(&mut buf[p..], b" frame=");
         p += console::format_u32(r_avg as u32, &mut buf[p..]);
         p += copy_into_buf(&mut buf[p..], b"/");
         p += console::format_u32((self.render_max_ns / 1000) as u32, &mut buf[p..]);
-        p += copy_into_buf(&mut buf[p..], b"us gpu=");
-        p += console::format_u32(self.gpu_submit_count, &mut buf[p..]);
+        p += copy_into_buf(&mut buf[p..], b"us walk=");
+        p += console::format_u32(w_avg as u32, &mut buf[p..]);
         p += copy_into_buf(&mut buf[p..], b"/");
-        p += console::format_u32((self.gpu_submit_total_ns / 1000) as u32, &mut buf[p..]);
-        p += copy_into_buf(&mut buf[p..], b"us lu=");
-        p += console::format_u32(self.live_upload_count, &mut buf[p..]);
-        p += copy_into_buf(&mut buf[p..], b"/");
-        p += console::format_u32(self.live_check_count, &mut buf[p..]);
+        p += console::format_u32((self.walk_max_ns / 1000) as u32, &mut buf[p..]);
+        p += copy_into_buf(&mut buf[p..], b"us atlas=");
+        p += console::format_u32(a_avg as u32, &mut buf[p..]);
+        p += copy_into_buf(&mut buf[p..], b"us*");
+        p += console::format_u32(self.atlas_upload_count, &mut buf[p..]);
+        p += copy_into_buf(&mut buf[p..], b" gpu=");
+        p += console::format_u32(gp_avg as u32, &mut buf[p..]);
+        p += copy_into_buf(&mut buf[p..], b"us*");
+        p += console::format_u32(self.gpu_path_count, &mut buf[p..]);
+        p += copy_into_buf(&mut buf[p..], b" emit=");
+        p += console::format_u32(e_avg as u32, &mut buf[p..]);
+        p += copy_into_buf(&mut buf[p..], b"us");
 
         if self.live_upload_count > 0 {
-            p += copy_into_buf(&mut buf[p..], b" ");
+            p += copy_into_buf(&mut buf[p..], b" live=");
             p += console::format_u32(lu_avg as u32, &mut buf[p..]);
-            p += copy_into_buf(&mut buf[p..], b"/");
-            p += console::format_u32((self.live_upload_max_ns / 1000) as u32, &mut buf[p..]);
-            p += copy_into_buf(&mut buf[p..], b"us");
+            p += copy_into_buf(&mut buf[p..], b"us*");
+            p += console::format_u32(self.live_upload_count, &mut buf[p..]);
         }
 
-        p += copy_into_buf(&mut buf[p..], b" g=");
-        p += console::format_u32(self.live_last_gen, &mut buf[p..]);
+        // Event counts
         p += copy_into_buf(&mut buf[p..], b" s=");
         p += console::format_u32(self.scene_dirty_count, &mut buf[p..]);
         p += copy_into_buf(&mut buf[p..], b" i=");
@@ -1123,8 +1143,6 @@ impl PipelineMetrics {
         p += console::format_u32(self.timer_due_count, &mut buf[p..]);
         p += copy_into_buf(&mut buf[p..], b" idle=");
         p += console::format_u32(self.idle_count, &mut buf[p..]);
-        p += copy_into_buf(&mut buf[p..], b" ipc=");
-        p += console::format_u32(self.ipc_count, &mut buf[p..]);
 
         if self.atlas_reset_count > 0 {
             p += copy_into_buf(&mut buf[p..], b" atlas_rst=");
@@ -3082,70 +3100,59 @@ impl Compositor {
 
         draws.finalize();
 
+        let atlas_t0 = abi::system::clock_read().unwrap_or(0);
+
         self.upload_atlas_dirty();
+
+        let atlas_dt = abi::system::clock_read()
+            .unwrap_or(0)
+            .saturating_sub(atlas_t0);
+
+        self.metrics.atlas_upload_total_ns += atlas_dt;
+
+        if atlas_dt > 0 {
+            self.metrics.atlas_upload_count += 1;
+        }
+
+        let gpu_t0 = abi::system::clock_read().unwrap_or(0);
+        let gpu_path_n = self.walk_ctx.pending_gpu_paths.len() as u32;
+
         self.dispatch_gpu_paths();
+
+        let gpu_dt = abi::system::clock_read()
+            .unwrap_or(0)
+            .saturating_sub(gpu_t0);
+
+        self.metrics.gpu_path_total_ns += gpu_dt;
+        self.metrics.gpu_path_count += gpu_path_n;
         self.flush_pending_cursor();
 
+        let emit_t0 = abi::system::clock_read().unwrap_or(0);
         let clear_r = srgb_to_linear(bg.r as f32 / 255.0);
         let clear_g = srgb_to_linear(bg.g as f32 / 255.0);
         let clear_b = srgb_to_linear(bg.b as f32 / 255.0);
-
-        if draws.ops.is_empty() {
-            // SAFETY: render_dma.va is a valid DMA allocation of render_buf_size bytes.
-            let dma_buf = unsafe {
-                core::slice::from_raw_parts_mut(
-                    self.render_dma[self.render_dma_idx].va as *mut u8,
-                    self.render_buf_size,
-                )
-            };
-            let len = {
-                let mut w = CommandWriter::new(dma_buf);
-
-                w.begin_render_pass(
-                    render::DRAWABLE_HANDLE,
-                    0,
-                    0,
-                    render::LOAD_CLEAR,
-                    render::STORE_STORE,
-                    0,
-                    0,
-                    clear_r,
-                    clear_g,
-                    clear_b,
-                    1.0,
-                );
-                w.end_render_pass();
-                w.present_and_commit(self.frame_count);
-
-                w.len()
-            };
-
-            submit_async(
-                &self.device,
-                &mut self.render_vq,
-                render::VIRTQ_RENDER,
-                self.render_dma[self.render_dma_idx].pa,
-                len,
-            );
-
-            self.in_flight = true;
-        } else {
-            let mut first = true;
+        // SAFETY: render_dma.va is a valid DMA allocation of render_buf_size bytes.
+        let dma_buf = unsafe {
+            core::slice::from_raw_parts_mut(
+                self.render_dma[self.render_dma_idx].va as *mut u8,
+                self.render_buf_size,
+            )
+        };
+        let len = {
+            let mut w = CommandWriter::new(dma_buf);
+            let mut in_render_pass = false;
             let mut active_pipe: Option<Pipe> = None;
             let mut op_idx = 0;
 
             while op_idx < draws.ops.len() {
-                // SAFETY: render_dma.va is a valid DMA allocation of render_buf_size bytes.
-                let dma_buf = unsafe {
-                    core::slice::from_raw_parts_mut(
-                        self.render_dma[self.render_dma_idx].va as *mut u8,
-                        self.render_buf_size,
-                    )
-                };
-
                 if matches!(draws.ops[op_idx].pipe, Pipe::BackdropBlur) {
                     let op = &draws.ops[op_idx];
-                    let is_last = op_idx == draws.ops.len() - 1;
+
+                    if in_render_pass {
+                        w.end_render_pass();
+                        in_render_pass = false;
+                    }
+
                     let mut corners = [(0.0f32, 0.0f32); 4];
 
                     for (i, corner) in corners.iter_mut().enumerate() {
@@ -3255,166 +3262,97 @@ impl Compositor {
                     } else {
                         (1.0f32, 0.0f32, 0.0f32, 1.0f32)
                     };
-                    let h_vals: [f32; 12] = [
-                        step_px / phys_w,
-                        0.0,
-                        center_x,
-                        center_y,
-                        half_w,
-                        half_h,
-                        phys_cr,
-                        0.0,
-                        inv_a,
-                        inv_b,
-                        inv_c,
-                        inv_d,
-                    ];
-                    let v_vals: [f32; 12] = [
-                        0.0,
-                        step_px / phys_h,
-                        center_x,
-                        center_y,
-                        half_w,
-                        half_h,
-                        phys_cr,
-                        0.0,
-                        inv_a,
-                        inv_b,
-                        inv_c,
-                        inv_d,
-                    ];
-                    let mut h_params = [0u8; 48];
-                    let mut v_params = [0u8; 48];
+                    let blur_params = |dx: f32, dy: f32| -> [u8; 48] {
+                        let vals: [f32; 12] = [
+                            dx, dy, center_x, center_y, half_w, half_h, phys_cr, 0.0, inv_a, inv_b,
+                            inv_c, inv_d,
+                        ];
+                        let mut out = [0u8; 48];
 
-                    for i in 0..12 {
-                        h_params[i * 4..(i + 1) * 4].copy_from_slice(&h_vals[i].to_le_bytes());
-                        v_params[i * 4..(i + 1) * 4].copy_from_slice(&v_vals[i].to_le_bytes());
-                    }
-
-                    let len = {
-                        let mut w = CommandWriter::new(dma_buf);
-
-                        w.begin_blit_pass();
-                        w.copy_texture_region(
-                            render::DRAWABLE_HANDLE,
-                            TEX_BLUR,
-                            sx,
-                            sy,
-                            sw,
-                            sh,
-                            sx,
-                            sy,
-                        );
-                        w.end_blit_pass();
-                        w.begin_render_pass(
-                            render::DRAWABLE_HANDLE,
-                            0,
-                            0,
-                            render::LOAD_LOAD,
-                            render::STORE_STORE,
-                            0,
-                            0,
-                            0.0,
-                            0.0,
-                            0.0,
-                            1.0,
-                        );
-                        w.set_render_pipeline(PIPE_BLUR);
-                        w.set_fragment_texture(TEX_BLUR, 0);
-                        w.set_fragment_sampler(SAMPLER_LINEAR, 0);
-                        w.set_fragment_bytes(0, &h_params);
-                        render::batch::emit_draws(&mut w, &quad);
-                        w.end_render_pass();
-
-                        w.len()
-                    };
-
-                    submit_and_wait(
-                        &self.device,
-                        &mut self.render_vq,
-                        self.irq_event,
-                        render::VIRTQ_RENDER,
-                        self.render_dma[self.render_dma_idx].pa,
-                        len,
-                    );
-
-                    let len = {
-                        let mut w = CommandWriter::new(dma_buf);
-
-                        w.begin_blit_pass();
-                        w.copy_texture_region(
-                            render::DRAWABLE_HANDLE,
-                            TEX_BLUR,
-                            sx,
-                            sy,
-                            sw,
-                            sh,
-                            sx,
-                            sy,
-                        );
-                        w.end_blit_pass();
-                        w.begin_render_pass(
-                            render::DRAWABLE_HANDLE,
-                            0,
-                            0,
-                            render::LOAD_LOAD,
-                            render::STORE_STORE,
-                            0,
-                            0,
-                            0.0,
-                            0.0,
-                            0.0,
-                            1.0,
-                        );
-                        w.set_render_pipeline(PIPE_BLUR);
-                        w.set_fragment_texture(TEX_BLUR, 0);
-                        w.set_fragment_sampler(SAMPLER_LINEAR, 0);
-                        w.set_fragment_bytes(0, &v_params);
-
-                        render::batch::emit_draws(&mut w, &quad);
-
-                        w.end_render_pass();
-
-                        if is_last {
-                            w.present_and_commit(self.frame_count);
+                        for i in 0..12 {
+                            out[i * 4..(i + 1) * 4].copy_from_slice(&vals[i].to_le_bytes());
                         }
 
-                        w.len()
+                        out
                     };
+                    let h_params = blur_params(step_px / phys_w, 0.0);
+                    let v_params = blur_params(0.0, step_px / phys_h);
 
-                    if is_last {
-                        submit_async(
-                            &self.device,
-                            &mut self.render_vq,
-                            render::VIRTQ_RENDER,
-                            self.render_dma[self.render_dma_idx].pa,
-                            len,
-                        );
+                    w.begin_blit_pass();
+                    w.copy_texture_region(
+                        render::DRAWABLE_HANDLE,
+                        TEX_BLUR,
+                        sx,
+                        sy,
+                        sw,
+                        sh,
+                        sx,
+                        sy,
+                    );
+                    w.end_blit_pass();
+                    w.begin_render_pass(
+                        render::DRAWABLE_HANDLE,
+                        0,
+                        0,
+                        render::LOAD_LOAD,
+                        render::STORE_STORE,
+                        0,
+                        0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        1.0,
+                    );
+                    w.set_render_pipeline(PIPE_BLUR);
+                    w.set_fragment_texture(TEX_BLUR, 0);
+                    w.set_fragment_sampler(SAMPLER_LINEAR, 0);
+                    w.set_fragment_bytes(0, &h_params);
 
-                        self.in_flight = true;
-                    } else {
-                        submit_and_wait(
-                            &self.device,
-                            &mut self.render_vq,
-                            self.irq_event,
-                            render::VIRTQ_RENDER,
-                            self.render_dma[self.render_dma_idx].pa,
-                            len,
-                        );
-                    }
+                    render::batch::emit_draws(&mut w, &quad);
 
-                    first = false;
+                    w.end_render_pass();
+                    w.begin_blit_pass();
+                    w.copy_texture_region(
+                        render::DRAWABLE_HANDLE,
+                        TEX_BLUR,
+                        sx,
+                        sy,
+                        sw,
+                        sh,
+                        sx,
+                        sy,
+                    );
+                    w.end_blit_pass();
+                    w.begin_render_pass(
+                        render::DRAWABLE_HANDLE,
+                        0,
+                        0,
+                        render::LOAD_LOAD,
+                        render::STORE_STORE,
+                        0,
+                        0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        1.0,
+                    );
+                    w.set_render_pipeline(PIPE_BLUR);
+                    w.set_fragment_texture(TEX_BLUR, 0);
+                    w.set_fragment_sampler(SAMPLER_LINEAR, 0);
+                    w.set_fragment_bytes(0, &v_params);
+
+                    render::batch::emit_draws(&mut w, &quad);
+
+                    w.end_render_pass();
+
                     active_pipe = None;
                     op_idx += 1;
 
                     continue;
                 }
 
-                // Batch consecutive non-blur ops into a single render pass.
-                let batch_start = op_idx;
-                let len = {
-                    let mut w = CommandWriter::new(dma_buf);
-                    let load = if first {
+                if !in_render_pass {
+                    let load = if op_idx == 0 {
                         render::LOAD_CLEAR
                     } else {
                         render::LOAD_LOAD
@@ -3434,114 +3372,96 @@ impl Compositor {
                         1.0,
                     );
 
-                    while op_idx < draws.ops.len() {
-                        let op = &draws.ops[op_idx];
-
-                        if matches!(op.pipe, Pipe::BackdropBlur) {
-                            break;
-                        }
-
-                        let cp = w.checkpoint();
-                        let verts = &draws.verts[op.vert_offset..op.vert_offset + op.vert_bytes];
-                        let needs_rebind = active_pipe != Some(op.pipe)
-                            || op.pipe == Pipe::Shadow
-                            || op.pipe == Pipe::Gradient
-                            || op.pipe == Pipe::GradientMasked;
-
-                        if needs_rebind {
-                            match op.pipe {
-                                Pipe::Solid => {
-                                    w.set_render_pipeline(PIPE_SOLID);
-                                }
-                                Pipe::Glyph => {
-                                    w.set_render_pipeline(PIPE_GLYPH);
-                                    w.set_fragment_texture(TEX_ATLAS, 0);
-                                    w.set_fragment_sampler(SAMPLER_NEAREST, 0);
-                                }
-                                Pipe::Shadow => {
-                                    w.set_render_pipeline(PIPE_SHADOW);
-                                    w.set_fragment_bytes(0, &op.params[..48]);
-                                }
-                                Pipe::Gradient => {
-                                    w.set_render_pipeline(PIPE_GRADIENT);
-                                    w.set_fragment_bytes(0, &op.params);
-                                }
-                                Pipe::GradientMasked => {
-                                    w.set_render_pipeline(PIPE_GRADIENT_MASKED);
-                                    w.set_fragment_bytes(0, &op.params);
-                                    w.set_fragment_texture(TEX_ATLAS, 0);
-                                    w.set_fragment_sampler(SAMPLER_NEAREST, 0);
-                                }
-                                Pipe::Textured(tex_id) => {
-                                    w.set_render_pipeline(PIPE_TEXTURED);
-                                    w.set_fragment_texture(tex_id, 0);
-                                    w.set_fragment_sampler(SAMPLER_LINEAR, 0);
-                                }
-                                Pipe::BackdropBlur => unreachable!(),
-                            }
-                            active_pipe = Some(op.pipe);
-                        }
-
-                        render::batch::emit_draws(&mut w, verts);
-
-                        if w.has_overflow() {
-                            w.rewind_to(cp);
-
-                            active_pipe = None;
-
-                            break;
-                        }
-
-                        first = false;
-                        op_idx += 1;
-                    }
-
-                    w.end_render_pass();
-
-                    let is_final = op_idx == draws.ops.len();
-
-                    if is_final {
-                        w.present_and_commit(self.frame_count);
-                    }
-
-                    w.len()
-                };
-
-                if op_idx == draws.ops.len() {
-                    submit_async(
-                        &self.device,
-                        &mut self.render_vq,
-                        render::VIRTQ_RENDER,
-                        self.render_dma[self.render_dma_idx].pa,
-                        len,
-                    );
-
-                    self.in_flight = true;
-                } else {
-                    submit_and_wait(
-                        &self.device,
-                        &mut self.render_vq,
-                        self.irq_event,
-                        render::VIRTQ_RENDER,
-                        self.render_dma[self.render_dma_idx].pa,
-                        len,
-                    );
+                    in_render_pass = true;
                 }
 
-                if op_idx == batch_start {
-                    op_idx += 1;
+                let op = &draws.ops[op_idx];
+                let verts = &draws.verts[op.vert_offset..op.vert_offset + op.vert_bytes];
+                let needs_rebind = active_pipe != Some(op.pipe)
+                    || op.pipe == Pipe::Shadow
+                    || op.pipe == Pipe::Gradient
+                    || op.pipe == Pipe::GradientMasked;
+
+                if needs_rebind {
+                    match op.pipe {
+                        Pipe::Solid => {
+                            w.set_render_pipeline(PIPE_SOLID);
+                        }
+                        Pipe::Glyph => {
+                            w.set_render_pipeline(PIPE_GLYPH);
+                            w.set_fragment_texture(TEX_ATLAS, 0);
+                            w.set_fragment_sampler(SAMPLER_NEAREST, 0);
+                        }
+                        Pipe::Shadow => {
+                            w.set_render_pipeline(PIPE_SHADOW);
+                            w.set_fragment_bytes(0, &op.params[..48]);
+                        }
+                        Pipe::Gradient => {
+                            w.set_render_pipeline(PIPE_GRADIENT);
+                            w.set_fragment_bytes(0, &op.params);
+                        }
+                        Pipe::GradientMasked => {
+                            w.set_render_pipeline(PIPE_GRADIENT_MASKED);
+                            w.set_fragment_bytes(0, &op.params);
+                            w.set_fragment_texture(TEX_ATLAS, 0);
+                            w.set_fragment_sampler(SAMPLER_NEAREST, 0);
+                        }
+                        Pipe::Textured(tex_id) => {
+                            w.set_render_pipeline(PIPE_TEXTURED);
+                            w.set_fragment_texture(tex_id, 0);
+                            w.set_fragment_sampler(SAMPLER_LINEAR, 0);
+                        }
+                        Pipe::BackdropBlur => unreachable!(),
+                    }
+
+                    active_pipe = Some(op.pipe);
                 }
+
+                render::batch::emit_draws(&mut w, verts);
+
+                op_idx += 1;
             }
-        }
 
+            if !in_render_pass {
+                w.begin_render_pass(
+                    render::DRAWABLE_HANDLE,
+                    0,
+                    0,
+                    render::LOAD_CLEAR,
+                    render::STORE_STORE,
+                    0,
+                    0,
+                    clear_r,
+                    clear_g,
+                    clear_b,
+                    1.0,
+                );
+            }
+
+            w.end_render_pass();
+            w.present_and_commit(self.frame_count);
+
+            w.len()
+        };
+
+        submit_async(
+            &self.device,
+            &mut self.render_vq,
+            render::VIRTQ_RENDER,
+            self.render_dma[self.render_dma_idx].pa,
+            len,
+        );
+
+        self.in_flight = true;
         self.frame_count += 1;
 
-        let frame_dt = abi::system::clock_read()
-            .unwrap_or(0)
-            .saturating_sub(frame_t0);
+        let now = abi::system::clock_read().unwrap_or(0);
+        let frame_dt = now.saturating_sub(frame_t0);
+        let emit_dt = now.saturating_sub(emit_t0);
 
         self.metrics.render_count += 1;
         self.metrics.render_total_ns += frame_dt;
+        self.metrics.emit_total_ns += emit_dt;
 
         if frame_dt > self.metrics.render_max_ns {
             self.metrics.render_max_ns = frame_dt;
