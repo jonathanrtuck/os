@@ -196,6 +196,16 @@ impl DmaAllocRequest {
 pub struct DmaBuf {
     pub va: usize,
     pub pa: u64,
+    vmo: Handle,
+}
+
+impl Drop for DmaBuf {
+    fn drop(&mut self) {
+        if self.vmo.0 != 0 {
+            let _ = abi::vmo::unmap(self.va);
+            let _ = abi::handle::close(Handle(self.vmo.0));
+        }
+    }
 }
 
 pub fn request_dma(init_ep: Handle, size: usize) -> Result<DmaBuf, SyscallError> {
@@ -219,7 +229,11 @@ pub fn request_dma(init_ep: Handle, size: usize) -> Result<DmaBuf, SyscallError>
     let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
     let va = abi::vmo::map(vmo, 0, rw)?;
 
-    Ok(DmaBuf { va, pa: va as u64 })
+    Ok(DmaBuf {
+        va,
+        pa: va as u64,
+        vmo,
+    })
 }
 
 #[cfg(test)]

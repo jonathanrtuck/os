@@ -49,9 +49,8 @@ struct SndDevice {
     ctrl_vq: virtio::Virtqueue,
     tx_vq: virtio::Virtqueue,
     irq_event: Handle,
-    ctrl_buf_va: usize,
-    ctrl_buf_pa: u64,
-    tx_buf: [TxBuf; 2],
+    ctrl_dma: init::DmaBuf,
+    tx_dma: [init::DmaBuf; 2],
     tx_active: usize,
     tx_pending: bool,
     started: bool,
@@ -59,24 +58,19 @@ struct SndDevice {
     tx_status_offset: [usize; 2],
 }
 
-struct TxBuf {
-    va: usize,
-    pa: u64,
-}
-
 impl SndDevice {
     fn ctrl_request(&mut self, request: &[u8]) -> u32 {
-        let buf = self.ctrl_buf_va as *mut u8;
+        let buf = self.ctrl_dma.va as *mut u8;
         let req_len = request.len();
 
-        // SAFETY: ctrl_buf is a PAGE_SIZE DMA buffer, request fits.
+        // SAFETY: ctrl_dma is a PAGE_SIZE DMA buffer, request fits.
         unsafe {
             core::ptr::copy_nonoverlapping(request.as_ptr(), buf, req_len);
             core::ptr::write_bytes(buf.add(req_len), 0, 4);
         }
 
-        let req_pa = self.ctrl_buf_pa;
-        let resp_pa = self.ctrl_buf_pa + req_len as u64;
+        let req_pa = self.ctrl_dma.pa;
+        let resp_pa = self.ctrl_dma.pa + req_len as u64;
 
         self.ctrl_vq
             .push_chain(&[(req_pa, req_len as u32, false), (resp_pa, 4, true)]);
@@ -92,7 +86,7 @@ impl SndDevice {
 
         // SAFETY: device has written 4-byte response at resp_pa.
         unsafe {
-            let resp = (self.ctrl_buf_va + req_len) as *const u32;
+            let resp = (self.ctrl_dma.va + req_len) as *const u32;
 
             core::ptr::read_volatile(resp)
         }
@@ -171,7 +165,7 @@ impl SndDevice {
         self.tx_pending = false;
 
         let prev = 1 - self.tx_active;
-        let status_va = self.tx_buf[prev].va + self.tx_status_offset[prev];
+        let status_va = self.tx_dma[prev].va + self.tx_status_offset[prev];
         // SAFETY: status_va points to the 8-byte status within the completed TX DMA buffer.
         let status = unsafe { core::ptr::read_volatile(status_va as *const u32) };
 
@@ -181,7 +175,7 @@ impl SndDevice {
         }
     }
 
-    fn fill_tx_buf(buf: &TxBuf, f32_data: &[f32]) -> usize {
+    fn fill_tx_buf(buf: &init::DmaBuf, f32_data: &[f32]) -> usize {
         let frame_count = f32_data.len() / 2;
         let s16_bytes = frame_count * FRAME_BYTES;
 
@@ -212,7 +206,7 @@ impl SndDevice {
     fn submit_tx_buf(&mut self, s16_bytes: usize) {
         self.tx_status_offset[self.tx_active] = 4 + s16_bytes;
 
-        let buf = &self.tx_buf[self.tx_active];
+        let buf = &self.tx_dma[self.tx_active];
         let header_pa = buf.pa;
         let data_pa = buf.pa + 4;
         let status_pa = buf.pa + (4 + s16_bytes) as u64;
@@ -237,7 +231,7 @@ impl SndDevice {
             return true;
         }
 
-        let s16_bytes = Self::fill_tx_buf(&self.tx_buf[self.tx_active], f32_data);
+        let s16_bytes = Self::fill_tx_buf(&self.tx_dma[self.tx_active], f32_data);
 
         self.wait_tx_complete();
 
@@ -361,7 +355,7 @@ fn setup_virtqueue(
     device: &virtio::Device,
     queue_idx: u32,
     init_ep: Handle,
-) -> Option<virtio::Virtqueue> {
+) -> Option<(virtio::Virtqueue, init::DmaBuf)> {
     let queue_size = device
         .queue_max_size(queue_idx)
         .min(virtio::DEFAULT_QUEUE_SIZE);
@@ -377,7 +371,7 @@ fn setup_virtqueue(
     // SAFETY: DMA allocation is valid; zeroing before use.
     unsafe { core::ptr::write_bytes(vq_dma.va as *mut u8, 0, vq_alloc) };
 
-    let vq = virtio::Virtqueue::new(queue_size, vq_dma.va, vq_dma.va as u64);
+    let vq = virtio::Virtqueue::new(queue_size, vq_dma.va, vq_dma.pa);
 
     device.setup_queue(
         queue_idx,
@@ -387,7 +381,7 @@ fn setup_virtqueue(
         vq.used_pa(),
     );
 
-    Some(vq)
+    Some((vq, vq_dma))
 }
 
 #[unsafe(no_mangle)]
@@ -408,13 +402,13 @@ extern "C" fn _start() -> ! {
         abi::thread::exit(3);
     }
 
-    let ctrl_vq = match setup_virtqueue(&device, CONTROLQ, HANDLE_INIT_EP) {
-        Some(vq) => vq,
+    let (ctrl_vq, _ctrl_vq_dma) = match setup_virtqueue(&device, CONTROLQ, HANDLE_INIT_EP) {
+        Some(pair) => pair,
         None => abi::thread::exit(4),
     };
     let _event_vq = setup_virtqueue(&device, 1, HANDLE_INIT_EP);
-    let tx_vq = match setup_virtqueue(&device, TXQUEUE, HANDLE_INIT_EP) {
-        Some(vq) => vq,
+    let (tx_vq, _tx_vq_dma) = match setup_virtqueue(&device, TXQUEUE, HANDLE_INIT_EP) {
+        Some(pair) => pair,
         None => abi::thread::exit(4),
     };
     let _rx_vq = setup_virtqueue(&device, 3, HANDLE_INIT_EP);
@@ -459,18 +453,8 @@ extern "C" fn _start() -> ! {
         ctrl_vq,
         tx_vq,
         irq_event,
-        ctrl_buf_va: ctrl_dma.va,
-        ctrl_buf_pa: ctrl_dma.va as u64,
-        tx_buf: [
-            TxBuf {
-                va: tx_dma_0.va,
-                pa: tx_dma_0.va as u64,
-            },
-            TxBuf {
-                va: tx_dma_1.va,
-                pa: tx_dma_1.va as u64,
-            },
-        ],
+        ctrl_dma,
+        tx_dma: [tx_dma_0, tx_dma_1],
         tx_active: 0,
         tx_pending: false,
         started: false,

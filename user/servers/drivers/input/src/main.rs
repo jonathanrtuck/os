@@ -215,17 +215,15 @@ extern "C" fn _start() -> ! {
         .min(virtio::DEFAULT_QUEUE_SIZE);
     let vq_bytes = virtio::Virtqueue::total_bytes(queue_size);
     let vq_alloc = vq_bytes.next_multiple_of(PAGE_SIZE);
-    let vq_dma = match init::request_dma(HANDLE_INIT_EP, vq_alloc) {
+    let _vq_dma = match init::request_dma(HANDLE_INIT_EP, vq_alloc) {
         Ok(r) => r,
         Err(_) => abi::thread::exit(4),
     };
-    let vq_va = vq_dma.va;
 
-    // SAFETY: vq_va is a valid DMA allocation; zeroing before virtqueue init.
-    unsafe { core::ptr::write_bytes(vq_va as *mut u8, 0, vq_alloc) };
+    // SAFETY: _vq_dma.va is a valid DMA allocation; zeroing before virtqueue init.
+    unsafe { core::ptr::write_bytes(_vq_dma.va as *mut u8, 0, vq_alloc) };
 
-    let vq_pa = vq_va as u64;
-    let mut vq = virtio::Virtqueue::new(queue_size, vq_va, vq_pa);
+    let mut vq = virtio::Virtqueue::new(queue_size, _vq_dma.va, _vq_dma.pa);
 
     device.setup_queue(
         EVENT_VIRTQ,
@@ -240,12 +238,12 @@ extern "C" fn _start() -> ! {
         Ok(r) => r,
         Err(_) => abi::thread::exit(5),
     };
+
+    // SAFETY: evt_dma.va is a valid DMA allocation; zeroing event buffer memory.
+    unsafe { core::ptr::write_bytes(evt_dma.va as *mut u8, 0, event_alloc) };
+
     let event_va = evt_dma.va;
-
-    // SAFETY: event_va is a valid DMA allocation; zeroing event buffer memory.
-    unsafe { core::ptr::write_bytes(event_va as *mut u8, 0, event_alloc) };
-
-    let event_pa = event_va as u64;
+    let event_pa = evt_dma.pa;
 
     for i in 0..NUM_EVENT_BUFS {
         let buf_pa = event_pa + (i as u64 * VIRTIO_EVENT_SIZE as u64);
@@ -273,6 +271,8 @@ extern "C" fn _start() -> ! {
     let mut tab_event_va: usize = 0;
     let mut tab_event_pa: u64 = 0;
     let tab_irq_event: Option<Handle>;
+    let mut _tab_vq_dma: Option<init::DmaBuf> = None;
+    let mut _tab_evt_dma: Option<init::DmaBuf> = None;
 
     if let Some((tab_dev, tab_slot)) = tablet {
         if tab_dev.negotiate() {
@@ -285,7 +285,7 @@ extern "C" fn _start() -> ! {
                 // SAFETY: tq_dma.va is a valid DMA allocation.
                 unsafe { core::ptr::write_bytes(tq_dma.va as *mut u8, 0, tq_alloc) };
 
-                let mut tvq = virtio::Virtqueue::new(tq_size, tq_dma.va, tq_dma.va as u64);
+                let mut tvq = virtio::Virtqueue::new(tq_size, tq_dma.va, tq_dma.pa);
 
                 tab_dev.setup_queue(
                     EVENT_VIRTQ,
@@ -295,12 +295,14 @@ extern "C" fn _start() -> ! {
                     tvq.used_pa(),
                 );
 
+                _tab_vq_dma = Some(tq_dma);
+
                 if let Ok(te_dma) = init::request_dma(HANDLE_INIT_EP, event_alloc) {
                     // SAFETY: te_dma.va is a valid DMA allocation.
                     unsafe { core::ptr::write_bytes(te_dma.va as *mut u8, 0, event_alloc) };
 
                     tab_event_va = te_dma.va;
-                    tab_event_pa = te_dma.va as u64;
+                    tab_event_pa = te_dma.pa;
 
                     for i in 0..NUM_EVENT_BUFS {
                         let buf_pa = tab_event_pa + (i as u64 * VIRTIO_EVENT_SIZE as u64);
@@ -310,6 +312,8 @@ extern "C" fn _start() -> ! {
 
                     tab_dev.driver_ok();
                     tab_dev.notify(EVENT_VIRTQ);
+
+                    _tab_evt_dma = Some(te_dma);
 
                     if let Ok(te) = abi::event::create() {
                         let tab_irq = virtio::SPI_BASE_INTID + tab_slot;

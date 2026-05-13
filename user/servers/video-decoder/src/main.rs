@@ -38,6 +38,12 @@ const SHARED_VMO_SIZE: usize = PAGE_SIZE * 64;
 
 const RIFF_MAGIC: [u8; 4] = *b"RIFF";
 
+struct AudioThreadCleanup {
+    stack_base: *mut u8,
+    stack_layout: alloc::alloc::Layout,
+    death_event: Handle,
+}
+
 struct VideoDecoder {
     console_ep: Handle,
     file_vmo: Handle,
@@ -66,6 +72,7 @@ struct VideoDecoder {
     audio_pcm_vmo: Handle,
     audio_pcm_va: usize,
     audio_pcm_bytes: u32,
+    audio_cleanup: Option<AudioThreadCleanup>,
 }
 
 struct PlaybackStats {
@@ -828,6 +835,7 @@ impl VideoDecoder {
 
     fn close_current(&mut self) {
         self.stop_audio_playback();
+        self.try_reclaim_audio_stack();
 
         if self.file_va != 0 {
             let _ = abi::vmo::unmap(self.file_va);
@@ -878,10 +886,28 @@ impl VideoDecoder {
         let _ = ipc::client::call_simple(self.codec_ep, video::STOP_AUDIO, &[]);
     }
 
-    fn start_audio_playback(&self) {
+    fn try_reclaim_audio_stack(&mut self) {
+        if self.audio_cleanup.is_none() {
+            return;
+        }
+
+        let evt = self.audio_cleanup.as_ref().unwrap().death_event;
+
+        if abi::event::wait_deadline(evt, 0x1, 1).is_ok() {
+            let cleanup = self.audio_cleanup.take().unwrap();
+            let _ = abi::handle::close(cleanup.death_event);
+
+            // SAFETY: stack was allocated with this layout; thread has exited.
+            unsafe { alloc::alloc::dealloc(cleanup.stack_base, cleanup.stack_layout) };
+        }
+    }
+
+    fn start_audio_playback(&mut self) {
         if self.audio_pcm_vmo.0 == 0 || self.audio_pcm_bytes == 0 {
             return;
         }
+
+        self.try_reclaim_audio_stack();
 
         let audio_ep = match name::lookup(HANDLE_NS_EP, b"audio") {
             Ok(h) => h,
@@ -922,9 +948,33 @@ impl VideoDecoder {
 
         let stack_top = stack_base as usize + PAGE_SIZE;
         let entry = audio_play_thread as extern "C" fn(usize) -> ! as usize;
+        let death_event = match abi::event::create() {
+            Ok(h) => h,
+            Err(_) => {
+                // SAFETY: stack was just allocated with this layout.
+                unsafe { alloc::alloc::dealloc(stack_base, stack_layout) };
 
-        if let Ok(thread) = abi::thread::create(entry, stack_top, arg_ptr) {
-            let _ = abi::handle::close(thread);
+                return;
+            }
+        };
+
+        match abi::thread::create(entry, stack_top, arg_ptr) {
+            Ok(thread) => {
+                let _ = abi::event::bind_thread(death_event, thread);
+                let _ = abi::handle::close(thread);
+
+                self.audio_cleanup = Some(AudioThreadCleanup {
+                    stack_base,
+                    stack_layout,
+                    death_event,
+                });
+            }
+            Err(_) => {
+                let _ = abi::handle::close(death_event);
+
+                // SAFETY: thread creation failed; stack is unused.
+                unsafe { alloc::alloc::dealloc(stack_base, stack_layout) };
+            }
         }
     }
 }
@@ -1092,6 +1142,7 @@ extern "C" fn _start() -> ! {
         audio_pcm_vmo: Handle(0),
         audio_pcm_va: 0,
         audio_pcm_bytes: 0,
+        audio_cleanup: None,
     };
 
     loop {

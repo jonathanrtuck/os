@@ -51,15 +51,14 @@ struct BlkDevice {
     device: virtio::Device,
     vq: virtio::Virtqueue,
     irq_event: Handle,
-    buf_va: usize,
-    buf_pa: u64,
+    buf_dma: init::DmaBuf,
     capacity_sectors: u64,
     has_flush: bool,
 }
 
 impl BlkDevice {
     fn submit(&mut self, req_type: u32, sector: u64, data_bytes: u32) -> u8 {
-        let buf_ptr = self.buf_va as *mut u8;
+        let buf_ptr = self.buf_dma.va as *mut u8;
 
         // SAFETY: buf_va points to DMA allocation with at least 16 bytes for BlkReqHeader.
         unsafe {
@@ -70,9 +69,9 @@ impl BlkDevice {
             (*header).sector = sector;
         }
 
-        let header_pa = self.buf_pa;
+        let header_pa = self.buf_dma.pa;
         let status_offset = DATA_OFFSET + data_bytes as usize;
-        let status_pa = self.buf_pa + status_offset as u64;
+        let status_pa = self.buf_dma.pa + status_offset as u64;
 
         // SAFETY: status_offset is within the DMA buffer (16 + data_bytes < 2 pages).
         unsafe { *buf_ptr.add(status_offset) = STATUS_NOT_SUPPORTED };
@@ -81,7 +80,7 @@ impl BlkDevice {
             self.vq
                 .push_chain(&[(header_pa, 16, false), (status_pa, 1, true)]);
         } else {
-            let data_pa = self.buf_pa + DATA_OFFSET as u64;
+            let data_pa = self.buf_dma.pa + DATA_OFFSET as u64;
             let data_writable = req_type == VIRTIO_BLK_T_IN;
 
             self.vq.push_chain(&[
@@ -126,7 +125,7 @@ impl BlkDevice {
     }
 
     fn data_ptr(&self) -> *mut u8 {
-        (self.buf_va + DATA_OFFSET) as *mut u8
+        (self.buf_dma.va + DATA_OFFSET) as *mut u8
     }
 
     fn capacity_blocks(&self) -> u32 {
@@ -365,17 +364,15 @@ extern "C" fn _start() -> ! {
         .min(virtio::DEFAULT_QUEUE_SIZE);
     let vq_bytes = virtio::Virtqueue::total_bytes(queue_size);
     let vq_alloc = vq_bytes.next_multiple_of(PAGE_SIZE);
-    let vq_dma = match init::request_dma(HANDLE_INIT_EP, vq_alloc) {
+    let _vq_dma = match init::request_dma(HANDLE_INIT_EP, vq_alloc) {
         Ok(d) => d,
         Err(_) => abi::thread::exit(4),
     };
-    let vq_va = vq_dma.va;
 
-    // SAFETY: vq_va is a valid DMA allocation; zeroing before virtqueue init.
-    unsafe { core::ptr::write_bytes(vq_va as *mut u8, 0, vq_alloc) };
+    // SAFETY: _vq_dma.va is a valid DMA allocation; zeroing before virtqueue init.
+    unsafe { core::ptr::write_bytes(_vq_dma.va as *mut u8, 0, vq_alloc) };
 
-    let vq_pa = vq_va as u64;
-    let vq = virtio::Virtqueue::new(queue_size, vq_va, vq_pa);
+    let vq = virtio::Virtqueue::new(queue_size, _vq_dma.va, _vq_dma.pa);
 
     device.setup_queue(
         VIRTQ_REQUEST,
@@ -390,12 +387,9 @@ extern "C" fn _start() -> ! {
         Ok(d) => d,
         Err(_) => abi::thread::exit(5),
     };
-    let buf_va = buf_dma.va;
 
-    // SAFETY: buf_va is a valid DMA allocation of 2 pages; zeroing before use.
-    unsafe { core::ptr::write_bytes(buf_va as *mut u8, 0, buf_alloc) };
-
-    let buf_pa = buf_va as u64;
+    // SAFETY: buf_dma.va is a valid DMA allocation of 2 pages; zeroing before use.
+    unsafe { core::ptr::write_bytes(buf_dma.va as *mut u8, 0, buf_alloc) };
 
     device.driver_ok();
 
@@ -414,8 +408,7 @@ extern "C" fn _start() -> ! {
         device,
         vq,
         irq_event,
-        buf_va,
-        buf_pa,
+        buf_dma,
         capacity_sectors,
         has_flush,
     };

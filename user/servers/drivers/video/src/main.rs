@@ -46,15 +46,11 @@ struct VideoDriver {
     ctrl_vq: virtio::Virtqueue,
     decode_vq: virtio::Virtqueue,
     irq_event: Handle,
-    ctrl_buf_va: usize,
-    ctrl_buf_pa: u64,
-    frame_hdr_va: usize,
-    frame_hdr_pa: u64,
-    compressed_va: usize,
-    compressed_pa: u64,
+    ctrl_dma: init::DmaBuf,
+    frame_hdr_dma: init::DmaBuf,
+    compressed_dma: init::DmaBuf,
     compressed_len: usize,
-    status_buf_va: usize,
-    status_buf_pa: u64,
+    status_dma: init::DmaBuf,
     supported_codecs: u32,
     max_width: u32,
     max_height: u32,
@@ -63,8 +59,7 @@ struct VideoDriver {
     next_session_id: u32,
     output_va: usize,
     output_len: usize,
-    pixel_dma_va: usize,
-    pixel_dma_pa: u64,
+    pixel_dma: Option<init::DmaBuf>,
     pixel_dma_len: usize,
     session_width: u32,
     session_height: u32,
@@ -77,7 +72,7 @@ impl VideoDriver {
     /// chain (request readable, response writable), notifies the device,
     /// waits for IRQ, and returns the response bytes.
     fn ctrl_request(&mut self, request: &[u8], response_len: u32) {
-        let buf = self.ctrl_buf_va as *mut u8;
+        let buf = self.ctrl_dma.va as *mut u8;
         let req_len = request.len();
 
         // SAFETY: ctrl_buf is a PAGE_SIZE DMA buffer, request fits.
@@ -86,8 +81,8 @@ impl VideoDriver {
             core::ptr::write_bytes(buf.add(req_len), 0, response_len as usize);
         }
 
-        let req_pa = self.ctrl_buf_pa;
-        let resp_pa = self.ctrl_buf_pa + req_len as u64;
+        let req_pa = self.ctrl_dma.pa;
+        let resp_pa = self.ctrl_dma.pa + req_len as u64;
 
         self.ctrl_vq.push_chain(&[
             (req_pa, req_len as u32, false),
@@ -135,7 +130,7 @@ impl VideoDriver {
         req[16..20].copy_from_slice(&height.to_le_bytes());
         req[20..24].copy_from_slice(&codec_data_size.to_le_bytes());
 
-        let buf = self.ctrl_buf_va as *mut u8;
+        let buf = self.ctrl_dma.va as *mut u8;
 
         // SAFETY: ctrl_buf is a PAGE_SIZE DMA buffer.
         unsafe {
@@ -149,19 +144,19 @@ impl VideoDriver {
             }
         }
 
-        let req_pa = self.ctrl_buf_pa;
+        let req_pa = self.ctrl_dma.pa;
         let resp_offset = if codec_data.is_empty() {
             24u64
         } else {
             24 + codec_data.len() as u64
         };
-        let resp_pa = self.ctrl_buf_pa + resp_offset;
+        let resp_pa = self.ctrl_dma.pa + resp_offset;
 
         if codec_data.is_empty() {
             self.ctrl_vq
                 .push_chain(&[(req_pa, 24, false), (resp_pa, 12, true)]);
         } else {
-            let codec_pa = self.ctrl_buf_pa + 24;
+            let codec_pa = self.ctrl_dma.pa + 24;
 
             self.ctrl_vq.push_chain(&[
                 (req_pa, 24, false),
@@ -178,7 +173,7 @@ impl VideoDriver {
 
         let _ = abi::event::clear(self.irq_event, 0x1);
         let _ = self.ctrl_vq.pop_used();
-        let resp_va = self.ctrl_buf_va + resp_offset as usize;
+        let resp_va = self.ctrl_dma.va + resp_offset as usize;
 
         // SAFETY: device has written 12-byte response.
         unsafe {
@@ -198,7 +193,7 @@ impl VideoDriver {
         self.ctrl_request(&req, 4);
 
         // SAFETY: device has written 4-byte status response.
-        unsafe { core::ptr::read_volatile((self.ctrl_buf_va + 8) as *const u32) }
+        unsafe { core::ptr::read_volatile((self.ctrl_dma.va + 8) as *const u32) }
     }
 
     fn flush_session(&mut self, session_id: u32) -> u32 {
@@ -210,7 +205,7 @@ impl VideoDriver {
         self.ctrl_request(&req, 4);
 
         // SAFETY: device has written 4-byte status response.
-        unsafe { core::ptr::read_volatile((self.ctrl_buf_va + 8) as *const u32) }
+        unsafe { core::ptr::read_volatile((self.ctrl_dma.va + 8) as *const u32) }
     }
 
     fn stop_audio(&mut self) {
@@ -238,12 +233,12 @@ impl VideoDriver {
         unsafe {
             core::ptr::copy_nonoverlapping(
                 audio_data.as_ptr(),
-                self.compressed_va as *mut u8,
+                self.compressed_dma.va as *mut u8,
                 total_input,
             );
         }
 
-        let hdr = self.ctrl_buf_va as *mut u8;
+        let hdr = self.ctrl_dma.va as *mut u8;
 
         // SAFETY: ctrl_buf is a PAGE_SIZE DMA buffer.
         unsafe {
@@ -262,13 +257,13 @@ impl VideoDriver {
         // SAFETY: ctrl_buf is PAGE_SIZE.
         unsafe { core::ptr::write_bytes(hdr.add(24), 0, 8) };
 
-        let hdr_pa = self.ctrl_buf_pa;
-        let status_pa = self.ctrl_buf_pa + 24;
+        let hdr_pa = self.ctrl_dma.pa;
+        let status_pa = self.ctrl_dma.pa + 24;
 
         // 4-descriptor chain: header, audio data, PCM output, status
         self.ctrl_vq.push_chain(&[
             (hdr_pa, 24, false),
-            (self.compressed_pa, total_input as u32, false),
+            (self.compressed_dma.pa, total_input as u32, false),
             (pcm_dma_pa, pcm_dma_len as u32, true),
             (status_pa, 8, true),
         ]);
@@ -283,8 +278,8 @@ impl VideoDriver {
 
         // SAFETY: device has written 8-byte status+pcm_bytes.
         unsafe {
-            let status = core::ptr::read_volatile((self.ctrl_buf_va + 24) as *const u32);
-            let pcm_bytes = core::ptr::read_volatile((self.ctrl_buf_va + 28) as *const u32);
+            let status = core::ptr::read_volatile((self.ctrl_dma.va + 24) as *const u32);
+            let pcm_bytes = core::ptr::read_volatile((self.ctrl_dma.va + 28) as *const u32);
 
             (status, pcm_bytes)
         }
@@ -304,14 +299,14 @@ impl VideoDriver {
         unsafe {
             core::ptr::copy_nonoverlapping(
                 compressed_data.as_ptr(),
-                self.compressed_va as *mut u8,
+                self.compressed_dma.va as *mut u8,
                 data_len,
             );
         }
 
         // Build 20-byte frame header in frame_hdr_buf:
         // [session_id: u32][flags: u32][compressed_size: u32][reserved: u32][timestamp_ns: u64]
-        let hdr = self.frame_hdr_va as *mut u8;
+        let hdr = self.frame_hdr_dma.va as *mut u8;
 
         // SAFETY: frame_hdr_va is a PAGE_SIZE DMA buffer.
         unsafe {
@@ -325,7 +320,7 @@ impl VideoDriver {
         }
         // Zero the status buffer before submission.
         // SAFETY: status_buf_va is a PAGE_SIZE DMA buffer.
-        unsafe { core::ptr::write_bytes(self.status_buf_va as *mut u8, 0, 24) };
+        unsafe { core::ptr::write_bytes(self.status_dma.va as *mut u8, 0, 24) };
 
         let pixel_size = self.session_width as usize * self.session_height as usize * 4;
         let use_pixel_output = self.pixel_dma_len >= pixel_size && pixel_size > 0;
@@ -333,17 +328,17 @@ impl VideoDriver {
         if use_pixel_output {
             // 4-descriptor chain: header, compressed, pixel output, status
             self.decode_vq.push_chain(&[
-                (self.frame_hdr_pa, 20, false),
-                (self.compressed_pa, data_len as u32, false),
-                (self.pixel_dma_pa, pixel_size as u32, true),
-                (self.status_buf_pa, 24, true),
+                (self.frame_hdr_dma.pa, 20, false),
+                (self.compressed_dma.pa, data_len as u32, false),
+                (self.pixel_dma.as_ref().unwrap().pa, pixel_size as u32, true),
+                (self.status_dma.pa, 24, true),
             ]);
         } else {
             // 3-descriptor chain: header, compressed, status (zero-copy only)
             self.decode_vq.push_chain(&[
-                (self.frame_hdr_pa, 20, false),
-                (self.compressed_pa, data_len as u32, false),
-                (self.status_buf_pa, 24, true),
+                (self.frame_hdr_dma.pa, 20, false),
+                (self.compressed_dma.pa, data_len as u32, false),
+                (self.status_dma.pa, 24, true),
             ]);
         }
         self.device.notify(DECODEQ);
@@ -358,7 +353,7 @@ impl VideoDriver {
         // [status: u32][bytes_written: u32][timestamp_ns: u64][duration_ns: u64]
         // SAFETY: device has written 24-byte response at status_buf_va.
         let reply = unsafe {
-            let va = self.status_buf_va;
+            let va = self.status_dma.va;
 
             video::DecodeFrameReply {
                 status: core::ptr::read_volatile(va as *const u32),
@@ -372,11 +367,11 @@ impl VideoDriver {
             let out_off = output_pixel_offset;
             let copy_len = pixel_size.min(self.output_len.saturating_sub(out_off));
 
-            // SAFETY: pixel_dma_va holds decoded BGRA from the host.
+            // SAFETY: pixel_dma holds decoded BGRA from the host.
             // output_va + out_off is within the mapped output VMO.
             unsafe {
                 core::ptr::copy_nonoverlapping(
-                    self.pixel_dma_va as *const u8,
+                    self.pixel_dma.as_ref().unwrap().va as *const u8,
                     (self.output_va + out_off) as *mut u8,
                     copy_len,
                 );
@@ -459,9 +454,8 @@ impl Dispatch for VideoServer {
                             // SAFETY: DMA allocation is valid; zeroing before use.
                             unsafe { core::ptr::write_bytes(dma.va as *mut u8, 0, dma_size) };
 
-                            self.driver.pixel_dma_va = dma.va;
-                            self.driver.pixel_dma_pa = dma.va as u64;
                             self.driver.pixel_dma_len = dma_size;
+                            self.driver.pixel_dma = Some(dma);
                         }
                     }
                 }
@@ -672,7 +666,7 @@ fn setup_virtqueue(
     device: &virtio::Device,
     queue_idx: u32,
     init_ep: Handle,
-) -> Option<virtio::Virtqueue> {
+) -> Option<(virtio::Virtqueue, init::DmaBuf)> {
     let queue_size = device
         .queue_max_size(queue_idx)
         .min(virtio::DEFAULT_QUEUE_SIZE);
@@ -688,7 +682,7 @@ fn setup_virtqueue(
     // SAFETY: DMA allocation is valid; zeroing before use.
     unsafe { core::ptr::write_bytes(vq_dma.va as *mut u8, 0, vq_alloc) };
 
-    let vq = virtio::Virtqueue::new(queue_size, vq_dma.va, vq_dma.va as u64);
+    let vq = virtio::Virtqueue::new(queue_size, vq_dma.va, vq_dma.pa);
 
     device.setup_queue(
         queue_idx,
@@ -698,7 +692,7 @@ fn setup_virtqueue(
         vq.used_pa(),
     );
 
-    Some(vq)
+    Some((vq, vq_dma))
 }
 
 /// Format a u32 as "0x" + lowercase hex into `buf`, returning the number
@@ -749,12 +743,12 @@ extern "C" fn _start() -> ! {
         abi::thread::exit(3);
     }
 
-    let ctrl_vq = match setup_virtqueue(&device, CONTROLQ, HANDLE_INIT_EP) {
-        Some(vq) => vq,
+    let (ctrl_vq, _ctrl_vq_dma) = match setup_virtqueue(&device, CONTROLQ, HANDLE_INIT_EP) {
+        Some(pair) => pair,
         None => abi::thread::exit(4),
     };
-    let decode_vq = match setup_virtqueue(&device, DECODEQ, HANDLE_INIT_EP) {
-        Some(vq) => vq,
+    let (decode_vq, _decode_vq_dma) = match setup_virtqueue(&device, DECODEQ, HANDLE_INIT_EP) {
+        Some(pair) => pair,
         None => abi::thread::exit(4),
     };
     // Allocate DMA buffers.
@@ -846,15 +840,11 @@ extern "C" fn _start() -> ! {
             ctrl_vq,
             decode_vq,
             irq_event,
-            ctrl_buf_va: ctrl_dma.va,
-            ctrl_buf_pa: ctrl_dma.va as u64,
-            frame_hdr_va: frame_hdr_dma.va,
-            frame_hdr_pa: frame_hdr_dma.va as u64,
-            compressed_va: compressed_dma.va,
-            compressed_pa: compressed_dma.va as u64,
+            ctrl_dma,
+            frame_hdr_dma,
+            compressed_dma,
             compressed_len: compressed_size,
-            status_buf_va: status_dma.va,
-            status_buf_pa: status_dma.va as u64,
+            status_dma,
             supported_codecs,
             max_width,
             max_height,
@@ -863,8 +853,7 @@ extern "C" fn _start() -> ! {
             next_session_id: 1,
             output_va: 0,
             output_len: 0,
-            pixel_dma_va: 0,
-            pixel_dma_pa: 0,
+            pixel_dma: None,
             pixel_dma_len: 0,
             session_width: 0,
             session_height: 0,

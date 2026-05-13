@@ -30,15 +30,15 @@ struct RngDevice {
     device: virtio::Device,
     vq: virtio::Virtqueue,
     irq_event: Handle,
-    buf_va: usize,
-    buf_pa: u64,
+    buf_dma: init::DmaBuf,
 }
 
 impl RngDevice {
     fn fill(&mut self, size: usize) -> &[u8] {
         let clamped = size.min(PAGE_SIZE);
 
-        self.vq.push_chain(&[(self.buf_pa, clamped as u32, true)]);
+        self.vq
+            .push_chain(&[(self.buf_dma.pa, clamped as u32, true)]);
         self.device.notify(VIRTQ_REQUEST);
 
         let _ = abi::event::wait(&[(self.irq_event, 0x1)]);
@@ -53,7 +53,7 @@ impl RngDevice {
 
         // SAFETY: buf_va points to a DMA allocation of PAGE_SIZE bytes;
         // the device has written used_len bytes.
-        unsafe { core::slice::from_raw_parts(self.buf_va as *const u8, used_len) }
+        unsafe { core::slice::from_raw_parts(self.buf_dma.va as *const u8, used_len) }
     }
 }
 
@@ -124,17 +124,15 @@ extern "C" fn _start() -> ! {
         .min(virtio::DEFAULT_QUEUE_SIZE);
     let vq_bytes = virtio::Virtqueue::total_bytes(queue_size);
     let vq_alloc = vq_bytes.next_multiple_of(PAGE_SIZE);
-    let vq_dma = match init::request_dma(HANDLE_INIT_EP, vq_alloc) {
+    let _vq_dma = match init::request_dma(HANDLE_INIT_EP, vq_alloc) {
         Ok(d) => d,
         Err(_) => abi::thread::exit(4),
     };
-    let vq_va = vq_dma.va;
 
-    // SAFETY: vq_va is a valid DMA allocation; zeroing before virtqueue init.
-    unsafe { core::ptr::write_bytes(vq_va as *mut u8, 0, vq_alloc) };
+    // SAFETY: _vq_dma.va is a valid DMA allocation; zeroing before virtqueue init.
+    unsafe { core::ptr::write_bytes(_vq_dma.va as *mut u8, 0, vq_alloc) };
 
-    let vq_pa = vq_va as u64;
-    let vq = virtio::Virtqueue::new(queue_size, vq_va, vq_pa);
+    let vq = virtio::Virtqueue::new(queue_size, _vq_dma.va, _vq_dma.pa);
 
     device.setup_queue(
         VIRTQ_REQUEST,
@@ -148,12 +146,9 @@ extern "C" fn _start() -> ! {
         Ok(d) => d,
         Err(_) => abi::thread::exit(5),
     };
-    let buf_va = buf_dma.va;
 
-    // SAFETY: buf_va is a valid DMA allocation of 1 page; zeroing before use.
-    unsafe { core::ptr::write_bytes(buf_va as *mut u8, 0, PAGE_SIZE) };
-
-    let buf_pa = buf_va as u64;
+    // SAFETY: buf_dma.va is a valid DMA allocation of 1 page; zeroing before use.
+    unsafe { core::ptr::write_bytes(buf_dma.va as *mut u8, 0, PAGE_SIZE) };
 
     device.driver_ok();
 
@@ -171,8 +166,7 @@ extern "C" fn _start() -> ! {
         device,
         vq,
         irq_event,
-        buf_va,
-        buf_pa,
+        buf_dma,
     };
     let console_ep = match name::watch(HANDLE_NS_EP, b"console") {
         Ok(h) => h,

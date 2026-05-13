@@ -63,10 +63,7 @@ struct P9Client {
     device: virtio::Device,
     vq: virtio::Virtqueue,
     irq_event: Handle,
-    t_va: usize,
-    t_pa: u64,
-    r_va: usize,
-    r_pa: u64,
+    msg_dma: init::DmaBuf,
 }
 
 impl MsgReader {
@@ -162,10 +159,18 @@ impl MsgWriter {
 impl P9Client {
     fn transact(&mut self, t_size: u32) -> MsgReader {
         // SAFETY: r_va points to a valid DMA allocation of at least MSIZE bytes.
-        unsafe { core::ptr::write_bytes(self.r_va as *mut u8, 0, MSIZE as usize) };
+        unsafe {
+            core::ptr::write_bytes(
+                (self.msg_dma.va + MSIZE as usize) as *mut u8,
+                0,
+                MSIZE as usize,
+            )
+        };
 
-        self.vq
-            .push_chain(&[(self.t_pa, t_size, false), (self.r_pa, MSIZE, true)]);
+        self.vq.push_chain(&[
+            (self.msg_dma.pa, t_size, false),
+            ((self.msg_dma.pa + MSIZE as u64), MSIZE, true),
+        ]);
         self.device.notify(VIRTQ_REQUEST);
 
         let _ = abi::event::wait(&[(self.irq_event, 0x1)]);
@@ -176,11 +181,11 @@ impl P9Client {
 
         self.vq.pop_used();
 
-        MsgReader::new(self.r_va as *const u8)
+        MsgReader::new((self.msg_dma.va + MSIZE as usize) as *const u8)
     }
 
     fn version(&mut self) -> bool {
-        let mut w = MsgWriter::new(self.t_va as *mut u8);
+        let mut w = MsgWriter::new(self.msg_dma.va as *mut u8);
 
         w.put_u8(P9_TVERSION);
         w.put_u16(0xFFFF);
@@ -202,7 +207,7 @@ impl P9Client {
     }
 
     fn attach(&mut self) -> bool {
-        let mut w = MsgWriter::new(self.t_va as *mut u8);
+        let mut w = MsgWriter::new(self.msg_dma.va as *mut u8);
 
         w.put_u8(P9_TATTACH);
         w.put_u16(0);
@@ -251,7 +256,7 @@ impl P9Client {
             return false;
         }
 
-        let mut w = MsgWriter::new(self.t_va as *mut u8);
+        let mut w = MsgWriter::new(self.msg_dma.va as *mut u8);
 
         w.put_u8(P9_TWALK);
         w.put_u16(0);
@@ -271,7 +276,7 @@ impl P9Client {
     }
 
     fn lopen(&mut self, fid: u32) -> bool {
-        let mut w = MsgWriter::new(self.t_va as *mut u8);
+        let mut w = MsgWriter::new(self.msg_dma.va as *mut u8);
 
         w.put_u8(P9_TLOPEN);
         w.put_u16(0);
@@ -297,7 +302,7 @@ impl P9Client {
             }
 
             let count = (remaining as u32).min(max_chunk);
-            let mut w = MsgWriter::new(self.t_va as *mut u8);
+            let mut w = MsgWriter::new(self.msg_dma.va as *mut u8);
 
             w.put_u8(P9_TREAD);
             w.put_u16(0);
@@ -338,7 +343,7 @@ impl P9Client {
     }
 
     fn clunk(&mut self, fid: u32) {
-        let mut w = MsgWriter::new(self.t_va as *mut u8);
+        let mut w = MsgWriter::new(self.msg_dma.va as *mut u8);
 
         w.put_u8(P9_TCLUNK);
         w.put_u16(0);
@@ -504,7 +509,7 @@ impl NinePServer {
         let max_chunk = MSIZE - 11;
 
         loop {
-            let mut w = MsgWriter::new(self.client.t_va as *mut u8);
+            let mut w = MsgWriter::new(self.client.msg_dma.va as *mut u8);
 
             w.put_u8(P9_TREAD);
             w.put_u16(0);
@@ -583,15 +588,15 @@ extern "C" fn _start() -> ! {
         .min(virtio::DEFAULT_QUEUE_SIZE);
     let vq_bytes = virtio::Virtqueue::total_bytes(queue_size);
     let vq_alloc = vq_bytes.next_multiple_of(PAGE_SIZE);
-    let vq_dma = match init::request_dma(HANDLE_INIT_EP, vq_alloc) {
+    let _vq_dma = match init::request_dma(HANDLE_INIT_EP, vq_alloc) {
         Ok(d) => d,
         Err(_) => abi::thread::exit(4),
     };
 
-    // SAFETY: vq_dma.va is a valid DMA allocation; zeroing before virtqueue init.
-    unsafe { core::ptr::write_bytes(vq_dma.va as *mut u8, 0, vq_alloc) };
+    // SAFETY: _vq_dma.va is a valid DMA allocation; zeroing before virtqueue init.
+    unsafe { core::ptr::write_bytes(_vq_dma.va as *mut u8, 0, vq_alloc) };
 
-    let vq = virtio::Virtqueue::new(queue_size, vq_dma.va, vq_dma.va as u64);
+    let vq = virtio::Virtqueue::new(queue_size, _vq_dma.va, _vq_dma.pa);
 
     device.setup_queue(
         VIRTQ_REQUEST,
@@ -626,10 +631,7 @@ extern "C" fn _start() -> ! {
         device,
         vq,
         irq_event,
-        t_va: msg_dma.va,
-        t_pa: msg_dma.va as u64,
-        r_va: msg_dma.va + MSIZE as usize,
-        r_pa: msg_dma.va as u64 + MSIZE as u64,
+        msg_dma,
     };
 
     if !client.version() {

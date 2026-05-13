@@ -516,6 +516,7 @@ pub(crate) struct Presenter {
     pub(crate) audio_ep: Handle,
     pub(crate) audio_vmo: Handle,
     pub(crate) audio_data_len: u32,
+    play_cleanup: Option<PlayThreadCleanup>,
 
     pub(crate) console_ep: Handle,
     pub(crate) layout_dirty: bool,
@@ -1116,6 +1117,12 @@ struct PlayArgs {
     data_len: u32,
 }
 
+struct PlayThreadCleanup {
+    stack_base: *mut u8,
+    stack_layout: alloc::alloc::Layout,
+    death_event: Handle,
+}
+
 extern "C" fn play_thread_entry(arg: usize) -> ! {
     // SAFETY: arg is a pointer to a heap-allocated PlayArgs.
     let args = unsafe { &*(arg as *const PlayArgs) };
@@ -1146,10 +1153,26 @@ extern "C" fn play_thread_entry(arg: usize) -> ! {
 const PLAY_THREAD_STACK_SIZE: usize = PAGE_SIZE;
 
 impl Presenter {
-    fn play_audio_clip(&self) {
+    fn try_reclaim_play_stack(&mut self) {
+        if self.play_cleanup.is_none() {
+            return;
+        }
+        let evt = self.play_cleanup.as_ref().unwrap().death_event;
+
+        if abi::event::wait_deadline(evt, 0x1, 1).is_ok() {
+            let cleanup = self.play_cleanup.take().unwrap();
+            let _ = abi::handle::close(cleanup.death_event);
+            // SAFETY: stack was allocated with this layout; thread has exited.
+            unsafe { alloc::alloc::dealloc(cleanup.stack_base, cleanup.stack_layout) };
+        }
+    }
+
+    fn play_audio_clip(&mut self) {
         if self.audio_ep.0 == 0 || self.audio_vmo.0 == 0 {
             return;
         }
+
+        self.try_reclaim_play_stack();
 
         let ro = Rights(Rights::READ.0 | Rights::MAP.0);
         let vmo_dup = match abi::handle::dup(self.audio_vmo, ro) {
@@ -1177,7 +1200,32 @@ impl Presenter {
 
         let stack_top = stack_base as usize + PLAY_THREAD_STACK_SIZE;
         let entry = play_thread_entry as extern "C" fn(usize) -> ! as usize;
-        let _ = abi::thread::create(entry, stack_top, arg_ptr);
+        let death_event = match abi::event::create() {
+            Ok(h) => h,
+            Err(_) => {
+                // SAFETY: stack was just allocated with this layout.
+                unsafe { alloc::alloc::dealloc(stack_base, stack_layout) };
+                return;
+            }
+        };
+
+        match abi::thread::create(entry, stack_top, arg_ptr) {
+            Ok(thread) => {
+                let _ = abi::event::bind_thread(death_event, thread);
+                let _ = abi::handle::close(thread);
+
+                self.play_cleanup = Some(PlayThreadCleanup {
+                    stack_base,
+                    stack_layout,
+                    death_event,
+                });
+            }
+            Err(_) => {
+                let _ = abi::handle::close(death_event);
+                // SAFETY: thread creation failed; stack is unused.
+                unsafe { alloc::alloc::dealloc(stack_base, stack_layout) };
+            }
+        }
     }
 
     fn toggle_video_playback(&mut self) {
@@ -1452,6 +1500,7 @@ extern "C" fn _start() -> ! {
         audio_ep: Handle(0),
         audio_vmo: Handle(0),
         audio_data_len: 0,
+        play_cleanup: None,
         console_ep,
         layout_dirty: true,
     };
