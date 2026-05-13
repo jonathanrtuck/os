@@ -411,15 +411,6 @@ impl<'a> SceneWriter<'a> {
         self.push_data(bytes)
     }
 
-    /// Append new data, returning a fresh DataRef. The old DataRef (if any)
-    /// is abandoned — the bump allocator does not reclaim space until
-    /// `reset_data()`. This is equivalent to `push_data` but named to
-    /// clarify intent at call sites where a previous DataRef is being
-    /// logically replaced.
-    pub fn push_data_replacing(&mut self, bytes: &[u8]) -> DataRef {
-        self.push_data(bytes)
-    }
-
     /// Check if the data buffer has room for `bytes` more bytes.
     pub fn has_data_space(&self, bytes: usize) -> bool {
         (self.header().data_used as usize) + bytes <= DATA_BUFFER_SIZE

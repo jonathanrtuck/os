@@ -161,8 +161,8 @@ pub(crate) fn scale_icon_paths(
             let tag = u32::from_le_bytes([cmds[pos], cmds[pos + 1], cmds[pos + 2], cmds[pos + 3]]);
 
             match tag {
-                0 | 1 => {
-                    if pos + 12 > cmds.len() {
+                scene::PATH_MOVE_TO | scene::PATH_LINE_TO => {
+                    if pos + scene::PATH_MOVE_TO_SIZE > cmds.len() {
                         break;
                     }
 
@@ -183,10 +183,10 @@ pub(crate) fn scale_icon_paths(
                     buf.extend_from_slice(&x.to_le_bytes());
                     buf.extend_from_slice(&y.to_le_bytes());
 
-                    pos += 12;
+                    pos += scene::PATH_MOVE_TO_SIZE;
                 }
-                2 => {
-                    if pos + 28 > cmds.len() {
+                scene::PATH_CUBIC_TO => {
+                    if pos + scene::PATH_CUBIC_TO_SIZE > cmds.len() {
                         break;
                     }
 
@@ -203,18 +203,18 @@ pub(crate) fn scale_icon_paths(
                         ]) * scale;
                     }
 
-                    buf.extend_from_slice(&2u32.to_le_bytes());
+                    buf.extend_from_slice(&scene::PATH_CUBIC_TO.to_le_bytes());
 
                     for c in &coords {
                         buf.extend_from_slice(&c.to_le_bytes());
                     }
 
-                    pos += 28;
+                    pos += scene::PATH_CUBIC_TO_SIZE;
                 }
-                3 => {
-                    buf.extend_from_slice(&3u32.to_le_bytes());
+                scene::PATH_CLOSE => {
+                    buf.extend_from_slice(&scene::PATH_CLOSE.to_le_bytes());
 
-                    pos += 4;
+                    pos += scene::PATH_CLOSE_SIZE;
                 }
                 _ => break,
             }
@@ -421,6 +421,7 @@ pub(crate) struct Presenter {
     pub(crate) audio_data_len: u32,
 
     pub(crate) console_ep: Handle,
+    pub(crate) layout_dirty: bool,
 }
 
 pub(crate) struct FrameStats {
@@ -486,14 +487,7 @@ impl FrameStats {
 
 impl Presenter {
     fn read_active_index(&self) -> usize {
-        // SAFETY: swap_va is a valid mapping of a SceneSwapHeader.
-        unsafe {
-            let hdr = self.swap_va as *const scene::SceneSwapHeader;
-
-            (*hdr)
-                .active_index
-                .load(core::sync::atomic::Ordering::Acquire) as usize
-        }
+        scene::SceneSwapHeader::read_active_index(self.swap_va)
     }
 
     fn swap_scene(&mut self) {
@@ -502,18 +496,7 @@ impl Presenter {
 
         self.swap_gen = self.swap_gen.wrapping_add(1);
 
-        // SAFETY: swap_va is a valid RW mapping. Release ordering ensures
-        // all scene writes are visible before the compositor sees the swap.
-        unsafe {
-            let hdr = self.swap_va as *const scene::SceneSwapHeader;
-
-            (*hdr)
-                .generation
-                .store(self.swap_gen, core::sync::atomic::Ordering::Release);
-            (*hdr)
-                .active_index
-                .store(back as u32, core::sync::atomic::Ordering::Release);
-        }
+        scene::SceneSwapHeader::swap(self.swap_va, self.swap_gen, back as u32);
     }
 
     fn text_area_dims(&self) -> (u32, u32) {
@@ -624,6 +607,7 @@ impl Dispatch for Presenter {
                 }
             }
             presenter_service::BUILD => {
+                self.layout_dirty = true;
                 self.build_scene();
 
                 let reply = self.make_info_reply();
@@ -657,6 +641,7 @@ impl Dispatch for Presenter {
                     self.scroll_y += event.delta_y;
                     self.clamp_scroll();
                     self.write_viewport();
+                    self.layout_dirty = true;
                     self.build_scene();
                 }
 
@@ -1374,6 +1359,7 @@ extern "C" fn _start() -> ! {
         audio_vmo: Handle(0),
         audio_data_len: 0,
         console_ep,
+        layout_dirty: true,
     };
 
     server.spaces.push(Space::Text);

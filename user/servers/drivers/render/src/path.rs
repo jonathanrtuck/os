@@ -145,23 +145,22 @@ fn flatten_cubic(
     );
 }
 
-#[allow(dead_code)]
 pub fn flatten_to_buffer(
     path_data: &[u8],
     scale: f32,
-    fill_rule: FillRule,
     stroke_data: Option<&[u8]>,
     buf: &mut [u8],
 ) -> usize {
     let data = stroke_data.unwrap_or(path_data);
-    let mut segs = Vec::with_capacity(256);
-    let mut cx = 0i32;
-    let mut cy = 0i32;
-    let mut start_x = 0i32;
-    let mut start_y = 0i32;
+    let max_segs = buf.len() / 16;
+    let mut count = 0usize;
+    let mut cx = 0.0f32;
+    let mut cy = 0.0f32;
+    let mut start_x = 0.0f32;
+    let mut start_y = 0.0f32;
     let mut off = 0;
 
-    while off < data.len() && segs.len() < MAX_SEGMENTS {
+    while off < data.len() && count < max_segs.min(MAX_SEGMENTS) {
         let tag = read_u32(data, off);
 
         match tag {
@@ -170,11 +169,8 @@ pub fn flatten_to_buffer(
                     break;
                 }
 
-                let x = read_f32(data, off + 4) * scale;
-                let y = read_f32(data, off + 8) * scale;
-
-                cx = f32_to_fp(x);
-                cy = f32_to_fp(y);
+                cx = read_f32(data, off + 4) * scale;
+                cy = read_f32(data, off + 8) * scale;
                 start_x = cx;
                 start_y = cy;
                 off += PATH_MOVE_TO_SIZE;
@@ -184,20 +180,18 @@ pub fn flatten_to_buffer(
                     break;
                 }
 
-                let x = read_f32(data, off + 4) * scale;
-                let y = read_f32(data, off + 8) * scale;
-                let nx = f32_to_fp(x);
-                let ny = f32_to_fp(y);
+                let nx = read_f32(data, off + 4) * scale;
+                let ny = read_f32(data, off + 8) * scale;
+                let base = count * 16;
 
-                segs.push(Seg {
-                    x0: cx,
-                    y0: cy,
-                    x1: nx,
-                    y1: ny,
-                });
+                buf[base..base + 4].copy_from_slice(&cx.to_le_bytes());
+                buf[base + 4..base + 8].copy_from_slice(&cy.to_le_bytes());
+                buf[base + 8..base + 12].copy_from_slice(&nx.to_le_bytes());
+                buf[base + 12..base + 16].copy_from_slice(&ny.to_le_bytes());
 
                 cx = nx;
                 cy = ny;
+                count += 1;
                 off += PATH_LINE_TO_SIZE;
             }
             PATH_CUBIC_TO => {
@@ -209,25 +203,27 @@ pub fn flatten_to_buffer(
                 let c1y = read_f32(data, off + 8) * scale;
                 let c2x = read_f32(data, off + 12) * scale;
                 let c2y = read_f32(data, off + 16) * scale;
-                let x = read_f32(data, off + 20) * scale;
-                let y = read_f32(data, off + 24) * scale;
-                let fx = cx as f32 / FP_ONE as f32;
-                let fy = cy as f32 / FP_ONE as f32;
+                let x3 = read_f32(data, off + 20) * scale;
+                let y3 = read_f32(data, off + 24) * scale;
 
-                flatten_cubic(
-                    fx, fy, c1x, c1y, c2x, c2y, x, y, &mut segs, &mut cx, &mut cy, 0,
+                flatten_cubic_f32(
+                    cx, cy, c1x, c1y, c2x, c2y, x3, y3, buf, &mut count, max_segs, 0,
                 );
 
+                cx = x3;
+                cy = y3;
                 off += PATH_CUBIC_TO_SIZE;
             }
             PATH_CLOSE => {
-                if (cx, cy) != (start_x, start_y) {
-                    segs.push(Seg {
-                        x0: cx,
-                        y0: cy,
-                        x1: start_x,
-                        y1: start_y,
-                    });
+                if (cx - start_x).abs() > 0.001 || (cy - start_y).abs() > 0.001 {
+                    if count < max_segs {
+                        let base = count * 16;
+                        buf[base..base + 4].copy_from_slice(&cx.to_le_bytes());
+                        buf[base + 4..base + 8].copy_from_slice(&cy.to_le_bytes());
+                        buf[base + 8..base + 12].copy_from_slice(&start_x.to_le_bytes());
+                        buf[base + 12..base + 16].copy_from_slice(&start_y.to_le_bytes());
+                        count += 1;
+                    }
 
                     cx = start_x;
                     cy = start_y;
@@ -239,22 +235,99 @@ pub fn flatten_to_buffer(
         }
     }
 
-    let _ = fill_rule;
-    let seg_size = 16;
-    let max_segs = buf.len() / seg_size;
-    let count = segs.len().min(max_segs);
-    let fp_scale = 1.0 / FP_ONE as f32;
+    count
+}
 
-    for (i, seg) in segs.iter().take(count).enumerate() {
-        let base = i * seg_size;
+#[allow(clippy::too_many_arguments)]
+fn flatten_cubic_f32(
+    x0: f32,
+    y0: f32,
+    c1x: f32,
+    c1y: f32,
+    c2x: f32,
+    c2y: f32,
+    x3: f32,
+    y3: f32,
+    buf: &mut [u8],
+    count: &mut usize,
+    max_segs: usize,
+    depth: u32,
+) {
+    if depth > 6 || *count >= max_segs {
+        let base = (*count).min(max_segs.saturating_sub(1)) * 16;
 
-        buf[base..base + 4].copy_from_slice(&(seg.x0 as f32 * fp_scale).to_le_bytes());
-        buf[base + 4..base + 8].copy_from_slice(&(seg.y0 as f32 * fp_scale).to_le_bytes());
-        buf[base + 8..base + 12].copy_from_slice(&(seg.x1 as f32 * fp_scale).to_le_bytes());
-        buf[base + 12..base + 16].copy_from_slice(&(seg.y1 as f32 * fp_scale).to_le_bytes());
+        if *count < max_segs {
+            buf[base..base + 4].copy_from_slice(&x0.to_le_bytes());
+            buf[base + 4..base + 8].copy_from_slice(&y0.to_le_bytes());
+            buf[base + 8..base + 12].copy_from_slice(&x3.to_le_bytes());
+            buf[base + 12..base + 16].copy_from_slice(&y3.to_le_bytes());
+            *count += 1;
+        }
+
+        return;
     }
 
-    count
+    let dx = x3 - x0;
+    let dy = y3 - y0;
+    let d1 = ((c1x - x3) * dy - (c1y - y3) * dx).abs();
+    let d2 = ((c2x - x3) * dy - (c2y - y3) * dx).abs();
+
+    if (d1 + d2) * (d1 + d2) < 0.25 * (dx * dx + dy * dy) {
+        if *count < max_segs {
+            let base = *count * 16;
+
+            buf[base..base + 4].copy_from_slice(&x0.to_le_bytes());
+            buf[base + 4..base + 8].copy_from_slice(&y0.to_le_bytes());
+            buf[base + 8..base + 12].copy_from_slice(&x3.to_le_bytes());
+            buf[base + 12..base + 16].copy_from_slice(&y3.to_le_bytes());
+
+            *count += 1;
+        }
+
+        return;
+    }
+
+    let m01x = (x0 + c1x) * 0.5;
+    let m01y = (y0 + c1y) * 0.5;
+    let m12x = (c1x + c2x) * 0.5;
+    let m12y = (c1y + c2y) * 0.5;
+    let m23x = (c2x + x3) * 0.5;
+    let m23y = (c2y + y3) * 0.5;
+    let m012x = (m01x + m12x) * 0.5;
+    let m012y = (m01y + m12y) * 0.5;
+    let m123x = (m12x + m23x) * 0.5;
+    let m123y = (m12y + m23y) * 0.5;
+    let mx = (m012x + m123x) * 0.5;
+    let my = (m012y + m123y) * 0.5;
+
+    flatten_cubic_f32(
+        x0,
+        y0,
+        m01x,
+        m01y,
+        m012x,
+        m012y,
+        mx,
+        my,
+        buf,
+        count,
+        max_segs,
+        depth + 1,
+    );
+    flatten_cubic_f32(
+        mx,
+        my,
+        m123x,
+        m123y,
+        m23x,
+        m23y,
+        x3,
+        y3,
+        buf,
+        count,
+        max_segs,
+        depth + 1,
+    );
 }
 
 pub fn rasterize_path(

@@ -84,6 +84,8 @@ impl Presenter {
     // ── Pointer button handling ──────────────────────────────────
 
     pub(crate) fn handle_pointer_button(&mut self, btn: presenter_service::PointerButton) {
+        self.layout_dirty = true;
+
         if btn.button != 0 {
             return;
         }
@@ -246,9 +248,11 @@ impl Presenter {
         }
 
         self.dragging = true;
+
         // SAFETY: re-read header after doc_select may have changed it.
         let (_cl, cursor_pos, sel_anchor, _) =
             unsafe { document_service::read_doc_header(self.doc_va) };
+
         self.drag_origin_start = sel_anchor;
         self.drag_origin_end = cursor_pos;
         self.sticky_col = None;
@@ -257,6 +261,8 @@ impl Presenter {
     }
 
     pub(crate) fn handle_pointer_drag(&mut self, abs_x: u32, abs_y: u32) {
+        self.layout_dirty = true;
+
         if !self.dragging {
             return;
         }

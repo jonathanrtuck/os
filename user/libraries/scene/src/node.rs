@@ -1,7 +1,7 @@
 //! Scene graph node type, header, and memory layout constants.
 
 use crate::{
-    primitives::{Animation, Border, Color, Content, DataRef, bitflags},
+    primitives::{bitflags, Animation, Border, Color, Content, DataRef},
     transform::AffineTransform,
 };
 
@@ -411,3 +411,42 @@ pub struct SceneSwapHeader {
 }
 
 const _: () = assert!(core::mem::size_of::<SceneSwapHeader>() == 16);
+
+impl SceneSwapHeader {
+    pub fn read_generation(va: usize) -> u32 {
+        // SAFETY: caller guarantees va points to a valid SceneSwapHeader mapping.
+        unsafe {
+            let hdr = va as *const SceneSwapHeader;
+
+            (*hdr)
+                .generation
+                .load(core::sync::atomic::Ordering::Acquire)
+        }
+    }
+
+    pub fn read_active_index(va: usize) -> usize {
+        // SAFETY: caller guarantees va points to a valid SceneSwapHeader mapping.
+        unsafe {
+            let hdr = va as *const SceneSwapHeader;
+
+            (*hdr)
+                .active_index
+                .load(core::sync::atomic::Ordering::Acquire) as usize
+        }
+    }
+
+    pub fn swap(va: usize, new_gen: u32, new_active: u32) {
+        // SAFETY: caller guarantees va points to a valid RW SceneSwapHeader mapping.
+        // Release ordering ensures all scene buffer writes are visible before the swap.
+        unsafe {
+            let hdr = va as *const SceneSwapHeader;
+
+            (*hdr)
+                .generation
+                .store(new_gen, core::sync::atomic::Ordering::Release);
+            (*hdr)
+                .active_index
+                .store(new_active, core::sync::atomic::Ordering::Release);
+        }
+    }
+}

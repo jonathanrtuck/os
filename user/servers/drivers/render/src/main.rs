@@ -552,6 +552,39 @@ enum Pipe {
     BackdropBlur,
 }
 
+#[allow(clippy::too_many_arguments)]
+fn pack_gradient_params(
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    c0: scene::Color,
+    c1: scene::Color,
+    alpha_mul: f32,
+    angle: f32,
+    kind: u8,
+    scale: f32,
+) -> [u8; 64] {
+    let mut p = [0u8; 64];
+
+    p[0..4].copy_from_slice(&(x0 * scale).to_le_bytes());
+    p[4..8].copy_from_slice(&(y0 * scale).to_le_bytes());
+    p[8..12].copy_from_slice(&(x1 * scale).to_le_bytes());
+    p[12..16].copy_from_slice(&(y1 * scale).to_le_bytes());
+    p[16..20].copy_from_slice(&(c0.r as f32 / 255.0).to_le_bytes());
+    p[20..24].copy_from_slice(&(c0.g as f32 / 255.0).to_le_bytes());
+    p[24..28].copy_from_slice(&(c0.b as f32 / 255.0).to_le_bytes());
+    p[28..32].copy_from_slice(&(c0.a as f32 / 255.0 * alpha_mul).to_le_bytes());
+    p[32..36].copy_from_slice(&(c1.r as f32 / 255.0).to_le_bytes());
+    p[36..40].copy_from_slice(&(c1.g as f32 / 255.0).to_le_bytes());
+    p[40..44].copy_from_slice(&(c1.b as f32 / 255.0).to_le_bytes());
+    p[44..48].copy_from_slice(&(c1.a as f32 / 255.0 * alpha_mul).to_le_bytes());
+    p[48..52].copy_from_slice(&angle.to_le_bytes());
+    p[52..56].copy_from_slice(&(kind as f32).to_le_bytes());
+
+    p
+}
+
 struct DrawOp {
     pipe: Pipe,
     vert_offset: usize,
@@ -568,16 +601,27 @@ struct DrawList {
     current_start: usize,
 }
 
-impl DrawList {
-    fn new(display_w: f32, display_h: f32) -> Self {
+impl Default for DrawList {
+    fn default() -> Self {
         Self {
-            verts: alloc::vec::Vec::with_capacity(1024 * QUAD_BYTES),
-            ops: alloc::vec::Vec::with_capacity(64),
-            display_w,
-            display_h,
+            verts: alloc::vec::Vec::new(),
+            ops: alloc::vec::Vec::new(),
+            display_w: 0.0,
+            display_h: 0.0,
             current_pipe: Pipe::Solid,
             current_start: 0,
         }
+    }
+}
+
+impl DrawList {
+    fn reset(&mut self, display_w: f32, display_h: f32) {
+        self.verts.clear();
+        self.ops.clear();
+        self.display_w = display_w;
+        self.display_h = display_h;
+        self.current_pipe = Pipe::Solid;
+        self.current_start = 0;
     }
 
     fn flush_current(&mut self) {
@@ -851,22 +895,18 @@ impl DrawList {
             );
         }
 
-        let mut params = [0u8; 64];
-
-        params[0..4].copy_from_slice(&(px * scale).to_le_bytes());
-        params[4..8].copy_from_slice(&(py * scale).to_le_bytes());
-        params[8..12].copy_from_slice(&((px + pw) * scale).to_le_bytes());
-        params[12..16].copy_from_slice(&((py + ph) * scale).to_le_bytes());
-        params[16..20].copy_from_slice(&(color_start.r as f32 / 255.0).to_le_bytes());
-        params[20..24].copy_from_slice(&(color_start.g as f32 / 255.0).to_le_bytes());
-        params[24..28].copy_from_slice(&(color_start.b as f32 / 255.0).to_le_bytes());
-        params[28..32].copy_from_slice(&(color_start.a as f32 / 255.0).to_le_bytes());
-        params[32..36].copy_from_slice(&(color_end.r as f32 / 255.0).to_le_bytes());
-        params[36..40].copy_from_slice(&(color_end.g as f32 / 255.0).to_le_bytes());
-        params[40..44].copy_from_slice(&(color_end.b as f32 / 255.0).to_le_bytes());
-        params[44..48].copy_from_slice(&(color_end.a as f32 / 255.0).to_le_bytes());
-        params[48..52].copy_from_slice(&angle.to_le_bytes());
-        params[52..56].copy_from_slice(&(kind as f32).to_le_bytes());
+        let params = pack_gradient_params(
+            px,
+            py,
+            px + pw,
+            py + ph,
+            color_start,
+            color_end,
+            1.0,
+            angle,
+            kind,
+            scale,
+        );
 
         self.ops.push(DrawOp {
             pipe: Pipe::Gradient,
@@ -929,22 +969,18 @@ impl DrawList {
         }
 
         let opa = opacity as f32 / 255.0;
-        let mut params = [0u8; 64];
-
-        params[0..4].copy_from_slice(&(px * scale).to_le_bytes());
-        params[4..8].copy_from_slice(&(py * scale).to_le_bytes());
-        params[8..12].copy_from_slice(&((px + grad_w) * scale).to_le_bytes());
-        params[12..16].copy_from_slice(&((py + grad_h) * scale).to_le_bytes());
-        params[16..20].copy_from_slice(&(color_start.r as f32 / 255.0).to_le_bytes());
-        params[20..24].copy_from_slice(&(color_start.g as f32 / 255.0).to_le_bytes());
-        params[24..28].copy_from_slice(&(color_start.b as f32 / 255.0).to_le_bytes());
-        params[28..32].copy_from_slice(&(color_start.a as f32 / 255.0 * opa).to_le_bytes());
-        params[32..36].copy_from_slice(&(color_end.r as f32 / 255.0).to_le_bytes());
-        params[36..40].copy_from_slice(&(color_end.g as f32 / 255.0).to_le_bytes());
-        params[40..44].copy_from_slice(&(color_end.b as f32 / 255.0).to_le_bytes());
-        params[44..48].copy_from_slice(&(color_end.a as f32 / 255.0 * opa).to_le_bytes());
-        params[48..52].copy_from_slice(&angle.to_le_bytes());
-        params[52..56].copy_from_slice(&(kind as f32).to_le_bytes());
+        let params = pack_gradient_params(
+            px,
+            py,
+            px + grad_w,
+            py + grad_h,
+            color_start,
+            color_end,
+            opa,
+            angle,
+            kind,
+            scale,
+        );
 
         self.ops.push(DrawOp {
             pipe: Pipe::GradientMasked,
@@ -1385,6 +1421,16 @@ const RASTER_BUF_SIZE: usize = 100 * 100;
 const ATLAS_W_F: f32 = atlas::ATLAS_WIDTH as f32;
 const ATLAS_H_F: f32 = atlas::ATLAS_HEIGHT as f32;
 const NS_PER_MS: u64 = 1_000_000;
+const MAX_GPU_SEGMENTS: usize = 256;
+
+struct PendingGpuPath {
+    seg_count: u16,
+    atlas_u: u16,
+    atlas_v: u16,
+    width: u16,
+    height: u16,
+    seg_buf: alloc::vec::Vec<u8>,
+}
 
 struct WalkContext {
     atlas: alloc::boxed::Box<GlyphAtlas>,
@@ -1398,6 +1444,7 @@ struct WalkContext {
     now_tick: u64,
     next_deadline: u64,
     images: [ImageSlot; MAX_IMAGES],
+    pending_gpu_paths: alloc::vec::Vec<PendingGpuPath>,
 }
 
 fn evaluate_animation(anim: &scene::Animation, now_ns: u64, frame_interval_ns: u64) -> (u8, u64) {
@@ -2052,6 +2099,50 @@ fn lookup_or_rasterize_path(
         return Some(*entry);
     }
 
+    if pw > 0 && ph > 0 && pw <= 256 && ph <= 256 {
+        let mut seg_buf = alloc::vec![0u8; MAX_GPU_SEGMENTS * 16];
+        let seg_count = path::flatten_to_buffer(path_data, scale, stroke_data, &mut seg_buf);
+
+        if seg_count > 0 && seg_count <= MAX_GPU_SEGMENTS {
+            let placeholder = alloc::vec![0u8; (pw * ph) as usize];
+            let ok = ctx.atlas.pack(
+                1,
+                cache_size,
+                cache_hash,
+                pw as u16,
+                ph as u16,
+                0,
+                0,
+                &placeholder,
+            );
+
+            if ok {
+                let entry = ctx.atlas.lookup(1, cache_size, cache_hash).copied();
+
+                if let Some(e) = &entry {
+                    seg_buf.truncate(seg_count * 16);
+
+                    ctx.pending_gpu_paths.push(PendingGpuPath {
+                        seg_count: seg_count as u16,
+                        atlas_u: e.u,
+                        atlas_v: e.v,
+                        width: pw as u16,
+                        height: ph as u16,
+                        seg_buf,
+                    });
+
+                    ctx.atlas_dirty = true;
+                }
+
+                return entry;
+            }
+
+            ctx.atlas_full = true;
+
+            return None;
+        }
+    }
+
     let coverage = path::rasterize_path(path_data, pw, ph, scale, fill_rule, stroke_data);
 
     if coverage.is_empty() {
@@ -2437,6 +2528,8 @@ struct Compositor {
 
     images: [ImageSlot; MAX_IMAGES],
 
+    pending_cursor: Option<(f32, f32)>,
+    draw_list: DrawList,
     metrics: PipelineMetrics,
 }
 
@@ -2476,6 +2569,106 @@ impl ImageSlot {
 }
 
 impl Compositor {
+    fn ensure_render_idle(&mut self) {
+        if self.in_flight {
+            ensure_completed(&mut self.render_vq, self.irq_event, &self.device);
+
+            self.in_flight = false;
+        }
+    }
+
+    fn flush_pending_cursor(&mut self) {
+        let (x, y) = match self.pending_cursor.take() {
+            Some(pos) => pos,
+            None => return,
+        };
+
+        self.ensure_render_idle();
+
+        // SAFETY: render_dma.va is a valid DMA allocation.
+        let dma_buf = unsafe {
+            core::slice::from_raw_parts_mut(
+                self.render_dma[self.render_dma_idx].va as *mut u8,
+                self.render_buf_size,
+            )
+        };
+        let len = {
+            let mut w = CommandWriter::new(dma_buf);
+            w.set_cursor_position(x, y);
+            w.len()
+        };
+
+        submit_and_wait(
+            &self.device,
+            &mut self.render_vq,
+            self.irq_event,
+            render::VIRTQ_RENDER,
+            self.render_dma[self.render_dma_idx].pa,
+            len,
+        );
+    }
+
+    fn dispatch_gpu_paths(&mut self) {
+        if self.walk_ctx.pending_gpu_paths.is_empty() {
+            return;
+        }
+
+        for pending in core::mem::take(&mut self.walk_ctx.pending_gpu_paths) {
+            if pending.seg_count == 0 {
+                continue;
+            }
+
+            self.ensure_render_idle();
+
+            // SAFETY: render_dma.va is a valid DMA allocation.
+            let dma_buf = unsafe {
+                core::slice::from_raw_parts_mut(
+                    self.render_dma[self.render_dma_idx].va as *mut u8,
+                    self.render_buf_size,
+                )
+            };
+            let seg_bytes = &pending.seg_buf[..pending.seg_count as usize * 16];
+            let bounds = [0.0f32, 0.0f32, pending.width as f32, pending.height as f32];
+            // SAFETY: [f32; 4] and [u8; 16] have the same size and alignment requirements are met.
+            let bounds_bytes: [u8; 16] = unsafe { core::mem::transmute(bounds) };
+            let len = {
+                let mut w = CommandWriter::new(dma_buf);
+
+                w.begin_compute_pass();
+                w.set_compute_pipeline(PIPE_PATH_COVERAGE);
+                w.set_compute_texture(TEX_PATH_COVERAGE, 0);
+                w.set_compute_bytes(0, seg_bytes);
+                w.set_compute_bytes(1, &(pending.seg_count as u32).to_le_bytes());
+                w.set_compute_bytes(2, &bounds_bytes);
+                w.dispatch_threads(pending.width, pending.height, 1, 16, 16, 1);
+                w.end_compute_pass();
+                w.begin_blit_pass();
+                w.copy_texture_region(
+                    TEX_PATH_COVERAGE,
+                    TEX_ATLAS,
+                    0,
+                    0,
+                    pending.width,
+                    pending.height,
+                    pending.atlas_u,
+                    pending.atlas_v,
+                );
+                w.end_blit_pass();
+
+                w.len()
+            };
+
+            submit_and_wait(
+                &self.device,
+                &mut self.render_vq,
+                self.irq_event,
+                render::VIRTQ_RENDER,
+                self.render_dma[self.render_dma_idx].pa,
+                len,
+            );
+        }
+    }
+
     fn upload_atlas_dirty(&mut self) {
         if !self.walk_ctx.atlas_dirty {
             return;
@@ -2564,10 +2757,9 @@ impl Compositor {
         if bgra.is_empty() {
             return;
         }
-        if self.in_flight {
-            ensure_completed(&mut self.render_vq, self.irq_event, &self.device);
-            self.in_flight = false;
-        }
+
+        self.ensure_render_idle();
+
         // SAFETY: render_dma.va is a valid DMA allocation.
         let dma_buf = unsafe {
             core::slice::from_raw_parts_mut(
@@ -2600,34 +2792,7 @@ impl Compositor {
     fn update_cursor_position(&mut self, x: f32, y: f32) {
         self.upload_cursor();
 
-        if self.in_flight {
-            ensure_completed(&mut self.render_vq, self.irq_event, &self.device);
-
-            self.in_flight = false;
-        }
-        // SAFETY: render_dma.va is a valid DMA allocation.
-        let dma_buf = unsafe {
-            core::slice::from_raw_parts_mut(
-                self.render_dma[self.render_dma_idx].va as *mut u8,
-                self.render_buf_size,
-            )
-        };
-        let len = {
-            let mut w = CommandWriter::new(dma_buf);
-
-            w.set_cursor_position(x, y);
-
-            w.len()
-        };
-
-        submit_and_wait(
-            &self.device,
-            &mut self.render_vq,
-            self.irq_event,
-            render::VIRTQ_RENDER,
-            self.render_dma[self.render_dma_idx].pa,
-            len,
-        );
+        self.pending_cursor = Some((x, y));
     }
 
     fn upload_image_slot(&mut self, slot: usize) {
@@ -2642,7 +2807,6 @@ impl Compositor {
         let img_h = img.h;
         let pixel_size = img.pixel_size;
         let img_va = img.va;
-
         // SAFETY: setup_dma.va is a valid DMA allocation of setup_buf_size bytes.
         let dma_buf = unsafe {
             core::slice::from_raw_parts_mut(self.setup_dma.va as *mut u8, self.setup_buf_size)
@@ -2729,14 +2893,7 @@ impl Compositor {
             return false;
         }
 
-        // SAFETY: swap_va is a valid RO mapping of a SceneSwapHeader.
-        let swap_gen = unsafe {
-            let hdr = self.swap_va as *const scene::SceneSwapHeader;
-
-            (*hdr)
-                .generation
-                .load(core::sync::atomic::Ordering::Acquire)
-        };
+        let swap_gen = scene::SceneSwapHeader::read_generation(self.swap_va);
 
         if swap_gen != self.last_scene_gen {
             self.last_scene_gen = swap_gen;
@@ -2875,9 +3032,8 @@ impl Compositor {
         }
 
         if self.in_flight {
-            ensure_completed(&mut self.render_vq, self.irq_event, &self.device);
+            self.ensure_render_idle();
 
-            self.in_flight = false;
             self.render_dma_idx = 1 - self.render_dma_idx;
         }
 
@@ -2894,15 +3050,7 @@ impl Compositor {
         self.walk_ctx.next_deadline = 0;
         self.walk_ctx.images = self.images;
 
-        // Read active buffer index from the swap header.
-        // SAFETY: swap_va is a valid RO mapping of a SceneSwapHeader.
-        let active = unsafe {
-            let hdr = self.swap_va as *const scene::SceneSwapHeader;
-
-            (*hdr)
-                .active_index
-                .load(core::sync::atomic::Ordering::Acquire) as usize
-        };
+        let active = scene::SceneSwapHeader::read_active_index(self.swap_va);
         let scene_va = self.scene_vas[active & 1];
 
         if scene_va == 0 {
@@ -2922,7 +3070,10 @@ impl Compositor {
 
         let root_node = reader.node(root);
         let bg = root_node.background;
-        let mut draws = DrawList::new(self.logical_w as f32, self.logical_h as f32);
+        let mut draws = core::mem::take(&mut self.draw_list);
+
+        draws.reset(self.logical_w as f32, self.logical_h as f32);
+
         let walk_t0 = abi::system::clock_read().unwrap_or(0);
 
         walk_node(
@@ -2949,6 +3100,8 @@ impl Compositor {
         draws.finalize();
 
         self.upload_atlas_dirty();
+        self.dispatch_gpu_paths();
+        self.flush_pending_cursor();
 
         let clear_r = srgb_to_linear(bg.r as f32 / 255.0);
         let clear_g = srgb_to_linear(bg.g as f32 / 255.0);
@@ -3411,6 +3564,8 @@ impl Compositor {
             self.metrics.render_max_ns = frame_dt;
         }
 
+        self.draw_list = draws;
+
         self.walk_ctx.next_deadline
     }
 }
@@ -3761,6 +3916,7 @@ extern "C" fn _start() -> ! {
         now_tick: 0,
         next_deadline: 0,
         images: [ImageSlot::EMPTY; MAX_IMAGES],
+        pending_gpu_paths: alloc::vec::Vec::new(),
     };
 
     console::write(console_ep, b"render: atlas ready\n");
@@ -3793,6 +3949,8 @@ extern "C" fn _start() -> ! {
         cursor_visible: false,
         cursor_shape: scene::CURSOR_DEFAULT,
         images: [ImageSlot::EMPTY; MAX_IMAGES],
+        pending_cursor: None,
+        draw_list: DrawList::default(),
         metrics: PipelineMetrics::new(),
     };
 

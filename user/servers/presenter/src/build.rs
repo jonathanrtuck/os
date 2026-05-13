@@ -8,6 +8,30 @@ use super::{
     shape_text,
 };
 
+fn build_font_axes(weight: u16, font_size: u16) -> ([fonts::metrics::AxisValue; 2], usize) {
+    let mut axes = [fonts::metrics::AxisValue {
+        tag: [0; 4],
+        value: 0.0,
+    }; 2];
+    let mut count = 0;
+
+    if weight != 400 {
+        axes[count] = fonts::metrics::AxisValue {
+            tag: *b"wght",
+            value: weight as f32,
+        };
+        count += 1;
+    }
+
+    axes[count] = fonts::metrics::AxisValue {
+        tag: *b"opsz",
+        value: font_size as f32,
+    };
+    count += 1;
+
+    (axes, count)
+}
+
 // ── Selection geometry ────────────────────────────────────────────
 
 pub(crate) struct SelectionSpan {
@@ -98,26 +122,7 @@ fn byte_to_x_rich(
         let upem = fonts::metrics::font_metrics(font_data)
             .map(|m| m.units_per_em)
             .unwrap_or(1000);
-        let mut axes_buf = [fonts::metrics::AxisValue {
-            tag: [0; 4],
-            value: 0.0,
-        }; 2];
-        let mut ac = 0;
-
-        if vr.weight != 400 {
-            axes_buf[ac] = fonts::metrics::AxisValue {
-                tag: *b"wght",
-                value: vr.weight as f32,
-            };
-            ac += 1;
-        }
-
-        axes_buf[ac] = fonts::metrics::AxisValue {
-            tag: *b"opsz",
-            value: vr.font_size as f32,
-        };
-        ac += 1;
-
+        let (axes_buf, ac) = build_font_axes(vr.weight, vr.font_size);
         let axes = &axes_buf[..ac];
         let text_len = piecetable::text_len(doc_buf) as usize;
         let extract_end = byte_pos.min(text_len);
@@ -281,26 +286,7 @@ pub(crate) fn xy_to_byte_rich(
         let upem = fonts::metrics::font_metrics(font_data)
             .map(|m| m.units_per_em)
             .unwrap_or(1000);
-        let mut axes_buf = [fonts::metrics::AxisValue {
-            tag: [0; 4],
-            value: 0.0,
-        }; 2];
-        let mut axis_count = 0;
-
-        if vr.weight != 400 {
-            axes_buf[axis_count] = fonts::metrics::AxisValue {
-                tag: *b"wght",
-                value: vr.weight as f32,
-            };
-            axis_count += 1;
-        }
-
-        axes_buf[axis_count] = fonts::metrics::AxisValue {
-            tag: *b"opsz",
-            value: vr.font_size as f32,
-        };
-        axis_count += 1;
-
+        let (axes_buf, axis_count) = build_font_axes(vr.weight, vr.font_size);
         let axes = &axes_buf[..axis_count];
         let run_start = vr.byte_offset as usize;
         let run_end = run_start + vr.byte_length as usize;
@@ -411,26 +397,7 @@ pub(crate) fn compute_rich_cursor(
         let upem = fonts::metrics::font_metrics(font_data)
             .map(|m| m.units_per_em)
             .unwrap_or(1000);
-        let mut axes_buf = [fonts::metrics::AxisValue {
-            tag: [0; 4],
-            value: 0.0,
-        }; 2];
-        let mut axis_count = 0;
-
-        if vr.weight != 400 {
-            axes_buf[axis_count] = fonts::metrics::AxisValue {
-                tag: *b"wght",
-                value: vr.weight as f32,
-            };
-            axis_count += 1;
-        }
-
-        axes_buf[axis_count] = fonts::metrics::AxisValue {
-            tag: *b"opsz",
-            value: vr.font_size as f32,
-        };
-        axis_count += 1;
-
+        let (axes_buf, axis_count) = build_font_axes(vr.weight, vr.font_size);
         let axes = &axes_buf[..axis_count];
         // Extract run text from piecetable.
         let text_len = piecetable::text_len(doc_buf) as usize;
@@ -590,26 +557,7 @@ fn build_rich_text_nodes(
         let upem = fonts::metrics::font_metrics(font_data)
             .map(|m| m.units_per_em)
             .unwrap_or(1000);
-        let mut axes_buf = [fonts::metrics::AxisValue {
-            tag: [0; 4],
-            value: 0.0,
-        }; 2];
-        let mut axis_count = 0;
-
-        if vr.weight != 400 {
-            axes_buf[axis_count] = fonts::metrics::AxisValue {
-                tag: *b"wght",
-                value: vr.weight as f32,
-            };
-            axis_count += 1;
-        }
-
-        axes_buf[axis_count] = fonts::metrics::AxisValue {
-            tag: *b"opsz",
-            value: vr.font_size as f32,
-        };
-        axis_count += 1;
-
+        let (axes_buf, axis_count) = build_font_axes(vr.weight, vr.font_size);
         let axes = &axes_buf[..axis_count];
         let mut glyph_count = 0usize;
 
@@ -991,7 +939,10 @@ impl super::Presenter {
     }
 
     pub(crate) fn build_scene(&mut self) {
-        let _ = ipc::client::call_simple(self.layout_ep, layout_service::RECOMPUTE, &[]);
+        if self.layout_dirty {
+            let _ = ipc::client::call_simple(self.layout_ep, layout_service::RECOMPUTE, &[]);
+            self.layout_dirty = false;
+        }
         // SAFETY: doc_va is a valid RO mapping of the document buffer.
         let (content_len, cursor_pos, sel_anchor, _) =
             unsafe { document_service::read_doc_header(self.doc_va) };
@@ -1003,15 +954,18 @@ impl super::Presenter {
         let is_rich_format = layout_header.format == 1;
         // Compute cursor position and auto-scroll to keep it visible.
         let (cursor_line_idx, cursor_col_in_line) = self.find_cursor_line(cursor_pos, line_count);
-
-        if is_rich_format {
+        let rich_cursor_info = if is_rich_format {
             let ci =
                 compute_rich_cursor(&self.results_buf, &layout_header, cursor_pos, self.doc_va);
 
             self.ensure_cursor_visible_at(ci.y, ci.height as i32);
+
+            Some(ci)
         } else {
             self.ensure_cursor_visible(cursor_line_idx as u32);
-        }
+
+            None
+        };
 
         self.clamp_scroll();
         self.write_viewport();
@@ -1516,14 +1470,7 @@ impl super::Presenter {
                         cursor_style_color,
                         cursor_weight,
                         cursor_skew,
-                    ) = if is_rich {
-                        let ci = compute_rich_cursor(
-                            &self.results_buf,
-                            &layout_header,
-                            cursor_pos,
-                            self.doc_va,
-                        );
-
+                    ) = if let Some(ci) = &rich_cursor_info {
                         (
                             ci.x,
                             ci.y,

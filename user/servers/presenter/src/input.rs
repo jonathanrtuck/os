@@ -235,6 +235,8 @@ impl Presenter {
     // ── Main key event handler ─────────────────────────────────
 
     pub(crate) fn handle_key_event(&mut self, dispatch: text_editor::KeyDispatch) {
+        self.layout_dirty = true;
+
         let ctrl = dispatch.modifiers & text_editor::MOD_CONTROL != 0;
 
         // Ctrl+W: close the active space.

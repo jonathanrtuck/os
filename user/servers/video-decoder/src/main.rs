@@ -815,16 +815,12 @@ extern "C" fn _start() -> ! {
                     + decoder.frame_pts_ns.last().copied().unwrap_or(0)
                     + decoder.ns_per_frame
             };
-            let wait_t0 = abi::system::clock_read().unwrap_or(0);
             let got_ipc = match ipc::server::serve_one_timed(HANDLE_SVC_EP, &mut decoder, deadline)
             {
                 Ok(()) => true,
                 Err(abi::types::SyscallError::TimedOut) => false,
                 Err(_) => break,
             };
-            let wait_dt = abi::system::clock_read()
-                .unwrap_or(0)
-                .saturating_sub(wait_t0);
 
             if got_ipc {
                 continue;
@@ -862,31 +858,6 @@ extern "C" fn _start() -> ! {
                 if dt > decoder.stats.max_decode_ns {
                     decoder.stats.max_decode_ns = dt;
                 }
-
-                let dt_us = (dt / 1000) as u32;
-                let el_ms = (elapsed / 1_000_000) as u32;
-                let wait_us = (wait_dt / 1000) as u32;
-                let mut buf = [0u8; 100];
-                let mut p = 0;
-
-                p += copy_into(&mut buf[p..], b"vdec: f=");
-                p += console::format_u32(target, &mut buf[p..]);
-                p += copy_into(&mut buf[p..], b"/");
-                p += console::format_u32(total, &mut buf[p..]);
-                p += copy_into(&mut buf[p..], b" dec=");
-                p += console::format_u32(dt_us, &mut buf[p..]);
-                p += copy_into(&mut buf[p..], b"us wait=");
-                p += console::format_u32(wait_us, &mut buf[p..]);
-                p += copy_into(&mut buf[p..], b"us el=");
-                p += console::format_u32(el_ms, &mut buf[p..]);
-                p += copy_into(&mut buf[p..], b"ms g=");
-                p += console::format_u32(decoder.output_gen as u32, &mut buf[p..]);
-
-                buf[p] = b'\n';
-
-                p += 1;
-
-                console::write(decoder.console_ep, &buf[..p]);
             }
 
             if decoder.current_frame >= total - 1 {
