@@ -1027,6 +1027,7 @@ struct PipelineMetrics {
     idle_count: u32,
     ipc_count: u32,
     atlas_reset_count: u32,
+    overrun_skip_count: u32,
     live_check_count: u32,
     live_last_gen: u32,
     loop_max_ns: u64,
@@ -1055,6 +1056,7 @@ impl PipelineMetrics {
             idle_count: 0,
             ipc_count: 0,
             atlas_reset_count: 0,
+            overrun_skip_count: 0,
             live_check_count: 0,
             live_last_gen: 0,
             loop_max_ns: 0,
@@ -1147,6 +1149,10 @@ impl PipelineMetrics {
         if self.atlas_reset_count > 0 {
             p += copy_into_buf(&mut buf[p..], b" atlas_rst=");
             p += console::format_u32(self.atlas_reset_count, &mut buf[p..]);
+        }
+        if self.overrun_skip_count > 0 {
+            p += copy_into_buf(&mut buf[p..], b" overrun=");
+            p += console::format_u32(self.overrun_skip_count, &mut buf[p..]);
         }
         if self.loop_max_ns > 0 {
             p += copy_into_buf(&mut buf[p..], b" loop_max=");
@@ -2533,6 +2539,7 @@ struct Compositor {
 
     pending_cursor: Option<(f32, f32)>,
     draw_list: DrawList,
+    last_bg: scene::Color,
     metrics: PipelineMetrics,
 }
 
@@ -3468,6 +3475,166 @@ impl Compositor {
         }
 
         self.draw_list = draws;
+        self.last_bg = bg;
+
+        self.walk_ctx.next_deadline
+    }
+
+    fn render_frame_reuse_drawlist(&mut self) -> u64 {
+        let frame_t0 = abi::system::clock_read().unwrap_or(0);
+
+        if self.draw_list.ops.is_empty() {
+            return 0;
+        }
+
+        if self.in_flight {
+            self.ensure_render_idle();
+
+            self.render_dma_idx = 1 - self.render_dma_idx;
+        }
+
+        let bg = self.last_bg;
+        let emit_t0 = abi::system::clock_read().unwrap_or(0);
+        let clear_r = srgb_to_linear(bg.r as f32 / 255.0);
+        let clear_g = srgb_to_linear(bg.g as f32 / 255.0);
+        let clear_b = srgb_to_linear(bg.b as f32 / 255.0);
+        // SAFETY: render_dma.va is a valid DMA allocation of render_buf_size bytes.
+        let dma_buf = unsafe {
+            core::slice::from_raw_parts_mut(
+                self.render_dma[self.render_dma_idx].va as *mut u8,
+                self.render_buf_size,
+            )
+        };
+        let draws = &self.draw_list;
+        let len = {
+            let mut w = CommandWriter::new(dma_buf);
+            let mut in_render_pass = false;
+            let mut active_pipe: Option<Pipe> = None;
+            let mut op_idx = 0;
+
+            while op_idx < draws.ops.len() {
+                let op = &draws.ops[op_idx];
+
+                if matches!(op.pipe, Pipe::BackdropBlur) {
+                    op_idx += 1;
+
+                    continue;
+                }
+
+                if !in_render_pass {
+                    let load = if op_idx == 0 {
+                        render::LOAD_CLEAR
+                    } else {
+                        render::LOAD_LOAD
+                    };
+
+                    w.begin_render_pass(
+                        render::DRAWABLE_HANDLE,
+                        0,
+                        0,
+                        load,
+                        render::STORE_STORE,
+                        0,
+                        0,
+                        clear_r,
+                        clear_g,
+                        clear_b,
+                        1.0,
+                    );
+
+                    in_render_pass = true;
+                }
+
+                let verts = &draws.verts[op.vert_offset..op.vert_offset + op.vert_bytes];
+                let needs_rebind = active_pipe != Some(op.pipe)
+                    || op.pipe == Pipe::Shadow
+                    || op.pipe == Pipe::Gradient
+                    || op.pipe == Pipe::GradientMasked;
+
+                if needs_rebind {
+                    match op.pipe {
+                        Pipe::Solid => {
+                            w.set_render_pipeline(PIPE_SOLID);
+                        }
+                        Pipe::Glyph => {
+                            w.set_render_pipeline(PIPE_GLYPH);
+                            w.set_fragment_texture(TEX_ATLAS, 0);
+                            w.set_fragment_sampler(SAMPLER_NEAREST, 0);
+                        }
+                        Pipe::Shadow => {
+                            w.set_render_pipeline(PIPE_SHADOW);
+                            w.set_fragment_bytes(0, &op.params[..48]);
+                        }
+                        Pipe::Gradient => {
+                            w.set_render_pipeline(PIPE_GRADIENT);
+                            w.set_fragment_bytes(0, &op.params);
+                        }
+                        Pipe::GradientMasked => {
+                            w.set_render_pipeline(PIPE_GRADIENT_MASKED);
+                            w.set_fragment_bytes(0, &op.params);
+                            w.set_fragment_texture(TEX_ATLAS, 0);
+                            w.set_fragment_sampler(SAMPLER_NEAREST, 0);
+                        }
+                        Pipe::Textured(tex_id) => {
+                            w.set_render_pipeline(PIPE_TEXTURED);
+                            w.set_fragment_texture(tex_id, 0);
+                            w.set_fragment_sampler(SAMPLER_LINEAR, 0);
+                        }
+                        Pipe::BackdropBlur => unreachable!(),
+                    }
+
+                    active_pipe = Some(op.pipe);
+                }
+
+                render::batch::emit_draws(&mut w, verts);
+
+                op_idx += 1;
+            }
+
+            if !in_render_pass {
+                w.begin_render_pass(
+                    render::DRAWABLE_HANDLE,
+                    0,
+                    0,
+                    render::LOAD_CLEAR,
+                    render::STORE_STORE,
+                    0,
+                    0,
+                    clear_r,
+                    clear_g,
+                    clear_b,
+                    1.0,
+                );
+            }
+
+            w.end_render_pass();
+            w.present_and_commit(self.frame_count);
+
+            w.len()
+        };
+
+        submit_async(
+            &self.device,
+            &mut self.render_vq,
+            render::VIRTQ_RENDER,
+            self.render_dma[self.render_dma_idx].pa,
+            len,
+        );
+
+        self.in_flight = true;
+        self.frame_count += 1;
+
+        let now = abi::system::clock_read().unwrap_or(0);
+        let frame_dt = now.saturating_sub(frame_t0);
+        let emit_dt = now.saturating_sub(emit_t0);
+
+        self.metrics.render_count += 1;
+        self.metrics.render_total_ns += frame_dt;
+        self.metrics.emit_total_ns += emit_dt;
+
+        if frame_dt > self.metrics.render_max_ns {
+            self.metrics.render_max_ns = frame_dt;
+        }
 
         self.walk_ctx.next_deadline
     }
@@ -3854,6 +4021,7 @@ extern "C" fn _start() -> ! {
         images: [ImageSlot::EMPTY; MAX_IMAGES],
         pending_cursor: None,
         draw_list: DrawList::default(),
+        last_bg: scene::Color::rgba(0, 0, 0, 255),
         metrics: PipelineMetrics::new(),
     };
 
@@ -3897,6 +4065,7 @@ extern "C" fn _start() -> ! {
     let frame_interval = compositor.walk_ctx.frame_interval_ns;
     let mut next_vsync = abi::system::clock_read().unwrap_or(0) + frame_interval;
     let mut render_deadline: u64 = 0;
+    let mut last_render_end: u64 = 0;
     let report_interval_ns: u64 = 1_000_000_000;
     let mut next_report = abi::system::clock_read().unwrap_or(0) + report_interval_ns;
 
@@ -3939,11 +4108,23 @@ extern "C" fn _start() -> ! {
             compositor.metrics.timer_due_count += 1;
         }
 
-        if scene_changed || images_changed || timer_due {
-            let next = compositor.render_frame();
+        let overrun =
+            last_render_end > 0 && now.saturating_sub(last_render_end) < frame_interval / 2;
 
+        if !overrun && (scene_changed || images_changed || timer_due) {
+            let next = if images_changed && !scene_changed && !timer_due {
+                compositor.render_frame_reuse_drawlist()
+            } else {
+                compositor.render_frame()
+            };
+
+            last_render_end = abi::system::clock_read().unwrap_or(0);
             render_deadline = if next > now { next } else { 0 };
         } else {
+            if overrun {
+                compositor.metrics.overrun_skip_count += 1;
+            }
+
             compositor.metrics.idle_count += 1;
         }
 
@@ -3958,7 +4139,6 @@ extern "C" fn _start() -> ! {
         if now >= next_vsync {
             next_vsync = now + frame_interval;
         }
-
         if now >= next_report {
             compositor.metrics.report_and_reset(compositor.console_ep);
 

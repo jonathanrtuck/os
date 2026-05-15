@@ -426,9 +426,10 @@ impl super::Presenter {
         let max_w = self.display_width.saturating_sub(2 * page_margin);
         let max_h = content_h.saturating_sub(2 * page_margin);
         let (vis_lo, vis_hi) = self.workspace.visible_range(self.display_width);
+        let mut any_child_dirty = false;
 
         for i in vis_lo..=vis_hi {
-            match &mut self.workspace.children[i].viewer {
+            let changed = match &mut self.workspace.children[i].viewer {
                 super::handlers::ViewerKind::Text(tv) => {
                     tv.rebuild(&super::handlers::TextRebuildContext {
                         content,
@@ -442,23 +443,25 @@ impl super::Presenter {
                         sel_anchor,
                         content_len,
                         display_width: self.display_width,
-                    });
+                    })
                 }
-                super::handlers::ViewerKind::Image(iv) => {
-                    iv.rebuild(&view_tree::Constraints {
-                        available_width: upt(max_w),
-                        available_height: upt(max_h),
-                        now_ns,
-                    });
-                }
-                super::handlers::ViewerKind::Video(vv) => {
-                    vv.rebuild(&view_tree::Constraints {
-                        available_width: upt(max_w),
-                        available_height: upt(max_h),
-                        now_ns,
-                    });
-                }
-            }
+                super::handlers::ViewerKind::Image(iv) => iv.rebuild(&view_tree::Constraints {
+                    available_width: upt(max_w),
+                    available_height: upt(max_h),
+                    now_ns,
+                }),
+                super::handlers::ViewerKind::Video(vv) => vv.rebuild(&view_tree::Constraints {
+                    available_width: upt(max_w),
+                    available_height: upt(max_h),
+                    now_ns,
+                }),
+            };
+
+            any_child_dirty |= changed;
+        }
+
+        if any_child_dirty {
+            self.workspace.child_dirty = true;
         }
 
         let active_mimetype = self
@@ -466,8 +469,8 @@ impl super::Presenter {
             .children
             .get(self.workspace.active)
             .and_then(|c| core::str::from_utf8(c.mimetype).ok());
-
-        self.workspace
+        let ws_changed = self
+            .workspace
             .rebuild(&super::handlers::WorkspaceRebuildContext {
                 display_width: self.display_width,
                 display_height: self.display_height,
@@ -475,6 +478,10 @@ impl super::Presenter {
                 rtc_secs: self.current_clock_secs(),
                 active_mimetype,
             });
+
+        if !ws_changed && !any_child_dirty {
+            return;
+        }
 
         let back_idx = 1 - self.read_active_index();
         let back_buf = unsafe {
@@ -486,9 +493,14 @@ impl super::Presenter {
 
         let ws_subtree = self.workspace.subtree();
         let child_subtrees = self.workspace.child_subtrees();
-        let child_refs: alloc::vec::Vec<&view_tree::ViewSubtree> = child_subtrees.to_vec();
 
-        super::handlers::write_subtree_as_root(ws_subtree, &child_refs, &mut scene, pt(0), pt(0));
+        super::handlers::write_subtree_as_root(
+            ws_subtree,
+            &child_subtrees,
+            &mut scene,
+            pt(0),
+            pt(0),
+        );
 
         self.swap_scene();
 

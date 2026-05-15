@@ -27,6 +27,8 @@ pub struct ImageViewer {
     pub content_id: u32,
     pub pixel_width: u16,
     pub pixel_height: u16,
+    last_avail_w: u32,
+    last_avail_h: u32,
     subtree: ViewSubtree,
 }
 
@@ -38,6 +40,8 @@ impl ImageViewer {
             content_id,
             pixel_width,
             pixel_height,
+            last_avail_w: u32::MAX,
+            last_avail_h: u32::MAX,
             subtree: ViewSubtree {
                 tree,
                 root: scene::NULL,
@@ -46,7 +50,17 @@ impl ImageViewer {
         }
     }
 
-    pub fn rebuild(&mut self, constraints: &Constraints) {
+    pub fn rebuild(&mut self, constraints: &Constraints) -> bool {
+        if constraints.available_width == self.last_avail_w
+            && constraints.available_height == self.last_avail_h
+            && self.subtree.root != scene::NULL
+        {
+            return false;
+        }
+
+        self.last_avail_w = constraints.available_width;
+        self.last_avail_h = constraints.available_height;
+
         let max_w = constraints.available_width / scene::MPT_PER_PT as u32;
         let max_h = constraints.available_height / scene::MPT_PER_PT as u32;
         let (disp_w, disp_h) = aspect_fit(
@@ -81,6 +95,8 @@ impl ImageViewer {
         );
 
         self.subtree = ViewSubtree { tree, root, layout };
+
+        true
     }
 }
 
@@ -131,6 +147,9 @@ pub struct VideoViewer {
     pub audio_cancel: abi::types::Handle,
     // Console for logging
     pub console_ep: abi::types::Handle,
+    last_avail_w: u32,
+    last_avail_h: u32,
+    last_playing: bool,
     subtree: ViewSubtree,
 }
 
@@ -172,6 +191,9 @@ impl VideoViewer {
             audio_ep: abi::types::Handle(0),
             audio_cancel: abi::types::Handle(0),
             console_ep: abi::types::Handle(0),
+            last_avail_w: u32::MAX,
+            last_avail_h: u32::MAX,
+            last_playing: false,
             subtree: ViewSubtree {
                 tree,
                 root: scene::NULL,
@@ -180,7 +202,19 @@ impl VideoViewer {
         }
     }
 
-    pub fn rebuild(&mut self, constraints: &Constraints) {
+    pub fn rebuild(&mut self, constraints: &Constraints) -> bool {
+        if constraints.available_width == self.last_avail_w
+            && constraints.available_height == self.last_avail_h
+            && self.playing == self.last_playing
+            && self.subtree.root != scene::NULL
+        {
+            return false;
+        }
+
+        self.last_avail_w = constraints.available_width;
+        self.last_avail_h = constraints.available_height;
+        self.last_playing = self.playing;
+
         let mut tree = ViewTree::new();
         let (disp_w, disp_h) = aspect_fit(
             self.pixel_width as u32,
@@ -270,6 +304,8 @@ impl VideoViewer {
         let layout = view_tree::layout(tree.nodes(), root, upt(disp_w), upt(disp_h), &NoMeasurer);
 
         self.subtree = ViewSubtree { tree, root, layout };
+
+        true
     }
 
     // ── Hardware codec methods ──────────────────────────────────────
@@ -975,6 +1011,12 @@ pub struct TextViewer {
     pub cmap_sans: [u16; 128],
     pub char_width_mpt: scene::Mpt,
     glyphs: [scene::ShapedGlyph; MAX_GLYPHS_PER_LINE],
+    last_content_len: u32,
+    last_cursor_pos: u32,
+    last_sel_anchor: u32,
+    last_scroll_y: i32,
+    last_page_w: u32,
+    last_page_h: u32,
     subtree: ViewSubtree,
 }
 
@@ -993,6 +1035,12 @@ impl TextViewer {
                 x_offset: 0,
                 y_offset: 0,
             }; MAX_GLYPHS_PER_LINE],
+            last_content_len: u32::MAX,
+            last_cursor_pos: u32::MAX,
+            last_sel_anchor: u32::MAX,
+            last_scroll_y: i32::MAX,
+            last_page_w: u32::MAX,
+            last_page_h: u32::MAX,
             subtree: ViewSubtree {
                 tree: ViewTree::new(),
                 root: scene::NULL,
@@ -1001,7 +1049,25 @@ impl TextViewer {
         }
     }
 
-    pub fn rebuild(&mut self, ctx: &TextRebuildContext<'_>) {
+    pub fn rebuild(&mut self, ctx: &TextRebuildContext<'_>) -> bool {
+        if ctx.content_len as u32 == self.last_content_len
+            && ctx.cursor_pos as u32 == self.last_cursor_pos
+            && ctx.sel_anchor as u32 == self.last_sel_anchor
+            && self.scroll_y == self.last_scroll_y
+            && ctx.page_w == self.last_page_w
+            && ctx.page_h == self.last_page_h
+            && self.subtree.root != scene::NULL
+        {
+            return false;
+        }
+
+        self.last_content_len = ctx.content_len as u32;
+        self.last_cursor_pos = ctx.cursor_pos as u32;
+        self.last_sel_anchor = ctx.sel_anchor as u32;
+        self.last_scroll_y = self.scroll_y;
+        self.last_page_w = ctx.page_w;
+        self.last_page_h = ctx.page_h;
+
         let mut tree = ViewTree::new();
         let line_count = ctx.layout_header.line_count as usize;
         let is_rich = ctx.layout_header.format == 1;
@@ -1103,6 +1169,8 @@ impl TextViewer {
         );
 
         self.subtree = ViewSubtree { tree, root, layout };
+
+        true
     }
 
     fn build_selection_view_nodes(
@@ -1639,6 +1707,11 @@ pub struct WorkspaceViewer {
     pub slide_animating: bool,
     pub last_anim_tick: u64,
     glyphs: [scene::ShapedGlyph; MAX_GLYPHS_PER_LINE],
+    last_rtc_secs: u64,
+    last_slide_val: i32,
+    last_display_w: u32,
+    last_display_h: u32,
+    pub child_dirty: bool,
     subtree: ViewSubtree,
 }
 
@@ -1661,6 +1734,11 @@ impl WorkspaceViewer {
                 x_offset: 0,
                 y_offset: 0,
             }; MAX_GLYPHS_PER_LINE],
+            last_rtc_secs: u64::MAX,
+            last_slide_val: i32::MAX,
+            last_display_w: u32::MAX,
+            last_display_h: u32::MAX,
+            child_dirty: true,
             subtree: ViewSubtree {
                 tree: ViewTree::new(),
                 root: scene::NULL,
@@ -1701,7 +1779,25 @@ impl WorkspaceViewer {
         }
     }
 
-    pub fn rebuild(&mut self, ctx: &WorkspaceRebuildContext) {
+    pub fn rebuild(&mut self, ctx: &WorkspaceRebuildContext) -> bool {
+        let slide_val = self.slide_spring.value();
+
+        if ctx.rtc_secs == self.last_rtc_secs
+            && slide_val == self.last_slide_val
+            && ctx.display_width == self.last_display_w
+            && ctx.display_height == self.last_display_h
+            && !self.child_dirty
+            && self.subtree.root != scene::NULL
+        {
+            return false;
+        }
+
+        self.last_rtc_secs = ctx.rtc_secs;
+        self.last_slide_val = slide_val;
+        self.last_display_w = ctx.display_width;
+        self.last_display_h = ctx.display_height;
+        self.child_dirty = false;
+
         let mut tree = ViewTree::new();
         let bg = Color::rgb(
             presenter_service::BG_R,
@@ -1912,6 +2008,8 @@ impl WorkspaceViewer {
         );
 
         self.subtree = ViewSubtree { tree, root, layout };
+
+        true
     }
 }
 
