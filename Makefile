@@ -1,8 +1,8 @@
 # Host target for verification tools that can't run on bare metal.
 HOST := aarch64-apple-darwin
 
-.PHONY: test test-all build check clippy fmt bench bench-el0 bench-smp clean integration-test \
-        miri asan fuzz mutants coverage gate nightly \
+.PHONY: test test-all build check clippy fmt bench bench-el0 bench-smp bench-render clean \
+        integration-test miri asan fuzz mutants coverage gate nightly \
         stress bench-check bench-baseline audit integration-release visual-test
 
 # -- Core targets --
@@ -36,6 +36,10 @@ bench-el0:
 bench-smp:
 	cargo build -p kernel --release --features bench-smp
 	hypervisor --no-gpu --timeout 60 target/aarch64-unknown-none/release/kernel
+
+bench-render:
+	@cargo build --release 2>&1 | tail -1
+	@user/shared/benchmarks/render/bench.sh
 
 integration-test:
 	@scripts/integration-test

@@ -1,8 +1,17 @@
 [package]
-name = "bench"
+name = "benchmarks"
 version = "0.1.0"
 edition = "2024"
 license = "Unlicense"
+autobins = false
+
+[[bin]]
+name = "bench-el0"
+path = "src/el0.rs"
+
+[[bin]]
+name = "bench-smp"
+path = "src/smp.rs"
 
 [dependencies]
 abi = { path = "../../system/abi" }

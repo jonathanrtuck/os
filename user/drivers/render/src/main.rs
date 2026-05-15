@@ -1027,7 +1027,6 @@ struct PipelineMetrics {
     idle_count: u32,
     ipc_count: u32,
     atlas_reset_count: u32,
-    overrun_skip_count: u32,
     live_check_count: u32,
     live_last_gen: u32,
     loop_max_ns: u64,
@@ -1056,7 +1055,6 @@ impl PipelineMetrics {
             idle_count: 0,
             ipc_count: 0,
             atlas_reset_count: 0,
-            overrun_skip_count: 0,
             live_check_count: 0,
             live_last_gen: 0,
             loop_max_ns: 0,
@@ -1149,10 +1147,6 @@ impl PipelineMetrics {
         if self.atlas_reset_count > 0 {
             p += copy_into_buf(&mut buf[p..], b" atlas_rst=");
             p += console::format_u32(self.atlas_reset_count, &mut buf[p..]);
-        }
-        if self.overrun_skip_count > 0 {
-            p += copy_into_buf(&mut buf[p..], b" overrun=");
-            p += console::format_u32(self.overrun_skip_count, &mut buf[p..]);
         }
         if self.loop_max_ns > 0 {
             p += copy_into_buf(&mut buf[p..], b" loop_max=");
@@ -4065,7 +4059,6 @@ extern "C" fn _start() -> ! {
     let frame_interval = compositor.walk_ctx.frame_interval_ns;
     let mut next_vsync = abi::system::clock_read().unwrap_or(0) + frame_interval;
     let mut render_deadline: u64 = 0;
-    let mut last_render_end: u64 = 0;
     let report_interval_ns: u64 = 1_000_000_000;
     let mut next_report = abi::system::clock_read().unwrap_or(0) + report_interval_ns;
 
@@ -4108,23 +4101,15 @@ extern "C" fn _start() -> ! {
             compositor.metrics.timer_due_count += 1;
         }
 
-        let overrun =
-            last_render_end > 0 && now.saturating_sub(last_render_end) < frame_interval / 2;
-
-        if !overrun && (scene_changed || images_changed || timer_due) {
+        if scene_changed || images_changed || timer_due {
             let next = if images_changed && !scene_changed && !timer_due {
                 compositor.render_frame_reuse_drawlist()
             } else {
                 compositor.render_frame()
             };
 
-            last_render_end = abi::system::clock_read().unwrap_or(0);
             render_deadline = if next > now { next } else { 0 };
         } else {
-            if overrun {
-                compositor.metrics.overrun_skip_count += 1;
-            }
-
             compositor.metrics.idle_count += 1;
         }
 

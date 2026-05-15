@@ -1,0 +1,75 @@
+# Render benchmark: three workloads back-to-back.
+#
+# Frame numbers map to compositor frames at display refresh rate.
+# At 120Hz, frame 120 ≈ 1 second. Metrics report every 1 second.
+#
+# 1. Typing burst (frames 0–50): rapid keystroke → render cycles.
+#    50 keystrokes in ~0.4s. First metrics period captures typing.
+#
+# 2. Idle (frames 50–600): no input for ~5 seconds.
+#    Multiple metrics periods with high idle counts.
+#
+# 3. Animation (frames 600–720): Ctrl+Tab space switch.
+#    Spring animation at 120fps.
+
+# ── 1. Typing burst ──────────────────────────────────────
+0 key shift+t
+1 key h
+2 key e
+3 key space
+4 key q
+5 key u
+6 key i
+7 key c
+8 key k
+9 key space
+10 key b
+11 key r
+12 key o
+13 key w
+14 key n
+15 key space
+16 key f
+17 key o
+18 key x
+19 key space
+20 key j
+21 key u
+22 key m
+23 key p
+24 key s
+25 key space
+26 key o
+27 key v
+28 key e
+29 key r
+30 key space
+31 key t
+32 key h
+33 key e
+34 key space
+35 key l
+36 key a
+37 key z
+38 key y
+39 key space
+40 key d
+41 key o
+42 key g
+43 key return
+44 key shift+p
+45 key a
+46 key c
+47 key k
+48 key space
+49 key m
+50 key y
+
+# ── 2. Idle ──────────────────────────────────────────────
+# No events for ~5 seconds. Compositor should idle-skip.
+
+# ── 3. Animation ─────────────────────────────────────────
+700 key ctrl+tab
+760 key ctrl+tab
+
+820 exit

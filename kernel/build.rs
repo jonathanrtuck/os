@@ -20,9 +20,9 @@ fn build_init(kernel_dir: &std::path::Path) {
     let bench_el0 = env::var("CARGO_FEATURE_BENCH_EL0").is_ok();
     let bench_smp = env::var("CARGO_FEATURE_BENCH_SMP").is_ok();
     let (init_dir, crate_name) = if bench_smp {
-        (kernel_dir.join("../user/shared/bench-smp"), "bench-smp")
+        (kernel_dir.join("../user/shared/benchmarks"), "bench-smp")
     } else if bench_el0 {
-        (kernel_dir.join("../user/shared/benchmarks"), "bench")
+        (kernel_dir.join("../user/shared/benchmarks"), "bench-el0")
     } else if integration {
         (
             kernel_dir.join("../user/shared/integration-tests"),
@@ -49,12 +49,10 @@ fn build_init(kernel_dir: &std::path::Path) {
     println!("cargo:rerun-if-changed=../user/shared/integration-tests/src/main.rs");
     println!("cargo:rerun-if-changed=../user/shared/integration-tests/link.ld");
     println!("cargo:rerun-if-changed=../user/shared/integration-tests/Cargo.toml");
-    println!("cargo:rerun-if-changed=../user/shared/benchmarks/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/shared/benchmarks/src/el0.rs");
+    println!("cargo:rerun-if-changed=../user/shared/benchmarks/src/smp.rs");
     println!("cargo:rerun-if-changed=../user/shared/benchmarks/link.ld");
     println!("cargo:rerun-if-changed=../user/shared/benchmarks/Cargo.toml");
-    println!("cargo:rerun-if-changed=../user/shared/bench-smp/src/main.rs");
-    println!("cargo:rerun-if-changed=../user/shared/bench-smp/link.ld");
-    println!("cargo:rerun-if-changed=../user/shared/bench-smp/Cargo.toml");
     println!("cargo:rerun-if-changed=../user/shared/hello/src/main.rs");
     println!("cargo:rerun-if-changed=../user/shared/hello/link.ld");
     println!("cargo:rerun-if-changed=../user/shared/hello/Cargo.toml");
@@ -131,12 +129,19 @@ fn build_userspace_crate(crate_dir: &std::path::Path, crate_name: &str, output: 
         "-C link-arg=-T{} -C link-arg=-nostdlib -C link-arg=--no-rosegment",
         link_ld.display()
     );
-    let status = Command::new("cargo")
-        .current_dir(crate_dir)
+    let mut cmd = Command::new("cargo");
+
+    cmd.current_dir(crate_dir)
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .env_remove("RUSTFLAGS")
         .env("CARGO_TARGET_AARCH64_UNKNOWN_NONE_RUSTFLAGS", &rustflags)
-        .args(["build", "--release"])
+        .args(["build", "--release"]);
+
+    if crate_dir.file_name().is_some_and(|n| n == "benchmarks") {
+        cmd.args(["--bin", crate_name]);
+    }
+
+    let status = cmd
         .status()
         .unwrap_or_else(|e| panic!("failed to build {crate_name}: {e}"));
 
@@ -277,7 +282,7 @@ const SERVICES: &[ServiceDef] = &[
         dir: "../user/editors/text",
         crate_name: "text-editor",
     },
-ServiceDef {
+    ServiceDef {
         name: "rng",
         dir: "../user/drivers/rng",
         crate_name: "rng",
