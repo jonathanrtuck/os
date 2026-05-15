@@ -104,19 +104,14 @@ pub(crate) fn compute_rich_cursor(
     doc_va: usize,
 ) -> RichCursorInfo {
     const FALLBACK_COLOR: u32 = 0x20_20_20_FF;
-
-    let run_count = layout_header.visible_run_count as usize;
-
-    if run_count == 0 {
-        return RichCursorInfo {
-            x: 0.0,
-            y: 0,
-            height: 20,
-            color_rgba: FALLBACK_COLOR,
-            weight: 400,
-            caret_skew: 0.0,
-        };
-    }
+    const FALLBACK: RichCursorInfo = RichCursorInfo {
+        x: 0.0,
+        y: 0,
+        height: 20,
+        color_rgba: FALLBACK_COLOR,
+        weight: 400,
+        caret_skew: 0.0,
+    };
 
     let (content_len, _, _, _) = unsafe { document_service::read_doc_header(doc_va) };
     let doc_buf = unsafe {
@@ -127,13 +122,42 @@ pub(crate) fn compute_rich_cursor(
     };
 
     if !piecetable::validate(doc_buf) {
+        return FALLBACK;
+    }
+
+    // current_style is the SSOT — the document service keeps it in sync
+    // with cursor position (left-affinity) on every move, insert, and
+    // delete, so it always reflects what the next typed character will
+    // inherit.
+    let style_id = piecetable::current_style(doc_buf);
+    let (cs_color, cs_weight, cs_font_size, cs_skew) =
+        if let Some(s) = piecetable::style(doc_buf, style_id) {
+            let font_data = super::font_data_for_style(s.font_family, s.flags);
+            let color = ((s.color[0] as u32) << 24)
+                | ((s.color[1] as u32) << 16)
+                | ((s.color[2] as u32) << 8)
+                | (s.color[3] as u32);
+
+            (
+                color,
+                s.weight,
+                s.font_size_pt,
+                fonts::metrics::caret_skew(font_data),
+            )
+        } else {
+            (FALLBACK_COLOR, 400, 14, 0.0)
+        };
+    let cs_line_height = (cs_font_size as u32 * 14) / 10;
+    let run_count = layout_header.visible_run_count as usize;
+
+    if run_count == 0 {
         return RichCursorInfo {
             x: 0.0,
             y: 0,
-            height: 20,
-            color_rgba: FALLBACK_COLOR,
-            weight: 400,
-            caret_skew: 0.0,
+            height: cs_line_height,
+            color_rgba: cs_color,
+            weight: cs_weight,
+            caret_skew: cs_skew,
         };
     }
 
@@ -177,9 +201,9 @@ pub(crate) fn compute_rich_cursor(
             x,
             y: vr.y,
             height: line_height,
-            color_rgba: vr.color_rgba,
-            weight: vr.weight,
-            caret_skew: fonts::metrics::caret_skew(font_data),
+            color_rgba: cs_color,
+            weight: cs_weight,
+            caret_skew: cs_skew,
         };
     }
 
@@ -191,20 +215,21 @@ pub(crate) fn compute_rich_cursor(
         let line_end = line_start + line.byte_length as usize;
 
         if cursor_pos >= line_start && cursor_pos <= line_end {
-            let default_h = 20u32;
-            let mut line_h = default_h;
+            let mut line_h = cs_line_height;
+            let mut found = false;
 
             for run_i in 0..run_count {
                 let vr = parse_visible_run_at(results_buf, run_i);
 
                 if vr.line_index as usize == i {
                     line_h = (vr.font_size as u32 * 14) / 10;
+                    found = true;
 
                     break;
                 }
             }
 
-            if line_h == default_h && i > 0 {
+            if !found && i > 0 {
                 for run_i in (0..run_count).rev() {
                     let vr = parse_visible_run_at(results_buf, run_i);
 
@@ -220,9 +245,9 @@ pub(crate) fn compute_rich_cursor(
                 x: 0.0,
                 y: line.y,
                 height: line_h,
-                color_rgba: FALLBACK_COLOR,
-                weight: 400,
-                caret_skew: 0.0,
+                color_rgba: cs_color,
+                weight: cs_weight,
+                caret_skew: cs_skew,
             };
         }
     }
@@ -234,26 +259,26 @@ pub(crate) fn compute_rich_cursor(
 
             (vr.font_size as u32 * 14) / 10
         } else {
-            20
+            cs_line_height
         };
 
         return RichCursorInfo {
             x: 0.0,
             y: last.y + last_h as i32,
             height: last_h,
-            color_rgba: FALLBACK_COLOR,
-            weight: 400,
-            caret_skew: 0.0,
+            color_rgba: cs_color,
+            weight: cs_weight,
+            caret_skew: cs_skew,
         };
     }
 
     RichCursorInfo {
         x: 0.0,
         y: 0,
-        height: 20,
-        color_rgba: FALLBACK_COLOR,
-        weight: 400,
-        caret_skew: 0.0,
+        height: cs_line_height,
+        color_rgba: cs_color,
+        weight: cs_weight,
+        caret_skew: cs_skew,
     }
 }
 

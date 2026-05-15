@@ -1006,6 +1006,36 @@ pub fn current_style(buf: &[u8]) -> u8 {
     read_header(buf).current_style
 }
 
+/// Update current_style to match the nearest visible character at the
+/// cursor position. The rule is proximity: inherit from whichever
+/// visible character the cursor is touching.
+///
+/// - At a line start (preceded by `\n`): the cursor touches the right
+///   neighbor, so inherit from it.
+/// - At line end or mid-line: the cursor touches the left neighbor.
+/// - On an empty last line (no right neighbor): the closest visible
+///   text is on the preceding line.
+/// - Empty document: no change (default style stays).
+pub fn sync_cursor_style(buf: &mut [u8], pos: u32) {
+    let left = if pos > 0 {
+        style_at(buf, pos - 1)
+    } else {
+        None
+    };
+    let left_is_newline = pos > 0 && byte_at(buf, pos - 1) == Some(b'\n');
+    let inherit = if pos == 0 {
+        style_at(buf, 0)
+    } else if left_is_newline {
+        style_at(buf, pos).or(left)
+    } else {
+        left
+    };
+
+    if let Some(sid) = inherit {
+        set_current_style(buf, sid);
+    }
+}
+
 /// Set the selection range in the header.
 pub fn set_selection(buf: &mut [u8], start: u32, end: u32) {
     let h = read_header_mut(buf);
@@ -2072,6 +2102,55 @@ mod tests {
         set_current_style(&mut buf, 5);
 
         assert_eq!(current_style(&buf), 5);
+    }
+
+    #[test]
+    fn sync_cursor_style_proximity() {
+        let mut buf = make_empty(4096);
+
+        add_default_styles(&mut buf);
+
+        // "Hello\nBold" — body (style 0) then bold (style 3).
+        set_current_style(&mut buf, 0);
+
+        assert!(insert_bytes(&mut buf, 0, b"Hello\n"));
+
+        set_current_style(&mut buf, 3);
+
+        assert!(insert_bytes(&mut buf, 6, b"Bold"));
+
+        // Cursor at pos 0 → no left neighbor, inherit first char (style 0).
+        sync_cursor_style(&mut buf, 0);
+
+        assert_eq!(current_style(&buf), 0);
+
+        // Cursor at pos 5 (after 'o' in "Hello") → left neighbor is 'o' → style 0.
+        sync_cursor_style(&mut buf, 5);
+
+        assert_eq!(current_style(&buf), 0);
+
+        // Cursor at pos 6 (start of line 2, after '\n') → left is '\n',
+        // so look right: 'B' is style 3.
+        sync_cursor_style(&mut buf, 6);
+
+        assert_eq!(current_style(&buf), 3);
+
+        // Cursor at pos 7 (after 'B' in "Bold") → left is 'B' → style 3.
+        sync_cursor_style(&mut buf, 7);
+
+        assert_eq!(current_style(&buf), 3);
+
+        // "Hello\nBold\n" — append a newline to create an empty last line.
+        set_current_style(&mut buf, 3);
+
+        assert!(insert_bytes(&mut buf, 10, b"\n"));
+
+        // Cursor at pos 11 (empty last line) → left is '\n', right is
+        // past end (None), so fall back to left's style (the '\n' inherits
+        // style 3 from "Bold").
+        sync_cursor_style(&mut buf, 11);
+
+        assert_eq!(current_style(&buf), 3);
     }
 
     // -----------------------------------------------------------------------

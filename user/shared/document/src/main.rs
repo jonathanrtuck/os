@@ -281,18 +281,7 @@ impl DocumentServer {
         let (new_content_len, new_cursor_pos) = {
             let buf = self.pt_buf_mut();
 
-            // Inherit style from surrounding text (left-affinity):
-            // position > 0 → style of preceding character;
-            // position 0   → style of first character (if any).
-            let inherit = if offset > 0 {
-                piecetable::style_at(buf, (offset - 1) as u32)
-            } else {
-                piecetable::style_at(buf, 0)
-            };
-
-            if let Some(sid) = inherit {
-                piecetable::set_current_style(buf, sid);
-            }
+            piecetable::sync_cursor_style(buf, offset as u32);
 
             if !piecetable::insert_bytes(buf, offset as u32, data) {
                 return false;
@@ -340,6 +329,7 @@ impl DocumentServer {
             let cursor = offset.min(new_text_len);
 
             piecetable::set_cursor_pos(buf, cursor as u32);
+            piecetable::sync_cursor_style(buf, cursor as u32);
 
             (piecetable::total_size(buf), cursor)
         };
@@ -505,6 +495,12 @@ impl DocumentServer {
         }
 
         self.sel_anchor = self.cursor_pos;
+
+        if self.format == document_service::FORMAT_RICH && self.content_len > 0 {
+            let pos = self.cursor_pos as u32;
+
+            piecetable::sync_cursor_style(self.pt_buf_mut(), pos);
+        }
 
         self.write_header();
     }
@@ -776,7 +772,10 @@ impl Dispatch for DocumentServer {
                     self.sel_anchor = pos;
 
                     if self.format == document_service::FORMAT_RICH {
-                        piecetable::set_cursor_pos(self.pt_buf_mut(), pos as u32);
+                        let buf = self.pt_buf_mut();
+
+                        piecetable::set_cursor_pos(buf, pos as u32);
+                        piecetable::sync_cursor_style(buf, pos as u32);
                     }
 
                     self.write_header();
@@ -804,8 +803,11 @@ impl Dispatch for DocumentServer {
                     self.cursor_pos = cursor;
 
                     if self.format == document_service::FORMAT_RICH {
-                        piecetable::set_cursor_pos(self.pt_buf_mut(), cursor as u32);
-                        piecetable::set_selection(self.pt_buf_mut(), anchor as u32, cursor as u32);
+                        let buf = self.pt_buf_mut();
+
+                        piecetable::set_cursor_pos(buf, cursor as u32);
+                        piecetable::set_selection(buf, anchor as u32, cursor as u32);
+                        piecetable::sync_cursor_style(buf, cursor as u32);
                     }
 
                     self.write_header();
@@ -1488,6 +1490,8 @@ extern "C" fn _start() -> ! {
     for &(start, end, style_id) in &ranges[..ri] {
         piecetable::apply_style(content_buf, start as u32, end as u32, style_id);
     }
+
+    piecetable::sync_cursor_style(content_buf, 0);
 
     let content_len = piecetable::total_size(content_buf);
 
