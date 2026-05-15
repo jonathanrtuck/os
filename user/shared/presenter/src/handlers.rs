@@ -2239,32 +2239,43 @@ pub fn write_view_node(
         Some(id) => id,
         None => return,
     };
-    let n = scene.node_mut(scene_id);
+    {
+        let n = scene.node_mut(scene_id);
 
-    n.x = x;
-    n.y = y;
-    n.width = width;
-    n.height = height;
-    n.background = node.background;
-    n.opacity = node.opacity;
-    n.corner_radius = (node.corner_radius / scene::MPT_PER_PT as u32).min(255) as u8;
-    n.shadow_color = node.shadow_color;
-    n.shadow_blur_radius = (node.shadow_blur_radius / scene::MPT_PER_PT as u32).min(255) as u8;
-    n.shadow_spread = (node.shadow_spread / scene::MPT_PER_PT).clamp(-128, 127) as i8;
-    n.shadow_offset_x = (node.shadow_offset_x / scene::MPT_PER_PT).clamp(-32768, 32767) as i16;
-    n.shadow_offset_y = (node.shadow_offset_y / scene::MPT_PER_PT).clamp(-32768, 32767) as i16;
-    n.role = node.role;
-    n.level = node.level;
-    n.cursor_shape = node.cursor_shape;
-    n.child_offset_x = node.child_offset_x;
-    n.child_offset_y = node.child_offset_y;
-    n.animation = node.animation;
+        n.x = x;
+        n.y = y;
+        n.width = width;
+        n.height = height;
+        n.background = node.background;
+        n.opacity = node.opacity;
+        n.corner_radius = (node.corner_radius / scene::MPT_PER_PT as u32).min(255) as u8;
+        n.shadow_color = node.shadow_color;
+        n.shadow_blur_radius = (node.shadow_blur_radius / scene::MPT_PER_PT as u32).min(255) as u8;
+        n.shadow_spread = (node.shadow_spread / scene::MPT_PER_PT).clamp(-128, 127) as i8;
+        n.shadow_offset_x = (node.shadow_offset_x / scene::MPT_PER_PT).clamp(-32768, 32767) as i16;
+        n.shadow_offset_y = (node.shadow_offset_y / scene::MPT_PER_PT).clamp(-32768, 32767) as i16;
+        n.role = node.role;
+        n.level = node.level;
+        n.state = node.state;
+        n.cursor_shape = node.cursor_shape;
+        n.backdrop_blur_radius =
+            (node.backdrop_blur_radius / scene::MPT_PER_PT as u32).min(255) as u8;
+        n.child_offset_x = node.child_offset_x;
+        n.child_offset_y = node.child_offset_y;
+        n.animation = node.animation;
 
-    if node.clips_children {
-        n.flags = scene::NodeFlags::VISIBLE.union(scene::NodeFlags::CLIPS_CHILDREN);
+        if node.clips_children {
+            n.flags = scene::NodeFlags::VISIBLE.union(scene::NodeFlags::CLIPS_CHILDREN);
+        }
+        if !node.transform.is_identity() {
+            n.transform = node.transform;
+        }
     }
-    if !node.transform.is_identity() {
-        n.transform = node.transform;
+
+    if let Some(ref name_str) = node.name {
+        let name_ref = scene.push_data(name_str.as_bytes());
+
+        scene.node_mut(scene_id).name = name_ref;
     }
 
     match &node.content {
@@ -2273,7 +2284,7 @@ pub fn write_view_node(
             src_width,
             src_height,
         } => {
-            n.content = Content::Image {
+            scene.node_mut(scene_id).content = Content::Image {
                 content_id: *content_id,
                 src_width: *src_width,
                 src_height: *src_height,
@@ -2322,7 +2333,7 @@ pub fn write_view_node(
             kind,
             angle_fp,
         } => {
-            n.content = Content::Gradient {
+            scene.node_mut(scene_id).content = Content::Gradient {
                 color_start: *color_start,
                 color_end: *color_end,
                 kind: *kind,
