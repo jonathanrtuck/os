@@ -171,6 +171,8 @@ pub enum ViewContent {
         angle_fp: u16,
         commands: Vec<u8>,
     },
+    /// Portal into a child viewer's subtree (compound document composition).
+    Portal { child_idx: u16 },
 }
 
 impl Default for ViewContent {
@@ -413,16 +415,19 @@ pub fn children(nodes: &[ViewNode], parent: NodeId) -> ChildIter<'_> {
     }
 }
 
-// ── Content handler trait ────────────────────────────────────────────
+// ── Viewer trait ─────────────────────────────────────────────────────
 
 pub struct ViewSubtree {
     pub tree: ViewTree,
     pub root: NodeId,
+    pub layout: Vec<LayoutBox>,
 }
 
 pub struct Constraints {
     pub available_width: Umpt,
     pub available_height: Umpt,
+    #[allow(dead_code)]
+    pub now_ns: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -441,13 +446,14 @@ pub struct InputEvent {
     pub button: u8,
 }
 
-pub trait ContentHandler {
-    fn load(&mut self, content: &[u8], constraints: &Constraints) -> ViewSubtree;
-    fn resize(&mut self, constraints: &Constraints) -> ViewSubtree;
-    fn update(&mut self, content: &[u8]) -> ViewSubtree;
+pub trait Viewer {
+    fn subtree(&self) -> &ViewSubtree;
     fn event(&mut self, event: &InputEvent) -> EventResponse;
     fn teardown(&mut self);
 }
+
+#[deprecated(note = "renamed to Viewer")]
+pub use Viewer as ContentHandler;
 
 // ── Dimension resolution (private) ───────────────────────────────────
 

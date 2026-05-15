@@ -722,6 +722,69 @@ ESDS) and wrong `mFramesPerPacket`.
 - **File VMO lifetime** — VMO handle kept alive while mapping is in use
   (previously closed prematurely, causing use-after-unmap).
 
+### Phase 18 — Content Service Architecture (COMPLETE)
+
+Decomposition of the monolithic presenter into the content service architecture
+described in `content-service-architecture.md`. The view tree is the SSOT.
+Content viewers produce it. Rendering pipelines consume it. The presenter
+orchestrates.
+
+1. **Viewer trait** — DONE. `Viewer` trait unifies output (`subtree()` →
+   `&ViewSubtree`) but not input. Each viewer type has its own `rebuild()`
+   method with viewer-specific parameters. Enum dispatch (`ViewerKind`) keeps
+   this zero-cost on bare metal. `ContentHandler` renamed to `Viewer`.
+
+2. **View tree as SSOT** — DONE. `ViewSubtree` includes pre-computed layout
+   positions alongside the view tree. Viewers compute layout during `rebuild`
+   and store the results. `write_subtree` reads positions from
+   `subtree.layout[node_id]` — it never calls the layout engine itself.
+
+3. **Portal-based composition** — DONE. `ViewContent::Portal { child_idx }`
+   enables zero-copy composition. The workspace viewer's ViewTree contains
+   portal nodes referencing child viewer subtrees by index. `write_subtree`
+   follows portals during the scene-writing walk. No copying, no sync.
+
+4. **ImageViewer** — DONE. Cached ViewSubtree with intrinsic dimensions +
+   shadow. Rebuilt on resize only.
+
+5. **VideoViewer** — DONE. Owns decoder endpoint, frame VMO, content_id, pixel
+   dimensions, playing state. Produces video frame + play/pause button subtree.
+   Resource cleanup via `Viewer::teardown()`.
+
+6. **TextViewer** — DONE. Largest extraction (~790 lines rendering rewrite).
+   Owns scroll_y, blink_start, cmap tables, char_width, glyph scratch buffer.
+   Produces page (white A4 rect with shadow) → viewport (clip, scroll) →
+   selection + glyph line nodes + cursor. Supports both plain and rich text
+   rendering paths with font fallback.
+
+7. **WorkspaceViewer** — DONE. Desktop compound document handler. Owns child
+   viewers, slide animation state. Produces chrome (icon, title, clock) +
+   content area + strip with portal nodes. `build_scene` went from ~770 lines to
+   ~80 lines of orchestration.
+
+8. **Space elimination** — DONE. `Space` enum deleted. Space-variant fields
+   moved into viewer structs. `spaces: Vec<Space>` →
+   `workspace.children: Vec<ChildViewer>`. Resource cleanup moved to
+   `Viewer::teardown()`.
+
+9. **ContentCommand** — DONE. Viewers return commands instead of performing IPC
+   directly. Commands: `MoveCursor`, `Select`, `ForwardKey`, `TogglePlayback`,
+   `ScrollTo`, `SetCursorShape`, `Unhandled`.
+
+10. **Viewer registry** — DONE. `ViewerRegistry` maps `MimetypePattern` (Exact,
+    Subtype, Universal) to `ViewerKindTag`. Linear scan with specificity
+    sorting. `lookup(mimetype)` returns highest-priority viewer.
+    `alternatives(mimetype)` returns all matching viewers for user switching.
+
+**Deferred:**
+
+- Phase 6 (structural reorganization) — directory moves from `servers/` +
+  `libraries/` to `system/`, `drivers/`, `codecs/`, `viewers/`, `shared/`.
+  Mechanical path updates, own session.
+- Full event routing through workspace viewer (Phase 4b-c) — text input/pointer
+  code still on Presenter via accessors. Infrastructure (ContentCommand) is in
+  place.
+
 ### Current Totals
 
 **Production services:** 19 (name, console, input, blk, render, 9p, rng, snd,

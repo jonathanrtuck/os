@@ -36,7 +36,7 @@ impl Presenter {
     pub(crate) fn xy_to_byte(&self, px: u32, py: u32, content_len: usize) -> usize {
         let (text_x, text_y) = self.text_origin();
         let rel_x = px.saturating_sub(text_x) as i32;
-        let rel_y = py.saturating_sub(text_y) as i32 + self.scroll_y;
+        let rel_y = py.saturating_sub(text_y) as i32 + self.scroll_y();
 
         if rel_y < 0 {
             return 0;
@@ -62,7 +62,7 @@ impl Presenter {
 
         let line_h = presenter_service::LINE_HEIGHT as i32;
         let target_line = (rel_y / line_h) as usize;
-        let cw_mpt = self.char_width_mpt;
+        let cw_mpt = self.char_width_mpt();
         let rel_x_mpt = rel_x * scene::MPT_PER_PT;
         let target_col = if cw_mpt > 0 {
             ((rel_x_mpt + cw_mpt / 2) / cw_mpt) as usize
@@ -109,7 +109,7 @@ impl Presenter {
             p += super::copy_into(&mut dbg[p..], b" y=");
             p += console::format_u32(click_y, &mut dbg[p..]);
             p += super::copy_into(&mut dbg[p..], b" sp=");
-            p += console::format_u32(self.active_space as u32, &mut dbg[p..]);
+            p += console::format_u32(self.workspace.active as u32, &mut dbg[p..]);
 
             dbg[p] = b'\n';
 
@@ -141,10 +141,7 @@ impl Presenter {
                 );
 
                 if node.role == scene::ROLE_BUTTON {
-                    if matches!(
-                        self.spaces.get(self.active_space),
-                        Some(super::Space::Video { .. })
-                    ) {
+                    if self.active_is_video() {
                         self.toggle_video_playback();
                     } else {
                         self.play_audio_clip();
@@ -157,7 +154,7 @@ impl Presenter {
             }
         }
 
-        if !matches!(self.spaces.get(self.active_space), Some(super::Space::Text)) {
+        if !self.active_is_text() {
             return;
         }
 
@@ -165,7 +162,6 @@ impl Presenter {
             return;
         }
 
-        // SAFETY: doc_va is a valid RO mapping of the document buffer.
         let (content_len, _cursor_pos, _sel_anchor, _) =
             unsafe { document_service::read_doc_header(self.doc_va) };
         let byte_pos = self.xy_to_byte(click_x, click_y, content_len);
@@ -188,8 +184,6 @@ impl Presenter {
         self.last_click_y = click_y;
         self.click_count = click_count;
 
-        // For rich text, extract the logical text from the piecetable.
-        // For plain text, read the raw document content directly.
         let header = parse_layout_header(&self.results_buf);
         let is_rich = header.format == 1;
         let mut rich_text_buf = alloc::vec::Vec::new();
@@ -252,14 +246,14 @@ impl Presenter {
 
         self.dragging = true;
 
-        // SAFETY: re-read header after doc_select may have changed it.
         let (_cl, cursor_pos, sel_anchor, _) =
             unsafe { document_service::read_doc_header(self.doc_va) };
 
         self.drag_origin_start = sel_anchor;
         self.drag_origin_end = cursor_pos;
         self.sticky_col = None;
-        self.blink_start = abi::system::clock_read().unwrap_or(0);
+
+        self.set_blink_start(abi::system::clock_read().unwrap_or(0));
         self.build_scene();
     }
 
@@ -277,7 +271,6 @@ impl Presenter {
             return;
         }
 
-        // SAFETY: doc_va is a valid RO mapping.
         let (content_len, _, _, _) = unsafe { document_service::read_doc_header(self.doc_va) };
         let byte_pos = self.xy_to_byte(drag_x, drag_y, content_len);
         let header = parse_layout_header(&self.results_buf);
@@ -352,7 +345,7 @@ impl Presenter {
             }
         }
 
-        self.blink_start = abi::system::clock_read().unwrap_or(0);
+        self.set_blink_start(abi::system::clock_read().unwrap_or(0));
         self.build_scene();
     }
 }

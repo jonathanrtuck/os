@@ -186,7 +186,7 @@ impl Presenter {
             let (text_x, text_y) = self.text_origin();
             let line_y = target_info.y + 1;
             let abs_x = text_x + target_x as u32;
-            let abs_y = (text_y as i32 + line_y - self.scroll_y).max(0) as u32;
+            let abs_y = (text_y as i32 + line_y - self.scroll_y()).max(0) as u32;
 
             self.xy_to_byte(abs_x, abs_y, content_len)
         } else {
@@ -239,51 +239,49 @@ impl Presenter {
 
         let ctrl = dispatch.modifiers & text_editor::MOD_CONTROL != 0;
 
-        // Ctrl+W: close the active space.
         if ctrl && dispatch.character == b'w' {
-            if self.spaces.len() <= 1 {
+            if self.workspace.children.len() <= 1 {
                 return;
             }
 
-            let _ = self.spaces.remove(self.active_space);
+            let active = self.workspace.active;
+            let _ = self.workspace.children.remove(active);
 
-            if self.active_space >= self.spaces.len() {
-                self.active_space = self.spaces.len() - 1;
+            if self.workspace.active >= self.workspace.children.len() {
+                self.workspace.active = self.workspace.children.len() - 1;
             }
 
-            let target = scene::pt(self.active_space as i32 * self.display_width as i32);
+            let target = scene::pt(self.workspace.active as i32 * self.display_width as i32);
 
-            self.slide_spring.reset_to(target);
-            self.slide_animating = false;
+            self.workspace.slide_spring.reset_to(target);
+            self.workspace.slide_animating = false;
             self.build_scene();
 
             return;
         }
 
-        // Ctrl+Tab: cycle to next space.
         if dispatch.key_code == text_editor::HID_KEY_TAB && ctrl {
-            if self.spaces.len() <= 1 {
+            if self.workspace.children.len() <= 1 {
                 return;
             }
 
-            self.active_space = (self.active_space + 1) % self.spaces.len();
+            self.workspace.active = (self.workspace.active + 1) % self.workspace.children.len();
 
-            let target = scene::pt(self.active_space as i32 * self.display_width as i32);
+            let target = scene::pt(self.workspace.active as i32 * self.display_width as i32);
 
-            self.slide_spring.set_target(target);
-            self.slide_animating = true;
-            self.last_anim_tick = abi::system::clock_read().unwrap_or(0);
-            self.blink_start = self.last_anim_tick;
+            self.workspace.slide_spring.set_target(target);
+            self.workspace.slide_animating = true;
+            self.workspace.last_anim_tick = abi::system::clock_read().unwrap_or(0);
+            self.set_blink_start(self.workspace.last_anim_tick);
             self.build_scene();
 
             return;
         }
 
-        if !matches!(self.spaces.get(self.active_space), Some(super::Space::Text)) {
+        if !self.active_is_text() {
             return;
         }
 
-        // SAFETY: doc_va is a valid RO mapping of the document buffer.
         let (raw_content_len, cursor_pos, sel_anchor, _) =
             unsafe { document_service::read_doc_header(self.doc_va) };
         let header = parse_layout_header(&self.results_buf);
@@ -307,18 +305,17 @@ impl Presenter {
         let shift = dispatch.modifiers & text_editor::MOD_SHIFT != 0;
         let cmd = dispatch.modifiers & text_editor::MOD_SUPER != 0;
 
-        // Cmd+A: select all.
         if cmd && dispatch.character == b'a' {
             self.doc_select(0, content_len);
+
             self.sticky_col = None;
-            self.blink_start = abi::system::clock_read().unwrap_or(0);
+
+            self.set_blink_start(abi::system::clock_read().unwrap_or(0));
             self.build_scene();
 
             return;
         }
 
-        // Compute sticky_col BEFORE nav_target so byte_at_sticky_x has
-        // the correct proportional x on the very first vertical press.
         if Self::is_vertical_nav(dispatch.key_code) && self.sticky_col.is_none() {
             if header.format == 1 {
                 let ci = compute_rich_cursor(&self.results_buf, &header, cursor_pos, self.doc_va);
@@ -375,7 +372,7 @@ impl Presenter {
             self.sticky_col = None;
         }
 
-        self.blink_start = abi::system::clock_read().unwrap_or(0);
+        self.set_blink_start(abi::system::clock_read().unwrap_or(0));
         self.build_scene();
     }
 }

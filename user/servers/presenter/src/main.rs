@@ -45,8 +45,6 @@ const EXIT_RENDER_NOT_FOUND: u32 = 0xE20D;
 const EXIT_RENDER_SETUP: u32 = 0xE20E;
 const EXIT_EDITOR_NOT_FOUND: u32 = 0xE20F;
 
-pub(crate) const MAX_GLYPHS_PER_LINE: usize = 256;
-
 pub(crate) fn read_rtc_seconds(rtc_va: usize) -> u64 {
     if rtc_va == 0 {
         return 0;
@@ -148,73 +146,6 @@ pub(crate) fn copy_into(dst: &mut [u8], src: &[u8]) -> usize {
     len
 }
 
-pub(crate) fn scale_icon_paths(
-    scene: &mut SceneWriter<'_>,
-    icon: &icons::Icon,
-    size_pt: u32,
-) -> (scene::DataRef, u32) {
-    let viewbox_bits = icon.viewbox.to_bits();
-    let mut buf = alloc::vec::Vec::new();
-
-    for icon_path in icon.paths {
-        let cmds = icon_path.commands;
-        let mut pos = 0;
-
-        while pos + 4 <= cmds.len() {
-            let tag = u32::from_le_bytes([cmds[pos], cmds[pos + 1], cmds[pos + 2], cmds[pos + 3]]);
-
-            match tag {
-                scene::PATH_MOVE_TO | scene::PATH_LINE_TO => {
-                    if pos + scene::PATH_MOVE_TO_SIZE > cmds.len() {
-                        break;
-                    }
-
-                    buf.extend_from_slice(&tag.to_le_bytes());
-                    buf.extend_from_slice(
-                        &scale_f32_bits(read_u32_le(cmds, pos + 4), size_pt, viewbox_bits)
-                            .to_le_bytes(),
-                    );
-                    buf.extend_from_slice(
-                        &scale_f32_bits(read_u32_le(cmds, pos + 8), size_pt, viewbox_bits)
-                            .to_le_bytes(),
-                    );
-
-                    pos += scene::PATH_MOVE_TO_SIZE;
-                }
-                scene::PATH_CUBIC_TO => {
-                    if pos + scene::PATH_CUBIC_TO_SIZE > cmds.len() {
-                        break;
-                    }
-
-                    buf.extend_from_slice(&scene::PATH_CUBIC_TO.to_le_bytes());
-
-                    for ci in 0..6 {
-                        let off = pos + 4 + ci * 4;
-
-                        buf.extend_from_slice(
-                            &scale_f32_bits(read_u32_le(cmds, off), size_pt, viewbox_bits)
-                                .to_le_bytes(),
-                        );
-                    }
-
-                    pos += scene::PATH_CUBIC_TO_SIZE;
-                }
-                scene::PATH_CLOSE => {
-                    buf.extend_from_slice(&scene::PATH_CLOSE.to_le_bytes());
-
-                    pos += scene::PATH_CLOSE_SIZE;
-                }
-                _ => break,
-            }
-        }
-    }
-
-    let hash = scene::fnv1a(&buf);
-    let data_ref = scene.push_path_commands(&buf);
-
-    (data_ref, hash)
-}
-
 // ── Layout results parsing (from seqlock-read buffer) ────────────
 
 pub(crate) fn parse_layout_header(buf: &[u8]) -> layout_service::LayoutHeader {
@@ -268,75 +199,6 @@ fn f32_bytes_to_mpt(bytes: [u8; 4]) -> scene::Mpt {
     sign * result
 }
 
-pub(crate) fn icon_stroke_width_fixed(stroke_bits: u32, size_pt: u32, viewbox_bits: u32) -> u16 {
-    let scaled = scale_f32_bits(stroke_bits, size_pt * 256, viewbox_bits);
-    let exp = ((scaled >> 23) & 0xFF) as i32;
-    let frac = (scaled & 0x7F_FFFF) as u64 | 0x80_0000;
-    let shift = exp - 150;
-
-    if exp == 0 {
-        return 0;
-    }
-
-    let val = if shift >= 0 {
-        frac << shift.min(16)
-    } else {
-        frac >> (-shift).min(24)
-    };
-
-    val.min(u16::MAX as u64) as u16
-}
-
-fn read_u32_le(buf: &[u8], off: usize) -> u32 {
-    u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
-}
-
-fn scale_f32_bits(bits: u32, num: u32, den_bits: u32) -> u32 {
-    if bits & 0x7FFF_FFFF == 0 {
-        return bits;
-    }
-
-    let sign = bits & 0x8000_0000;
-    let exp = (bits >> 23) & 0xFF;
-    let frac = (bits & 0x7F_FFFF) as u64 | 0x80_0000;
-
-    if exp == 0 || exp == 255 {
-        return bits;
-    }
-
-    let den_exp = (den_bits >> 23) & 0xFF;
-    let den_frac = (den_bits & 0x7F_FFFF) as u64 | 0x80_0000;
-
-    if den_exp == 0 {
-        return bits;
-    }
-
-    let product = frac * num as u64;
-    let scaled = (product << 23) / den_frac;
-
-    if scaled == 0 {
-        return 0;
-    }
-
-    let leading = 63 - scaled.leading_zeros();
-    let new_exp = exp as i32 - den_exp as i32 + leading as i32 + 104;
-
-    if new_exp <= 0 {
-        return 0;
-    }
-    if new_exp >= 255 {
-        return sign | 0x7F80_0000;
-    }
-
-    let new_frac = if leading > 23 {
-        (scaled >> (leading - 23)) as u32 & 0x7F_FFFF
-    } else {
-        ((scaled << (23 - leading)) as u32) & 0x7F_FFFF
-    };
-
-    sign | ((new_exp as u32) << 23) | new_frac
-}
-
 pub(crate) fn parse_visible_run_at(buf: &[u8], index: usize) -> layout_service::VisibleRun {
     let offset = layout_service::VISIBLE_RUNS_OFFSET + index * layout_service::VisibleRun::SIZE;
 
@@ -383,72 +245,7 @@ pub(crate) fn pack_run_style_id(family: u8, weight: u16, flags: u8) -> u32 {
     pack_style_id(style_id_for_family(family), weight, flags)
 }
 
-// ── Space — a subdocument of the desktop compound document ───────
-
-pub(crate) enum Space {
-    Text,
-    Image {
-        content_id: u32,
-        width: u16,
-        height: u16,
-    },
-    Video {
-        decoder_ep: Handle,
-        frame_vmo: Handle,
-        frame_va: usize,
-        content_id: u32,
-        width: u16,
-        height: u16,
-        total_frames: u32,
-        playing: bool,
-        #[allow(dead_code)]
-        host_texture_handle: u32,
-    },
-    Showcase,
-}
-
-impl Space {
-    pub(crate) fn mimetype(&self) -> Option<&'static str> {
-        match self {
-            Space::Text => Some("text/rich"),
-            Space::Image { .. } => Some("image/jpeg"),
-            Space::Video { .. } => Some("video/mp4"),
-            Space::Showcase => None,
-        }
-    }
-
-    pub(crate) fn needs_continuous_render(&self) -> bool {
-        matches!(self, Space::Showcase)
-    }
-}
-
-impl Drop for Space {
-    fn drop(&mut self) {
-        if let Space::Video {
-            decoder_ep,
-            frame_vmo,
-            frame_va,
-            playing,
-            ..
-        } = self
-        {
-            if *playing {
-                let _ = ipc::client::call_simple(*decoder_ep, video_decoder::PAUSE, &[]);
-
-                *playing = false;
-            }
-            if *frame_va != 0 {
-                let _ = abi::vmo::unmap(*frame_va);
-            }
-            if decoder_ep.0 != 0 {
-                let _ = abi::handle::close(*decoder_ep);
-            }
-            if frame_vmo.0 != 0 {
-                let _ = abi::handle::close(*frame_vmo);
-            }
-        }
-    }
-}
+// Space enum eliminated — child viewers owned by WorkspaceViewer.
 
 // ── Presenter server ──────────────────────────────────────────────
 
@@ -470,24 +267,15 @@ pub(crate) struct Presenter {
     pub(crate) display_width: u32,
     pub(crate) display_height: u32,
 
-    pub(crate) glyphs: [ShapedGlyph; MAX_GLYPHS_PER_LINE],
-    pub(crate) cmap_mono: [u16; 128],
-    pub(crate) cmap_sans: [u16; 128],
-    pub(crate) char_width_mpt: scene::Mpt,
-
-    pub(crate) blink_start: u64,
+    pub(crate) workspace: handlers::WorkspaceViewer,
 
     pub(crate) last_line_count: u32,
     pub(crate) last_cursor_line: u32,
     pub(crate) last_cursor_col: u32,
     pub(crate) last_content_len: u32,
-
-    pub(crate) scroll_y: i32,
-    pub(crate) sticky_col: Option<u32>,
-
-    pub(crate) clock_node_id: scene::NodeId,
-    pub(crate) clock_glyph_ref: scene::DataRef,
     pub(crate) last_clock_secs: u64,
+
+    pub(crate) sticky_col: Option<u32>,
 
     pub(crate) render_ep: Handle,
     pub(crate) editor_ep: Handle,
@@ -506,12 +294,6 @@ pub(crate) struct Presenter {
     pub(crate) drag_origin_start: usize,
     pub(crate) drag_origin_end: usize,
 
-    pub(crate) spaces: alloc::vec::Vec<Space>,
-    pub(crate) active_space: usize,
-    pub(crate) slide_spring: animation::SpringI32,
-    pub(crate) slide_animating: bool,
-    pub(crate) last_anim_tick: u64,
-
     pub(crate) frame_stats: FrameStats,
 
     pub(crate) audio_ep: Handle,
@@ -520,6 +302,70 @@ pub(crate) struct Presenter {
 
     pub(crate) console_ep: Handle,
     pub(crate) layout_dirty: bool,
+}
+
+impl Presenter {
+    #[allow(dead_code)]
+    pub(crate) fn active_space(&self) -> usize {
+        self.workspace.active
+    }
+
+    pub(crate) fn text_viewer(&self) -> Option<&handlers::TextViewer> {
+        for child in &self.workspace.children {
+            if let handlers::ViewerKind::Text(v) = &child.viewer {
+                return Some(v);
+            }
+        }
+        None
+    }
+
+    pub(crate) fn text_viewer_mut(&mut self) -> Option<&mut handlers::TextViewer> {
+        for child in &mut self.workspace.children {
+            if let handlers::ViewerKind::Text(v) = &mut child.viewer {
+                return Some(v);
+            }
+        }
+        None
+    }
+
+    pub(crate) fn active_is_text(&self) -> bool {
+        self.workspace
+            .children
+            .get(self.workspace.active)
+            .is_some_and(|c| matches!(c.viewer, handlers::ViewerKind::Text(_)))
+    }
+
+    pub(crate) fn active_is_video(&self) -> bool {
+        self.workspace
+            .children
+            .get(self.workspace.active)
+            .is_some_and(|c| matches!(c.viewer, handlers::ViewerKind::Video(_)))
+    }
+
+    pub(crate) fn scroll_y(&self) -> i32 {
+        self.text_viewer().map_or(0, |v| v.scroll_y)
+    }
+
+    pub(crate) fn set_scroll_y(&mut self, y: i32) {
+        if let Some(v) = self.text_viewer_mut() {
+            v.scroll_y = y;
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn blink_start(&self) -> u64 {
+        self.text_viewer().map_or(0, |v| v.blink_start)
+    }
+
+    pub(crate) fn set_blink_start(&mut self, t: u64) {
+        if let Some(v) = self.text_viewer_mut() {
+            v.blink_start = t;
+        }
+    }
+
+    pub(crate) fn char_width_mpt(&self) -> scene::Mpt {
+        self.text_viewer().map_or(11059, |v| v.char_width_mpt)
+    }
 }
 
 pub(crate) struct FrameStats {
@@ -622,21 +468,23 @@ impl Presenter {
         let line_h = presenter_service::LINE_HEIGHT as i32;
         let cursor_top = cursor_line as i32 * line_h;
         let vp_h = self.viewport_height();
+        let sy = self.scroll_y();
 
-        if cursor_top < self.scroll_y {
-            self.scroll_y = cursor_top;
-        } else if cursor_top + line_h > self.scroll_y + vp_h {
-            self.scroll_y = cursor_top + line_h - vp_h;
+        if cursor_top < sy {
+            self.set_scroll_y(cursor_top);
+        } else if cursor_top + line_h > sy + vp_h {
+            self.set_scroll_y(cursor_top + line_h - vp_h);
         }
     }
 
     fn ensure_cursor_visible_at(&mut self, cursor_y: i32, cursor_h: i32) {
         let vp_h = self.viewport_height();
+        let sy = self.scroll_y();
 
-        if cursor_y < self.scroll_y {
-            self.scroll_y = cursor_y;
-        } else if cursor_y + cursor_h > self.scroll_y + vp_h {
-            self.scroll_y = cursor_y + cursor_h - vp_h;
+        if cursor_y < sy {
+            self.set_scroll_y(cursor_y);
+        } else if cursor_y + cursor_h > sy + vp_h {
+            self.set_scroll_y(cursor_y + cursor_h - vp_h);
         }
     }
 
@@ -645,23 +493,26 @@ impl Presenter {
         let total_h = header.total_height;
         let vp_h = self.viewport_height();
         let max_scroll = if total_h > vp_h { total_h - vp_h } else { 0 };
+        let mut sy = self.scroll_y();
 
-        if self.scroll_y < 0 {
-            self.scroll_y = 0;
+        if sy < 0 {
+            sy = 0;
         }
 
-        if self.scroll_y > max_scroll {
-            self.scroll_y = max_scroll;
+        if sy > max_scroll {
+            sy = max_scroll;
         }
+
+        self.set_scroll_y(sy);
     }
 
     fn write_viewport(&self) {
         let (tw, th) = self.text_area_dims();
         let state = layout_service::ViewportState {
-            scroll_y: self.scroll_y,
+            scroll_y: self.scroll_y(),
             viewport_width: tw,
             viewport_height: th,
-            char_width_fp: (self.char_width_mpt as u32) * 64,
+            char_width_fp: (self.char_width_mpt() as u32) * 64,
             line_height: presenter_service::LINE_HEIGHT,
         };
         let mut buf = [0u8; layout_service::ViewportState::SIZE];
@@ -736,7 +587,7 @@ impl Dispatch for Presenter {
                 if msg.payload.len() >= presenter_service::ScrollEvent::SIZE {
                     let event = presenter_service::ScrollEvent::read_from(msg.payload);
 
-                    self.scroll_y += event.delta_y;
+                    self.set_scroll_y(self.scroll_y() + event.delta_y);
                     self.clamp_scroll();
                     self.write_viewport();
                     self.layout_dirty = true;
@@ -778,8 +629,10 @@ impl Dispatch for Presenter {
                 let _ = msg.reply_empty();
             }
             presenter_service::VIDEO_PLAYBACK_ENDED => {
-                if let Some(Space::Video { playing, .. }) = self.spaces.get_mut(self.active_space) {
-                    *playing = false;
+                if let Some(child) = self.workspace.children.get_mut(self.workspace.active)
+                    && let handlers::ViewerKind::Video(vid) = &mut child.viewer
+                {
+                    vid.playing = false;
                 }
 
                 self.build_scene();
@@ -839,7 +692,7 @@ fn alloc_content_id() -> u32 {
     NEXT_CONTENT_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
 }
 
-fn load_image_space(render_ep: Handle, console_ep: Handle) -> Option<Space> {
+fn load_image_child(render_ep: Handle, console_ep: Handle) -> Option<handlers::ChildViewer> {
     let (file_vmo, bytes_read) = store_load_type(b"image/jpeg")?;
     let decoder_ep = match name::lookup(HANDLE_NS_EP, b"jpeg-decoder") {
         Ok(h) => h,
@@ -894,10 +747,9 @@ fn load_image_space(render_ep: Handle, console_ep: Handle) -> Option<Space> {
 
     console::write(console_ep, b"presenter: image loaded from store\n");
 
-    Some(Space::Image {
-        content_id,
-        width,
-        height,
+    Some(handlers::ChildViewer {
+        viewer: handlers::ViewerKind::Image(handlers::ImageViewer::new(content_id, width, height)),
+        mimetype: b"image/jpeg",
     })
 }
 
@@ -935,12 +787,16 @@ fn upload_image_to_compositor(
 
 // ── Video loading from document store ───────────────────────────
 
-fn load_video_space(render_ep: Handle, console_ep: Handle) -> Option<Space> {
+fn load_video_child(render_ep: Handle, console_ep: Handle) -> Option<handlers::ChildViewer> {
     try_open_video(render_ep, console_ep, b"video/mp4")
         .or_else(|| try_open_video(render_ep, console_ep, b"video/avi"))
 }
 
-fn try_open_video(render_ep: Handle, console_ep: Handle, media_type: &[u8]) -> Option<Space> {
+fn try_open_video(
+    render_ep: Handle,
+    console_ep: Handle,
+    media_type: &'static [u8],
+) -> Option<handlers::ChildViewer> {
     let (file_vmo, bytes_read) = store_load_type(media_type)?;
     let decoder_ep = match name::lookup(HANDLE_NS_EP, b"video-decoder") {
         Ok(h) => h,
@@ -1072,16 +928,17 @@ fn try_open_video(render_ep: Handle, console_ep: Handle, media_type: &[u8]) -> O
 
     console::write(console_ep, b"presenter: video loaded from store\n");
 
-    Some(Space::Video {
-        decoder_ep,
-        frame_vmo,
-        frame_va,
-        content_id,
-        width,
-        height,
-        total_frames: or.total_frames,
-        playing: false,
-        host_texture_handle,
+    let mut vid = handlers::VideoViewer::new(content_id, width, height);
+
+    vid.decoder_ep = decoder_ep;
+    vid.frame_vmo = frame_vmo;
+    vid.frame_va = frame_va;
+    vid.total_frames = or.total_frames;
+    vid.playing = false;
+
+    Some(handlers::ChildViewer {
+        viewer: handlers::ViewerKind::Video(vid),
+        mimetype: media_type,
     })
 }
 
@@ -1142,26 +999,26 @@ impl Presenter {
     }
 
     fn toggle_video_playback(&mut self) {
-        match self.spaces.get_mut(self.active_space) {
-            Some(Space::Video {
-                decoder_ep,
-                total_frames,
-                playing,
-                ..
-            }) => {
-                if decoder_ep.0 == 0 || *total_frames == 0 {
+        let active = self.workspace.active;
+
+        if let Some(child) = self.workspace.children.get_mut(active) {
+            if let handlers::ViewerKind::Video(vid) = &mut child.viewer {
+                if vid.decoder_ep.0 == 0 || vid.total_frames == 0 {
                     return;
                 }
 
                 if let Ok((0, payload)) =
-                    ipc::client::call_simple(*decoder_ep, video_decoder::TOGGLE, &[])
+                    ipc::client::call_simple(vid.decoder_ep, video_decoder::TOGGLE, &[])
                 {
                     let reply = video_decoder::ToggleReply::read_from(&payload);
 
-                    *playing = reply.playing != 0;
+                    vid.playing = reply.playing != 0;
                 }
+            } else {
+                return;
             }
-            _ => return,
+        } else {
+            return;
         }
 
         self.build_scene();
@@ -1349,6 +1206,27 @@ extern "C" fn _start() -> ! {
 
     console::write(console_ep, b"presenter: editor connected\n");
 
+    let mut workspace = handlers::WorkspaceViewer::new();
+    let mut text_viewer = handlers::TextViewer::new(
+        build_cmap_table(font(init::FONT_IDX_MONO)),
+        build_cmap_table(font(init::FONT_IDX_SANS)),
+        compute_char_advance_mpt(font(init::FONT_IDX_MONO)),
+    );
+
+    text_viewer.blink_start = abi::system::clock_read().unwrap_or(0);
+
+    workspace.children.push(handlers::ChildViewer {
+        viewer: handlers::ViewerKind::Text(text_viewer),
+        mimetype: b"text/rich",
+    });
+
+    if let Some(image_child) = load_image_child(render_ep, console_ep) {
+        workspace.children.push(image_child);
+    }
+    if let Some(video_child) = load_video_child(render_ep, console_ep) {
+        workspace.children.push(video_child);
+    }
+
     let mut server = Presenter {
         doc_va,
         doc_ep,
@@ -1362,29 +1240,13 @@ extern "C" fn _start() -> ! {
         viewport_va,
         display_width,
         display_height,
-        glyphs: [ShapedGlyph {
-            glyph_id: 0,
-            _pad: 0,
-            x_advance: 0,
-            x_offset: 0,
-            y_offset: 0,
-        }; MAX_GLYPHS_PER_LINE],
-        cmap_mono: build_cmap_table(font(init::FONT_IDX_MONO)),
-        cmap_sans: build_cmap_table(font(init::FONT_IDX_SANS)),
-        char_width_mpt: compute_char_advance_mpt(font(init::FONT_IDX_MONO)),
-        blink_start: abi::system::clock_read().unwrap_or(0),
+        workspace,
         last_line_count: 0,
         last_cursor_line: 0,
         last_cursor_col: 0,
         last_content_len: 0,
-        scroll_y: 0,
-        sticky_col: None,
-        clock_node_id: scene::NULL,
-        clock_glyph_ref: scene::DataRef {
-            offset: 0,
-            length: 0,
-        },
         last_clock_secs: u64::MAX,
+        sticky_col: None,
         render_ep,
         editor_ep,
         rtc_va,
@@ -1398,17 +1260,6 @@ extern "C" fn _start() -> ! {
         dragging: false,
         drag_origin_start: 0,
         drag_origin_end: 0,
-        spaces: alloc::vec::Vec::new(),
-        active_space: 0,
-        slide_spring: {
-            let mut s = animation::SpringI32::new(0, 600, 49, 1);
-
-            s.set_settle_threshold(512);
-
-            s
-        },
-        slide_animating: false,
-        last_anim_tick: 0,
         frame_stats: FrameStats::new(),
         audio_ep: Handle(0),
         audio_vmo: Handle(0),
@@ -1417,18 +1268,7 @@ extern "C" fn _start() -> ! {
         layout_dirty: true,
     };
 
-    server.spaces.push(Space::Text);
-
-    if let Some(image_space) = load_image_space(render_ep, console_ep) {
-        server.spaces.push(image_space);
-    }
-    if let Some(video_space) = load_video_space(render_ep, console_ep) {
-        server.spaces.push(video_space);
-    }
-
     load_audio_clip(&mut server);
-
-    server.spaces.push(Space::Showcase);
     server.write_viewport();
     server.build_scene();
 
@@ -1439,11 +1279,7 @@ extern "C" fn _start() -> ! {
 
     loop {
         let now = abi::system::clock_read().unwrap_or(0);
-        let active_needs_render = server
-            .spaces
-            .get(server.active_space)
-            .is_some_and(|s| s.needs_continuous_render());
-        let needs_anim = server.slide_animating || active_needs_render;
+        let needs_anim = server.workspace.slide_animating;
         let deadline = if needs_anim {
             if next_frame <= now {
                 let behind = now - next_frame;
@@ -1465,20 +1301,22 @@ extern "C" fn _start() -> ! {
         };
 
         if frame_due {
-            if server.slide_animating {
+            if server.workspace.slide_animating {
                 let frame_start = abi::system::clock_read().unwrap_or(0);
                 let dt_ns = frame_start
-                    .saturating_sub(server.last_anim_tick)
+                    .saturating_sub(server.workspace.last_anim_tick)
                     .min(33_000_000);
 
-                server.last_anim_tick = frame_start;
+                server.workspace.last_anim_tick = frame_start;
+                server.workspace.slide_spring.tick_ns(dt_ns);
 
-                server.slide_spring.tick_ns(dt_ns);
+                if server.workspace.slide_spring.settled() {
+                    server.workspace.slide_animating = false;
 
-                if server.slide_spring.settled() {
-                    server.slide_animating = false;
-
-                    server.slide_spring.reset_to(server.slide_spring.target());
+                    server
+                        .workspace
+                        .slide_spring
+                        .reset_to(server.workspace.slide_spring.target());
                 }
 
                 server.build_scene();
@@ -1489,14 +1327,10 @@ extern "C" fn _start() -> ! {
                     .frame_stats
                     .record(frame_end.saturating_sub(frame_start));
 
-                if !server.slide_animating {
+                if !server.workspace.slide_animating {
                     server.frame_stats.report(server.console_ep);
                     server.frame_stats.reset();
                 }
-            }
-
-            if !server.slide_animating && active_needs_render {
-                server.build_scene();
             }
 
             server.update_clock();

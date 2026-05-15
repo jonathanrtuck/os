@@ -346,6 +346,35 @@ replace it. The viewer is a pure function of state:
 `file bytes + mimetype + view state → visual output`. See
 [foundations.md § Viewer-First Design](foundations.md#viewer-first-design).
 
+**Viewer registry** — maps mimetype patterns to viewer implementations.
+Specificity rules (`text/markdown` > `text/*` > `*/*`), user preference breaks
+ties. Enables user-switchable viewers: multiple viewers can register for the
+same mimetype; the registry picks the highest-priority match.
+
+**Viewer trait** — the implementation contract for content viewers. Unifies
+output (`subtree()` → `&ViewSubtree`) but not input — each viewer type has its
+own `rebuild()` method with viewer-specific parameters. Enum dispatch
+(`ViewerKind`) keeps this zero-cost on bare metal.
+
+**View tree** — the universal intermediate representation for all rendering.
+Every content type produces view tree nodes; all rendering pipelines (GPU
+compositor, CLI, screen reader) consume them. The view tree is the fan-out point
+where modality-specific pipelines diverge. See `view-tree` library.
+
+**ViewSubtree** — a self-contained view tree fragment produced by a single
+viewer. Contains the tree, its root node, and pre-computed layout positions. The
+workspace viewer composes child subtrees via portal nodes.
+
+**Portal** — a `ViewContent::Portal { child_idx }` node in a compound document's
+view tree that references a child viewer's subtree by index. `write_subtree`
+follows portals during the scene-writing walk. Each viewer owns exactly one
+representation of its content — no copying, no sync.
+
+**ContentCommand** — the return type of viewer event handling. Viewers receive
+input events and return commands (`MoveCursor`, `Select`, `ForwardKey`,
+`TogglePlayback`, etc.) instead of performing IPC directly. The presenter
+executes the IPC.
+
 ---
 
 ## IPC
