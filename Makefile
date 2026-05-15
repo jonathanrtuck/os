@@ -9,7 +9,7 @@ HOST := aarch64-apple-darwin
 
 test:
 	cargo t
-	cargo test --manifest-path user/servers/drivers/render/Cargo.toml \
+	cargo test --manifest-path user/drivers/render/Cargo.toml \
 		--lib --no-default-features --target $(HOST)
 
 build:
