@@ -47,11 +47,19 @@ impl ImageViewer {
     }
 
     pub fn rebuild(&mut self, constraints: &Constraints) {
+        let max_w = constraints.available_width / scene::MPT_PER_PT as u32;
+        let max_h = constraints.available_height / scene::MPT_PER_PT as u32;
+        let (disp_w, disp_h) = aspect_fit(
+            self.pixel_width as u32,
+            self.pixel_height as u32,
+            max_w,
+            max_h,
+        );
         let mut tree = ViewTree::new();
         let root = tree.add(ViewNode {
             intrinsic: IntrinsicSize::Fixed {
-                width: upt(self.pixel_width as u32),
-                height: upt(self.pixel_height as u32),
+                width: upt(disp_w),
+                height: upt(disp_h),
             },
             role: scene::ROLE_IMAGE,
             content: ViewContent::Image {
@@ -223,12 +231,11 @@ impl VideoViewer {
             icon_data.viewbox.to_bits(),
         );
         let btn = tree.add(ViewNode {
+            display: view_tree::Display::FixedCanvas,
             offset_x: pt(btn_x),
             offset_y: pt(btn_y),
-            intrinsic: IntrinsicSize::Fixed {
-                width: upt(btn_size),
-                height: upt(btn_size),
-            },
+            width: view_tree::Dimension::Points(upt(btn_size)),
+            height: view_tree::Dimension::Points(upt(btn_size)),
             background: Color::rgba(0, 0, 0, 120),
             corner_radius: upt(40),
             role: scene::ROLE_BUTTON,
@@ -562,8 +569,7 @@ impl VideoViewer {
 
         // Allocate PCM output VMO: duration_ns * 48000 * 2ch * 4bytes / 1e9
         let duration_ns = mp4_info.audio_duration_ns();
-        let pcm_estimate =
-            (duration_ns as usize * 48000 * 8 / 1_000_000_000) + super::PAGE_SIZE;
+        let pcm_estimate = (duration_ns as usize * 48000 * 8 / 1_000_000_000) + super::PAGE_SIZE;
         let pcm_vmo_size = pcm_estimate.next_multiple_of(super::PAGE_SIZE);
         let pcm_vmo = match abi::vmo::create(pcm_vmo_size, 0) {
             Ok(h) => h,
@@ -837,9 +843,7 @@ impl VideoViewer {
         if next < self.frame_pts_ns.len() {
             self.play_start_ns + self.frame_pts_ns[next]
         } else {
-            self.play_start_ns
-                + self.frame_pts_ns.last().copied().unwrap_or(0)
-                + self.ns_per_frame
+            self.play_start_ns + self.frame_pts_ns.last().copied().unwrap_or(0) + self.ns_per_frame
         }
     }
 }
@@ -2252,6 +2256,7 @@ pub fn write_view_node(
     n.role = node.role;
     n.level = node.level;
     n.cursor_shape = node.cursor_shape;
+    n.animation = node.animation;
 
     if node.clips_children {
         n.flags = scene::NodeFlags::VISIBLE.union(scene::NodeFlags::CLIPS_CHILDREN);
