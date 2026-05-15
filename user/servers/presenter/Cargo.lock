@@ -238,6 +238,7 @@ dependencies = [
  "store-service",
  "text-editor",
  "video-decoder",
+ "view-tree",
 ]
 
 [[package]]
@@ -384,6 +385,13 @@ dependencies = [
  "mp4",
  "name",
  "video",
+]
+
+[[package]]
+name = "view-tree"
+version = "0.1.0"
+dependencies = [
+ "scene",
 ]
 
 [[package]]

@@ -1,25 +1,31 @@
-//! View tree — the universal intermediate representation for content rendering.
+//! View tree — the single source of truth for the document's live state.
 //!
 //! Every content type produces view tree nodes. All rendering pipelines
 //! (GPU compositor, CLI, screen reader, braille) consume them. The view
 //! tree is the fan-out point where modality-specific pipelines diverge.
 //!
-//! The view tree carries three concerns per node:
+//! Each node carries all properties any consumer might need:
 //! - **Layout:** display mode, position, margins, padding, sizing
-//! - **Semantic:** role, level (for accessibility)
+//! - **Semantic:** role, level, state, accessible name
+//! - **Visual:** background, border, shadow, opacity, transform
+//! - **Content:** text glyphs, image reference, vector path, gradient
 //! - **Tree structure:** first_child / next_sibling indices
 //!
-//! Visual style (background, color, font, opacity) is NOT carried here —
-//! it passes through from content handlers to the scene graph builder
-//! without the layout engine touching it.
+//! Consumers pick the properties relevant to them. The layout engine
+//! reads layout fields. The screen reader reads semantic fields. The
+//! GPU renderer reads everything. The view tree makes no assumptions
+//! about how it will be used.
 
 #![no_std]
 
 extern crate alloc;
 
-use alloc::{vec, vec::Vec};
+use alloc::{string::String, vec, vec::Vec};
 
-use scene::{Mpt, NULL, NodeId, ROLE_NONE, Umpt};
+use scene::{
+    AffineTransform, Animation, Color, FillRule, GradientKind, Mpt, NULL, NodeId, ROLE_NONE,
+    ShapedGlyph, Umpt,
+};
 
 // ── Display mode ─────────────────────────────────────────────────────
 
@@ -122,11 +128,62 @@ pub trait ContentMeasurer {
     fn measure(&self, node_id: NodeId, available_width: Umpt) -> (Umpt, Umpt);
 }
 
+// ── View content ────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub enum ViewContent {
+    /// Container — no content beyond decoration.
+    None,
+    /// Shaped glyph run (one font, one color).
+    Glyphs {
+        glyphs: Vec<ShapedGlyph>,
+        color: Color,
+        font_size: u16,
+        style_id: u32,
+    },
+    /// Reference to a texture uploaded to the compositor.
+    Image {
+        content_id: u32,
+        src_width: u16,
+        src_height: u16,
+    },
+    /// Vector path contours.
+    Path {
+        commands: Vec<u8>,
+        color: Color,
+        stroke_color: Color,
+        fill_rule: FillRule,
+        stroke_width: u16,
+        content_hash: u32,
+    },
+    /// GPU-evaluated gradient fill.
+    Gradient {
+        color_start: Color,
+        color_end: Color,
+        kind: GradientKind,
+        angle_fp: u16,
+    },
+    /// Path filled with a gradient.
+    GradientPath {
+        color_start: Color,
+        color_end: Color,
+        kind: GradientKind,
+        angle_fp: u16,
+        commands: Vec<u8>,
+    },
+}
+
+impl Default for ViewContent {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
 // ── ViewNode ─────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ViewNode {
-    // Layout
+    // ── Layout ──────────────────────────────────────────────────
     pub display: Display,
     pub position: Position,
     pub margin: Edges,
@@ -142,11 +199,36 @@ pub struct ViewNode {
     pub offset_y: Mpt,
     pub intrinsic: IntrinsicSize,
 
-    // Semantic
+    // ── Semantic ────────────────────────────────────────────────
     pub role: u8,
     pub level: u8,
+    pub state: u32,
+    pub name: Option<String>,
+    pub order: u16,
 
-    // Tree structure
+    // ── Visual ─────────────────────────────────────────────────
+    pub background: Color,
+    pub color: Color,
+    pub border_color: Color,
+    pub corner_radius: Umpt,
+    pub opacity: u8,
+    pub shadow_color: Color,
+    pub shadow_blur_radius: Umpt,
+    pub shadow_spread: Mpt,
+    pub shadow_offset_x: Mpt,
+    pub shadow_offset_y: Mpt,
+    pub backdrop_blur_radius: Umpt,
+    pub clips_children: bool,
+    pub child_offset_x: Mpt,
+    pub child_offset_y: Mpt,
+    pub cursor_shape: u8,
+    pub transform: AffineTransform,
+    pub animation: Animation,
+
+    // ── Content ─────────────────────────────────────────────────
+    pub content: ViewContent,
+
+    // ── Tree structure ──────────────────────────────────────────
     pub first_child: NodeId,
     pub next_sibling: NodeId,
 }
@@ -170,6 +252,27 @@ impl Default for ViewNode {
             intrinsic: IntrinsicSize::Container,
             role: ROLE_NONE,
             level: 0,
+            state: 0,
+            name: None,
+            order: 0,
+            background: Color::TRANSPARENT,
+            color: Color::TRANSPARENT,
+            border_color: Color::TRANSPARENT,
+            corner_radius: 0,
+            opacity: 255,
+            shadow_color: Color::TRANSPARENT,
+            shadow_blur_radius: 0,
+            shadow_spread: 0,
+            shadow_offset_x: 0,
+            shadow_offset_y: 0,
+            backdrop_blur_radius: 0,
+            clips_children: false,
+            child_offset_x: 0,
+            child_offset_y: 0,
+            cursor_shape: 0,
+            transform: AffineTransform::identity(),
+            animation: Animation::NONE,
+            content: ViewContent::None,
             first_child: NULL,
             next_sibling: NULL,
         }
@@ -227,24 +330,34 @@ impl ViewTree {
 
     pub fn add(&mut self, node: ViewNode) -> NodeId {
         let id = self.nodes.len();
+
         assert!(id < NULL as usize, "view tree node limit exceeded");
+
         self.nodes.push(node);
+
         id as NodeId
     }
 
     pub fn append_child(&mut self, parent: NodeId, child: NodeId) {
         let first = self.nodes[parent as usize].first_child;
+
         if first == NULL {
             self.nodes[parent as usize].first_child = child;
+
             return;
         }
+
         let mut cur = first;
+
         loop {
             let next = self.nodes[cur as usize].next_sibling;
+
             if next == NULL {
                 self.nodes[cur as usize].next_sibling = child;
+
                 return;
             }
+
             cur = next;
         }
     }
@@ -284,8 +397,11 @@ impl<'a> Iterator for ChildIter<'a> {
         if self.cur == NULL {
             return Option::None;
         }
+
         let id = self.cur;
+
         self.cur = self.nodes[id as usize].next_sibling;
+
         Some(id)
     }
 }
@@ -297,6 +413,42 @@ pub fn children(nodes: &[ViewNode], parent: NodeId) -> ChildIter<'_> {
     }
 }
 
+// ── Content handler trait ────────────────────────────────────────────
+
+pub struct ViewSubtree {
+    pub tree: ViewTree,
+    pub root: NodeId,
+}
+
+pub struct Constraints {
+    pub available_width: Umpt,
+    pub available_height: Umpt,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventResponse {
+    Handled,
+    Unhandled,
+}
+
+pub struct InputEvent {
+    pub kind: u8,
+    pub key_code: u8,
+    pub modifiers: u8,
+    pub character: u8,
+    pub pointer_x: i32,
+    pub pointer_y: i32,
+    pub button: u8,
+}
+
+pub trait ContentHandler {
+    fn load(&mut self, content: &[u8], constraints: &Constraints) -> ViewSubtree;
+    fn resize(&mut self, constraints: &Constraints) -> ViewSubtree;
+    fn update(&mut self, content: &[u8]) -> ViewSubtree;
+    fn event(&mut self, event: &InputEvent) -> EventResponse;
+    fn teardown(&mut self);
+}
+
 // ── Dimension resolution (private) ───────────────────────────────────
 
 fn clamp_dimension(value: Umpt, min: Dimension, max: Dimension) -> Umpt {
@@ -304,6 +456,7 @@ fn clamp_dimension(value: Umpt, min: Dimension, max: Dimension) -> Umpt {
         Dimension::Points(m) if value > m => m,
         _ => value,
     };
+
     match min {
         Dimension::Points(m) if v < m => m,
         _ => v,
@@ -315,6 +468,7 @@ fn resolve_width(node: &ViewNode, available: Umpt) -> Umpt {
         Dimension::Points(w) => w,
         Dimension::Auto => available,
     };
+
     clamp_dimension(raw, node.min_width, node.max_width)
 }
 
@@ -323,11 +477,13 @@ fn resolve_height(node: &ViewNode, content_height: Umpt) -> Umpt {
         Dimension::Points(h) => h,
         Dimension::Auto => content_height,
     };
+
     clamp_dimension(raw, node.min_height, node.max_height)
 }
 
 fn content_box_width(node: &ViewNode, border_box_width: Umpt) -> Umpt {
     let inset = (node.padding.horizontal() + node.border.horizontal()) as Umpt;
+
     border_box_width.saturating_sub(inset)
 }
 
@@ -345,6 +501,7 @@ pub fn layout(
     measurer: &dyn ContentMeasurer,
 ) -> Vec<LayoutBox> {
     let mut boxes = vec![LayoutBox::EMPTY; nodes.len()];
+
     layout_node(
         nodes,
         root,
@@ -353,6 +510,7 @@ pub fn layout(
         measurer,
         &mut boxes,
     );
+
     boxes
 }
 
@@ -380,6 +538,7 @@ fn layout_node(
                 Dimension::Points(ph) => ph,
                 Dimension::Auto => height,
             };
+
             boxes[id as usize] = LayoutBox {
                 x: 0,
                 y: 0,
@@ -388,11 +547,13 @@ fn layout_node(
                 padding: node.padding,
                 border: node.border,
             };
+
             return;
         }
         IntrinsicSize::Measure => {
             let mw = resolve_width(node, available_width);
             let (used_w, used_h) = measurer.measure(id, mw);
+
             boxes[id as usize] = LayoutBox {
                 x: 0,
                 y: 0,
@@ -401,6 +562,7 @@ fn layout_node(
                 padding: node.padding,
                 border: node.border,
             };
+
             return;
         }
         IntrinsicSize::Container => {}
@@ -442,18 +604,18 @@ fn layout_block(
     let node = &nodes[id as usize];
     let border_box_w = resolve_width(node, available_width);
     let content_w = content_box_width(node, border_box_w);
-
     let mut y: Mpt = 0;
     let mut prev_margin_bottom: Mpt = 0;
     let mut first_child = true;
-
     let mut child_id = node.first_child;
+
     while child_id != NULL {
         let child = &nodes[child_id as usize];
         let next = child.next_sibling;
 
         if child.display == Display::None {
             child_id = next;
+
             continue;
         }
 
@@ -466,6 +628,7 @@ fn layout_block(
                 Dimension::Points(h) => h,
                 Dimension::Auto => 0,
             };
+
             layout_node(
                 nodes,
                 child_id,
@@ -474,9 +637,11 @@ fn layout_block(
                 measurer,
                 boxes,
             );
+
             boxes[child_id as usize].x = child.offset_x;
             boxes[child_id as usize].y = child.offset_y;
             child_id = next;
+
             continue;
         }
 
@@ -486,6 +651,7 @@ fn layout_block(
         layout_node(nodes, child_id, child_avail_w, 0, measurer, boxes);
 
         let child_margin_top = child.margin.top;
+
         if first_child {
             y += child_margin_top;
         } else {
@@ -496,8 +662,8 @@ fn layout_block(
         boxes[child_id as usize].y = y;
 
         let child_box_h = boxes[child_id as usize].height as Mpt;
-        y += child_box_h;
 
+        y += child_box_h;
         prev_margin_bottom = child.margin.bottom;
         first_child = false;
         child_id = next;
@@ -533,14 +699,15 @@ fn layout_fixed(
     let border_box_w = resolve_width(node, available_width);
     let border_box_h = resolve_height(node, available_height);
     let content_w = content_box_width(node, border_box_w);
-
     let mut child_id = node.first_child;
+
     while child_id != NULL {
         let child = &nodes[child_id as usize];
         let next = child.next_sibling;
 
         if child.display == Display::None {
             child_id = next;
+
             continue;
         }
 
@@ -561,9 +728,9 @@ fn layout_fixed(
             measurer,
             boxes,
         );
+
         boxes[child_id as usize].x = child.offset_x;
         boxes[child_id as usize].y = child.offset_y;
-
         child_id = next;
     }
 
@@ -613,6 +780,7 @@ mod tests {
     #[test]
     fn edges_zero() {
         let e = Edges::ZERO;
+
         assert_eq!(e.horizontal(), 0);
         assert_eq!(e.vertical(), 0);
     }
@@ -620,6 +788,7 @@ mod tests {
     #[test]
     fn edges_uniform() {
         let e = Edges::uniform(pt(10));
+
         assert_eq!(e.top, pt(10));
         assert_eq!(e.right, pt(10));
         assert_eq!(e.horizontal(), pt(20));
@@ -634,6 +803,7 @@ mod tests {
             bottom: pt(3),
             left: pt(4),
         };
+
         assert_eq!(e.horizontal(), pt(6));
         assert_eq!(e.vertical(), pt(4));
     }
@@ -650,6 +820,7 @@ mod tests {
     #[test]
     fn view_node_default() {
         let n = ViewNode::default();
+
         assert_eq!(n.display, Display::Block);
         assert_eq!(n.position, Position::Static);
         assert_eq!(n.first_child, NULL);
@@ -665,6 +836,7 @@ mod tests {
     #[test]
     fn layout_box_empty() {
         let b = LayoutBox::EMPTY;
+
         assert_eq!(b.x, 0);
         assert_eq!(b.y, 0);
         assert_eq!(b.width, 0);
@@ -677,6 +849,7 @@ mod tests {
     fn tree_add_node() {
         let mut tree = ViewTree::new();
         let id = tree.add(ViewNode::default());
+
         assert_eq!(id, 0);
         assert_eq!(tree.len(), 1);
     }
@@ -687,6 +860,7 @@ mod tests {
         let parent = tree.add(ViewNode::default());
         let child1 = tree.add(ViewNode::default());
         let child2 = tree.add(ViewNode::default());
+
         tree.append_child(parent, child1);
         tree.append_child(parent, child2);
 
@@ -702,11 +876,13 @@ mod tests {
         let c1 = tree.add(ViewNode::default());
         let c2 = tree.add(ViewNode::default());
         let c3 = tree.add(ViewNode::default());
+
         tree.append_child(parent, c1);
         tree.append_child(parent, c2);
         tree.append_child(parent, c3);
 
         let ids: Vec<NodeId> = children(tree.nodes(), parent).collect();
+
         assert_eq!(ids, vec![c1, c2, c3]);
     }
 
@@ -715,6 +891,7 @@ mod tests {
         let mut tree = ViewTree::new();
         let leaf = tree.add(ViewNode::default());
         let ids: Vec<NodeId> = children(tree.nodes(), leaf).collect();
+
         assert!(ids.is_empty());
     }
 
@@ -723,6 +900,7 @@ mod tests {
     #[test]
     fn resolve_width_auto_uses_available() {
         let node = ViewNode::default();
+
         assert_eq!(resolve_width(&node, upt(500)), upt(500));
     }
 
@@ -732,6 +910,7 @@ mod tests {
             width: Dimension::Points(upt(200)),
             ..Default::default()
         };
+
         assert_eq!(resolve_width(&node, upt(500)), upt(200));
     }
 
@@ -741,6 +920,7 @@ mod tests {
             max_width: Dimension::Points(upt(300)),
             ..Default::default()
         };
+
         assert_eq!(resolve_width(&node, upt(500)), upt(300));
     }
 
@@ -751,12 +931,14 @@ mod tests {
             min_width: Dimension::Points(upt(200)),
             ..Default::default()
         };
+
         assert_eq!(resolve_width(&node, upt(500)), upt(200));
     }
 
     #[test]
     fn resolve_height_auto_uses_content() {
         let node = ViewNode::default();
+
         assert_eq!(resolve_height(&node, upt(300)), upt(300));
     }
 
@@ -766,6 +948,7 @@ mod tests {
             height: Dimension::Points(upt(100)),
             ..Default::default()
         };
+
         assert_eq!(resolve_height(&node, upt(300)), upt(100));
     }
 
@@ -776,6 +959,7 @@ mod tests {
             border: Edges::uniform(pt(2)),
             ..Default::default()
         };
+
         assert_eq!(content_box_width(&node, upt(500)), upt(500) - upt(24));
     }
 
@@ -785,6 +969,7 @@ mod tests {
             padding: Edges::uniform(pt(300)),
             ..Default::default()
         };
+
         assert_eq!(content_box_width(&node, upt(100)), 0);
     }
 
@@ -807,9 +992,11 @@ mod tests {
             height: Dimension::Points(upt(100)),
             ..Default::default()
         });
+
         tree.append_child(root, child);
 
         let boxes = layout(tree.nodes(), root, upt(800), upt(600), &NoMeasurer);
+
         assert_eq!(boxes[child as usize].x, pt(100));
         assert_eq!(boxes[child as usize].y, pt(50));
         assert_eq!(boxes[child as usize].width, upt(200));
@@ -834,9 +1021,11 @@ mod tests {
             },
             ..Default::default()
         });
+
         tree.append_child(root, child);
 
         let boxes = layout(tree.nodes(), root, upt(800), upt(600), &NoMeasurer);
+
         assert_eq!(boxes[child as usize].width, upt(300));
         assert_eq!(boxes[child as usize].height, upt(200));
         assert_eq!(boxes[child as usize].x, pt(10));
@@ -858,10 +1047,12 @@ mod tests {
             intrinsic: IntrinsicSize::Measure,
             ..Default::default()
         });
+
         tree.append_child(root, child);
 
         let m = FixedMeasurer(upt(100), upt(50));
         let boxes = layout(tree.nodes(), root, upt(800), upt(600), &m);
+
         assert_eq!(boxes[child as usize].width, upt(100));
         assert_eq!(boxes[child as usize].height, upt(50));
     }
@@ -889,10 +1080,12 @@ mod tests {
             height: Dimension::Points(upt(50)),
             ..Default::default()
         });
+
         tree.append_child(root, c1);
         tree.append_child(root, c2);
 
         let boxes = layout(tree.nodes(), root, upt(800), upt(600), &NoMeasurer);
+
         assert_eq!(boxes[c1 as usize].x, pt(0));
         assert_eq!(boxes[c2 as usize].x, pt(200));
         assert_eq!(boxes[c2 as usize].y, pt(300));
@@ -911,9 +1104,11 @@ mod tests {
             display: Display::None,
             ..Default::default()
         });
+
         tree.append_child(root, hidden);
 
         let boxes = layout(tree.nodes(), root, upt(800), upt(600), &NoMeasurer);
+
         assert_eq!(boxes[hidden as usize], LayoutBox::EMPTY);
     }
 
@@ -930,9 +1125,11 @@ mod tests {
             height: Dimension::Points(upt(100)),
             ..Default::default()
         });
+
         tree.append_child(root, child);
 
         let boxes = layout(tree.nodes(), root, upt(400), upt(1000), &NoMeasurer);
+
         assert_eq!(boxes[child as usize].width, upt(400));
         assert_eq!(boxes[child as usize].height, upt(100));
         assert_eq!(boxes[child as usize].x, 0);
@@ -955,10 +1152,12 @@ mod tests {
             height: Dimension::Points(upt(200)),
             ..Default::default()
         });
+
         tree.append_child(root, c1);
         tree.append_child(root, c2);
 
         let boxes = layout(tree.nodes(), root, upt(400), upt(1000), &NoMeasurer);
+
         assert_eq!(boxes[c1 as usize].y, 0);
         assert_eq!(boxes[c2 as usize].y, upt(100) as Mpt);
         assert_eq!(boxes[root as usize].height, upt(300));
@@ -981,9 +1180,11 @@ mod tests {
             },
             ..Default::default()
         });
+
         tree.append_child(root, child);
 
         let boxes = layout(tree.nodes(), root, upt(400), upt(1000), &NoMeasurer);
+
         assert_eq!(boxes[child as usize].x, pt(20));
         assert_eq!(boxes[child as usize].y, pt(10));
         assert_eq!(boxes[child as usize].width, upt(400) - upt(40));
@@ -1002,9 +1203,11 @@ mod tests {
             height: Dimension::Points(upt(100)),
             ..Default::default()
         });
+
         tree.append_child(root, child);
 
         let boxes = layout(tree.nodes(), root, upt(400), upt(1000), &NoMeasurer);
+
         assert_eq!(boxes[child as usize].width, upt(360));
         assert_eq!(boxes[root as usize].height, upt(140));
         assert_eq!(boxes[root as usize].padding, Edges::uniform(pt(20)));
@@ -1018,9 +1221,11 @@ mod tests {
             height: Dimension::Points(upt(50)),
             ..Default::default()
         });
+
         tree.append_child(root, child);
 
         let boxes = layout(tree.nodes(), root, upt(600), upt(1000), &NoMeasurer);
+
         assert_eq!(boxes[root as usize].width, upt(600));
         assert_eq!(boxes[child as usize].width, upt(600));
     }
@@ -1036,10 +1241,12 @@ mod tests {
             intrinsic: IntrinsicSize::Measure,
             ..Default::default()
         });
+
         tree.append_child(root, leaf);
 
         let m = FixedMeasurer(upt(100), upt(50));
         let boxes = layout(tree.nodes(), root, upt(400), upt(1000), &m);
+
         assert_eq!(boxes[leaf as usize].width, upt(100));
         assert_eq!(boxes[leaf as usize].height, upt(50));
     }
@@ -1058,9 +1265,11 @@ mod tests {
             },
             ..Default::default()
         });
+
         tree.append_child(root, leaf);
 
         let boxes = layout(tree.nodes(), root, upt(400), upt(1000), &NoMeasurer);
+
         assert_eq!(boxes[leaf as usize].width, upt(200));
         assert_eq!(boxes[leaf as usize].height, upt(150));
     }
@@ -1094,10 +1303,12 @@ mod tests {
             },
             ..Default::default()
         });
+
         tree.append_child(root, c1);
         tree.append_child(root, c2);
 
         let boxes = layout(tree.nodes(), root, upt(400), upt(1000), &NoMeasurer);
+
         assert_eq!(boxes[c2 as usize].y, pt(130));
         assert_eq!(boxes[root as usize].height, upt(230));
     }
@@ -1129,10 +1340,12 @@ mod tests {
             },
             ..Default::default()
         });
+
         tree.append_child(root, c1);
         tree.append_child(root, c2);
 
         let boxes = layout(tree.nodes(), root, upt(400), upt(1000), &NoMeasurer);
+
         assert_eq!(boxes[c2 as usize].y, pt(65));
     }
 
@@ -1159,10 +1372,12 @@ mod tests {
             height: Dimension::Points(upt(50)),
             ..Default::default()
         });
+
         tree.append_child(root, canvas);
         tree.append_child(canvas, canvas_child);
 
         let boxes = layout(tree.nodes(), root, upt(800), upt(1000), &NoMeasurer);
+
         assert_eq!(boxes[canvas as usize].y, 0);
         assert_eq!(boxes[canvas as usize].width, upt(400));
         assert_eq!(boxes[canvas as usize].height, upt(300));
@@ -1193,11 +1408,13 @@ mod tests {
             height: Dimension::Points(upt(100)),
             ..Default::default()
         });
+
         tree.append_child(root, flow1);
         tree.append_child(root, abs);
         tree.append_child(root, flow2);
 
         let boxes = layout(tree.nodes(), root, upt(400), upt(1000), &NoMeasurer);
+
         assert_eq!(boxes[abs as usize].x, pt(50));
         assert_eq!(boxes[abs as usize].y, pt(50));
         assert_eq!(boxes[flow2 as usize].y, upt(100) as Mpt);
@@ -1222,10 +1439,12 @@ mod tests {
             },
             ..Default::default()
         });
+
         tree.append_child(root, middle);
         tree.append_child(middle, leaf);
 
         let boxes = layout(tree.nodes(), root, upt(600), upt(1000), &NoMeasurer);
+
         assert_eq!(boxes[leaf as usize].width, upt(100));
         assert_eq!(boxes[leaf as usize].height, upt(80));
         assert_eq!(boxes[middle as usize].width, upt(600));
@@ -1244,6 +1463,7 @@ mod tests {
             intrinsic: IntrinsicSize::Measure,
             ..Default::default()
         });
+
         tree.append_child(root, leaf);
 
         let boxes = layout(
@@ -1253,6 +1473,7 @@ mod tests {
             upt(1000),
             &WidthDependentMeasurer,
         );
+
         assert_eq!(boxes[leaf as usize].width, upt(500));
         assert_eq!(boxes[leaf as usize].height, upt(20));
     }

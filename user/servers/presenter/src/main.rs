@@ -15,6 +15,7 @@ extern crate heap;
 extern crate piecetable;
 
 mod build;
+mod handlers;
 mod input;
 mod pointer;
 

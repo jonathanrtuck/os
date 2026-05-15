@@ -1,6 +1,7 @@
 //! Scene building — compiles document state + layout into a scene graph tree.
 
 use scene::{Color, Content, FillRule, NodeFlags, SCENE_SIZE, SceneWriter, ShapedGlyph, pt, upt};
+use view_tree::ContentHandler;
 
 use super::{
     MAX_GLYPHS_PER_LINE, STYLE_MONO, STYLE_SANS, font, font_data_for_style, pack_run_style_id,
@@ -1565,32 +1566,41 @@ impl super::Presenter {
                     height,
                 } => {
                     if *width > 0 && *height > 0 {
+                        let mut handler = super::handlers::ImageHandler {
+                            content_id: *content_id,
+                            pixel_width: *width,
+                            pixel_height: *height,
+                        };
                         let max_w = self.display_width.saturating_sub(2 * page_margin);
                         let max_h = content_h.saturating_sub(2 * page_margin);
-                        let src_w = *width as u32;
-                        let src_h = *height as u32;
+                        let subtree = handler.load(
+                            &[],
+                            &view_tree::Constraints {
+                                available_width: upt(max_w),
+                                available_height: upt(max_h),
+                            },
+                        );
+                        let node = subtree.tree.get(subtree.root);
+                        let (src_w, src_h) = match node.intrinsic {
+                            view_tree::IntrinsicSize::Fixed { width, height } => (
+                                width / scene::MPT_PER_PT as u32,
+                                height / scene::MPT_PER_PT as u32,
+                            ),
+                            _ => (0, 0),
+                        };
                         let (disp_w, disp_h) = aspect_fit(src_w, src_h, max_w, max_h);
                         let img_x = base_x + ((self.display_width as i32 - disp_w as i32) / 2);
                         let img_y = ((content_h as i32 - disp_h as i32) / 2).max(0);
 
-                        if let Some(image_node) = scene.alloc_node() {
-                            let n = scene.node_mut(image_node);
-
-                            n.x = pt(img_x);
-                            n.y = pt(img_y);
-                            n.width = upt(disp_w);
-                            n.height = upt(disp_h);
-                            n.content = Content::Image {
-                                content_id: *content_id,
-                                src_width: *width,
-                                src_height: *height,
-                            };
-                            n.shadow_color = Color::rgba(0, 0, 0, 255);
-                            n.shadow_blur_radius = presenter_service::SHADOW_BLUR_RADIUS;
-                            n.shadow_spread = presenter_service::SHADOW_SPREAD;
-
-                            scene.add_child(strip, image_node);
-                        }
+                        super::handlers::write_view_node(
+                            node,
+                            &mut scene,
+                            strip,
+                            pt(img_x),
+                            pt(img_y),
+                            upt(disp_w),
+                            upt(disp_h),
+                        );
                     }
                 }
 

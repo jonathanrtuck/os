@@ -27,6 +27,7 @@ service = [
     "dep:scene",
     "dep:text-editor",
     "ipc/kernel",
+    "dep:view-tree",
 ]
 
 [dependencies]
@@ -51,5 +52,6 @@ scene = { path = "../../libraries/scene", optional = true }
 store-service = { path = "../store", optional = true }
 text-editor = { path = "../../editors/text", optional = true }
 video-decoder = { path = "../video-decoder", optional = true }
+view-tree = { path = "../../libraries/view-tree", optional = true }
 
 [workspace]
