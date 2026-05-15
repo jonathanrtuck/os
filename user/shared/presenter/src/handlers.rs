@@ -333,10 +333,8 @@ impl TextViewer {
         );
         let root = tree.add(ViewNode {
             display: view_tree::Display::FixedCanvas,
-            intrinsic: IntrinsicSize::Fixed {
-                width: upt(ctx.page_w),
-                height: upt(ctx.page_h),
-            },
+            width: view_tree::Dimension::Points(upt(ctx.page_w)),
+            height: view_tree::Dimension::Points(upt(ctx.page_h)),
             background: page_bg,
             shadow_color: Color::rgba(0, 0, 0, 255),
             shadow_blur_radius: upt(presenter_service::SHADOW_BLUR_RADIUS as u32),
@@ -1677,6 +1675,61 @@ pub fn write_subtree(
         offset_x,
         offset_y,
     );
+}
+
+pub fn write_subtree_as_root(
+    subtree: &ViewSubtree,
+    children: &[&ViewSubtree],
+    scene: &mut SceneWriter,
+    offset_x: scene::Mpt,
+    offset_y: scene::Mpt,
+) {
+    if subtree.root == scene::NULL {
+        return;
+    }
+
+    let node = subtree.tree.get(subtree.root);
+    let lb = if (subtree.root as usize) < subtree.layout.len() {
+        &subtree.layout[subtree.root as usize]
+    } else {
+        &LayoutBox::EMPTY
+    };
+    let x = offset_x + lb.x;
+    let y = offset_y + lb.y;
+    let scene_id = match scene.alloc_node() {
+        Some(id) => id,
+        None => return,
+    };
+
+    {
+        let n = scene.node_mut(scene_id);
+
+        n.x = x;
+        n.y = y;
+        n.width = lb.width;
+        n.height = lb.height;
+        n.background = node.background;
+        n.opacity = node.opacity;
+        n.corner_radius = (node.corner_radius / scene::MPT_PER_PT as u32).min(255) as u8;
+        n.role = node.role;
+        n.level = node.level;
+
+        if node.clips_children {
+            n.flags = scene::NodeFlags::VISIBLE.union(scene::NodeFlags::CLIPS_CHILDREN);
+        }
+    }
+
+    scene.set_root(scene_id);
+
+    let pad_x = lb.padding.left + lb.border.left;
+    let pad_y = lb.padding.top + lb.border.top;
+    let mut child = node.first_child;
+
+    while child != scene::NULL {
+        write_subtree_node(subtree, children, child, scene, scene_id, pad_x, pad_y);
+
+        child = subtree.tree.get(child).next_sibling;
+    }
 }
 
 fn write_subtree_node(

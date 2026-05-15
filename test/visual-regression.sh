@@ -146,20 +146,8 @@ assert /tmp/p14-back-040.png no_black_bar 400,65,600,770,0 || ok=false
 assert /tmp/p14-back-040.png region_variance 400,100,600,600,50 || ok=false
 end_test $ok "phase14: image space"
 
-# ── 6. Phase 15: showcase play button ────────────────────────────
-
-begin_test "showcase play button (phase15: render, cursor, hit test)"
-hypervisor "$KERNEL" --events test/phase15-showcase.events \
-    --drive "$DISK" --audio --video-decode --background --resolution "$RES" --timeout 30 \
-    >/dev/null 2>&1
-ok=true
-# Multi-capture: "p15-clicked" prefix → -NNN.png per frame_id.
-# Frame 50: play button visible (gray circle + white icon) at ~(196,730) in 1x.
-assert /tmp/p15-clicked-050.png color_in_region 170,700,80,80,85,85,85 --tolerance 10 || ok=false
-assert /tmp/p15-clicked-050.png color_in_region 180,710,60,60,231,231,231 --tolerance 30 || ok=false
-# Button should be circular — corner pixel should be background, not button.
-assert /tmp/p15-clicked-050.png pixel_at 174,704,32,32,32 --tolerance 5 || ok=false
-end_test $ok "phase15: showcase play button"
+# Test 6 (showcase play button) removed — Showcase space was deleted
+# in Phase 18 (content service architecture).
 
 # ── Summary ───────────────────────────────────────────────────────
 

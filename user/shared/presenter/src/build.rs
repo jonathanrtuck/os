@@ -459,18 +459,11 @@ impl super::Presenter {
 
         scene.reset();
 
-        let root = match scene.alloc_node() {
-            Some(id) => id,
-            None => return,
-        };
-
-        scene.set_root(root);
-
         let ws_subtree = self.workspace.subtree();
         let child_subtrees = self.workspace.child_subtrees();
         let child_refs: alloc::vec::Vec<&view_tree::ViewSubtree> = child_subtrees.to_vec();
 
-        super::handlers::write_subtree(ws_subtree, &child_refs, &mut scene, root, pt(0), pt(0));
+        super::handlers::write_subtree_as_root(ws_subtree, &child_refs, &mut scene, pt(0), pt(0));
 
         self.swap_scene();
 
