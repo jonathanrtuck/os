@@ -1,0 +1,17 @@
+[package]
+name = "test-presenter"
+version = "0.1.0"
+edition = "2024"
+license = "Unlicense"
+
+[dependencies]
+abi = { path = "../../system/abi" }
+console = { path = "../console" }
+document-service = { path = "../document" }
+heap = { path = "../../system/heap" }
+ipc = { path = "../../system/ipc" }
+name = { path = "../name" }
+presenter-service = { path = "../presenter" }
+scene = { path = "../scene" }
+
+[workspace]

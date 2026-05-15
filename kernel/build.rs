@@ -20,16 +20,16 @@ fn build_init(kernel_dir: &std::path::Path) {
     let bench_el0 = env::var("CARGO_FEATURE_BENCH_EL0").is_ok();
     let bench_smp = env::var("CARGO_FEATURE_BENCH_SMP").is_ok();
     let (init_dir, crate_name) = if bench_smp {
-        (kernel_dir.join("../user/bench-smp"), "bench-smp")
+        (kernel_dir.join("../user/shared/bench-smp"), "bench-smp")
     } else if bench_el0 {
-        (kernel_dir.join("../user/bench"), "bench")
+        (kernel_dir.join("../user/shared/benchmarks"), "bench")
     } else if integration {
         (
-            kernel_dir.join("../user/integration-tests"),
+            kernel_dir.join("../user/shared/integration-tests"),
             "integration-tests",
         )
     } else {
-        (kernel_dir.join("../user/servers/init"), "init")
+        (kernel_dir.join("../user/shared/init"), "init")
     };
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let init_bin = out_dir.join("init.bin");
@@ -42,99 +42,99 @@ fn build_init(kernel_dir: &std::path::Path) {
         write_empty_service_pack(&out_dir);
     }
 
-    println!("cargo:rerun-if-changed=../user/servers/init/src/main.rs");
-    println!("cargo:rerun-if-changed=../user/servers/init/src/manifest.rs");
-    println!("cargo:rerun-if-changed=../user/servers/init/link.ld");
-    println!("cargo:rerun-if-changed=../user/servers/init/Cargo.toml");
-    println!("cargo:rerun-if-changed=../user/integration-tests/src/main.rs");
-    println!("cargo:rerun-if-changed=../user/integration-tests/link.ld");
-    println!("cargo:rerun-if-changed=../user/integration-tests/Cargo.toml");
-    println!("cargo:rerun-if-changed=../user/bench/src/main.rs");
-    println!("cargo:rerun-if-changed=../user/bench/link.ld");
-    println!("cargo:rerun-if-changed=../user/bench/Cargo.toml");
-    println!("cargo:rerun-if-changed=../user/bench-smp/src/main.rs");
-    println!("cargo:rerun-if-changed=../user/bench-smp/link.ld");
-    println!("cargo:rerun-if-changed=../user/bench-smp/Cargo.toml");
-    println!("cargo:rerun-if-changed=../user/servers/hello/src/main.rs");
-    println!("cargo:rerun-if-changed=../user/servers/hello/link.ld");
-    println!("cargo:rerun-if-changed=../user/servers/hello/Cargo.toml");
-    println!("cargo:rerun-if-changed=../user/servers/console/src/main.rs");
-    println!("cargo:rerun-if-changed=../user/servers/console/link.ld");
-    println!("cargo:rerun-if-changed=../user/servers/console/Cargo.toml");
-    println!("cargo:rerun-if-changed=../user/servers/drivers/input/src/main.rs");
-    println!("cargo:rerun-if-changed=../user/servers/drivers/input/link.ld");
-    println!("cargo:rerun-if-changed=../user/servers/drivers/input/Cargo.toml");
-    println!("cargo:rerun-if-changed=../user/servers/drivers/blk/src/main.rs");
-    println!("cargo:rerun-if-changed=../user/servers/drivers/blk/link.ld");
-    println!("cargo:rerun-if-changed=../user/servers/drivers/blk/Cargo.toml");
-    println!("cargo:rerun-if-changed=../user/servers/drivers/rng/src/main.rs");
-    println!("cargo:rerun-if-changed=../user/servers/drivers/rng/src/lib.rs");
-    println!("cargo:rerun-if-changed=../user/servers/drivers/rng/link.ld");
-    println!("cargo:rerun-if-changed=../user/servers/drivers/rng/Cargo.toml");
-    println!("cargo:rerun-if-changed=../user/servers/drivers/snd/src/main.rs");
-    println!("cargo:rerun-if-changed=../user/servers/drivers/snd/src/lib.rs");
-    println!("cargo:rerun-if-changed=../user/servers/drivers/snd/link.ld");
-    println!("cargo:rerun-if-changed=../user/servers/drivers/snd/Cargo.toml");
-    println!("cargo:rerun-if-changed=../user/servers/drivers/video/src/main.rs");
-    println!("cargo:rerun-if-changed=../user/servers/drivers/video/src/lib.rs");
-    println!("cargo:rerun-if-changed=../user/servers/drivers/video/link.ld");
-    println!("cargo:rerun-if-changed=../user/servers/drivers/video/Cargo.toml");
-    println!("cargo:rerun-if-changed=../user/servers/audio/src/main.rs");
-    println!("cargo:rerun-if-changed=../user/servers/audio/src/lib.rs");
-    println!("cargo:rerun-if-changed=../user/servers/audio/link.ld");
-    println!("cargo:rerun-if-changed=../user/servers/audio/Cargo.toml");
-    println!("cargo:rerun-if-changed=../user/servers/drivers/render/src/main.rs");
-    println!("cargo:rerun-if-changed=../user/servers/drivers/render/link.ld");
-    println!("cargo:rerun-if-changed=../user/servers/drivers/render/Cargo.toml");
-    println!("cargo:rerun-if-changed=../user/servers/store/src/main.rs");
-    println!("cargo:rerun-if-changed=../user/servers/store/src/lib.rs");
-    println!("cargo:rerun-if-changed=../user/servers/store/link.ld");
-    println!("cargo:rerun-if-changed=../user/servers/store/Cargo.toml");
-    println!("cargo:rerun-if-changed=../user/servers/document/src/main.rs");
-    println!("cargo:rerun-if-changed=../user/servers/document/src/lib.rs");
-    println!("cargo:rerun-if-changed=../user/servers/document/link.ld");
-    println!("cargo:rerun-if-changed=../user/servers/document/Cargo.toml");
-    println!("cargo:rerun-if-changed=../user/servers/layout/src/main.rs");
-    println!("cargo:rerun-if-changed=../user/servers/layout/src/lib.rs");
-    println!("cargo:rerun-if-changed=../user/servers/layout/link.ld");
-    println!("cargo:rerun-if-changed=../user/servers/layout/Cargo.toml");
-    println!("cargo:rerun-if-changed=../user/servers/test-layout/src/main.rs");
-    println!("cargo:rerun-if-changed=../user/servers/test-layout/link.ld");
-    println!("cargo:rerun-if-changed=../user/servers/test-layout/Cargo.toml");
-    println!("cargo:rerun-if-changed=../user/servers/presenter/src/main.rs");
-    println!("cargo:rerun-if-changed=../user/servers/presenter/src/lib.rs");
-    println!("cargo:rerun-if-changed=../user/servers/presenter/link.ld");
-    println!("cargo:rerun-if-changed=../user/servers/presenter/Cargo.toml");
-    println!("cargo:rerun-if-changed=../user/servers/test-presenter/src/main.rs");
-    println!("cargo:rerun-if-changed=../user/servers/test-presenter/link.ld");
-    println!("cargo:rerun-if-changed=../user/servers/test-presenter/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/shared/init/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/shared/init/src/manifest.rs");
+    println!("cargo:rerun-if-changed=../user/shared/init/link.ld");
+    println!("cargo:rerun-if-changed=../user/shared/init/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/shared/integration-tests/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/shared/integration-tests/link.ld");
+    println!("cargo:rerun-if-changed=../user/shared/integration-tests/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/shared/benchmarks/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/shared/benchmarks/link.ld");
+    println!("cargo:rerun-if-changed=../user/shared/benchmarks/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/shared/bench-smp/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/shared/bench-smp/link.ld");
+    println!("cargo:rerun-if-changed=../user/shared/bench-smp/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/shared/hello/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/shared/hello/link.ld");
+    println!("cargo:rerun-if-changed=../user/shared/hello/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/shared/console/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/shared/console/link.ld");
+    println!("cargo:rerun-if-changed=../user/shared/console/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/drivers/input/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/drivers/input/link.ld");
+    println!("cargo:rerun-if-changed=../user/drivers/input/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/drivers/blk/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/drivers/blk/link.ld");
+    println!("cargo:rerun-if-changed=../user/drivers/blk/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/drivers/rng/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/drivers/rng/src/lib.rs");
+    println!("cargo:rerun-if-changed=../user/drivers/rng/link.ld");
+    println!("cargo:rerun-if-changed=../user/drivers/rng/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/drivers/snd/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/drivers/snd/src/lib.rs");
+    println!("cargo:rerun-if-changed=../user/drivers/snd/link.ld");
+    println!("cargo:rerun-if-changed=../user/drivers/snd/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/drivers/video/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/drivers/video/src/lib.rs");
+    println!("cargo:rerun-if-changed=../user/drivers/video/link.ld");
+    println!("cargo:rerun-if-changed=../user/drivers/video/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/shared/audio/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/shared/audio/src/lib.rs");
+    println!("cargo:rerun-if-changed=../user/shared/audio/link.ld");
+    println!("cargo:rerun-if-changed=../user/shared/audio/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/drivers/render/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/drivers/render/link.ld");
+    println!("cargo:rerun-if-changed=../user/drivers/render/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/shared/store-service/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/shared/store-service/src/lib.rs");
+    println!("cargo:rerun-if-changed=../user/shared/store-service/link.ld");
+    println!("cargo:rerun-if-changed=../user/shared/store-service/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/shared/document/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/shared/document/src/lib.rs");
+    println!("cargo:rerun-if-changed=../user/shared/document/link.ld");
+    println!("cargo:rerun-if-changed=../user/shared/document/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/shared/layout/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/shared/layout/src/lib.rs");
+    println!("cargo:rerun-if-changed=../user/shared/layout/link.ld");
+    println!("cargo:rerun-if-changed=../user/shared/layout/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/shared/test-layout/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/shared/test-layout/link.ld");
+    println!("cargo:rerun-if-changed=../user/shared/test-layout/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/shared/presenter/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/shared/presenter/src/lib.rs");
+    println!("cargo:rerun-if-changed=../user/shared/presenter/link.ld");
+    println!("cargo:rerun-if-changed=../user/shared/presenter/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/shared/test-presenter/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/shared/test-presenter/link.ld");
+    println!("cargo:rerun-if-changed=../user/shared/test-presenter/Cargo.toml");
     println!("cargo:rerun-if-changed=../user/editors/text/src/main.rs");
     println!("cargo:rerun-if-changed=../user/editors/text/src/lib.rs");
     println!("cargo:rerun-if-changed=../user/editors/text/link.ld");
     println!("cargo:rerun-if-changed=../user/editors/text/Cargo.toml");
-    println!("cargo:rerun-if-changed=../user/servers/test-editor/src/main.rs");
-    println!("cargo:rerun-if-changed=../user/servers/test-editor/link.ld");
-    println!("cargo:rerun-if-changed=../user/servers/test-editor/Cargo.toml");
-    println!("cargo:rerun-if-changed=../user/servers/png-decoder/src/main.rs");
-    println!("cargo:rerun-if-changed=../user/servers/png-decoder/src/lib.rs");
-    println!("cargo:rerun-if-changed=../user/servers/png-decoder/link.ld");
-    println!("cargo:rerun-if-changed=../user/servers/png-decoder/Cargo.toml");
-    println!("cargo:rerun-if-changed=../user/servers/jpeg-decoder/src/main.rs");
-    println!("cargo:rerun-if-changed=../user/servers/jpeg-decoder/src/lib.rs");
-    println!("cargo:rerun-if-changed=../user/servers/jpeg-decoder/link.ld");
-    println!("cargo:rerun-if-changed=../user/servers/jpeg-decoder/Cargo.toml");
-    println!("cargo:rerun-if-changed=../user/servers/video-decoder/src/main.rs");
-    println!("cargo:rerun-if-changed=../user/servers/video-decoder/src/lib.rs");
-    println!("cargo:rerun-if-changed=../user/servers/video-decoder/link.ld");
-    println!("cargo:rerun-if-changed=../user/servers/video-decoder/Cargo.toml");
-    println!("cargo:rerun-if-changed=../user/servers/drivers/9p/src/main.rs");
-    println!("cargo:rerun-if-changed=../user/servers/drivers/9p/src/lib.rs");
-    println!("cargo:rerun-if-changed=../user/servers/drivers/9p/link.ld");
-    println!("cargo:rerun-if-changed=../user/servers/drivers/9p/Cargo.toml");
-    println!("cargo:rerun-if-changed=../user/servers/fs/src/main.rs");
-    println!("cargo:rerun-if-changed=../user/servers/fs/src/lib.rs");
-    println!("cargo:rerun-if-changed=../user/servers/fs/link.ld");
-    println!("cargo:rerun-if-changed=../user/servers/fs/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/shared/test-editor/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/shared/test-editor/link.ld");
+    println!("cargo:rerun-if-changed=../user/shared/test-editor/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/shared/png-decoder/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/shared/png-decoder/src/lib.rs");
+    println!("cargo:rerun-if-changed=../user/shared/png-decoder/link.ld");
+    println!("cargo:rerun-if-changed=../user/shared/png-decoder/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/shared/jpeg-decoder/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/shared/jpeg-decoder/src/lib.rs");
+    println!("cargo:rerun-if-changed=../user/shared/jpeg-decoder/link.ld");
+    println!("cargo:rerun-if-changed=../user/shared/jpeg-decoder/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/shared/video-decoder/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/shared/video-decoder/src/lib.rs");
+    println!("cargo:rerun-if-changed=../user/shared/video-decoder/link.ld");
+    println!("cargo:rerun-if-changed=../user/shared/video-decoder/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/drivers/9p/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/drivers/9p/src/lib.rs");
+    println!("cargo:rerun-if-changed=../user/drivers/9p/link.ld");
+    println!("cargo:rerun-if-changed=../user/drivers/9p/Cargo.toml");
+    println!("cargo:rerun-if-changed=../user/shared/host-fs/src/main.rs");
+    println!("cargo:rerun-if-changed=../user/shared/host-fs/src/lib.rs");
+    println!("cargo:rerun-if-changed=../user/shared/host-fs/link.ld");
+    println!("cargo:rerun-if-changed=../user/shared/host-fs/Cargo.toml");
 }
 
 fn build_userspace_crate(crate_dir: &std::path::Path, crate_name: &str, output: &std::path::Path) {
@@ -241,47 +241,47 @@ struct ServiceDef {
 const SERVICES: &[ServiceDef] = &[
     ServiceDef {
         name: "name",
-        dir: "../user/servers/name",
+        dir: "../user/shared/name",
         crate_name: "name",
     },
     ServiceDef {
         name: "console",
-        dir: "../user/servers/console",
+        dir: "../user/shared/console",
         crate_name: "console",
     },
     ServiceDef {
         name: "input",
-        dir: "../user/servers/drivers/input",
+        dir: "../user/drivers/input",
         crate_name: "input",
     },
     ServiceDef {
         name: "blk",
-        dir: "../user/servers/drivers/blk",
+        dir: "../user/drivers/blk",
         crate_name: "blk",
     },
     ServiceDef {
         name: "render",
-        dir: "../user/servers/drivers/render",
+        dir: "../user/drivers/render",
         crate_name: "render",
     },
     ServiceDef {
         name: "store",
-        dir: "../user/servers/store",
+        dir: "../user/shared/store-service",
         crate_name: "store-service",
     },
     ServiceDef {
         name: "document",
-        dir: "../user/servers/document",
+        dir: "../user/shared/document",
         crate_name: "document-service",
     },
     ServiceDef {
         name: "layout",
-        dir: "../user/servers/layout",
+        dir: "../user/shared/layout",
         crate_name: "layout-service",
     },
     ServiceDef {
         name: "presenter",
-        dir: "../user/servers/presenter",
+        dir: "../user/shared/presenter",
         crate_name: "presenter-service",
     },
     ServiceDef {
@@ -291,47 +291,47 @@ const SERVICES: &[ServiceDef] = &[
     },
     ServiceDef {
         name: "png-decoder",
-        dir: "../user/servers/png-decoder",
+        dir: "../user/shared/png-decoder",
         crate_name: "png-decoder",
     },
     ServiceDef {
         name: "jpeg-decoder",
-        dir: "../user/servers/jpeg-decoder",
+        dir: "../user/shared/jpeg-decoder",
         crate_name: "jpeg-decoder",
     },
     ServiceDef {
         name: "video-decoder",
-        dir: "../user/servers/video-decoder",
+        dir: "../user/shared/video-decoder",
         crate_name: "video-decoder",
     },
     ServiceDef {
         name: "rng",
-        dir: "../user/servers/drivers/rng",
+        dir: "../user/drivers/rng",
         crate_name: "rng",
     },
     ServiceDef {
         name: "snd",
-        dir: "../user/servers/drivers/snd",
+        dir: "../user/drivers/snd",
         crate_name: "snd",
     },
     ServiceDef {
         name: "codec-decode",
-        dir: "../user/servers/drivers/video",
+        dir: "../user/drivers/video",
         crate_name: "video",
     },
     ServiceDef {
         name: "audio",
-        dir: "../user/servers/audio",
+        dir: "../user/shared/audio",
         crate_name: "audio-service",
     },
     ServiceDef {
         name: "9p",
-        dir: "../user/servers/drivers/9p",
+        dir: "../user/drivers/9p",
         crate_name: "virtio-9p",
     },
     ServiceDef {
         name: "fs",
-        dir: "../user/servers/fs",
+        dir: "../user/shared/host-fs",
         crate_name: "fs-service",
     },
 ];

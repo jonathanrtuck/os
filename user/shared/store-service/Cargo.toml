@@ -1,0 +1,18 @@
+[package]
+name = "store-service"
+version = "0.1.0"
+edition = "2024"
+license = "Unlicense"
+
+[dependencies]
+abi = { path = "../../system/abi" }
+blk = { path = "../../drivers/blk" }
+heap = { path = "../../system/heap" }
+console = { path = "../console" }
+fs = { path = "../fs" }
+init = { path = "../init" }
+ipc = { path = "../../system/ipc" }
+name = { path = "../name" }
+store = { path = "../store" }
+
+[workspace]

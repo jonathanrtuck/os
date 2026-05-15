@@ -1,0 +1,15 @@
+[package]
+name = "video"
+version = "0.1.0"
+edition = "2024"
+license = "Unlicense"
+
+[dependencies]
+abi = { path = "../../system/abi" }
+console = { path = "../../shared/console" }
+init = { path = "../../shared/init" }
+ipc = { path = "../../system/ipc" }
+name = { path = "../../shared/name" }
+virtio = { path = "../../system/virtio" }
+
+[workspace]

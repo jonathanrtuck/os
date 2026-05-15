@@ -1,23 +1,23 @@
 [workspace]
 members = [
     "kernel",
-    "user/libraries/scene",
-    "user/libraries/drawing",
-    "user/libraries/piecetable",
-    "user/libraries/animation",
-    "user/libraries/layout",
-    "user/libraries/fs",
-    "user/libraries/icons",
-    "user/libraries/store",
-    "user/libraries/fonts",
-    "user/libraries/render",
-    "user/libraries/png",
-    "user/libraries/jpeg",
-    "user/libraries/avi",
-    "user/libraries/mp4",
-    "user/libraries/view-tree",
+    "user/shared/scene",
+    "user/shared/drawing",
+    "user/shared/piecetable",
+    "user/shared/animation",
+    "user/shared/line-break",
+    "user/shared/fs",
+    "user/shared/icons",
+    "user/shared/store",
+    "user/shared/fonts",
+    "user/shared/render",
+    "user/codecs/png",
+    "user/codecs/jpeg",
+    "user/codecs/avi",
+    "user/codecs/mp4",
+    "user/shared/view",
 ]
-exclude = ["kernel/fuzz", "user/init", "user/abi", "tools/mkdisk", "tools/mkavi"]
+exclude = ["kernel/fuzz", "user/shared/init", "user/system/abi", "tools/mkdisk", "tools/mkavi"]
 resolver = "3"
 
 [profile.dev]

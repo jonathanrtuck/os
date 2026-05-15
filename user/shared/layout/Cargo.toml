@@ -1,0 +1,35 @@
+[package]
+name = "layout-service"
+version = "0.1.0"
+edition = "2024"
+license = "Unlicense"
+
+[features]
+default = ["service"]
+service = [
+    "dep:abi",
+    "dep:console",
+    "dep:document-service",
+    "dep:fonts",
+    "dep:heap",
+    "dep:init",
+    "dep:layout",
+    "dep:name",
+    "dep:piecetable",
+    "ipc/kernel",
+]
+
+[dependencies]
+ipc = { path = "../../system/ipc", default-features = false }
+
+abi = { path = "../../system/abi", optional = true }
+console = { path = "../console", optional = true }
+document-service = { path = "../document", optional = true }
+fonts = { path = "../fonts", optional = true }
+heap = { path = "../../system/heap", optional = true }
+init = { path = "../init", optional = true }
+layout = { path = "../line-break", optional = true }
+name = { path = "../name", optional = true }
+piecetable = { path = "../piecetable", optional = true }
+
+[workspace]

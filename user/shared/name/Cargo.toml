@@ -1,0 +1,12 @@
+[package]
+name = "name"
+version = "0.1.0"
+edition = "2024"
+license = "Unlicense"
+
+[dependencies]
+abi = { path = "../../system/abi" }
+heap = { path = "../../system/heap" }
+ipc = { path = "../../system/ipc" }
+
+[workspace]

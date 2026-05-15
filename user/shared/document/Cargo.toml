@@ -1,0 +1,29 @@
+[package]
+name = "document-service"
+version = "0.1.0"
+edition = "2024"
+license = "Unlicense"
+
+[features]
+default = ["service"]
+service = [
+    "dep:abi",
+    "dep:console",
+    "dep:heap",
+    "dep:name",
+    "dep:piecetable",
+    "dep:store-service",
+    "ipc/kernel",
+]
+
+[dependencies]
+ipc = { path = "../../system/ipc", default-features = false }
+
+abi = { path = "../../system/abi", optional = true }
+console = { path = "../console", optional = true }
+heap = { path = "../../system/heap", optional = true }
+name = { path = "../name", optional = true }
+piecetable = { path = "../piecetable", optional = true }
+store-service = { path = "../store-service", optional = true }
+
+[workspace]

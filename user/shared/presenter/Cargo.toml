@@ -1,0 +1,57 @@
+[package]
+name = "presenter-service"
+version = "0.1.0"
+edition = "2024"
+license = "Unlicense"
+
+[features]
+default = ["service"]
+service = [
+    "dep:abi",
+    "dep:animation",
+    "dep:audio-service",
+    "dep:console",
+    "dep:document-service",
+    "dep:fonts",
+    "dep:heap",
+    "dep:icons",
+    "dep:init",
+    "dep:layout",
+    "dep:layout-service",
+    "dep:name",
+    "dep:piecetable",
+    "dep:jpeg-decoder",
+    "dep:video-decoder",
+    "dep:render",
+    "dep:store-service",
+    "dep:scene",
+    "dep:text-editor",
+    "ipc/kernel",
+    "dep:view-tree",
+]
+
+[dependencies]
+ipc = { path = "../../system/ipc", default-features = false }
+
+abi = { path = "../../system/abi", optional = true }
+animation = { path = "../animation", optional = true }
+audio-service = { path = "../audio", optional = true }
+console = { path = "../console", optional = true }
+document-service = { path = "../document", optional = true }
+fonts = { path = "../fonts", optional = true }
+heap = { path = "../../system/heap", optional = true }
+icons = { path = "../icons", optional = true }
+init = { path = "../init", optional = true }
+jpeg-decoder = { path = "../jpeg-decoder", optional = true }
+layout = { path = "../line-break", optional = true }
+layout-service = { path = "../layout", optional = true }
+name = { path = "../name", optional = true }
+piecetable = { path = "../piecetable", optional = true }
+render = { path = "../../drivers/render", optional = true }
+scene = { path = "../scene", optional = true }
+store-service = { path = "../store-service", optional = true }
+text-editor = { path = "../../editors/text", optional = true }
+video-decoder = { path = "../video-decoder", optional = true }
+view-tree = { path = "../view", optional = true }
+
+[workspace]

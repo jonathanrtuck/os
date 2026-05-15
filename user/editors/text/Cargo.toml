@@ -15,11 +15,11 @@ service = [
 ]
 
 [dependencies]
-ipc = { path = "../../ipc", default-features = false }
+ipc = { path = "../../system/ipc", default-features = false }
 
-abi = { path = "../../abi", optional = true }
-console = { path = "../../servers/console", optional = true }
-document-service = { path = "../../servers/document", optional = true }
-name = { path = "../../servers/name", optional = true }
+abi = { path = "../../system/abi", optional = true }
+console = { path = "../../shared/console", optional = true }
+document-service = { path = "../../shared/document", optional = true }
+name = { path = "../../shared/name", optional = true }
 
 [workspace]

@@ -1,0 +1,16 @@
+[package]
+name = "audio-service"
+version = "0.1.0"
+edition = "2024"
+license = "Unlicense"
+
+[dependencies]
+abi = { path = "../../system/abi" }
+console = { path = "../console" }
+init = { path = "../init" }
+ipc = { path = "../../system/ipc" }
+name = { path = "../name" }
+snd = { path = "../../drivers/snd" }
+wav = { path = "../../codecs/wav" }
+
+[workspace]

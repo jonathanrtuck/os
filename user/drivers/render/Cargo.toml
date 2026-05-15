@@ -1,0 +1,25 @@
+[package]
+name = "render"
+version = "0.1.0"
+edition = "2024"
+license = "Unlicense"
+
+[features]
+default = ["baremetal"]
+baremetal = ["dep:abi", "dep:console", "dep:heap", "dep:init", "dep:ipc", "dep:name", "dep:virtio"]
+
+[dependencies]
+abi = { path = "../../system/abi", optional = true }
+libm = "0.2"
+animation = { path = "../../shared/animation" }
+console = { path = "../../shared/console", optional = true }
+fonts = { path = "../../shared/fonts" }
+heap = { path = "../../system/heap", optional = true }
+init = { path = "../../shared/init", optional = true }
+ipc = { path = "../../system/ipc", optional = true }
+name = { path = "../../shared/name", optional = true }
+icons = { path = "../../shared/icons" }
+scene = { path = "../../shared/scene" }
+virtio = { path = "../../system/virtio", optional = true }
+
+[workspace]

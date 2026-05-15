@@ -1,0 +1,14 @@
+[package]
+name = "test-store"
+version = "0.1.0"
+edition = "2024"
+license = "Unlicense"
+
+[dependencies]
+abi = { path = "../../system/abi" }
+console = { path = "../console" }
+ipc = { path = "../../system/ipc" }
+name = { path = "../name" }
+store-service = { path = "../store-service" }
+
+[workspace]

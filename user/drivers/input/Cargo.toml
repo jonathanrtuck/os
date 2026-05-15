@@ -1,0 +1,16 @@
+[package]
+name = "input"
+version = "0.1.0"
+edition = "2024"
+license = "Unlicense"
+
+[dependencies]
+abi = { path = "../../system/abi" }
+console = { path = "../../shared/console" }
+init = { path = "../../shared/init" }
+ipc = { path = "../../system/ipc" }
+name = { path = "../../shared/name" }
+presenter-service = { path = "../../shared/presenter" }
+virtio = { path = "../../system/virtio" }
+
+[workspace]
