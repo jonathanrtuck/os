@@ -14,6 +14,7 @@ infrastructure first, UX iteration last.
 | v0.5           | Rich text (piece table, multi-style runs, content-type dispatch)        | 2026-03-30 |
 | v0.6 (rewrite) | Kernel rewrite from first principles                                    | 2026-04-19 |
 | v0.7           | Userspace rebuild — services, drivers, integration, rendering           | 2026-05-11 |
+| v0.8           | Media pipeline, rendering v2, content service architecture              | 2026-05-15 |
 
 ### v0.6 — Kernel Rewrite
 
@@ -48,83 +49,187 @@ Rebuilt the full userspace stack on the verified kernel. Five phases:
    text + image spaces), rich text rendering (proportional layout, italic axis),
    120Hz frame loop, play button with audio playback
 
+### v0.8 — Media + Architecture
+
+Three major efforts built on the v0.7 service infrastructure:
+
+1. **Media pipeline** — video playback (H.264 hardware decode via VideoToolbox,
+   MP4/AVI container parsing, PTS-scheduled frame presentation, zero-copy
+   rendering via host texture binding), audio playback (AAC decode via
+   AudioConverter, WAV, virtio-snd driver, audio mixer service, synchronized A/V
+   with play/pause/seek). Document switching generalized from 2-space to N-space
+   strip with spring animation.
+
+2. **Rendering pipeline v2** — 8 optimizations driven by video playback
+   performance: vsync alignment (host counter), damage tracking (scissored
+   partial redraws, TBDR-aware retained blit), async frame submission
+   (double-buffered DMA, CPU/GPU overlap), atlas LRU eviction (shelf-based,
+   dirty rect upload), vertex buffer caching (skip scene walk on image-only
+   changes), GPU compute glyph compositing, single-submission emit (one command
+   buffer per frame), integer presenter math (eliminated FP context
+   save/restore).
+
+3. **Content service architecture** — decomposition of the monolithic presenter
+   into the viewer model. Viewer trait with enum dispatch (TextViewer,
+   ImageViewer, VideoViewer, WorkspaceViewer). View tree as SSOT — ViewSubtree
+   with pre-computed layout positions. Portal-based zero-copy composition —
+   workspace viewer's tree references child viewer subtrees by index.
+   ViewerRegistry maps mimetype patterns to viewers with specificity ranking.
+   ContentCommand: viewers return intent, presenter dispatches. Decoder services
+   eliminated — viewers call codec libraries directly. Directory restructured:
+   system/, drivers/, codecs/, shared/, editors/.
+
+## Current State
+
+19 production services. 589 tests + 4 fuzz targets + 33 property tests + 34
+bare-metal integration tests. 4 content types: text/plain (full editing),
+image/png + image/jpeg (viewing), video/mp4 + video/avi (playback with audio).
+
+**What's in place for future milestones:**
+
+- **Viewer abstraction** — mimetype → viewer → ViewSubtree → scene graph. New
+  content types plug in by implementing the Viewer trait and registering with
+  the ViewerRegistry. The compositor and rendering pipeline are
+  content-agnostic.
+- **Portal composition** — the workspace IS a compound document. Child viewers
+  compose via portals (zero-copy subtree references). Extending this to
+  document-level compound composition is the natural next step.
+- **Rendering pipeline** — native Metal renderer with analytical shadows, CPU
+  path rasterizer, glyph atlas, font shaping, damage tracking, GPU compute.
+  Decision #11 approach B (native renderer) is the reality.
+- **Interaction framework** — ContentCommand + hit testing + cursor shapes +
+  click/drag selection. The mechanism for routing input to the right viewer
+  exists.
+- **Data/control split** — bulk data (scene graph, document buffer, decoded
+  pixels) via shared memory VMOs. Control (edit requests, input events) via sync
+  IPC. Hot path is invisible to the kernel.
+
 ## Planned
 
-| Version    | Theme                           | Character      | Key Deliverables                                                                                                                                                 |
-| ---------- | ------------------------------- | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **v0.8**   | **Media Pipeline**              | Foundation     | Video playback (frame ring in content region). Additional audio codecs. Mimetype-driven decode routing. Media transport abstraction.                             |
-| **v0.9**   | **Design Decisions**            | Design sprint  | Settle #10 (view state), #15 (layout engine), #17 (interaction model) _as interfaces_. System clipboard. Prototyping to validate, not to ship.                   |
-| **v0.10**  | **Compound Documents & Layout** | Foundation     | Layout engine (#15). Spatial composition. Manifest format. Translators. Generic — not encoding a specific UX.                                                    |
-| **v0.11**  | **Realtime & Streaming**        | Foundation     | Conversations, presence, streaming media as document types. Local prototype with mock transport. Exercises the temporal axis of compound docs (#14).             |
-| **v0.12**  | **CLI / TUI**                   | Foundation     | The other native OS interface (GUI and CLI are equally fundamental). Shell model, tools-as-subshells, structured pipes. Depends on #17 settled in v0.9.          |
-| **v0.13**  | **Network**                     | Infrastructure | Network stack, TCP/IP, DNS, TLS. Unlocks real transport for v0.11's realtime content types.                                                                      |
-| **v0.14**  | **Web**                         | Foundation     | Web content as compound document, browser-as-translator. Depends on network + compound docs + layout engine.                                                     |
-| **v0.15**  | **Real Hardware**               | Infrastructure | Apple Silicon bare-metal target. Driver work behind existing interfaces. Second architecture enabled by v0.6's arch abstraction.                                 |
-| **v0.16+** | **UX Iteration**                | Polish         | GUI + CLI together. Document browse/search interface. Look, feel, interaction, animation. Multiple passes — this is where the document-centric thesis is tested. |
-| **v1.0**   | **Ship**                        |                | Whatever "done" means.                                                                                                                                           |
+| Version    | Theme                    | Character      | Key Deliverables                                                                                                                            |
+| ---------- | ------------------------ | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| **v0.9**   | **Compound Documents**   | Foundation     | Manifest format. Spatial composition (flow + canvas). Layout engine for multi-type docs. Sub-document editing. Translator proof-of-concept. |
+| **v0.10**  | **CLI / TUI**            | Foundation     | The other native OS interface. Shell model, tools-as-subshells, structured pipes. Document query integration.                               |
+| **v0.11**  | **Realtime & Streaming** | Foundation     | Conversations, presence, streaming media as document types. Local prototype with mock transport. Temporal axis of compound docs.            |
+| **v0.12**  | **Network**              | Infrastructure | Network stack, TCP/IP, DNS, TLS. Unlocks real transport for v0.11's realtime content types.                                                 |
+| **v0.13**  | **Web**                  | Foundation     | HTML as compound document. Web engine as translator (approach B). Depends on network + compound docs + layout.                              |
+| **v0.14**  | **Real Hardware**        | Infrastructure | Apple Silicon bare-metal target. Driver work behind existing interfaces.                                                                    |
+| **v0.15+** | **UX Iteration**         | Polish         | GUI + CLI together. Document browse/search. Look, feel, interaction, animation. Where the document-centric thesis is tested.                |
+| **v1.0**   | **Ship**                 |                | Whatever "done" means.                                                                                                                      |
 
-## What's Already In Place
+### v0.9 — Compound Documents
 
-The v0.7 userspace built significant media and rendering infrastructure that was
-originally planned for later milestones:
+The content service architecture (v0.8) provides the mechanism: viewers produce
+subtrees, portals compose them, the registry routes mimetypes to viewers. v0.9
+builds the compound document model on top of this infrastructure.
 
-- **Image:** PNG decoder (all color types, Adam7 interlacing), JPEG decoder
-  (EXIF orientation), texture rendering pipeline, mimetype-routed decode via
-  decoder services
-- **Audio:** WAV decoder, virtio-snd driver, audio mixer service, play button UI
-- **Typography:** Three font families (JetBrains Mono, Inter, Source Serif 4),
-  proportional layout, italic axis, font fallback chain
-- **Rendering:** Analytical shadows, path rasterizer (fill + stroke), gradient
-  paths, hardware cursor, 120Hz frame loop, batched GPU submit, atlas eviction
-- **Interaction:** Click/double/triple-click, drag selection
-  (character/word/line granularity), scene-graph hit testing, semantic cursor
-  shapes
-- **Document switching:** Multi-space scene graph, spring animation,
-  content-type aware key dispatch
+**What it delivers:**
 
-This means v0.8 (media) is partially complete — audio playback and image
-decoding are done. Video is the remaining gap.
+- **Manifest format** — the data structure describing a compound document:
+  parts, relationships, layout axes (spatial/temporal/logical from Decision
+  #14). Internal to the OS, no external interop requirement.
+- **Spatial composition** — at minimum flow and fixed canvas layout modes. The
+  layout engine computes positions for heterogeneous content parts within a
+  compound document.
+- **Compound document viewer** — uses portals to compose sub-viewers. A rich
+  text document with inline images, or a slide deck with text + image regions,
+  both rendered through the same viewer composition model.
+- **Sub-document editing** — editing text within a compound document using the
+  same text editor. Resolves the nesting tension from Decision #17.
+- **Translator proof-of-concept** — at least one external format (e.g., Markdown
+  with images, or a simple HTML subset) translated into the manifest format.
+
+**Design decisions narrowed by v0.8:**
+
+- **#10 View State:** The viewer trait's `rebuild()` and ViewSubtree define a
+  concrete interface for view output. The remaining question is persistence —
+  how view state survives across sessions (opaque blobs per the initial leaning,
+  vs. structured).
+- **#11 Rendering:** Settled in practice. Approach B (native renderer, web
+  translated inward) is the implementation. The web engine becomes a translator
+  in v0.13, not a rendering substrate.
+- **#15 Layout Engine:** Text layout exists (the layout service). ViewSubtree
+  includes pre-computed positions. The remaining scope is spatial composition
+  for compound documents — how heterogeneous parts are positioned relative to
+  each other.
+- **#17 Interaction Model:** ContentCommand + viewer dispatch + hit testing
+  provide the input routing framework. The remaining questions are navigation
+  between documents and compound editing (how editor nesting works).
+
+### v0.10 — CLI / TUI
+
+The other native OS interface (GUI and CLI are equally fundamental — Guiding
+Belief #4). Placed after compound documents so the CLI operates on rich content,
+not just text files. Shell model, tools-as-subshells, structured pipes. Document
+query integration — the CLI's equivalent of "open a file" is a query, not a
+path.
+
+### v0.11 — Realtime & Streaming
+
+Conversations, presence, streaming media as document types. Local prototype with
+mock transport. Exercises the temporal axis of compound documents (Decision
+#14). Designed to work without a network stack — when the network arrives in
+v0.12, it plugs in as transport beneath content types that already work locally.
+
+### v0.13 — Web
+
+HTML as a compound document, translated inward via a web engine in the blue
+layer (Decision #11 approach B). The web engine parses HTML/CSS/JS and produces
+the OS's compound document format — manifests with spatial layout + referenced
+content. The native renderer displays the result through the same pipeline as
+every other document type. Depends on network (v0.12) + compound docs (v0.9) +
+layout engine (v0.9).
 
 ## Sequencing Rationale
 
-**Foundation-up, UX-last.** v0.1–v0.15 build generic infrastructure behind clean
-interfaces. UX iteration comes at the end (v0.16+) when all the pieces are on
-the table and can be iterated freely. This maximizes reusability — if the UX
-needs to change, the damage is contained to the leaf layer.
+**Foundation-up, UX-last.** v0.1–v0.14 build generic infrastructure behind clean
+interfaces. UX iteration comes at the end (v0.15+) when all the pieces are on
+the table.
 
-**Design decisions (v0.9) separate from UX iteration (v0.16+).** v0.9 settles
-_interfaces_: "what are the interaction primitives?", "how does view state
-work?", "what's the layout engine's API?" v0.16 iterates on _implementations_
-behind those interfaces.
+**Compound documents next (v0.9).** The viewer/portal/registry infrastructure
+from v0.8 is the mechanism; compound documents are the thesis of the entire
+project (Decision #2 + #14). Building them now, while the viewer abstraction is
+fresh, avoids the model calcifying around single-document assumptions.
 
-**Realtime before network (v0.11 before v0.13).** Forces the realtime content
+**Design decisions merged into implementation (v0.9, not a separate
+milestone).** The original plan (old v0.9) separated "settle interfaces" from
+"implement compound docs" (old v0.10). But v0.8's content service architecture
+already created concrete interfaces for #10/#15/#17. What remains is
+implementing compound document layout and composition behind those interfaces —
+which was the old v0.10's job. Merging them avoids a two-step that the
+architecture already shortcut.
+
+**Realtime before network (v0.11 before v0.12).** Forces the realtime content
 model to be designed without assuming a specific transport. Conversations and
 streams become document types with temporal semantics, not "network features."
 When the network stack arrives, it plugs in as transport beneath content types
 that already work locally.
 
-**CLI/TUI as its own milestone (v0.12).** The CLI is a fundamental OS interface,
-not an afterthought. Placed after design decisions (#17 settled) and compound
-docs (rich enough to be interesting) but before network/web.
+**CLI as its own milestone (v0.10).** The CLI is a fundamental OS interface, not
+an afterthought. Placed after compound documents (rich enough to be interesting)
+but before network/web.
 
-**Flexibility points:** v0.8 (media) and v0.9 (design decisions) are swappable —
-media has no dependency on the interaction model. Everything else chains
-naturally.
+**Web last among content milestones (v0.13).** HTML is a compound document
+format. The translator pattern requires both the compound document model to
+translate INTO and the network stack to fetch content FROM.
+
+**Flexibility points:** v0.10 (CLI) and v0.11 (realtime) are swappable — neither
+depends on the other. Everything else chains naturally.
 
 ## Descoped
 
-- Multi-display (single display only — interfaces are clean enough for others to
-  add)
+- Multi-display (single display only — interfaces clean enough to add later)
 - Self-hosting (development stays on macOS)
 
 ## Decision Dependencies
 
 Unsettled decisions and when they get resolved:
 
-| Decision              | Status                            | Resolved in |
-| --------------------- | --------------------------------- | ----------- |
-| #10 View State        | Unsettled (leaning: opaque blobs) | v0.9        |
-| #15 Layout Engine     | Unsettled                         | v0.9        |
-| #17 Interaction Model | Exploring                         | v0.9        |
+| Decision              | Status                                                                                  | Resolved in |
+| --------------------- | --------------------------------------------------------------------------------------- | ----------- |
+| #10 View State        | Interface exists (viewer trait); persistence story unsettled                            | v0.9        |
+| #11 Rendering         | Settled by implementation: approach B (native renderer, web as translator)              | v0.8        |
+| #15 Layout Engine     | Text layout done; compound spatial layout unsettled                                     | v0.9        |
+| #17 Interaction Model | Framework exists (ContentCommand, hit testing); navigation + compound editing unsettled | v0.9–v0.10  |
 
-Settled decisions: #1–9, #11–14, #16, #18. See `decisions.md`.
+Settled decisions: #1–9, #12–14, #16, #18. See `decisions.md`.
