@@ -127,9 +127,6 @@ fn register_for(ns_ep: Handle, svc_name: &[u8]) -> Handle {
 const STORE_SVC: &[u8] = b"store";
 const DOCUMENT_SVC: &[u8] = b"document";
 const EDITOR_TEXT_SVC: &[u8] = b"editor.text";
-const PNG_DECODER_SVC: &[u8] = b"png-decoder";
-const JPEG_DECODER_SVC: &[u8] = b"jpeg-decoder";
-const VIDEO_DECODER_SVC: &[u8] = b"video-decoder";
 const FS_SVC: &[u8] = b"fs";
 
 fn spawn_from_pack(pack_data: &[u8], ns_ep: Handle, init_ep: Handle, font_vmo: Handle) {
@@ -197,9 +194,6 @@ fn spawn_from_pack(pack_data: &[u8], ns_ep: Handle, init_ep: Handle, font_vmo: H
         } else if name == STORE_SVC
             || name == DOCUMENT_SVC
             || name == EDITOR_TEXT_SVC
-            || name == PNG_DECODER_SVC
-            || name == JPEG_DECODER_SVC
-            || name == VIDEO_DECODER_SVC
             || name == FS_SVC
             || name == AUDIO_SVC
         {

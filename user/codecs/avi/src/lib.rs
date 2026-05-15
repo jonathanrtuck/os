@@ -430,6 +430,7 @@ mod tests {
 
         // Placeholder for RIFF header (12 bytes).
         buf.extend_from_slice(&[0u8; 12]);
+
         write_fourcc(&mut buf, 0, b"RIFF");
         write_fourcc(&mut buf, 8, b"AVI ");
 
@@ -437,13 +438,16 @@ mod tests {
         let hdrl_start = buf.len();
 
         buf.extend_from_slice(&[0u8; 8]); // LIST header
+
         write_fourcc(&mut buf, hdrl_start, b"LIST");
+
         buf.extend_from_slice(b"hdrl");
 
         // avih chunk (56 bytes).
         let avih_start = buf.len();
 
         buf.extend_from_slice(&[0u8; 8 + 56]);
+
         write_fourcc(&mut buf, avih_start, b"avih");
         write_u32(&mut buf, avih_start + 4, 56);
         write_u32(&mut buf, avih_start + 8, us_per_frame);
@@ -456,13 +460,16 @@ mod tests {
         let strl_start = buf.len();
 
         buf.extend_from_slice(&[0u8; 8]);
+
         write_fourcc(&mut buf, strl_start, b"LIST");
+
         buf.extend_from_slice(b"strl");
 
         // strh chunk (56 bytes).
         let strh_start = buf.len();
 
         buf.extend_from_slice(&[0u8; 8 + 56]);
+
         write_fourcc(&mut buf, strh_start, b"strh");
         write_u32(&mut buf, strh_start + 4, 56);
         write_fourcc(&mut buf, strh_start + 8, b"vids");
@@ -472,6 +479,7 @@ mod tests {
         let strf_start = buf.len();
 
         buf.extend_from_slice(&[0u8; 8 + 40]);
+
         write_fourcc(&mut buf, strf_start, b"strf");
         write_u32(&mut buf, strf_start + 4, 40);
         write_u32(&mut buf, strf_start + 8, 40); // biSize
@@ -492,15 +500,19 @@ mod tests {
         let movi_start = buf.len();
 
         buf.extend_from_slice(&[0u8; 8]);
+
         write_fourcc(&mut buf, movi_start, b"LIST");
+
         buf.extend_from_slice(b"movi");
 
         for frame in frames {
             let chunk_start = buf.len();
 
             buf.extend_from_slice(&[0u8; 8]);
+
             write_fourcc(&mut buf, chunk_start, b"00dc");
             write_u32(&mut buf, chunk_start + 4, frame.len() as u32);
+
             buf.extend_from_slice(frame);
 
             if frame.len() % 2 != 0 {
@@ -517,6 +529,7 @@ mod tests {
         let idx1_data_size = frames.len() * 16;
 
         buf.extend_from_slice(&[0u8; 8]);
+
         write_fourcc(&mut buf, idx1_start, b"idx1");
         write_u32(&mut buf, idx1_start + 4, idx1_data_size as u32);
 
@@ -526,6 +539,7 @@ mod tests {
             let entry_start = buf.len();
 
             buf.extend_from_slice(&[0u8; 16]);
+
             write_fourcc(&mut buf, entry_start, b"00dc");
             write_u32(&mut buf, entry_start + 4, Idx1Entry::KEYFRAME);
             write_u32(&mut buf, entry_start + 8, frame_offset);
@@ -576,7 +590,6 @@ mod tests {
         let frames: Vec<FrameRef> = VideoFrameIter::new(&data).unwrap().collect();
 
         assert_eq!(frames.len(), 3);
-
         assert_eq!(frame_data(&data, &frames[0]), Some(b"JPEG0".as_slice()));
         assert_eq!(frame_data(&data, &frames[1]), Some(b"JPEG1".as_slice()));
         assert_eq!(frame_data(&data, &frames[2]), Some(b"JPEG2".as_slice()));

@@ -115,18 +115,6 @@ fn build_init(kernel_dir: &std::path::Path) {
     println!("cargo:rerun-if-changed=../user/shared/test-editor/src/main.rs");
     println!("cargo:rerun-if-changed=../user/shared/test-editor/link.ld");
     println!("cargo:rerun-if-changed=../user/shared/test-editor/Cargo.toml");
-    println!("cargo:rerun-if-changed=../user/shared/png-decoder/src/main.rs");
-    println!("cargo:rerun-if-changed=../user/shared/png-decoder/src/lib.rs");
-    println!("cargo:rerun-if-changed=../user/shared/png-decoder/link.ld");
-    println!("cargo:rerun-if-changed=../user/shared/png-decoder/Cargo.toml");
-    println!("cargo:rerun-if-changed=../user/shared/jpeg-decoder/src/main.rs");
-    println!("cargo:rerun-if-changed=../user/shared/jpeg-decoder/src/lib.rs");
-    println!("cargo:rerun-if-changed=../user/shared/jpeg-decoder/link.ld");
-    println!("cargo:rerun-if-changed=../user/shared/jpeg-decoder/Cargo.toml");
-    println!("cargo:rerun-if-changed=../user/shared/video-decoder/src/main.rs");
-    println!("cargo:rerun-if-changed=../user/shared/video-decoder/src/lib.rs");
-    println!("cargo:rerun-if-changed=../user/shared/video-decoder/link.ld");
-    println!("cargo:rerun-if-changed=../user/shared/video-decoder/Cargo.toml");
     println!("cargo:rerun-if-changed=../user/drivers/9p/src/main.rs");
     println!("cargo:rerun-if-changed=../user/drivers/9p/src/lib.rs");
     println!("cargo:rerun-if-changed=../user/drivers/9p/link.ld");
@@ -289,22 +277,7 @@ const SERVICES: &[ServiceDef] = &[
         dir: "../user/editors/text",
         crate_name: "text-editor",
     },
-    ServiceDef {
-        name: "png-decoder",
-        dir: "../user/shared/png-decoder",
-        crate_name: "png-decoder",
-    },
-    ServiceDef {
-        name: "jpeg-decoder",
-        dir: "../user/shared/jpeg-decoder",
-        crate_name: "jpeg-decoder",
-    },
-    ServiceDef {
-        name: "video-decoder",
-        dir: "../user/shared/video-decoder",
-        crate_name: "video-decoder",
-    },
-    ServiceDef {
+ServiceDef {
         name: "rng",
         dir: "../user/drivers/rng",
         crate_name: "rng",

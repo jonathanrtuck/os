@@ -493,7 +493,6 @@ fn clamp_u8(v: i32) -> u8 {
 fn ycbcr_to_bgra(y: i32, cb: i32, cr: i32) -> [u8; 4] {
     let cb_shift = cb - 128;
     let cr_shift = cr - 128;
-
     let r = y + ((91881 * cr_shift + 32768) >> 16);
     let g = y - ((22554 * cb_shift + 46802 * cr_shift + 32768) >> 16);
     let b = y + ((116130 * cb_shift + 32768) >> 16);
@@ -674,7 +673,6 @@ fn parse_sof(
         if state.components[i].h_factor > max_h {
             max_h = state.components[i].h_factor;
         }
-
         if state.components[i].v_factor > max_v {
             max_v = state.components[i].v_factor;
         }
@@ -706,7 +704,6 @@ fn parse_exif_orientation(data: &[u8], pos: usize, len: usize) -> u8 {
         (0x49, 0x49) => false,
         _ => return 1,
     };
-
     let read16 = |off: usize| -> u16 {
         if big_endian {
             read_u16_be(data, off)
@@ -714,7 +711,6 @@ fn parse_exif_orientation(data: &[u8], pos: usize, len: usize) -> u8 {
             (data[off] as u16) | ((data[off + 1] as u16) << 8)
         }
     };
-
     let read32 = |off: usize| -> u32 {
         if big_endian {
             ((data[off] as u32) << 24)
@@ -1243,7 +1239,6 @@ fn decode_progressive(
 
             decode_progressive_scan(state, data, entropy_start, &scan, coeff_buf)?
         };
-
         // The bit reader may have already consumed the marker that ends
         // the entropy segment. Use it directly if available; otherwise
         // scan forward from end_pos.
@@ -1330,6 +1325,7 @@ fn decode_progressive(
                     }
 
                     let _ = parse_dht(state, data, pos + 2, seg_len - 2);
+
                     pos += seg_len;
                 }
                 M_DQT => {
@@ -1344,6 +1340,7 @@ fn decode_progressive(
                     }
 
                     let _ = parse_dqt(state, data, pos + 2, seg_len - 2);
+
                     pos += seg_len;
                 }
                 _ if marker >= 0xD0 && marker <= 0xD7 => continue,
@@ -1398,6 +1395,7 @@ fn decode_progressive_scan(
             for mcu_col in 0..mcu_cols {
                 if restart_interval > 0 && mcu_count > 0 && mcu_count % restart_interval == 0 {
                     reader.handle_restart();
+
                     dc_pred = [0i32; MAX_COMPONENTS];
                     eobrun = 0;
                 }
@@ -1477,6 +1475,7 @@ fn decode_progressive_scan(
         for block_num in 0..total_blocks {
             if restart_interval > 0 && mcu_count > 0 && mcu_count % restart_interval == 0 {
                 reader.handle_restart();
+
                 dc_pred = [0i32; MAX_COMPONENTS];
                 eobrun = 0;
             }
@@ -1615,6 +1614,7 @@ fn decode_ac_first(
         let byte_offset = block_offset + ZIGZAG[k] as usize * 2;
 
         write_coeff(coeff_buf, byte_offset, coeff_val);
+
         k += 1;
     }
 
@@ -1755,6 +1755,7 @@ fn decode_ac_refine(
         let byte_offset = block_offset + ZIGZAG[k] as usize * 2;
 
         write_coeff(coeff_buf, byte_offset, new_coeff);
+
         k += 1;
 
         // Continue refining non-zeros for the rest of the block.
@@ -1806,6 +1807,7 @@ fn finalize_progressive(state: &DecoderState, output: &mut [u8]) -> Result<(), J
                         }
 
                         idct_2d(&mut blocks[block_idx]);
+
                         block_idx += 1;
                     }
                 }
@@ -1879,7 +1881,6 @@ pub fn jpeg_decode_buf_size(data: &[u8]) -> Result<usize, JpegError> {
         .checked_mul(h)
         .and_then(|p| p.checked_mul(4))
         .ok_or(JpegError::DimensionOverflow)?;
-
     let mut total = pixel_size;
 
     if state.is_progressive {
@@ -2288,6 +2289,7 @@ mod tests {
         for &z in &ZIGZAG {
             assert!((z as usize) < 64);
             assert!(!seen[z as usize], "duplicate zigzag entry");
+
             seen[z as usize] = true;
         }
     }

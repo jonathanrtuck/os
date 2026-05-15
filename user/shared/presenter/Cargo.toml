@@ -10,22 +10,25 @@ service = [
     "dep:abi",
     "dep:animation",
     "dep:audio-service",
+    "dep:avi",
     "dep:console",
     "dep:document-service",
     "dep:fonts",
     "dep:heap",
     "dep:icons",
     "dep:init",
+    "dep:jpeg",
     "dep:layout",
     "dep:layout-service",
+    "dep:mp4",
     "dep:name",
     "dep:piecetable",
-    "dep:jpeg-decoder",
-    "dep:video-decoder",
+    "dep:png",
     "dep:render",
     "dep:store-service",
     "dep:scene",
     "dep:text-editor",
+    "dep:video",
     "ipc/kernel",
     "dep:view-tree",
 ]
@@ -36,22 +39,25 @@ ipc = { path = "../../system/ipc", default-features = false }
 abi = { path = "../../system/abi", optional = true }
 animation = { path = "../animation", optional = true }
 audio-service = { path = "../audio", optional = true }
+avi = { path = "../../codecs/avi", optional = true }
 console = { path = "../console", optional = true }
 document-service = { path = "../document", optional = true }
 fonts = { path = "../fonts", optional = true }
 heap = { path = "../../system/heap", optional = true }
 icons = { path = "../icons", optional = true }
 init = { path = "../init", optional = true }
-jpeg-decoder = { path = "../jpeg-decoder", optional = true }
+jpeg = { path = "../../codecs/jpeg", optional = true }
 layout = { path = "../line-break", optional = true }
 layout-service = { path = "../layout", optional = true }
+mp4 = { path = "../../codecs/mp4", optional = true }
 name = { path = "../name", optional = true }
 piecetable = { path = "../piecetable", optional = true }
+png = { path = "../../codecs/png", optional = true }
 render = { path = "../../drivers/render", optional = true }
 scene = { path = "../scene", optional = true }
 store-service = { path = "../store-service", optional = true }
 text-editor = { path = "../../editors/text", optional = true }
-video-decoder = { path = "../video-decoder", optional = true }
+video = { path = "../../drivers/video", optional = true }
 view-tree = { path = "../view", optional = true }
 
 [workspace]

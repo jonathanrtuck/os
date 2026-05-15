@@ -95,12 +95,41 @@ pub struct VideoViewer {
     pub pixel_width: u16,
     pub pixel_height: u16,
     pub playing: bool,
-    pub decoder_ep: abi::types::Handle,
     pub frame_vmo: abi::types::Handle,
     pub frame_va: usize,
     pub total_frames: u32,
+    // Container + file state
+    pub file_vmo: abi::types::Handle,
+    pub file_va: usize,
+    pub file_size: usize,
+    pub frame_index: alloc::vec::Vec<avi::FrameRef>,
+    pub frame_pts_ns: alloc::vec::Vec<u64>,
+    pub ns_per_frame: u64,
+    pub current_frame: u32,
+    pub play_start_ns: u64,
+    // Hardware codec state
+    pub codec_ep: abi::types::Handle,
+    pub codec_session_id: u32,
+    pub codec_texture_handle: u32,
+    pub shared_vmo: abi::types::Handle,
+    pub shared_va: usize,
+    pub codec: u8,
+    pub output_gen: u64,
+    // Audio state
+    pub audio_pcm_vmo: abi::types::Handle,
+    pub audio_pcm_va: usize,
+    pub audio_pcm_bytes: u32,
+    pub audio_ep: abi::types::Handle,
+    pub audio_cancel: abi::types::Handle,
+    // Console for logging
+    pub console_ep: abi::types::Handle,
     subtree: ViewSubtree,
 }
+
+const SHARED_VMO_SIZE: usize = super::PAGE_SIZE * 64;
+
+/// Generation counter header size on the output VMO (gen + flags = 2 * u64).
+pub(crate) const GEN_HEADER_SIZE: usize = 2 * core::mem::size_of::<u64>();
 
 impl VideoViewer {
     pub fn new(content_id: u32, pixel_width: u16, pixel_height: u16) -> Self {
@@ -111,10 +140,30 @@ impl VideoViewer {
             pixel_width,
             pixel_height,
             playing: false,
-            decoder_ep: abi::types::Handle(0),
             frame_vmo: abi::types::Handle(0),
             frame_va: 0,
             total_frames: 0,
+            file_vmo: abi::types::Handle(0),
+            file_va: 0,
+            file_size: 0,
+            frame_index: alloc::vec::Vec::new(),
+            frame_pts_ns: alloc::vec::Vec::new(),
+            ns_per_frame: 0,
+            current_frame: 0,
+            play_start_ns: 0,
+            codec_ep: abi::types::Handle(0),
+            codec_session_id: 0,
+            codec_texture_handle: 0,
+            shared_vmo: abi::types::Handle(0),
+            shared_va: 0,
+            codec: 0,
+            output_gen: 0,
+            audio_pcm_vmo: abi::types::Handle(0),
+            audio_pcm_va: 0,
+            audio_pcm_bytes: 0,
+            audio_ep: abi::types::Handle(0),
+            audio_cancel: abi::types::Handle(0),
+            console_ep: abi::types::Handle(0),
             subtree: ViewSubtree {
                 tree,
                 root: scene::NULL,
@@ -215,6 +264,665 @@ impl VideoViewer {
 
         self.subtree = ViewSubtree { tree, root, layout };
     }
+
+    // ── Hardware codec methods ──────────────────────────────────────
+
+    pub fn setup_hardware_session(&mut self, ns_ep: abi::types::Handle) {
+        if self.pixel_width == 0 || self.pixel_height == 0 {
+            return;
+        }
+
+        let width = self.pixel_width as u32;
+        let height = self.pixel_height as u32;
+
+        if self.codec_ep.0 == 0 {
+            self.codec_ep = name::lookup(ns_ep, b"codec-decode").unwrap_or(abi::types::Handle(0));
+
+            if self.codec_ep.0 == 0 {
+                return;
+            }
+        }
+
+        if self.shared_vmo.0 == 0 {
+            let vmo = match abi::vmo::create(SHARED_VMO_SIZE, 0) {
+                Ok(h) => h,
+                Err(_) => return,
+            };
+            let rw = abi::types::Rights(
+                abi::types::Rights::READ.0
+                    | abi::types::Rights::WRITE.0
+                    | abi::types::Rights::MAP.0,
+            );
+            let va = match abi::vmo::map(vmo, 0, rw) {
+                Ok(va) => va,
+                Err(_) => {
+                    let _ = abi::handle::close(vmo);
+
+                    return;
+                }
+            };
+
+            self.shared_vmo = vmo;
+            self.shared_va = va;
+
+            let shared_dup = match abi::handle::dup(
+                vmo,
+                abi::types::Rights(
+                    abi::types::Rights::READ.0
+                        | abi::types::Rights::MAP.0
+                        | abi::types::Rights::DUP.0,
+                ),
+            ) {
+                Ok(h) => h,
+                Err(_) => return,
+            };
+            let mut setup_buf = [0u8; ipc::message::MSG_SIZE];
+            let _ = ipc::client::call(
+                self.codec_ep,
+                video::SETUP,
+                &[],
+                &[shared_dup.0],
+                &mut [],
+                &mut setup_buf,
+            );
+        }
+
+        let codec_data_size = if self.codec == video::CODEC_H264 && self.shared_va != 0 {
+            self.write_codec_data()
+        } else {
+            0
+        };
+        let output_dup = match abi::handle::dup(
+            self.frame_vmo,
+            abi::types::Rights(
+                abi::types::Rights::READ.0
+                    | abi::types::Rights::WRITE.0
+                    | abi::types::Rights::MAP.0
+                    | abi::types::Rights::DUP.0,
+            ),
+        ) {
+            Ok(h) => h,
+            Err(_) => return,
+        };
+        let req = video::CreateSessionRequest {
+            codec: self.codec,
+            width,
+            height,
+            codec_data_offset: 0,
+            codec_data_size: codec_data_size as u32,
+        };
+        let mut req_buf = [0u8; video::CreateSessionRequest::SIZE];
+
+        req.write_to(&mut req_buf);
+
+        let mut call_buf = [0u8; ipc::message::MSG_SIZE];
+        let reply = match ipc::client::call(
+            self.codec_ep,
+            video::CREATE_SESSION,
+            &req_buf,
+            &[output_dup.0],
+            &mut [],
+            &mut call_buf,
+        ) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+
+        if reply.is_error() || reply.payload.len() < video::CreateSessionReply::SIZE {
+            return;
+        }
+
+        let cr = video::CreateSessionReply::read_from(reply.payload);
+
+        self.codec_session_id = cr.session_id;
+        self.codec_texture_handle = cr.texture_handle;
+    }
+
+    fn write_codec_data(&self) -> usize {
+        if self.file_va == 0 || self.shared_va == 0 {
+            return 0;
+        }
+
+        // SAFETY: file_va is a valid mapping of file_size bytes.
+        let file_data =
+            unsafe { core::slice::from_raw_parts(self.file_va as *const u8, self.file_size) };
+        let mp4_info = match mp4::parse(file_data) {
+            Ok(m) => m,
+            Err(_) => return 0,
+        };
+        let (_nal_len, avcc_body) = match mp4_info.avc_config() {
+            Some(cfg) => cfg,
+            None => return 0,
+        };
+        let mut reformat_buf = alloc::vec![0u8; 1024];
+        let written = reformat_avcc(avcc_body, &mut reformat_buf);
+
+        if written == 0 || written > SHARED_VMO_SIZE {
+            return 0;
+        }
+
+        // SAFETY: shared_va is a valid RW mapping of SHARED_VMO_SIZE bytes.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                reformat_buf.as_ptr(),
+                self.shared_va as *mut u8,
+                written,
+            );
+        }
+
+        written
+    }
+
+    pub fn decode_and_publish(&mut self, idx: u32) {
+        if self.file_va == 0 || self.frame_index.is_empty() || self.codec_session_id == 0 {
+            return;
+        }
+
+        let idx = idx as usize;
+
+        if idx >= self.frame_index.len() {
+            return;
+        }
+
+        let frame_ref = &self.frame_index[idx];
+        // SAFETY: file_va is a valid mapping of file_size bytes.
+        let file_data =
+            unsafe { core::slice::from_raw_parts(self.file_va as *const u8, self.file_size) };
+        let frame_data = match avi::frame_data(file_data, frame_ref) {
+            Some(d) => d,
+            None => return,
+        };
+
+        if self.shared_va != 0 && frame_data.len() <= SHARED_VMO_SIZE {
+            // SAFETY: shared_va is a valid RW mapping of SHARED_VMO_SIZE bytes.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    frame_data.as_ptr(),
+                    self.shared_va as *mut u8,
+                    frame_data.len(),
+                );
+            }
+
+            let pts_ns = self
+                .frame_pts_ns
+                .get(idx)
+                .copied()
+                .unwrap_or(idx as u64 * self.ns_per_frame);
+            let req = video::DecodeFrameRequest {
+                session_id: self.codec_session_id,
+                offset: 0,
+                size: frame_data.len() as u32,
+                timestamp_ns: pts_ns,
+                output_pixel_offset: GEN_HEADER_SIZE as u32,
+            };
+            let mut req_buf = [0u8; video::DecodeFrameRequest::SIZE];
+
+            req.write_to(&mut req_buf);
+
+            let _ = ipc::client::call_simple(self.codec_ep, video::DECODE_FRAME, &req_buf);
+        }
+
+        self.output_gen = self.output_gen.wrapping_add(1);
+        self.current_frame = idx as u32;
+
+        // SAFETY: frame_va is page-aligned. Release ordering ensures pixel
+        // writes are visible before the gen bump makes the buffer readable.
+        unsafe {
+            let gen_ptr = self.frame_va as *const core::sync::atomic::AtomicU64;
+
+            (*gen_ptr).store(self.output_gen, core::sync::atomic::Ordering::Release);
+        }
+    }
+
+    pub fn publish_status(&self) {
+        if self.frame_va == 0 {
+            return;
+        }
+
+        // SAFETY: frame_va + 8 is within the 16-byte header (page-aligned VMO).
+        unsafe {
+            let flags_ptr = (self.frame_va + 8) as *const core::sync::atomic::AtomicU64;
+
+            (*flags_ptr).store(
+                u64::from(self.playing),
+                core::sync::atomic::Ordering::Release,
+            );
+        }
+    }
+
+    pub fn extract_audio(&mut self, _ns_ep: abi::types::Handle) {
+        if self.file_va == 0 || self.codec_ep.0 == 0 || self.shared_va == 0 {
+            return;
+        }
+
+        // SAFETY: file_va is a valid mapping of file_size bytes.
+        let file_data =
+            unsafe { core::slice::from_raw_parts(self.file_va as *const u8, self.file_size) };
+        let mp4_info = match mp4::parse(file_data) {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+
+        if !mp4_info.has_audio() {
+            return;
+        }
+
+        let config = match mp4_info.audio_config() {
+            Some(c) => c,
+            None => return,
+        };
+        let audio_refs: alloc::vec::Vec<mp4::SampleRef> = mp4_info.audio_samples().collect();
+
+        if audio_refs.is_empty() {
+            return;
+        }
+
+        let config_size = config.len();
+        let sizes_size = audio_refs.len() * 4;
+        let data_size: usize = audio_refs.iter().map(|s| s.size as usize).sum();
+        let total = config_size + sizes_size + data_size;
+
+        if total > SHARED_VMO_SIZE {
+            return;
+        }
+
+        // Pack into shared VMO: [config][frame_sizes][compressed_data]
+        let dst = self.shared_va as *mut u8;
+        let mut pos = 0;
+
+        // SAFETY: shared_va is a valid RW mapping of SHARED_VMO_SIZE bytes.
+        unsafe {
+            core::ptr::copy_nonoverlapping(config.as_ptr(), dst.add(pos), config_size);
+        }
+
+        pos += config_size;
+
+        for r in &audio_refs {
+            // SAFETY: pos + 4 <= total <= SHARED_VMO_SIZE.
+            unsafe {
+                core::ptr::copy_nonoverlapping(r.size.to_le_bytes().as_ptr(), dst.add(pos), 4);
+            }
+
+            pos += 4;
+        }
+
+        for r in &audio_refs {
+            let sample = match mp4_info.sample_data(r) {
+                Some(d) => d,
+                None => return,
+            };
+
+            // SAFETY: pos + sample.len() <= total <= SHARED_VMO_SIZE.
+            unsafe {
+                core::ptr::copy_nonoverlapping(sample.as_ptr(), dst.add(pos), sample.len());
+            }
+
+            pos += sample.len();
+        }
+
+        // Allocate PCM output VMO: duration_ns * 48000 * 2ch * 4bytes / 1e9
+        let duration_ns = mp4_info.audio_duration_ns();
+        let pcm_estimate =
+            (duration_ns as usize * 48000 * 8 / 1_000_000_000) + super::PAGE_SIZE;
+        let pcm_vmo_size = pcm_estimate.next_multiple_of(super::PAGE_SIZE);
+        let pcm_vmo = match abi::vmo::create(pcm_vmo_size, 0) {
+            Ok(h) => h,
+            Err(_) => return,
+        };
+        let pcm_dup = match abi::handle::dup(
+            pcm_vmo,
+            abi::types::Rights(
+                abi::types::Rights::READ.0
+                    | abi::types::Rights::WRITE.0
+                    | abi::types::Rights::MAP.0
+                    | abi::types::Rights::DUP.0,
+            ),
+        ) {
+            Ok(h) => h,
+            Err(_) => {
+                let _ = abi::handle::close(pcm_vmo);
+
+                return;
+            }
+        };
+        let req = video::DecodeAudioRequest {
+            codec: video::AUDIO_CODEC_AAC,
+            channels: mp4_info.audio_channels() as u8,
+            sample_rate: mp4_info.audio_sample_rate(),
+            config_size: config_size as u32,
+            num_frames: audio_refs.len() as u32,
+            data_size: data_size as u32,
+        };
+        let mut req_buf = [0u8; video::DecodeAudioRequest::SIZE];
+
+        req.write_to(&mut req_buf);
+
+        let mut call_buf = [0u8; ipc::message::MSG_SIZE];
+        let mut recv_handles = [0u32; 4];
+        let reply = match ipc::client::call(
+            self.codec_ep,
+            video::DECODE_AUDIO,
+            &req_buf,
+            &[pcm_dup.0],
+            &mut recv_handles,
+            &mut call_buf,
+        ) {
+            Ok(r) => r,
+            Err(_) => {
+                let _ = abi::handle::close(pcm_vmo);
+
+                return;
+            }
+        };
+
+        if reply.is_error() || reply.payload.len() < video::DecodeAudioReply::SIZE {
+            let _ = abi::handle::close(pcm_vmo);
+
+            return;
+        }
+
+        let ar = video::DecodeAudioReply::read_from(reply.payload);
+
+        if ar.status != 0 || ar.pcm_bytes == 0 {
+            let _ = abi::handle::close(pcm_vmo);
+
+            return;
+        }
+
+        let ro = abi::types::Rights(abi::types::Rights::READ.0 | abi::types::Rights::MAP.0);
+        let pcm_va = match abi::vmo::map(pcm_vmo, 0, ro) {
+            Ok(va) => va,
+            Err(_) => {
+                let _ = abi::handle::close(pcm_vmo);
+
+                return;
+            }
+        };
+
+        self.audio_pcm_vmo = pcm_vmo;
+        self.audio_pcm_va = pcm_va;
+        self.audio_pcm_bytes = ar.pcm_bytes;
+
+        console::write(self.console_ep, b"presenter: audio extracted\n");
+    }
+
+    pub fn start_audio_playback(&mut self, ns_ep: abi::types::Handle) {
+        if self.audio_pcm_vmo.0 == 0 || self.audio_pcm_bytes == 0 {
+            return;
+        }
+
+        if self.audio_ep.0 == 0 {
+            self.audio_ep = match name::lookup(ns_ep, b"audio") {
+                Ok(h) => h,
+                Err(_) => return,
+            };
+        }
+
+        let pcm_dup = match abi::handle::dup(
+            self.audio_pcm_vmo,
+            abi::types::Rights(abi::types::Rights::READ.0 | abi::types::Rights::MAP.0),
+        ) {
+            Ok(h) => h,
+            Err(_) => return,
+        };
+        let cancel = match abi::event::create() {
+            Ok(h) => h,
+            Err(_) => {
+                let _ = abi::handle::close(pcm_dup);
+
+                return;
+            }
+        };
+        let cancel_dup = match abi::handle::dup(cancel, abi::types::Rights::ALL) {
+            Ok(h) => h,
+            Err(_) => {
+                let _ = abi::handle::close(pcm_dup);
+                let _ = abi::handle::close(cancel);
+
+                return;
+            }
+        };
+        let current_pts = self
+            .frame_pts_ns
+            .get(self.current_frame as usize)
+            .copied()
+            .unwrap_or(0);
+        let pcm_offset = (current_pts * 48000 * 8 / 1_000_000_000) as u32 & !7;
+        let remaining = self.audio_pcm_bytes.saturating_sub(pcm_offset);
+        let req = audio_service::PlayRequest {
+            format: audio_service::FORMAT_F32_STEREO_48K,
+            data_len: remaining,
+            data_offset: pcm_offset,
+        };
+        let mut payload = [0u8; audio_service::PlayRequest::SIZE];
+
+        req.write_to(&mut payload);
+
+        let mut reply_buf = [0u8; ipc::message::MSG_SIZE];
+
+        if ipc::client::call(
+            self.audio_ep,
+            audio_service::PLAY,
+            &payload,
+            &[pcm_dup.0, cancel_dup.0],
+            &mut [],
+            &mut reply_buf,
+        )
+        .is_ok()
+        {
+            if self.audio_cancel.0 != 0 {
+                let _ = abi::handle::close(self.audio_cancel);
+            }
+
+            self.audio_cancel = cancel;
+        } else {
+            let _ = abi::handle::close(cancel);
+        }
+    }
+
+    pub fn stop_audio_playback(&mut self) {
+        if self.audio_cancel.0 != 0 {
+            let _ = abi::event::signal(self.audio_cancel, 0x1);
+            let _ = abi::handle::close(self.audio_cancel);
+
+            self.audio_cancel = abi::types::Handle(0);
+        }
+        if self.codec_ep.0 != 0 {
+            let _ = ipc::client::call_simple(self.codec_ep, video::STOP_AUDIO, &[]);
+        }
+    }
+
+    pub fn close_current(&mut self) {
+        self.stop_audio_playback();
+
+        if self.file_va != 0 {
+            let _ = abi::vmo::unmap(self.file_va);
+
+            self.file_va = 0;
+        }
+        if self.file_vmo.0 != 0 {
+            let _ = abi::handle::close(self.file_vmo);
+
+            self.file_vmo = abi::types::Handle(0);
+        }
+        if self.frame_va != 0 {
+            let _ = abi::vmo::unmap(self.frame_va);
+
+            self.frame_va = 0;
+        }
+        if self.frame_vmo.0 != 0 {
+            let _ = abi::handle::close(self.frame_vmo);
+
+            self.frame_vmo = abi::types::Handle(0);
+        }
+        if self.audio_pcm_va != 0 {
+            let _ = abi::vmo::unmap(self.audio_pcm_va);
+
+            self.audio_pcm_va = 0;
+        }
+        if self.audio_pcm_vmo.0 != 0 {
+            let _ = abi::handle::close(self.audio_pcm_vmo);
+
+            self.audio_pcm_vmo = abi::types::Handle(0);
+        }
+
+        self.audio_pcm_bytes = 0;
+        self.frame_index.clear();
+        self.frame_pts_ns.clear();
+        self.file_size = 0;
+        self.codec = 0;
+    }
+
+    pub fn toggle_playback(&mut self, ns_ep: abi::types::Handle) {
+        self.playing = !self.playing;
+
+        if self.playing {
+            let now = abi::system::clock_read().unwrap_or(0);
+            let current_pts = self
+                .frame_pts_ns
+                .get(self.current_frame as usize)
+                .copied()
+                .unwrap_or(0);
+
+            self.play_start_ns = now.saturating_sub(current_pts);
+
+            self.start_audio_playback(ns_ep);
+        } else {
+            self.stop_audio_playback();
+        }
+
+        self.publish_status();
+    }
+
+    /// Advance playback to the next due frame. Returns true if playback ended.
+    pub fn advance_playback(&mut self, _ns_ep: abi::types::Handle) -> bool {
+        if !self.playing || self.frame_pts_ns.is_empty() {
+            return false;
+        }
+
+        let now = abi::system::clock_read().unwrap_or(0);
+        let elapsed = now.saturating_sub(self.play_start_ns);
+        let total = self.frame_pts_ns.len() as u32;
+        let mut target = self.current_frame;
+
+        while (target + 1) < total {
+            if self.frame_pts_ns[(target + 1) as usize] > elapsed {
+                break;
+            }
+
+            target += 1;
+        }
+
+        if target > self.current_frame {
+            self.decode_and_publish(target);
+        }
+
+        if self.current_frame >= total - 1 {
+            self.playing = false;
+
+            self.stop_audio_playback();
+            self.decode_and_publish(0);
+            self.publish_status();
+
+            return true;
+        }
+
+        false
+    }
+
+    /// Calculate the deadline for the next frame to present.
+    pub fn next_frame_deadline(&self) -> u64 {
+        let next = (self.current_frame + 1) as usize;
+
+        if next < self.frame_pts_ns.len() {
+            self.play_start_ns + self.frame_pts_ns[next]
+        } else {
+            self.play_start_ns
+                + self.frame_pts_ns.last().copied().unwrap_or(0)
+                + self.ns_per_frame
+        }
+    }
+}
+
+fn reformat_avcc(avcc: &[u8], out: &mut [u8]) -> usize {
+    if avcc.len() < 7 {
+        return 0;
+    }
+
+    let nal_length_size = (avcc[4] & 0x03) + 1;
+    let num_sps = (avcc[5] & 0x1F) as usize;
+    let mut read_pos = 6;
+    let mut params: alloc::vec::Vec<(usize, usize)> = alloc::vec::Vec::new();
+
+    for _ in 0..num_sps {
+        if read_pos + 2 > avcc.len() {
+            return 0;
+        }
+
+        let len = u16::from_be_bytes([avcc[read_pos], avcc[read_pos + 1]]) as usize;
+
+        read_pos += 2;
+
+        if read_pos + len > avcc.len() {
+            return 0;
+        }
+
+        params.push((read_pos, len));
+
+        read_pos += len;
+    }
+
+    if read_pos >= avcc.len() {
+        return 0;
+    }
+
+    let num_pps = avcc[read_pos] as usize;
+
+    read_pos += 1;
+
+    for _ in 0..num_pps {
+        if read_pos + 2 > avcc.len() {
+            return 0;
+        }
+
+        let len = u16::from_be_bytes([avcc[read_pos], avcc[read_pos + 1]]) as usize;
+
+        read_pos += 2;
+
+        if read_pos + len > avcc.len() {
+            return 0;
+        }
+
+        params.push((read_pos, len));
+
+        read_pos += len;
+    }
+
+    let total_params = params.len();
+    let needed = 4 + params.iter().map(|(_, len)| 4 + len).sum::<usize>();
+
+    if needed > out.len() {
+        return 0;
+    }
+
+    out[0] = nal_length_size;
+    out[1] = total_params as u8;
+    out[2] = 0;
+    out[3] = 0;
+
+    let mut write_pos = 4;
+
+    for &(offset, len) in &params {
+        out[write_pos..write_pos + 4].copy_from_slice(&(len as u32).to_le_bytes());
+
+        write_pos += 4;
+
+        out[write_pos..write_pos + len].copy_from_slice(&avcc[offset..offset + len]);
+
+        write_pos += len;
+    }
+
+    write_pos
 }
 
 impl Viewer for VideoViewer {
@@ -228,25 +936,13 @@ impl Viewer for VideoViewer {
 
     fn teardown(&mut self) {
         if self.playing {
-            let _ = ipc::client::call_simple(self.decoder_ep, video_decoder::PAUSE, &[]);
-
             self.playing = false;
-        }
-        if self.frame_va != 0 {
-            let _ = abi::vmo::unmap(self.frame_va);
 
-            self.frame_va = 0;
+            self.stop_audio_playback();
+            self.publish_status();
         }
-        if self.decoder_ep.0 != 0 {
-            let _ = abi::handle::close(self.decoder_ep);
 
-            self.decoder_ep = abi::types::Handle(0);
-        }
-        if self.frame_vmo.0 != 0 {
-            let _ = abi::handle::close(self.frame_vmo);
-
-            self.frame_vmo = abi::types::Handle(0);
-        }
+        self.close_current();
     }
 }
 

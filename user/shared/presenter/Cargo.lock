@@ -160,18 +160,6 @@ name = "jpeg"
 version = "0.1.0"
 
 [[package]]
-name = "jpeg-decoder"
-version = "0.1.0"
-dependencies = [
- "abi",
- "console",
- "heap",
- "ipc",
- "jpeg",
- "name",
-]
-
-[[package]]
 name = "layout"
 version = "0.1.0"
 
@@ -215,12 +203,17 @@ name = "piecetable"
 version = "0.1.0"
 
 [[package]]
+name = "png"
+version = "0.1.0"
+
+[[package]]
 name = "presenter-service"
 version = "0.1.0"
 dependencies = [
  "abi",
  "animation",
  "audio-service",
+ "avi",
  "console",
  "document-service",
  "fonts",
@@ -228,16 +221,18 @@ dependencies = [
  "icons",
  "init",
  "ipc",
- "jpeg-decoder",
+ "jpeg",
  "layout",
  "layout-service",
+ "mp4",
  "name",
  "piecetable",
+ "png",
  "render",
  "scene",
  "store-service",
  "text-editor",
- "video-decoder",
+ "video",
  "view-tree",
 ]
 
@@ -370,21 +365,6 @@ dependencies = [
  "ipc",
  "name",
  "virtio",
-]
-
-[[package]]
-name = "video-decoder"
-version = "0.1.0"
-dependencies = [
- "abi",
- "audio-service",
- "avi",
- "console",
- "heap",
- "ipc",
- "mp4",
- "name",
- "video",
 ]
 
 [[package]]

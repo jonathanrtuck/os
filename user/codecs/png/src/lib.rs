@@ -72,7 +72,11 @@ fn raw_row_bytes(width: usize, color_type: u8, bit_depth: u8) -> usize {
 fn filter_bpp(color_type: u8, bit_depth: u8) -> usize {
     let bpp = bits_per_pixel(color_type, bit_depth) / 8;
 
-    if bpp == 0 { 1 } else { bpp }
+    if bpp == 0 {
+        1
+    } else {
+        bpp
+    }
 }
 
 fn validate_format(color_type: u8, bit_depth: u8) -> Result<(), PngError> {
@@ -467,6 +471,7 @@ fn decode_non_interlaced(
         let (bgra_part, raw_part) = output.split_at_mut(raw_start);
         let raw_slice = &raw_part[y * scanline + 1..y * scanline + 1 + rrb];
         let bgra_slice = &mut bgra_part[bgra_row..bgra_row + w * 4];
+
         row_to_bgra(raw_slice, bgra_slice, w, color_type, bit_depth, chunks);
     }
 
@@ -968,6 +973,7 @@ impl<'a> BitReader<'a> {
 
             if self.byte_idx < self.chunk_data_len {
                 let b = self.data[self.chunk_data_start + self.byte_idx];
+
                 self.byte_idx += 1;
 
                 return Some(b);

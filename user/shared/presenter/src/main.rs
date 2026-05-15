@@ -692,65 +692,276 @@ fn alloc_content_id() -> u32 {
     NEXT_CONTENT_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
 }
 
-fn load_image_child(render_ep: Handle, console_ep: Handle) -> Option<handlers::ChildViewer> {
-    let (file_vmo, bytes_read) = store_load_type(b"image/jpeg")?;
-    let decoder_ep = match name::lookup(HANDLE_NS_EP, b"jpeg-decoder") {
-        Ok(h) => h,
+fn decode_jpeg_in_process(
+    file_vmo: Handle,
+    bytes_read: usize,
+    render_ep: Handle,
+    console_ep: Handle,
+) -> Option<handlers::ChildViewer> {
+    let ro = Rights(Rights::READ.0 | Rights::MAP.0);
+    let file_va = match abi::vmo::map(file_vmo, 0, ro) {
+        Ok(va) => va,
         Err(_) => {
             let _ = abi::handle::close(file_vmo);
 
             return None;
         }
     };
-    let decode_req = jpeg_decoder::DecodeRequest {
-        file_size: bytes_read as u32,
+    // SAFETY: kernel mapped the VMO at file_va, bytes_read is within bounds.
+    let jpeg_data = unsafe { core::slice::from_raw_parts(file_va as *const u8, bytes_read) };
+    let buf_size = match jpeg::jpeg_decode_buf_size(jpeg_data) {
+        Ok(s) => s,
+        Err(_) => {
+            let _ = abi::vmo::unmap(file_va);
+            let _ = abi::handle::close(file_vmo);
+
+            return None;
+        }
     };
-    let mut decode_buf = [0u8; jpeg_decoder::DecodeRequest::SIZE];
+    let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
+    let decode_vmo_size = buf_size.next_multiple_of(PAGE_SIZE);
+    let decode_vmo = match abi::vmo::create(decode_vmo_size, 0) {
+        Ok(h) => h,
+        Err(_) => {
+            let _ = abi::vmo::unmap(file_va);
+            let _ = abi::handle::close(file_vmo);
 
-    decode_req.write_to(&mut decode_buf);
+            return None;
+        }
+    };
+    let decode_va = match abi::vmo::map(decode_vmo, 0, rw) {
+        Ok(va) => va,
+        Err(_) => {
+            let _ = abi::vmo::unmap(file_va);
+            let _ = abi::handle::close(file_vmo);
+            let _ = abi::handle::close(decode_vmo);
 
-    let mut call_buf = [0u8; ipc::message::MSG_SIZE];
-    let mut decode_handles = [0u32; 4];
-    let decode_reply = match ipc::client::call(
-        decoder_ep,
-        jpeg_decoder::DECODE,
-        &decode_buf,
-        &[file_vmo.0],
-        &mut decode_handles,
-        &mut call_buf,
-    ) {
-        Ok(r) => r,
-        Err(_) => return None,
+            return None;
+        }
+    };
+    // SAFETY: decode_vmo is mapped RW at decode_va with buf_size usable bytes.
+    let output = unsafe { core::slice::from_raw_parts_mut(decode_va as *mut u8, buf_size) };
+    let header = match jpeg::jpeg_decode(jpeg_data, output) {
+        Ok(h) => h,
+        Err(_) => {
+            let _ = abi::vmo::unmap(file_va);
+            let _ = abi::handle::close(file_vmo);
+            let _ = abi::vmo::unmap(decode_va);
+            let _ = abi::handle::close(decode_vmo);
+
+            return None;
+        }
     };
 
-    if decode_reply.is_error()
-        || decode_reply.payload.len() < jpeg_decoder::DecodeReply::SIZE
-        || decode_reply.handle_count == 0
-    {
-        return None;
+    // Done with input VMO.
+    let _ = abi::vmo::unmap(file_va);
+    let _ = abi::handle::close(file_vmo);
+
+    let pixel_size = header.width as usize * header.height as usize * 4;
+    let pixel_vmo_size = pixel_size.next_multiple_of(PAGE_SIZE);
+    let pixel_vmo = match abi::vmo::create(pixel_vmo_size, 0) {
+        Ok(h) => h,
+        Err(_) => {
+            let _ = abi::vmo::unmap(decode_va);
+            let _ = abi::handle::close(decode_vmo);
+
+            return None;
+        }
+    };
+    let pixel_va = match abi::vmo::map(pixel_vmo, 0, rw) {
+        Ok(va) => va,
+        Err(_) => {
+            let _ = abi::vmo::unmap(decode_va);
+            let _ = abi::handle::close(decode_vmo);
+            let _ = abi::handle::close(pixel_vmo);
+
+            return None;
+        }
+    };
+
+    // SAFETY: both mappings are valid and non-overlapping.
+    unsafe {
+        core::ptr::copy_nonoverlapping(decode_va as *const u8, pixel_va as *mut u8, pixel_size);
     }
 
-    let dr = jpeg_decoder::DecodeReply::read_from(decode_reply.payload);
-    let pixel_vmo = Handle(decode_handles[0]);
+    // Clean up decode buffer.
+    let _ = abi::vmo::unmap(decode_va);
+    let _ = abi::handle::close(decode_vmo);
+    // Unmap pixel VMO locally — the handle is transferred to the compositor.
+    let _ = abi::vmo::unmap(pixel_va);
+
     let content_id = alloc_content_id();
-    let width = dr.width as u16;
-    let height = dr.height as u16;
-    let pixel_size = dr.pixel_size;
+    let width = header.width as u16;
+    let height = header.height as u16;
     let pixel_dup = match abi::handle::dup(pixel_vmo, Rights::READ_MAP) {
         Ok(h) => h,
         Err(_) => return None,
     };
 
     upload_image_to_compositor(
-        render_ep, pixel_dup, content_id, width, height, pixel_size, 0,
+        render_ep,
+        pixel_dup,
+        content_id,
+        width,
+        height,
+        pixel_size as u32,
+        0,
     );
 
-    console::write(console_ep, b"presenter: image loaded from store\n");
+    console::write(console_ep, b"presenter: jpeg decoded in-process\n");
 
     Some(handlers::ChildViewer {
         viewer: handlers::ViewerKind::Image(handlers::ImageViewer::new(content_id, width, height)),
         mimetype: b"image/jpeg",
     })
+}
+
+fn decode_png_in_process(
+    file_vmo: Handle,
+    bytes_read: usize,
+    render_ep: Handle,
+    console_ep: Handle,
+) -> Option<handlers::ChildViewer> {
+    let ro = Rights(Rights::READ.0 | Rights::MAP.0);
+    let file_va = match abi::vmo::map(file_vmo, 0, ro) {
+        Ok(va) => va,
+        Err(_) => {
+            let _ = abi::handle::close(file_vmo);
+
+            return None;
+        }
+    };
+    // SAFETY: kernel mapped the VMO at file_va, bytes_read is within bounds.
+    let png_data = unsafe { core::slice::from_raw_parts(file_va as *const u8, bytes_read) };
+    let buf_size = match png::png_decode_buf_size(png_data) {
+        Ok(s) => s,
+        Err(_) => {
+            let _ = abi::vmo::unmap(file_va);
+            let _ = abi::handle::close(file_vmo);
+
+            return None;
+        }
+    };
+    let header = match png::png_header(png_data) {
+        Ok(h) => h,
+        Err(_) => {
+            let _ = abi::vmo::unmap(file_va);
+            let _ = abi::handle::close(file_vmo);
+
+            return None;
+        }
+    };
+    let pixel_size = header.width as usize * header.height as usize * 4;
+    let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
+    let decode_vmo_size = buf_size.next_multiple_of(PAGE_SIZE);
+    let decode_vmo = match abi::vmo::create(decode_vmo_size, 0) {
+        Ok(h) => h,
+        Err(_) => {
+            let _ = abi::vmo::unmap(file_va);
+            let _ = abi::handle::close(file_vmo);
+
+            return None;
+        }
+    };
+    let decode_va = match abi::vmo::map(decode_vmo, 0, rw) {
+        Ok(va) => va,
+        Err(_) => {
+            let _ = abi::vmo::unmap(file_va);
+            let _ = abi::handle::close(file_vmo);
+            let _ = abi::handle::close(decode_vmo);
+
+            return None;
+        }
+    };
+    // SAFETY: decode_vmo is mapped RW at decode_va with buf_size usable bytes.
+    let output = unsafe { core::slice::from_raw_parts_mut(decode_va as *mut u8, buf_size) };
+    let decode_ok = png::png_decode(png_data, output).is_ok();
+
+    // Done with input VMO.
+    let _ = abi::vmo::unmap(file_va);
+    let _ = abi::handle::close(file_vmo);
+
+    if !decode_ok {
+        let _ = abi::vmo::unmap(decode_va);
+        let _ = abi::handle::close(decode_vmo);
+
+        return None;
+    }
+
+    let pixel_vmo_size = pixel_size.next_multiple_of(PAGE_SIZE);
+    let pixel_vmo = match abi::vmo::create(pixel_vmo_size, 0) {
+        Ok(h) => h,
+        Err(_) => {
+            let _ = abi::vmo::unmap(decode_va);
+            let _ = abi::handle::close(decode_vmo);
+
+            return None;
+        }
+    };
+    let pixel_va = match abi::vmo::map(pixel_vmo, 0, rw) {
+        Ok(va) => va,
+        Err(_) => {
+            let _ = abi::vmo::unmap(decode_va);
+            let _ = abi::handle::close(decode_vmo);
+            let _ = abi::handle::close(pixel_vmo);
+
+            return None;
+        }
+    };
+
+    // SAFETY: both mappings are valid and non-overlapping.
+    unsafe {
+        core::ptr::copy_nonoverlapping(decode_va as *const u8, pixel_va as *mut u8, pixel_size);
+    }
+
+    // Clean up decode buffer.
+    let _ = abi::vmo::unmap(decode_va);
+    let _ = abi::handle::close(decode_vmo);
+    // Unmap pixel VMO locally — the handle is transferred to the compositor.
+    let _ = abi::vmo::unmap(pixel_va);
+
+    let content_id = alloc_content_id();
+    let width = header.width as u16;
+    let height = header.height as u16;
+    let pixel_dup = match abi::handle::dup(pixel_vmo, Rights::READ_MAP) {
+        Ok(h) => h,
+        Err(_) => return None,
+    };
+
+    upload_image_to_compositor(
+        render_ep,
+        pixel_dup,
+        content_id,
+        width,
+        height,
+        pixel_size as u32,
+        0,
+    );
+
+    console::write(console_ep, b"presenter: png decoded in-process\n");
+
+    Some(handlers::ChildViewer {
+        viewer: handlers::ViewerKind::Image(handlers::ImageViewer::new(content_id, width, height)),
+        mimetype: b"image/png",
+    })
+}
+
+fn load_image_child(render_ep: Handle, console_ep: Handle) -> Option<handlers::ChildViewer> {
+    // Try JPEG first.
+    if let Some((file_vmo, bytes_read)) = store_load_type(b"image/jpeg")
+        && let Some(child) = decode_jpeg_in_process(file_vmo, bytes_read, render_ep, console_ep)
+    {
+        return Some(child);
+    }
+
+    // Fall back to PNG.
+    if let Some((file_vmo, bytes_read)) = store_load_type(b"image/png")
+        && let Some(child) = decode_png_in_process(file_vmo, bytes_read, render_ep, console_ep)
+    {
+        return Some(child);
+    }
+
+    None
 }
 
 fn upload_image_to_compositor(
@@ -787,6 +998,8 @@ fn upload_image_to_compositor(
 
 // ── Video loading from document store ───────────────────────────
 
+const RIFF_MAGIC: [u8; 4] = *b"RIFF";
+
 fn load_video_child(render_ep: Handle, console_ep: Handle) -> Option<handlers::ChildViewer> {
     try_open_video(render_ep, console_ep, b"video/mp4")
         .or_else(|| try_open_video(render_ep, console_ep, b"video/avi"))
@@ -798,85 +1011,191 @@ fn try_open_video(
     media_type: &'static [u8],
 ) -> Option<handlers::ChildViewer> {
     let (file_vmo, bytes_read) = store_load_type(media_type)?;
-    let decoder_ep = match name::lookup(HANDLE_NS_EP, b"video-decoder") {
-        Ok(h) => h,
-        Err(_) => {
-            let _ = abi::handle::close(file_vmo);
-
-            return None;
-        }
-    };
-    let open_req = video_decoder::OpenRequest {
-        file_size: bytes_read as u32,
-    };
-    let mut open_buf = [0u8; video_decoder::OpenRequest::SIZE];
-
-    open_req.write_to(&mut open_buf);
-
-    let notify_ep = match abi::handle::dup(HANDLE_SVC_EP, Rights(Rights::READ.0 | Rights::WRITE.0))
-    {
-        Ok(h) => h,
-        Err(_) => {
-            let _ = abi::handle::close(file_vmo);
-            let _ = abi::handle::close(decoder_ep);
-
-            return None;
-        }
-    };
-
-    let mut call_buf = [0u8; ipc::message::MSG_SIZE];
-    let mut open_handles = [0u32; 4];
-    let open_reply = match ipc::client::call(
-        decoder_ep,
-        video_decoder::OPEN,
-        &open_buf,
-        &[file_vmo.0, notify_ep.0],
-        &mut open_handles,
-        &mut call_buf,
-    ) {
-        Ok(r) => r,
-        Err(_) => return None,
-    };
-
-    if open_reply.is_error()
-        || open_reply.payload.len() < video_decoder::OpenReply::SIZE
-        || open_handles[0] == 0
-    {
-        return None;
-    }
-
-    let or = video_decoder::OpenReply::read_from(open_reply.payload);
-    let frame_vmo = Handle(open_handles[0]);
-
-    if or.total_frames == 0 {
-        let _ = abi::handle::close(frame_vmo);
-
-        return None;
-    }
-
-    let content_id = alloc_content_id();
-    let width = or.width as u16;
-    let height = or.height as u16;
-    let host_texture_handle = or.host_texture_handle;
-    let frame_va = match abi::vmo::map(frame_vmo, 0, Rights(Rights::READ.0 | Rights::MAP.0)) {
+    let ro = Rights(Rights::READ.0 | Rights::MAP.0);
+    let file_va = match abi::vmo::map(file_vmo, 0, ro) {
         Ok(va) => va,
         Err(_) => {
-            let _ = abi::handle::close(decoder_ep);
+            let _ = abi::handle::close(file_vmo);
+
+            return None;
+        }
+    };
+    // SAFETY: kernel mapped the VMO at file_va for bytes_read bytes.
+    let file_data = unsafe { core::slice::from_raw_parts(file_va as *const u8, bytes_read) };
+    let is_avi = file_data.len() >= 4 && file_data[0..4] == RIFF_MAGIC;
+    let result = if is_avi {
+        open_video_avi(file_data, file_va, file_vmo, bytes_read, render_ep, console_ep)
+    } else {
+        open_video_mp4(file_data, file_va, file_vmo, bytes_read, render_ep, console_ep)
+    };
+
+    if result.is_none() {
+        let _ = abi::vmo::unmap(file_va);
+        let _ = abi::handle::close(file_vmo);
+    }
+
+    result.map(|vid| handlers::ChildViewer {
+        viewer: handlers::ViewerKind::Video(vid),
+        mimetype: media_type,
+    })
+}
+
+fn open_video_avi(
+    file_data: &[u8],
+    file_va: usize,
+    file_vmo: Handle,
+    file_size: usize,
+    render_ep: Handle,
+    console_ep: Handle,
+) -> Option<handlers::VideoViewer> {
+    let info = avi::parse(file_data).ok()?;
+
+    if info.codec != avi::FourCC::MJPG && info.codec != avi::FourCC::MJPEG {
+        return None;
+    }
+
+    let frame_index: alloc::vec::Vec<avi::FrameRef> =
+        avi::VideoFrameIter::new(file_data).ok()?.collect();
+    let ns_per = info.ns_per_frame();
+    let frame_pts_ns: alloc::vec::Vec<u64> =
+        (0..frame_index.len() as u64).map(|i| i * ns_per).collect();
+
+    finish_open_video(
+        file_va,
+        file_vmo,
+        file_size,
+        info.width,
+        info.height,
+        ns_per,
+        frame_index,
+        frame_pts_ns,
+        video::CODEC_MJPEG,
+        render_ep,
+        console_ep,
+        b"presenter: opened AVI\n",
+    )
+}
+
+fn open_video_mp4(
+    file_data: &[u8],
+    file_va: usize,
+    file_vmo: Handle,
+    file_size: usize,
+    render_ep: Handle,
+    console_ep: Handle,
+) -> Option<handlers::VideoViewer> {
+    let mp4_info = mp4::parse(file_data).ok()?;
+
+    if mp4_info.total_samples == 0 || mp4_info.avc_config().is_none() {
+        return None;
+    }
+
+    let timescale = mp4_info.timescale as u64;
+    let mut frame_index: alloc::vec::Vec<avi::FrameRef> = alloc::vec::Vec::new();
+    let mut frame_pts_ns: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+
+    for s in mp4_info.samples() {
+        frame_index.push(avi::FrameRef {
+            offset: s.offset as u32,
+            size: s.size,
+        });
+
+        let pts_ns = (s.pts_ticks * 1_000_000_000)
+            .checked_div(timescale)
+            .unwrap_or(0);
+
+        frame_pts_ns.push(pts_ns);
+    }
+
+    finish_open_video(
+        file_va,
+        file_vmo,
+        file_size,
+        mp4_info.width,
+        mp4_info.height,
+        mp4_info.ns_per_frame(),
+        frame_index,
+        frame_pts_ns,
+        video::CODEC_H264,
+        render_ep,
+        console_ep,
+        b"presenter: opened MP4\n",
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_open_video(
+    file_va: usize,
+    file_vmo: Handle,
+    file_size: usize,
+    width: u32,
+    height: u32,
+    ns_per_frame: u64,
+    frame_index: alloc::vec::Vec<avi::FrameRef>,
+    frame_pts_ns: alloc::vec::Vec<u64>,
+    codec: u8,
+    render_ep: Handle,
+    console_ep: Handle,
+    log_msg: &[u8],
+) -> Option<handlers::VideoViewer> {
+    use handlers::GEN_HEADER_SIZE;
+
+    let pixel_size = width as usize * height as usize * 4;
+    let output_buf_size = (GEN_HEADER_SIZE + pixel_size).next_multiple_of(PAGE_SIZE);
+    let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
+    let frame_vmo = abi::vmo::create(output_buf_size, 0).ok()?;
+    let frame_va = match abi::vmo::map(frame_vmo, 0, rw) {
+        Ok(va) => va,
+        Err(_) => {
             let _ = abi::handle::close(frame_vmo);
 
             return None;
         }
     };
+    let total = frame_index.len() as u32;
+    let content_id = alloc_content_id();
+    let w16 = width as u16;
+    let h16 = height as u16;
+
+    let mut vid = handlers::VideoViewer::new(content_id, w16, h16);
+
+    vid.file_vmo = file_vmo;
+    vid.file_va = file_va;
+    vid.file_size = file_size;
+    vid.frame_vmo = frame_vmo;
+    vid.frame_va = frame_va;
+    vid.frame_index = frame_index;
+    vid.frame_pts_ns = frame_pts_ns;
+    vid.ns_per_frame = ns_per_frame;
+    vid.total_frames = total;
+    vid.codec = codec;
+    vid.console_ep = console_ep;
+
+    // Set up hardware codec session.
+    vid.setup_hardware_session(HANDLE_NS_EP);
+
+    if vid.codec_session_id == 0 {
+        vid.close_current();
+
+        return None;
+    }
+
+    if codec == video::CODEC_H264 {
+        vid.extract_audio(HANDLE_NS_EP);
+    }
+
+    // Decode the first frame so there's something to display.
+    vid.decode_and_publish(0);
+
+    // Register the frame VMO with the compositor.
+    let host_texture_handle = vid.codec_texture_handle;
 
     if host_texture_handle != 0 {
         // Zero-copy: bind the host's IOSurface-backed texture directly.
-        // The frame VMO is kept as a 16-byte signal buffer (gen counter + flags).
         let frame_dup = match abi::handle::dup(frame_vmo, Rights(Rights::READ.0 | Rights::MAP.0)) {
             Ok(h) => h,
             Err(_) => {
-                let _ = abi::handle::close(decoder_ep);
-                let _ = abi::vmo::unmap(frame_va);
-                let _ = abi::handle::close(frame_vmo);
+                vid.close_current();
 
                 return None;
             }
@@ -884,8 +1203,8 @@ fn try_open_video(
         let bind_req = render::comp::BindHostTextureRequest {
             content_id,
             host_handle: host_texture_handle,
-            width,
-            height,
+            width: w16,
+            height: h16,
         };
         let mut bind_buf = [0u8; render::comp::BindHostTextureRequest::SIZE];
 
@@ -906,40 +1225,27 @@ fn try_open_video(
         let frame_dup = match abi::handle::dup(frame_vmo, Rights(Rights::READ.0 | Rights::MAP.0)) {
             Ok(h) => h,
             Err(_) => {
-                let _ = abi::handle::close(decoder_ep);
-                let _ = abi::vmo::unmap(frame_va);
-                let _ = abi::handle::close(frame_vmo);
+                vid.close_current();
 
                 return None;
             }
         };
-        let pixel_size = width as u32 * height as u32 * 4;
+        let pxsz = width * height * 4;
 
         upload_image_to_compositor(
             render_ep,
             frame_dup,
             content_id,
-            width,
-            height,
-            pixel_size,
+            w16,
+            h16,
+            pxsz,
             render::comp::IMAGE_FLAG_LIVE,
         );
     }
 
-    console::write(console_ep, b"presenter: video loaded from store\n");
+    console::write(console_ep, log_msg);
 
-    let mut vid = handlers::VideoViewer::new(content_id, width, height);
-
-    vid.decoder_ep = decoder_ep;
-    vid.frame_vmo = frame_vmo;
-    vid.frame_va = frame_va;
-    vid.total_frames = or.total_frames;
-    vid.playing = false;
-
-    Some(handlers::ChildViewer {
-        viewer: handlers::ViewerKind::Video(vid),
-        mimetype: media_type,
-    })
+    Some(vid)
 }
 
 // ── Audio clip loading from store ─────────────────────────────────
@@ -1003,17 +1309,11 @@ impl Presenter {
 
         if let Some(child) = self.workspace.children.get_mut(active) {
             if let handlers::ViewerKind::Video(vid) = &mut child.viewer {
-                if vid.decoder_ep.0 == 0 || vid.total_frames == 0 {
+                if vid.total_frames == 0 || vid.codec_session_id == 0 {
                     return;
                 }
 
-                if let Ok((0, payload)) =
-                    ipc::client::call_simple(vid.decoder_ep, video_decoder::TOGGLE, &[])
-                {
-                    let reply = video_decoder::ToggleReply::read_from(&payload);
-
-                    vid.playing = reply.playing != 0;
-                }
+                vid.toggle_playback(HANDLE_NS_EP);
             } else {
                 return;
             }
@@ -1280,7 +1580,26 @@ extern "C" fn _start() -> ! {
     loop {
         let now = abi::system::clock_read().unwrap_or(0);
         let needs_anim = server.workspace.slide_animating;
-        let deadline = if needs_anim {
+        let video_playing = server.active_is_video()
+            && server
+                .workspace
+                .children
+                .get(server.workspace.active)
+                .is_some_and(|c| {
+                    matches!(&c.viewer, handlers::ViewerKind::Video(v) if v.playing)
+                });
+        let deadline = if video_playing {
+            // Video playback: use the video's PTS-based deadline.
+            if let Some(child) = server.workspace.children.get(server.workspace.active) {
+                if let handlers::ViewerKind::Video(vid) = &child.viewer {
+                    vid.next_frame_deadline()
+                } else {
+                    now + frame_ns
+                }
+            } else {
+                now + frame_ns
+            }
+        } else if needs_anim {
             if next_frame <= now {
                 let behind = now - next_frame;
 
@@ -1301,6 +1620,20 @@ extern "C" fn _start() -> ! {
         };
 
         if frame_due {
+            // Advance video playback if active.
+            if video_playing
+                && let Some(child) =
+                    server.workspace.children.get_mut(server.workspace.active)
+                && let handlers::ViewerKind::Video(vid) = &mut child.viewer
+            {
+                let ended = vid.advance_playback(HANDLE_NS_EP);
+
+                if ended {
+                    // Playback ended — rebuild scene to show play button.
+                    server.build_scene();
+                }
+            }
+
             if server.workspace.slide_animating {
                 let frame_start = abi::system::clock_read().unwrap_or(0);
                 let dt_ns = frame_start

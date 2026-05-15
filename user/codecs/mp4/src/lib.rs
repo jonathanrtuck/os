@@ -229,7 +229,6 @@ pub fn parse(data: &[u8]) -> Result<Mp4<'_>, Error> {
     if mp4.width == 0 || mp4.height == 0 {
         return Err(Error::NoVideoTrack);
     }
-
     if mp4.stts_count == 0 || mp4.stsc_count == 0 || mp4.stco_count == 0 {
         return Err(Error::NoSampleTable);
     }
@@ -277,7 +276,6 @@ fn parse_mvhd(data: &[u8], data_start: usize, end: usize, mp4: &mut Mp4<'_>) {
     let Some(pos) = fullbox_payload(data_start, end) else {
         return;
     };
-
     let version = data[data_start];
 
     if version == 1 {
@@ -1334,7 +1332,6 @@ mod tests {
     ) -> Vec<u8> {
         let mut buf = Vec::new();
         let total_duration: u64 = samples.iter().map(|s| s.duration as u64).sum();
-
         let moov = begin_box(&mut buf, b"moov");
 
         // mvhd
