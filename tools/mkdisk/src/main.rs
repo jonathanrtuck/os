@@ -223,23 +223,42 @@ fn create_compound_doc(store: &mut Store, image_id: FileId) {
                 viewport: None,
             }),
         }),
-        children: vec![Child {
-            uri: format!("store:{}", image_id.0),
-            placement: Some(Placement {
-                position: PerAxis {
-                    width: Some(mpt(100)),
-                    height: Some(mpt(50)),
+        children: vec![
+            Child {
+                uri: format!("store:{}", image_id.0),
+                placement: Some(Placement {
+                    position: PerAxis {
+                        width: Some(mpt(50)),
+                        height: Some(mpt(50)),
+                        ..Default::default()
+                    },
+                    size: PerAxis {
+                        width: Some(mpt(500)),
+                        height: Some(mpt(700)),
+                        ..Default::default()
+                    },
                     ..Default::default()
-                },
-                size: PerAxis {
-                    width: Some(mpt(1000)),
-                    height: Some(mpt(700)),
+                }),
+                viewport: None,
+            },
+            Child {
+                uri: format!("store:{}", image_id.0),
+                placement: Some(Placement {
+                    position: PerAxis {
+                        width: Some(mpt(650)),
+                        height: Some(mpt(50)),
+                        ..Default::default()
+                    },
+                    size: PerAxis {
+                        width: Some(mpt(500)),
+                        height: Some(mpt(700)),
+                        ..Default::default()
+                    },
                     ..Default::default()
-                },
-                ..Default::default()
-            }),
-            viewport: None,
-        }],
+                }),
+                viewport: None,
+            },
+        ],
     };
     let bytes = manifest::encode(&manifest);
     let id = store

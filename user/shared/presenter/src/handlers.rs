@@ -1748,18 +1748,6 @@ impl WorkspaceViewer {
         }
     }
 
-    pub fn child_subtrees(&self) -> alloc::vec::Vec<&ViewSubtree> {
-        self.children
-            .iter()
-            .map(|c| match &c.viewer {
-                ViewerKind::Image(v) => v.subtree(),
-                ViewerKind::Text(v) => v.subtree(),
-                ViewerKind::Video(v) => v.subtree(),
-                ViewerKind::Compound(v) => v.subtree(),
-            })
-            .collect()
-    }
-
     pub fn visible_range(&self, display_width: u32) -> (usize, usize) {
         let last = self.children.len().saturating_sub(1);
 
@@ -2113,7 +2101,6 @@ impl CompoundViewer {
             let (off_x, off_y) = self.child_position(manifest_child, child_root_box, ctx);
             let (w, h) = self.child_size(manifest_child, child_root_box);
 
-            let child_root_node = &child_subtree.tree.nodes()[child_subtree.root as usize];
             let node = tree.add(ViewNode {
                 offset_x: off_x,
                 offset_y: off_y,
@@ -2121,15 +2108,9 @@ impl CompoundViewer {
                     width: w,
                     height: h,
                 },
-                content: child_root_node.content.clone(),
-                background: child_root_node.background,
-                shadow_color: child_root_node.shadow_color,
-                shadow_blur_radius: child_root_node.shadow_blur_radius,
-                shadow_spread: child_root_node.shadow_spread,
-                shadow_offset_x: child_root_node.shadow_offset_x,
-                shadow_offset_y: child_root_node.shadow_offset_y,
-                corner_radius: child_root_node.corner_radius,
-                clips_children: child_root_node.clips_children,
+                content: ViewContent::Portal {
+                    child_idx: i as u16,
+                },
                 ..Default::default()
             });
 
@@ -2672,9 +2653,16 @@ pub fn write_view_node(
 
 // ── write_subtree — recursive ViewTree → scene graph writer ─────────
 
+/// A subtree reference paired with its own portal children.
+/// Enables recursive portal resolution for nested compound documents.
+pub struct SubtreeRef<'a> {
+    pub subtree: &'a ViewSubtree,
+    pub children: &'a [SubtreeRef<'a>],
+}
+
 pub fn write_subtree(
     subtree: &ViewSubtree,
-    children: &[&ViewSubtree],
+    children: &[SubtreeRef<'_>],
     scene: &mut SceneWriter,
     parent: scene::NodeId,
     offset_x: scene::Mpt,
@@ -2697,7 +2685,7 @@ pub fn write_subtree(
 
 pub fn write_subtree_as_root(
     subtree: &ViewSubtree,
-    children: &[&ViewSubtree],
+    children: &[SubtreeRef<'_>],
     scene: &mut SceneWriter,
     offset_x: scene::Mpt,
     offset_y: scene::Mpt,
@@ -2754,7 +2742,7 @@ pub fn write_subtree_as_root(
 
 fn write_subtree_node(
     subtree: &ViewSubtree,
-    children: &[&ViewSubtree],
+    children: &[SubtreeRef<'_>],
     node_id: scene::NodeId,
     scene: &mut SceneWriter,
     parent: scene::NodeId,
@@ -2774,7 +2762,9 @@ fn write_subtree_node(
         let idx = *child_idx as usize;
 
         if idx < children.len() {
-            write_subtree(children[idx], &[], scene, parent, x, y);
+            let child_ref = &children[idx];
+
+            write_subtree(child_ref.subtree, child_ref.children, scene, parent, x, y);
         }
 
         return;

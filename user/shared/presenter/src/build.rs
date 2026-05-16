@@ -499,15 +499,55 @@ impl super::Presenter {
         scene.reset();
 
         let ws_subtree = self.workspace.subtree();
-        let child_subtrees = self.workspace.child_subtrees();
+        let compound_nested: alloc::vec::Vec<alloc::vec::Vec<super::handlers::SubtreeRef<'_>>> =
+            self.workspace
+                .children
+                .iter()
+                .filter_map(|c| {
+                    if let super::handlers::ViewerKind::Compound(cv) = &c.viewer {
+                        Some(
+                            cv.children
+                                .iter()
+                                .map(|cc| {
+                                    let st = match &cc.viewer {
+                                        super::handlers::ViewerKind::Image(v) => v.subtree(),
+                                        super::handlers::ViewerKind::Text(v) => v.subtree(),
+                                        super::handlers::ViewerKind::Video(v) => v.subtree(),
+                                        super::handlers::ViewerKind::Compound(v) => v.subtree(),
+                                    };
+                                    super::handlers::SubtreeRef {
+                                        subtree: st,
+                                        children: &[],
+                                    }
+                                })
+                                .collect(),
+                        )
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+        let mut compound_idx = 0usize;
+        let child_refs: alloc::vec::Vec<super::handlers::SubtreeRef<'_>> = self
+            .workspace
+            .children
+            .iter()
+            .map(|c| {
+                let (subtree, children) = match &c.viewer {
+                    super::handlers::ViewerKind::Compound(cv) => {
+                        let nested = compound_nested[compound_idx].as_slice();
+                        compound_idx += 1;
+                        (cv.subtree(), nested as &[super::handlers::SubtreeRef<'_>])
+                    }
+                    super::handlers::ViewerKind::Image(v) => (v.subtree(), &[] as &[_]),
+                    super::handlers::ViewerKind::Text(v) => (v.subtree(), &[] as &[_]),
+                    super::handlers::ViewerKind::Video(v) => (v.subtree(), &[] as &[_]),
+                };
+                super::handlers::SubtreeRef { subtree, children }
+            })
+            .collect();
 
-        super::handlers::write_subtree_as_root(
-            ws_subtree,
-            &child_subtrees,
-            &mut scene,
-            pt(0),
-            pt(0),
-        );
+        super::handlers::write_subtree_as_root(ws_subtree, &child_refs, &mut scene, pt(0), pt(0));
 
         self.swap_scene();
 
@@ -597,3 +637,5 @@ impl super::Presenter {
         }
     }
 }
+
+// build_subtree_refs removed — two-pass ref building is inline in build_scene

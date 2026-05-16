@@ -1323,11 +1323,33 @@ fn load_compound_child(render_ep: Handle, console_ep: Handle) -> Option<handlers
     let _ = abi::handle::close(manifest_vmo);
     let mut compound = handlers::CompoundViewer::new(manifest.clone());
 
+    struct DecodedImage {
+        content_id: u32,
+        width: u16,
+        height: u16,
+    }
+
+    let mut decoded_cache: alloc::vec::Vec<(u64, DecodedImage)> = alloc::vec::Vec::new();
+
     for child_ref in &manifest.children {
         let file_id = match manifest::resolve_store_uri(&child_ref.uri) {
             Some(id) => id,
             None => continue,
         };
+
+        if let Some(cached) = decoded_cache.iter().find(|(fid, _)| *fid == file_id) {
+            compound.children.push(handlers::ChildViewer {
+                viewer: handlers::ViewerKind::Image(handlers::ImageViewer::new(
+                    cached.1.content_id,
+                    cached.1.width,
+                    cached.1.height,
+                )),
+                mimetype: b"image/jpeg",
+            });
+
+            continue;
+        }
+
         let (data_vmo, data_size, media_type_buf, mt_len) = match store_load_file(file_id) {
             Some(r) => r,
             None => continue,
@@ -1336,6 +1358,17 @@ fn load_compound_child(render_ep: Handle, console_ep: Handle) -> Option<handlers
 
         if media_type.starts_with(b"image/jpeg") {
             if let Some(cv) = decode_jpeg_in_process(data_vmo, data_size, render_ep, console_ep) {
+                if let handlers::ViewerKind::Image(ref iv) = cv.viewer {
+                    decoded_cache.push((
+                        file_id,
+                        DecodedImage {
+                            content_id: iv.content_id,
+                            width: iv.pixel_width,
+                            height: iv.pixel_height,
+                        },
+                    ));
+                }
+
                 compound.children.push(cv);
 
                 continue;
@@ -1343,6 +1376,17 @@ fn load_compound_child(render_ep: Handle, console_ep: Handle) -> Option<handlers
         } else if media_type.starts_with(b"image/png")
             && let Some(cv) = decode_png_in_process(data_vmo, data_size, render_ep, console_ep)
         {
+            if let handlers::ViewerKind::Image(ref iv) = cv.viewer {
+                decoded_cache.push((
+                    file_id,
+                    DecodedImage {
+                        content_id: iv.content_id,
+                        width: iv.pixel_width,
+                        height: iv.pixel_height,
+                    },
+                ));
+            }
+
             compound.children.push(cv);
 
             continue;
