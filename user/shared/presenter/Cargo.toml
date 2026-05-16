@@ -31,6 +31,7 @@ service = [
     "dep:video",
     "ipc/kernel",
     "dep:view-tree",
+    "dep:manifest",
 ]
 
 [dependencies]
@@ -49,6 +50,7 @@ init = { path = "../init", optional = true }
 jpeg = { path = "../../codecs/jpeg", optional = true }
 layout = { path = "../line-break", optional = true }
 layout-service = { path = "../layout", optional = true }
+manifest = { path = "../manifest", optional = true }
 mp4 = { path = "../../codecs/mp4", optional = true }
 name = { path = "../name", optional = true }
 piecetable = { path = "../piecetable", optional = true }

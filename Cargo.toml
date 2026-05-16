@@ -16,6 +16,7 @@ members = [
     "user/codecs/avi",
     "user/codecs/mp4",
     "user/shared/view",
+    "user/shared/manifest",
 ]
 exclude = ["kernel/fuzz", "user/shared/init", "user/system/abi", "tools/mkdisk", "tools/mkavi"]
 resolver = "3"

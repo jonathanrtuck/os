@@ -580,6 +580,88 @@ impl Dispatch for StoreServer {
                 let _ = msg.reply_ok(&data, &[transfer.0]);
             }
 
+            store_service::LOAD_FILE => {
+                if msg.payload.len() < store_service::LoadFileRequest::SIZE {
+                    let _ = msg.reply_error(ipc::STATUS_INVALID);
+
+                    return;
+                }
+
+                let req = store_service::LoadFileRequest::read_from(msg.payload);
+                let file_id = fs::FileId(req.file_id);
+                let media_type_str = match self.store.media_type(file_id) {
+                    Ok(mt) => mt,
+                    Err(_) => {
+                        let _ = msg.reply_error(ipc::STATUS_NOT_FOUND);
+
+                        return;
+                    }
+                };
+                let media_type_bytes = media_type_str.as_bytes();
+                let size = self.store.metadata(file_id).map(|m| m.size).unwrap_or(0);
+
+                if size == 0 {
+                    let _ = msg.reply_error(ipc::STATUS_NOT_FOUND);
+
+                    return;
+                }
+
+                let vmo_size = (size as usize).next_multiple_of(PAGE_SIZE);
+                let vmo = match abi::vmo::create(vmo_size, 0) {
+                    Ok(h) => h,
+                    Err(_) => {
+                        let _ = msg.reply_error(ipc::STATUS_NO_SPACE);
+
+                        return;
+                    }
+                };
+                let rw = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::MAP.0);
+                let va = match abi::vmo::map(vmo, 0, rw) {
+                    Ok(va) => va,
+                    Err(_) => {
+                        let _ = abi::handle::close(vmo);
+                        let _ = msg.reply_error(ipc::STATUS_NO_SPACE);
+
+                        return;
+                    }
+                };
+                // SAFETY: va is a valid RW mapping of vmo_size >= size bytes.
+                let buf = unsafe { core::slice::from_raw_parts_mut(va as *mut u8, size as usize) };
+                let bytes_read = match self.store.read(file_id, 0, buf) {
+                    Ok(n) => n as u64,
+                    Err(ref e) => {
+                        let _ = abi::vmo::unmap(va);
+                        let _ = abi::handle::close(vmo);
+                        let _ = msg.reply_error(store_error_status(e));
+
+                        return;
+                    }
+                };
+                let _ = abi::vmo::unmap(va);
+                let ro = Rights(Rights::READ.0 | Rights::MAP.0 | Rights::DUP.0);
+                let transfer = match abi::handle::dup(vmo, ro) {
+                    Ok(h) => {
+                        let _ = abi::handle::close(vmo);
+
+                        h
+                    }
+                    Err(_) => vmo,
+                };
+                let reply = store_service::LoadFileReply {
+                    size: bytes_read,
+                    media_type_len: media_type_bytes.len() as u16,
+                };
+                let mut data = [0u8; ipc::message::MAX_PAYLOAD];
+
+                reply.write_to(&mut data);
+
+                let mt_end = store_service::LoadFileReply::SIZE + media_type_bytes.len();
+
+                data[store_service::LoadFileReply::SIZE..mt_end].copy_from_slice(media_type_bytes);
+
+                let _ = msg.reply_ok(&data[..mt_end], &[transfer.0]);
+            }
+
             _ => {
                 let _ = msg.reply_error(ipc::STATUS_UNSUPPORTED);
             }

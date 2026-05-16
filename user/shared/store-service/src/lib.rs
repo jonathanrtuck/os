@@ -27,6 +27,12 @@ pub const QUERY_TYPE: u32 = 11;
 /// Reply: QueryTypeReply (file_id, size) + handle[0] = data VMO (READ | MAP | DUP).
 pub const LOAD_TYPE: u32 = 12;
 
+/// Load a file by file ID in one round-trip.
+/// Request: LoadFileRequest (file_id).
+/// Reply: LoadFileReply (size, media_type_len) + inline media type bytes
+///        + handle[0] = data VMO (READ | MAP | DUP).
+pub const LOAD_FILE: u32 = 13;
+
 /// Create request — media type as inline bytes after the header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CreateRequest {
@@ -353,6 +359,52 @@ impl QueryTypeReply {
     }
 }
 
+/// Load file by ID — request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoadFileRequest {
+    pub file_id: u64,
+}
+
+impl LoadFileRequest {
+    pub const SIZE: usize = 8;
+
+    pub fn write_to(&self, buf: &mut [u8]) {
+        buf[0..8].copy_from_slice(&self.file_id.to_le_bytes());
+    }
+
+    #[must_use]
+    pub fn read_from(buf: &[u8]) -> Self {
+        Self {
+            file_id: u64::from_le_bytes(buf[0..8].try_into().unwrap()),
+        }
+    }
+}
+
+/// Load file by ID — reply.
+/// Media type bytes follow immediately after this header in the payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoadFileReply {
+    pub size: u64,
+    pub media_type_len: u16,
+}
+
+impl LoadFileReply {
+    pub const SIZE: usize = 10;
+
+    pub fn write_to(&self, buf: &mut [u8]) {
+        buf[0..8].copy_from_slice(&self.size.to_le_bytes());
+        buf[8..10].copy_from_slice(&self.media_type_len.to_le_bytes());
+    }
+
+    #[must_use]
+    pub fn read_from(buf: &[u8]) -> Self {
+        Self {
+            size: u64::from_le_bytes(buf[0..8].try_into().unwrap()),
+            media_type_len: u16::from_le_bytes(buf[8..10].try_into().unwrap()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -497,6 +549,29 @@ mod tests {
     }
 
     #[test]
+    fn load_file_request_round_trip() {
+        let req = LoadFileRequest { file_id: 42 };
+        let mut buf = [0u8; LoadFileRequest::SIZE];
+
+        req.write_to(&mut buf);
+
+        assert_eq!(LoadFileRequest::read_from(&buf), req);
+    }
+
+    #[test]
+    fn load_file_reply_round_trip() {
+        let reply = LoadFileReply {
+            size: 8192,
+            media_type_len: 10,
+        };
+        let mut buf = [0u8; LoadFileReply::SIZE];
+
+        reply.write_to(&mut buf);
+
+        assert_eq!(LoadFileReply::read_from(&buf), reply);
+    }
+
+    #[test]
     fn method_ids_distinct() {
         let methods = [
             SETUP,
@@ -511,6 +586,7 @@ mod tests {
             GET_INFO,
             QUERY_TYPE,
             LOAD_TYPE,
+            LOAD_FILE,
         ];
 
         for i in 0..methods.len() {
@@ -534,5 +610,7 @@ mod tests {
         assert!(RestoreRequest::SIZE <= crate::MAX_PAYLOAD);
         assert!(DeleteSnapshotRequest::SIZE <= crate::MAX_PAYLOAD);
         assert!(InfoReply::SIZE <= crate::MAX_PAYLOAD);
+        assert!(LoadFileRequest::SIZE <= crate::MAX_PAYLOAD);
+        assert!(LoadFileReply::SIZE <= crate::MAX_PAYLOAD);
     }
 }

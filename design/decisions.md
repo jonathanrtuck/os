@@ -20,26 +20,26 @@ ignored.
 Which decisions are stable enough to write code against? This guides when to
 code vs. when to keep designing.
 
-| Decision               | Status    | Readiness            | Notes                                                                                                                                         |
-| ---------------------- | --------- | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| #1 Audience & Goals    | Settled   | N/A                  | Meta-decision, not directly implementable                                                                                                     |
-| #2 Data Model          | Settled   | **Safe**             | The axiom. Everything flows from this.                                                                                                        |
-| #3 Compatibility       | Settled   | **Safe**             | No POSIX. Standard interfaces only. Clear constraints.                                                                                        |
-| #4 Complexity          | Settled   | N/A                  | Design principle, not directly implementable                                                                                                  |
-| #5 File Understanding  | Settled   | **Behind interface** | Mimetype registry concept is firm. Storage mechanism depends on §16.                                                                          |
-| #6 View vs Edit        | Settled   | **Behind interface** | Concept is firm. Concrete API depends on §11 (rendering) and §16 (tech foundation).                                                           |
-| #7 File Organization   | Settled   | **Behind interface** | Query model is firm. Can prototype the API shape. Storage backend depends on §16.                                                             |
-| #8 Editor Model        | Settled   | **Behind interface** | Architecture is firm. Plugin API depends on §11 and §16.                                                                                      |
-| #9 Edit Protocol       | Settled   | **Behind interface** | Protocol shape is firm. Editor separation demo running (commit 827bcc8): text-editor sends write requests via IPC, compositor is sole writer. |
-| #10 View State         | Unsettled | **Not safe**         | Leaning toward opaque blobs, but not committed.                                                                                               |
-| #11 Rendering Tech     | Settled   | **Behind interface** | Architecture firm (web engine as substrate, adaptation layer). Engine choice deferred to prototype.                                           |
-| #12 Undo & History     | Settled   | **Behind interface** | Depends on COW filesystem choice (§16). Concept is firm.                                                                                      |
-| #13 Collaboration      | Settled   | **Not safe**         | "Design for, build later." Nothing to implement yet.                                                                                          |
-| #14 Compound Documents | Settled   | **Behind interface** | Uniform manifest model + three-axis relationships (spatial/temporal/logical). Rendering depends on §11. Open sub-questions remain.            |
-| #15 Layout Engine      | Unsettled | **Not safe**         | Depends on §11 (rendering technology).                                                                                                        |
-| #16 Tech Foundation    | Settled   | **Safe**             | All sub-decisions settled. COW filesystem + document store implemented (v0.4). Remaining open: snapshot pruning, page cache placement.        |
-| #17 Interaction Model  | Exploring | **Not safe**         | Shell placement leaning (blue-layer, pluggable). Compound editing model unresolved. Nothing settled yet.                                      |
-| #18 Iconography        | Settled   | **Safe**             | Vector path icons, runtime stroke rendering, build-time SVG conversion. Mimetype → icon mapping with fallback.                                |
+| Decision               | Status    | Readiness            | Notes                                                                                                                                                                                                           |
+| ---------------------- | --------- | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| #1 Audience & Goals    | Settled   | N/A                  | Meta-decision, not directly implementable                                                                                                                                                                       |
+| #2 Data Model          | Settled   | **Safe**             | The axiom. Everything flows from this.                                                                                                                                                                          |
+| #3 Compatibility       | Settled   | **Safe**             | No POSIX. Standard interfaces only. Clear constraints.                                                                                                                                                          |
+| #4 Complexity          | Settled   | N/A                  | Design principle, not directly implementable                                                                                                                                                                    |
+| #5 File Understanding  | Settled   | **Behind interface** | Mimetype registry concept is firm. Storage mechanism depends on §16.                                                                                                                                            |
+| #6 View vs Edit        | Settled   | **Behind interface** | Concept is firm. Concrete API depends on §11 (rendering) and §16 (tech foundation).                                                                                                                             |
+| #7 File Organization   | Settled   | **Behind interface** | Query model is firm. Can prototype the API shape. Storage backend depends on §16.                                                                                                                               |
+| #8 Editor Model        | Settled   | **Behind interface** | Architecture is firm. Plugin API depends on §11 and §16.                                                                                                                                                        |
+| #9 Edit Protocol       | Settled   | **Behind interface** | Protocol shape is firm. Editor separation demo running (commit 827bcc8): text-editor sends write requests via IPC, compositor is sole writer.                                                                   |
+| #10 View State         | Unsettled | **Not safe**         | Leaning toward opaque blobs, but not committed.                                                                                                                                                                 |
+| #11 Rendering Tech     | Settled   | **Behind interface** | Architecture firm (web engine as substrate, adaptation layer). Engine choice deferred to prototype.                                                                                                             |
+| #12 Undo & History     | Settled   | **Behind interface** | Depends on COW filesystem choice (§16). Concept is firm.                                                                                                                                                        |
+| #13 Collaboration      | Settled   | **Not safe**         | "Design for, build later." Nothing to implement yet.                                                                                                                                                            |
+| #14 Compound Documents | Settled   | **Behind interface** | Uniform manifest model + axes × positioning (4 display axes × 3 modes). URI content refs. One-level-deep. Navigation is viewer concern. Schema designed (`design/research/manifest-model.md`); not yet in code. |
+| #15 Layout Engine      | Unsettled | **Not safe**         | Scoped by §14's axes × positioning model (flow/grid/absolute over 4 display axes). Depends on §11 (rendering technology).                                                                                       |
+| #16 Tech Foundation    | Settled   | **Safe**             | All sub-decisions settled. COW filesystem + document store implemented (v0.4). Remaining open: snapshot pruning, page cache placement.                                                                          |
+| #17 Interaction Model  | Exploring | **Not safe**         | Shell placement leaning (blue-layer, pluggable). Compound editing model unresolved. Nothing settled yet.                                                                                                        |
+| #18 Iconography        | Settled   | **Safe**             | Vector path icons, runtime stroke rendering, build-time SVG conversion. Mimetype → icon mapping with fallback.                                                                                                  |
 
 **Readiness key:**
 
@@ -59,7 +59,7 @@ their direct consequences are omitted.
 | Decision                               | Confidence  | Revisit trigger                                   | Fallback                            | Blast radius                      |
 | -------------------------------------- | ----------- | ------------------------------------------------- | ----------------------------------- | --------------------------------- |
 | Edit protocol (#9)                     | High        | beginOp/endOp granularity wrong for real editors  | Adjust boundary semantics           | Undo model, IPC messages          |
-| Compound docs (#14)                    | Medium-High | Five layout models miss a real use case           | Add or merge models                 | Layout engine                     |
+| Compound docs (#14)                    | Medium-High | Axes × positioning matrix misses a real use case  | Add axis or positioning mode        | Layout engine, manifest schema    |
 | Undo: COW snapshots (#12)              | High        | Snapshots too expensive for fine-grained ops      | Operation-log undo                  | Filesystem integration            |
 | File org: queries (#7)                 | High        | Query performance unacceptable                    | Path-based fallback                 | Metadata DB, shell                |
 | Handles (#16)                          | High        | Need sub-document access granularity              | Extend rights model                 | Handle table, access control      |
@@ -566,15 +566,16 @@ scheduling); the macOS prototype validates the rendering integration.
     translator). Requires building a native rendering pipeline.
   - A hybrid is also possible (e.g., web engine for layout calculation, native
     renderer for compositing).
-  - **Why leaning B:** The compound document model (five layouts, manifests,
-    referenced content) is the internal truth. External formats — .docx, .pptx,
-    .html — are translations inward at the boundary. The OS doesn't think in
-    HTML any more than it thinks in .docx. Approach B preserves this: the OS
-    owns the rendering model, and the renderer can do things CSS can't express
-    (analogous to how Safari adds proprietary CSS extensions, except here the OS
-    isn't constrained by a web engine's architecture at all). Approach A inverts
-    the power relationship — the OS must express everything through the engine's
-    model, making the engine the de facto rendering authority.
+  - **Why leaning B:** The compound document model (axes × positioning,
+    manifests, referenced content) is the internal truth. External formats —
+    .docx, .pptx, .html — are translations inward at the boundary. The OS
+    doesn't think in HTML any more than it thinks in .docx. Approach B preserves
+    this: the OS owns the rendering model, and the renderer can do things CSS
+    can't express (analogous to how Safari adds proprietary CSS extensions,
+    except here the OS isn't constrained by a web engine's architecture at all).
+    Approach A inverts the power relationship — the OS must express everything
+    through the engine's model, making the engine the de facto rendering
+    authority.
 - **Which engine?** Servo (Rust, embeddable, incomplete), WebKit (lighter,
   macOS-native for prototyping), Chromium/CEF (mature, enormous), or something
   else. Engine choice is partially coupled with the rendering direction —
@@ -720,27 +721,52 @@ metadata declares which content types they handle (e.g.,
 registry — no separate mechanism. Same system used to find documents is used to
 find editors.
 
-**Three-axis relationship model:** The relationships between parts are described
-along three orthogonal, composable axes (see foundations.md for full details):
+**Axes × positioning model:** Layout is decomposed into two orthogonal
+properties: which display axes the layout operates on, and how children are
+positioned along them (see foundations.md for full details and the matrix):
 
-- **Spatial** — where parts are positioned (flow, fixed canvas, grid, freeform
-  canvas, or none)
-- **Temporal** — when parts are active (simultaneous, sequential, timed, or
-  none)
-- **Logical** — how parts are grouped (flat, sequential, hierarchical, graph, or
-  none)
+- **Display axes** — four axes (width, height, depth, time) form a closed set.
+  Content-domain concepts (frequency, pitch, price) are mapped to display axes
+  by viewers, not declared in the manifest. Axis types carry units (Mpt for
+  spatial, ms for time). Axis order is direction — `[width, height]` flows
+  horizontally, `[height, width]` flows vertically.
+- **Positioning modes** — three modes: `flow` (layout engine determines
+  positions from content sizes), `grid` (container divides space into regular
+  regions), `absolute` (children carry explicit coordinates).
 
-Every document is a point in this three-dimensional space. A slide deck =
-spatial (fixed canvas) + temporal (sequential) + logical (flat). A source code
-project = logical (hierarchical tree). A video editing project = spatial (2D
-frame) + temporal (timed) + logical (grouped by track). The original five layout
-types (flow, fixed canvas, timeline, grid, freeform canvas) mapped to four
-spatial sub-types plus one temporal sub-type (timeline = timed). The three-axis
-model extends this to cover organizational documents (projects, albums,
-playlists) that use the logical axis without spatial layout.
+A slide deck is `[height]` grid (the deck) of `[width, height]` absolute slides.
+A video editor is `[time, height]` absolute. A photo album is `[width, height]`
+grid. An article with inline images is `[width, height]` flow. The desktop is a
+`[width]` grid of documents. New layout types are points in this matrix, not
+additions to an enum.
+
+**URI content references.** All content is addressed by URI. `store:` scheme for
+local document store files (resolves to FileId), standard schemes (`https:`,
+`rtsp:`, `file:`) for external resources. One reference type, scheme-routed
+resolution.
+
+**Uniform shape.** Every manifest has the same structure: metadata + optional
+layout + children list. A simple document is one child with no layout. A
+compound document has multiple children with axes and positioning. The
+simple/compound distinction is a runtime property, not a type in the schema.
+
+**One level deep.** A manifest's children list is flat. A child that needs
+internal structure is a subdocument with its own manifest. Depth comes from
+nesting, not inline group definitions.
+
+**Navigation is a viewer concern.** The manifest describes structure and spatial
+layout. Whether to page through children (slides), scroll them, or show all at
+once is the viewer's decision. The same manifest can be rendered as a scrollable
+grid, a carousel, or a slideshow — different viewers, same data.
+
+**Edge data on children.** Each child carries optional placement (where it sits
+in the parent's layout, dependent on positioning mode) and an optional viewport
+(what region of the child's content to show — crop/zoom). Viewport is
+compositional: the same image can appear in two documents with different crops
+without duplicating content.
 
 **Version history is orthogonal to layout.** COW snapshots are an OS-level
-mechanism that applies to all documents regardless of their layout axes. Content
+mechanism that applies to all documents regardless of their layout. Content
 temporality (an audio waveform) and version history (edits to the audio) are
 fundamentally different — one is the document's structure, the other is the OS's
 undo system.
@@ -824,31 +850,25 @@ format support = new translator; the OS doesn't change.
 
 _Tier 4. Depends on: Compound documents, rendering technology._
 
-The layout engine is scoped by Decision #14's three-axis relationship model. It
-must handle relationships along three composable axes:
-
-- **Spatial axis:** flow, fixed canvas, grid, freeform canvas sub-types
-- **Temporal axis:** simultaneous, sequential, timed sub-types
-- **Logical axis:** flat, sequential, hierarchical, graph sub-types
-
-It also mediates cross-content-type interactions along whichever axes are active
-(image resize → text reflow on spatial axis, time range removal → synchronized
-track trimming on temporal axis, section collapse → child visibility on logical
+The layout engine is scoped by Decision #14's axes × positioning model. It must
+implement three positioning modes (flow, grid, absolute) across four display
+axes (width, height, depth, time). It also mediates cross-content-type
+interactions along whichever axes are active (image resize → text reflow in flow
+mode, time range removal → track synchronization in absolute mode on the time
 axis).
 
-| Option                                                | Tradeoffs                                                                                                                                                                                                       |
-| ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **CSS (via web engine)**                              | Covers spatial axis well (flow, grid, flex, absolute positioning). No support for temporal or logical axes.                                                                                                     |
-| **Custom layout engine**                              | Full control over all three axes. Can design temporal and logical layouts natively. But enormous engineering effort for spatial layouts that CSS handles well.                                                  |
-| **CSS for spatial + custom temporal/logical engines** | CSS handles spatial axis (4 sub-types). Custom engines handle temporal (timed synchronization, sequential transitions) and logical (tree navigation, graph layout). Three systems but each focused on one axis. |
+| Option                    | Tradeoffs                                                                                                                                                   |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **CSS (via web engine)**  | Covers spatial flow/grid/absolute well. No support for time axis or custom axis semantics. Ties layout to web engine (tension with Decision #11 leaning B). |
+| **Custom layout engine**  | Full control over all axes and positioning modes. Can handle time axis natively. Significant effort for spatial flow (line breaking, bidi, wrapping).       |
+| **Hybrid (CSS + custom)** | CSS for spatial flow/grid, custom for time-axis layouts. Two systems, but each focused on what it does well.                                                |
 
-**Initial leaning:** CSS for spatial + custom temporal/logical engines. **Why
-this matters:** The layout engine is a critical system component — it mediates
-cross-type interactions in compound documents (Decision #14). The three-axis
-model expands scope beyond the original five layout types. Closely tied to
-rendering technology choice (Decision #11). Logical axis support is what enables
-organizational documents (projects, albums) — without it, the compound document
-model only covers compositional use cases.
+**Initial leaning:** Custom layout engine. **Why this matters:** Decision #11
+leans toward native rendering (web content translated inward), which makes CSS
+dependency less natural. The axes × positioning model is simple enough that a
+custom engine can cover all cells in the matrix. The existing `layout` library
+already handles text flow layout. Closely tied to rendering technology choice
+(Decision #11).
 
 ---
 

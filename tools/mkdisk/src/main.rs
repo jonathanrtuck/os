@@ -6,9 +6,10 @@
 //! document store. When an assets directory is provided, ingests image
 //! files into the store with appropriate media types.
 
-use std::{env, fs::File, os::unix::fs::FileExt, path::Path, process};
+use std::{collections::HashMap, env, fs::File, os::unix::fs::FileExt, path::Path, process};
 
-use fs::{BLOCK_SIZE, BlockDevice, Filesystem, FsError};
+use fs::{BLOCK_SIZE, BlockDevice, FileId, Filesystem, FsError};
+use manifest::{AbsoluteProperties, Axis, Child, Layout, LayoutMode, Manifest, PerAxis, Placement};
 use store::Store;
 
 struct FileDevice {
@@ -25,6 +26,7 @@ impl FileDevice {
             .truncate(true)
             .open(path)
             .map_err(|_| FsError::Io)?;
+
         file.set_len(u64::from(blocks) * u64::from(BLOCK_SIZE))
             .map_err(|_| FsError::Io)?;
 
@@ -102,6 +104,7 @@ fn main() {
 
     if args.len() < 2 || args.len() > 3 {
         eprintln!("usage: mkdisk <output.img> [assets-dir]");
+
         process::exit(1);
     }
 
@@ -111,21 +114,26 @@ fn main() {
     let blocks: u32 = if assets_dir.is_some() { 8192 } else { 512 };
     let device = FileDevice::create(output_path, blocks).unwrap_or_else(|e| {
         eprintln!("error: failed to create {}: {e}", output_path.display());
+
         process::exit(1);
     });
     let filesystem = Filesystem::format(device).unwrap_or_else(|e| {
         eprintln!("error: format failed: {e}");
+
         process::exit(1);
     });
     let mut store = Store::init(Box::new(filesystem)).unwrap_or_else(|e| {
         eprintln!("error: store init failed: {e}");
+
         process::exit(1);
     });
     let mut file_count = 0u32;
+    let mut asset_ids: HashMap<&str, FileId> = HashMap::new();
 
     if let Some(dir) = assets_dir {
         if !dir.is_dir() {
             eprintln!("error: assets directory not found: {}", dir.display());
+
             process::exit(1);
         }
 
@@ -134,28 +142,35 @@ fn main() {
 
             if !path.exists() {
                 eprintln!("  skip  {}  (not found)", spec.filename);
+
                 continue;
             }
 
             let data = std::fs::read(&path).unwrap_or_else(|e| {
                 eprintln!("error: failed to read {}: {e}", path.display());
+
                 process::exit(1);
             });
             let id = store.create(spec.media_type).unwrap_or_else(|e| {
                 eprintln!("error: store create failed: {e}");
+
                 process::exit(1);
             });
 
             store.write(id, 0, &data).unwrap_or_else(|e| {
                 eprintln!("error: store write failed: {e}");
+
                 process::exit(1);
             });
             store
                 .set_attribute(id, "name", spec.name)
                 .unwrap_or_else(|e| {
                     eprintln!("error: set_attribute failed: {e}");
+
                     process::exit(1);
                 });
+
+            asset_ids.insert(spec.name, id);
 
             file_count += 1;
 
@@ -166,6 +181,12 @@ fn main() {
                 spec.filename,
                 data.len()
             );
+        }
+
+        if let Some(&image_id) = asset_ids.get("zoey") {
+            create_compound_doc(&mut store, image_id);
+
+            file_count += 1;
         }
     }
 
@@ -181,5 +202,70 @@ fn main() {
         blocks,
         blocks * BLOCK_SIZE / 1024,
         file_count
+    );
+}
+
+fn create_compound_doc(store: &mut Store, image_id: FileId) {
+    let mpt = |pt: i32| pt * 1024;
+    let manifest = Manifest {
+        title: Some("Compound Test".into()),
+        tags: vec!["test".into()],
+        provenance: None,
+        attributes: Vec::new(),
+        layout: Some(Layout {
+            axes: vec![Axis::Width, Axis::Height],
+            mode: LayoutMode::Absolute(AbsoluteProperties {
+                bounds: PerAxis {
+                    width: Some(mpt(1200)),
+                    height: Some(mpt(800)),
+                    ..Default::default()
+                },
+                viewport: None,
+            }),
+        }),
+        children: vec![Child {
+            uri: format!("store:{}", image_id.0),
+            placement: Some(Placement {
+                position: PerAxis {
+                    width: Some(mpt(100)),
+                    height: Some(mpt(50)),
+                    ..Default::default()
+                },
+                size: PerAxis {
+                    width: Some(mpt(1000)),
+                    height: Some(mpt(700)),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            viewport: None,
+        }],
+    };
+    let bytes = manifest::encode(&manifest);
+    let id = store
+        .create("application/x-os-document")
+        .unwrap_or_else(|e| {
+            eprintln!("error: create compound doc failed: {e}");
+
+            process::exit(1);
+        });
+
+    store.write(id, 0, &bytes).unwrap_or_else(|e| {
+        eprintln!("error: write compound doc failed: {e}");
+
+        process::exit(1);
+    });
+    store
+        .set_attribute(id, "name", "compound-test")
+        .unwrap_or_else(|e| {
+            eprintln!("error: set_attribute failed: {e}");
+
+            process::exit(1);
+        });
+
+    println!(
+        "  compound  {:?}  compound-test  ({} bytes manifest, 2 children)",
+        id,
+        bytes.len()
     );
 }

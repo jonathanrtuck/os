@@ -90,10 +90,10 @@ Its responsibilities:
   lines, that images have dimensions, that compound documents have parts with
   relationships.
 - **Layout:** Computes where content elements are positioned. For text: line
-  breaking, wrapping, glyph positioning. For compound documents:
-  spatial/temporal/logical arrangement of parts. For all content types: this is
-  where "understanding the content" translates into "knowing where everything
-  goes on screen."
+  breaking, wrapping, glyph positioning. For compound documents: axes ×
+  positioning layout (flow, grid, absolute over display axes). For all content
+  types: this is where "understanding the content" translates into "knowing
+  where everything goes on screen."
 - **Input routing:** Receives input events, decides where they go (editor,
   system gesture, navigation).
 - **View state:** Tracks focus, cursor position, selection, scroll offset.
@@ -234,8 +234,8 @@ The OS service understands content types at the mimetype level. This means:
 
 - It knows text has characters, lines, and wrapping behavior.
 - It knows images have pixel dimensions.
-- It knows compound documents have parts with spatial/temporal/logical
-  relationships.
+- It knows compound documents have parts with display axes and positioning modes
+  (the axes × positioning model).
 - It does **not** know about codec internals, compression algorithms, or
   format-specific structures. Those are leaf-node concerns handled by decoders
   inside the adaptation layer.
@@ -248,10 +248,10 @@ service, not the compositor. The compositor renders the _result_ of layout
 
 Every content type the OS natively understands gets a layout handler in the OS
 service. Text gets line breaking and wrapping. Images get dimension-aware
-placement. Compound documents get the three-axis layout engine. A content type
-without a layout handler falls back to "opaque rectangle" — the OS can still
-display it (via a decoder that produces pixels), it just can't flow text around
-it intelligently.
+placement. Compound documents get the axes × positioning layout engine. A
+content type without a layout handler falls back to "opaque rectangle" — the OS
+can still display it (via a decoder that produces pixels), it just can't flow
+text around it intelligently.
 
 ---
 

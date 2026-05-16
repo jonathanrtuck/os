@@ -1,0 +1,8 @@
+# Compound document test — navigate to compound doc space and capture.
+# Space 0: text, Space 1: image, Space 2: video, Space 3: compound
+# Each Ctrl+Tab advances one space. Spring animation ~30 frames.
+0 key ctrl+tab
+35 key ctrl+tab
+70 key ctrl+tab
+105 capture /tmp/compound-space.png
+105 exit

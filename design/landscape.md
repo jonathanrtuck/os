@@ -202,8 +202,8 @@ architectural change.
 Every document has a media type as OS-managed metadata (not a file extension
 convention, not an app association). The OS can render any file it understands
 without installing an application. Documents are manifests that reference
-content files and describe their relationships along three axes: spatial,
-temporal, and logical.
+content files and describe their layout via display axes (width, height, depth,
+time) and a positioning mode (flow, grid, absolute).
 
 This is the core thesis: **OS → Document → Tool** instead of OS → App →
 Document. The OS manages content directly; applications are tools you attach to

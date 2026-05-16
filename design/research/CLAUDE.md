@@ -18,8 +18,9 @@ Research documents informing OS design decisions.
 - `font-rendering.md` -- Font rendering pipeline research and implementation
   status.
 - `control-plane-ipc.md` -- Control plane IPC research.
-- `manifest-model.md` -- Compound document manifest data model. Composition
-  tree, content catalog, spatial/temporal/logical axes, serialization. Draft.
+- `manifest-model.md` -- Compound document manifest data model. Axes ×
+  positioning model, URI content references, one-level-deep rule, edge data.
+  Design complete, not yet in code.
 - `smp-concurrency.md` -- SMP concurrency model evaluation. Five approaches
   (BKL, per-object, multikernel, per-cluster, QNX preemptible) ranked against M4
   Pro hardware and project design principles. Decision: per-object locking

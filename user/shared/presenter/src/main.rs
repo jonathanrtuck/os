@@ -684,6 +684,47 @@ fn store_load_type(media_type: &[u8]) -> Option<(Handle, usize)> {
     Some((Handle(handles[0]), qt.size as usize))
 }
 
+/// Load a file by FileId from the store. Returns (data VMO, size, media_type).
+fn store_load_file(file_id: u64) -> Option<(Handle, usize, [u8; 64], usize)> {
+    let store_ep = name::lookup(HANDLE_NS_EP, b"store").ok()?;
+    let mut call_buf = [0u8; ipc::message::MSG_SIZE];
+    let mut req_buf = [0u8; store_service::LoadFileRequest::SIZE];
+    let req = store_service::LoadFileRequest { file_id };
+
+    req.write_to(&mut req_buf);
+
+    let mut handles = [0u32; 4];
+    let reply = ipc::client::call(
+        store_ep,
+        store_service::LOAD_FILE,
+        &req_buf,
+        &[],
+        &mut handles,
+        &mut call_buf,
+    )
+    .ok()?;
+
+    if reply.is_error()
+        || reply.payload.len() < store_service::LoadFileReply::SIZE
+        || handles[0] == 0
+    {
+        return None;
+    }
+
+    let lr = store_service::LoadFileReply::read_from(reply.payload);
+    let mt_len = (lr.media_type_len as usize)
+        .min(reply.payload.len() - store_service::LoadFileReply::SIZE)
+        .min(64);
+    let mut media_type = [0u8; 64];
+
+    media_type[..mt_len].copy_from_slice(
+        &reply.payload
+            [store_service::LoadFileReply::SIZE..store_service::LoadFileReply::SIZE + mt_len],
+    );
+
+    Some((Handle(handles[0]), lr.size as usize, media_type, mt_len))
+}
+
 // ── Image loading from store + decode + upload ──────────────────
 
 static NEXT_CONTENT_ID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1);
@@ -1024,9 +1065,13 @@ fn try_open_video(
     let file_data = unsafe { core::slice::from_raw_parts(file_va as *const u8, bytes_read) };
     let is_avi = file_data.len() >= 4 && file_data[0..4] == RIFF_MAGIC;
     let result = if is_avi {
-        open_video_avi(file_data, file_va, file_vmo, bytes_read, render_ep, console_ep)
+        open_video_avi(
+            file_data, file_va, file_vmo, bytes_read, render_ep, console_ep,
+        )
     } else {
-        open_video_mp4(file_data, file_va, file_vmo, bytes_read, render_ep, console_ep)
+        open_video_mp4(
+            file_data, file_va, file_vmo, bytes_read, render_ep, console_ep,
+        )
     };
 
     if result.is_none() {
@@ -1246,6 +1291,72 @@ fn finish_open_video(
     console::write(console_ep, log_msg);
 
     Some(vid)
+}
+
+// ── Compound document loading from store ─────────────────────────
+
+fn load_compound_child(render_ep: Handle, console_ep: Handle) -> Option<handlers::ChildViewer> {
+    let (manifest_vmo, manifest_size) = store_load_type(b"application/x-os-document")?;
+    let ro = Rights(Rights::READ.0 | Rights::MAP.0);
+    let manifest_va = match abi::vmo::map(manifest_vmo, 0, ro) {
+        Ok(va) => va,
+        Err(_) => {
+            let _ = abi::handle::close(manifest_vmo);
+
+            return None;
+        }
+    };
+    // SAFETY: kernel mapped the VMO at manifest_va, manifest_size is within bounds.
+    let manifest_bytes =
+        unsafe { core::slice::from_raw_parts(manifest_va as *const u8, manifest_size) };
+    let manifest = match manifest::decode(manifest_bytes) {
+        Ok(m) => m,
+        Err(_) => {
+            let _ = abi::vmo::unmap(manifest_va);
+            let _ = abi::handle::close(manifest_vmo);
+            console::write(console_ep, b"presenter: compound manifest decode failed\n");
+
+            return None;
+        }
+    };
+    let _ = abi::vmo::unmap(manifest_va);
+    let _ = abi::handle::close(manifest_vmo);
+    let mut compound = handlers::CompoundViewer::new(manifest.clone());
+
+    for child_ref in &manifest.children {
+        let file_id = match manifest::resolve_store_uri(&child_ref.uri) {
+            Some(id) => id,
+            None => continue,
+        };
+        let (data_vmo, data_size, media_type_buf, mt_len) = match store_load_file(file_id) {
+            Some(r) => r,
+            None => continue,
+        };
+        let media_type = &media_type_buf[..mt_len];
+
+        if media_type.starts_with(b"image/jpeg") {
+            if let Some(cv) = decode_jpeg_in_process(data_vmo, data_size, render_ep, console_ep) {
+                compound.children.push(cv);
+
+                continue;
+            }
+        } else if media_type.starts_with(b"image/png")
+            && let Some(cv) = decode_png_in_process(data_vmo, data_size, render_ep, console_ep)
+        {
+            compound.children.push(cv);
+
+            continue;
+        }
+
+        let _ = abi::handle::close(data_vmo);
+    }
+
+    console::write(console_ep, b"presenter: compound document loaded\n");
+
+    Some(handlers::ChildViewer {
+        viewer: handlers::ViewerKind::Compound(compound),
+        mimetype: b"application/x-os-document",
+    })
 }
 
 // ── Audio clip loading from store ─────────────────────────────────
@@ -1526,6 +1637,9 @@ extern "C" fn _start() -> ! {
     if let Some(video_child) = load_video_child(render_ep, console_ep) {
         workspace.children.push(video_child);
     }
+    if let Some(compound_child) = load_compound_child(render_ep, console_ep) {
+        workspace.children.push(compound_child);
+    }
 
     let mut server = Presenter {
         doc_va,
@@ -1585,9 +1699,7 @@ extern "C" fn _start() -> ! {
                 .workspace
                 .children
                 .get(server.workspace.active)
-                .is_some_and(|c| {
-                    matches!(&c.viewer, handlers::ViewerKind::Video(v) if v.playing)
-                });
+                .is_some_and(|c| matches!(&c.viewer, handlers::ViewerKind::Video(v) if v.playing));
         let deadline = if video_playing {
             // Video playback: use the video's PTS-based deadline.
             if let Some(child) = server.workspace.children.get(server.workspace.active) {
@@ -1612,7 +1724,6 @@ extern "C" fn _start() -> ! {
 
             (current_sec + 1) * NS_PER_SEC
         };
-
         let frame_due = match ipc::server::serve_one_timed(HANDLE_SVC_EP, &mut server, deadline) {
             Ok(()) => abi::system::clock_read().unwrap_or(0) >= deadline,
             Err(abi::types::SyscallError::TimedOut) => true,
@@ -1622,8 +1733,7 @@ extern "C" fn _start() -> ! {
         if frame_due {
             // Advance video playback if active.
             if video_playing
-                && let Some(child) =
-                    server.workspace.children.get_mut(server.workspace.active)
+                && let Some(child) = server.workspace.children.get_mut(server.workspace.active)
                 && let handlers::ViewerKind::Video(vid) = &mut child.viewer
             {
                 let ended = vid.advance_playback(HANDLE_NS_EP);

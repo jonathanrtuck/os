@@ -1682,6 +1682,7 @@ pub enum ViewerKind {
     Image(ImageViewer),
     Text(TextViewer),
     Video(VideoViewer),
+    Compound(CompoundViewer),
 }
 
 pub struct ChildViewer {
@@ -1754,6 +1755,7 @@ impl WorkspaceViewer {
                 ViewerKind::Image(v) => v.subtree(),
                 ViewerKind::Text(v) => v.subtree(),
                 ViewerKind::Video(v) => v.subtree(),
+                ViewerKind::Compound(v) => v.subtree(),
             })
             .collect()
     }
@@ -1968,6 +1970,7 @@ impl WorkspaceViewer {
                 ViewerKind::Image(v) => v.subtree(),
                 ViewerKind::Text(v) => v.subtree(),
                 ViewerKind::Video(v) => v.subtree(),
+                ViewerKind::Compound(v) => v.subtree(),
             };
 
             if child_subtree.root == scene::NULL {
@@ -2025,6 +2028,203 @@ impl Viewer for WorkspaceViewer {
     fn teardown(&mut self) {}
 }
 
+// ── Compound document viewer ────────────────────────────────────────
+
+pub struct CompoundViewer {
+    pub manifest: manifest::Manifest,
+    pub children: alloc::vec::Vec<ChildViewer>,
+    subtree: ViewSubtree,
+}
+
+pub struct CompoundRebuildContext {
+    pub avail_width: u32,
+    pub avail_height: u32,
+    pub now_ns: u64,
+}
+
+impl CompoundViewer {
+    pub fn new(manifest: manifest::Manifest) -> Self {
+        Self {
+            manifest,
+            children: alloc::vec::Vec::new(),
+            subtree: ViewSubtree {
+                tree: ViewTree::new(),
+                root: scene::NULL,
+                layout: vec![],
+            },
+        }
+    }
+
+    pub fn rebuild(&mut self, ctx: &CompoundRebuildContext) -> bool {
+        let child_constraints = Constraints {
+            available_width: scene::Umpt::from(ctx.avail_width),
+            available_height: scene::Umpt::from(ctx.avail_height),
+            now_ns: ctx.now_ns,
+        };
+
+        for child in &mut self.children {
+            match &mut child.viewer {
+                ViewerKind::Image(v) => {
+                    v.rebuild(&child_constraints);
+                }
+                ViewerKind::Video(v) => {
+                    v.rebuild(&child_constraints);
+                }
+                ViewerKind::Compound(v) => {
+                    v.rebuild(ctx);
+                }
+                ViewerKind::Text(_) => {}
+            }
+        }
+
+        let mut tree = ViewTree::new();
+        let (root_w, root_h) = self.root_bounds(ctx);
+        let root = tree.add(ViewNode {
+            display: view_tree::Display::FixedCanvas,
+            intrinsic: IntrinsicSize::Fixed {
+                width: root_w,
+                height: root_h,
+            },
+            clips_children: true,
+            ..Default::default()
+        });
+
+        for (i, child) in self.children.iter().enumerate() {
+            let child_subtree = match &child.viewer {
+                ViewerKind::Image(v) => v.subtree(),
+                ViewerKind::Text(v) => v.subtree(),
+                ViewerKind::Video(v) => v.subtree(),
+                ViewerKind::Compound(v) => v.subtree(),
+            };
+
+            if child_subtree.root == scene::NULL {
+                continue;
+            }
+
+            let manifest_child = match self.manifest.children.get(i) {
+                Some(c) => c,
+                None => continue,
+            };
+            let child_root_box = if (child_subtree.root as usize) < child_subtree.layout.len() {
+                &child_subtree.layout[child_subtree.root as usize]
+            } else {
+                &LayoutBox::EMPTY
+            };
+            let (off_x, off_y) = self.child_position(manifest_child, child_root_box, ctx);
+            let (w, h) = self.child_size(manifest_child, child_root_box);
+
+            let child_root_node = &child_subtree.tree.nodes()[child_subtree.root as usize];
+            let node = tree.add(ViewNode {
+                offset_x: off_x,
+                offset_y: off_y,
+                intrinsic: IntrinsicSize::Fixed {
+                    width: w,
+                    height: h,
+                },
+                content: child_root_node.content.clone(),
+                background: child_root_node.background,
+                shadow_color: child_root_node.shadow_color,
+                shadow_blur_radius: child_root_node.shadow_blur_radius,
+                shadow_spread: child_root_node.shadow_spread,
+                shadow_offset_x: child_root_node.shadow_offset_x,
+                shadow_offset_y: child_root_node.shadow_offset_y,
+                corner_radius: child_root_node.corner_radius,
+                clips_children: child_root_node.clips_children,
+                ..Default::default()
+            });
+
+            tree.append_child(root, node);
+        }
+
+        let layout = view_tree::layout(
+            tree.nodes(),
+            root,
+            scene::Umpt::from(root_w),
+            scene::Umpt::from(root_h),
+            &NoMeasurer,
+        );
+
+        self.subtree = ViewSubtree { tree, root, layout };
+
+        true
+    }
+
+    fn root_bounds(&self, ctx: &CompoundRebuildContext) -> (u32, u32) {
+        if let Some(ref layout) = self.manifest.layout
+            && let manifest::LayoutMode::Absolute(ref abs) = layout.mode
+        {
+            let w = abs
+                .bounds
+                .get(manifest::Axis::Width)
+                .map(|v| v as u32)
+                .unwrap_or(ctx.avail_width);
+            let h = abs
+                .bounds
+                .get(manifest::Axis::Height)
+                .map(|v| v as u32)
+                .unwrap_or(ctx.avail_height);
+
+            return (w, h);
+        }
+
+        (ctx.avail_width, ctx.avail_height)
+    }
+
+    fn child_position(
+        &self,
+        child: &manifest::Child,
+        child_box: &LayoutBox,
+        ctx: &CompoundRebuildContext,
+    ) -> (scene::Mpt, scene::Mpt) {
+        if let Some(ref placement) = child.placement {
+            let x = placement.position.get(manifest::Axis::Width).unwrap_or(0);
+            let y = placement.position.get(manifest::Axis::Height).unwrap_or(0);
+
+            return (scene::Mpt::from(x), scene::Mpt::from(y));
+        }
+
+        let _ = (child_box, ctx);
+
+        (scene::Mpt::from(0), scene::Mpt::from(0))
+    }
+
+    fn child_size(&self, child: &manifest::Child, child_box: &LayoutBox) -> (u32, u32) {
+        if let Some(ref placement) = child.placement {
+            let w = placement.size.get(manifest::Axis::Width);
+            let h = placement.size.get(manifest::Axis::Height);
+
+            if let (Some(w), Some(h)) = (w, h) {
+                return (w as u32, h as u32);
+            }
+        }
+
+        (child_box.width, child_box.height)
+    }
+
+    pub const SUPPORTED_TYPES: &[(MimetypePattern, ViewerKindTag)] = &[
+        (
+            MimetypePattern::Exact(b"application/x-os-document"),
+            ViewerKindTag::Compound,
+        ),
+        (
+            MimetypePattern::Exact(b"application/x-os-presentation"),
+            ViewerKindTag::Compound,
+        ),
+    ];
+}
+
+impl Viewer for CompoundViewer {
+    fn subtree(&self) -> &ViewSubtree {
+        &self.subtree
+    }
+
+    fn event(&mut self, _event: &InputEvent) -> EventResponse {
+        EventResponse::Unhandled
+    }
+
+    fn teardown(&mut self) {}
+}
+
 // ── Viewer registry ─────────────────────────────────────────────────
 
 #[allow(dead_code)]
@@ -2033,6 +2233,7 @@ pub enum ViewerKindTag {
     Image,
     Text,
     Video,
+    Compound,
     Workspace,
 }
 
@@ -2093,7 +2294,6 @@ impl ViewerRegistry {
                 priority: pat.specificity(),
             });
         }
-
         for &(pat, kind) in TextViewer::SUPPORTED_TYPES {
             entries.push(ViewerEntry {
                 pattern: pat,
@@ -2101,8 +2301,14 @@ impl ViewerRegistry {
                 priority: pat.specificity(),
             });
         }
-
         for &(pat, kind) in VideoViewer::SUPPORTED_TYPES {
+            entries.push(ViewerEntry {
+                pattern: pat,
+                kind,
+                priority: pat.specificity(),
+            });
+        }
+        for &(pat, kind) in CompoundViewer::SUPPORTED_TYPES {
             entries.push(ViewerEntry {
                 pattern: pat,
                 kind,

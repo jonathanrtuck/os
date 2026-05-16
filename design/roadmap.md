@@ -125,12 +125,14 @@ builds the compound document model on top of this infrastructure.
 
 **What it delivers:**
 
-- **Manifest format** — the data structure describing a compound document:
-  parts, relationships, layout axes (spatial/temporal/logical from Decision
-  #14). Internal to the OS, no external interop requirement.
-- **Spatial composition** — at minimum flow and fixed canvas layout modes. The
-  layout engine computes positions for heterogeneous content parts within a
-  compound document.
+- **Manifest format** — the data structure describing a compound document: URI
+  content references, display axes (width/height/depth/time), positioning mode
+  (flow/grid/absolute), edge data (placement + viewport). Schema designed in
+  `design/research/manifest-model.md`. Internal to the OS, no external interop
+  requirement.
+- **Layout composition** — at minimum flow and grid layout modes over spatial
+  axes. The layout engine computes positions for heterogeneous content parts
+  within a compound document.
 - **Compound document viewer** — uses portals to compose sub-viewers. A rich
   text document with inline images, or a slide deck with text + image regions,
   both rendered through the same viewer composition model.

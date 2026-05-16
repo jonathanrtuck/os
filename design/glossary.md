@@ -271,10 +271,10 @@ to present content: plain text, rich text, image, audio, video, structured data
 [foundations.md § The Type System](foundations.md#the-type-system-three-layers).
 
 **Compound document** — a document whose manifest references multiple content
-files with relationships between them. Not a separate concept — the manifest
+files with a layout that arranges them. Not a separate concept — the manifest
 model is uniform. What makes a document "compound" is having multiple content
-references with relationship axes (spatial, temporal, logical). See
-[foundations.md § Compound Documents](foundations.md#compound-documents).
+references with display axes and a positioning mode (axes × positioning model).
+See [foundations.md § Compound Documents](foundations.md#compound-documents).
 
 **FileId** — a newtype wrapping a filesystem inode identifier. The stable
 identity of a document across renames, moves, and metadata changes. Used
@@ -291,11 +291,13 @@ Declared at creation, content detection as fallback. See
 [foundations.md § Content Model](foundations.md#content-model).
 
 **Workspace** — the root compound document. The desktop is modeled as a compound
-document with a custom media type (e.g., `application/x-os-workspace`). The
-document strip is its spatial layout axis; system chrome (clock, controls) are
-sub-documents or metadata; GUI/TUI/a11y are different layout projections of the
-same structure. See [decisions.md § #17](decisions.md) and
-[journal.md](journal.md) "System-as-Compound-Document."
+document with a custom media type (e.g., `application/x-os-workspace`), a
+`[width]` grid of documents. The workspace viewer shows one child at a time with
+slide animation — same mechanism as a slide deck, different viewer. System
+chrome (clock, controls) are rendered by the workspace viewer. GUI/TUI/a11y are
+different rendering projections of the same structure. See
+[decisions.md § #17](decisions.md) and [journal.md](journal.md)
+"System-as-Compound-Document."
 
 ---
 

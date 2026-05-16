@@ -455,6 +455,13 @@ impl super::Presenter {
                     available_height: upt(max_h),
                     now_ns,
                 }),
+                super::handlers::ViewerKind::Compound(cv) => {
+                    cv.rebuild(&super::handlers::CompoundRebuildContext {
+                        avail_width: max_w,
+                        avail_height: max_h,
+                        now_ns,
+                    })
+                }
             };
 
             any_child_dirty |= changed;
