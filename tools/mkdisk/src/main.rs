@@ -9,7 +9,10 @@
 use std::{collections::HashMap, env, fs::File, os::unix::fs::FileExt, path::Path, process};
 
 use fs::{BLOCK_SIZE, BlockDevice, FileId, Filesystem, FsError};
-use manifest::{AbsoluteProperties, Axis, Child, Layout, LayoutMode, Manifest, PerAxis, Placement};
+use manifest::{
+    AbsoluteProperties, Axis, Child, FlowProperties, Layout, LayoutMode, Manifest, PerAxis,
+    Placement,
+};
 use store::Store;
 
 struct FileDevice {
@@ -213,28 +216,21 @@ fn create_compound_doc(store: &mut Store, image_id: FileId) {
         provenance: None,
         attributes: Vec::new(),
         layout: Some(Layout {
-            axes: vec![Axis::Width, Axis::Height],
-            mode: LayoutMode::Absolute(AbsoluteProperties {
-                bounds: PerAxis {
-                    width: Some(mpt(1200)),
-                    height: Some(mpt(800)),
+            axes: vec![Axis::Height, Axis::Width],
+            mode: LayoutMode::Flow(FlowProperties {
+                gap: PerAxis {
+                    height: Some(mpt(20)),
                     ..Default::default()
                 },
-                viewport: None,
+                ..Default::default()
             }),
         }),
         children: vec![
             Child {
                 uri: format!("store:{}", image_id.0),
                 placement: Some(Placement {
-                    position: PerAxis {
-                        width: Some(mpt(50)),
-                        height: Some(mpt(50)),
-                        ..Default::default()
-                    },
                     size: PerAxis {
-                        width: Some(mpt(500)),
-                        height: Some(mpt(700)),
+                        height: Some(mpt(350)),
                         ..Default::default()
                     },
                     ..Default::default()
@@ -244,14 +240,8 @@ fn create_compound_doc(store: &mut Store, image_id: FileId) {
             Child {
                 uri: format!("store:{}", image_id.0),
                 placement: Some(Placement {
-                    position: PerAxis {
-                        width: Some(mpt(650)),
-                        height: Some(mpt(50)),
-                        ..Default::default()
-                    },
                     size: PerAxis {
-                        width: Some(mpt(500)),
-                        height: Some(mpt(700)),
+                        height: Some(mpt(350)),
                         ..Default::default()
                     },
                     ..Default::default()

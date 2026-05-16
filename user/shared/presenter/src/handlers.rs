@@ -2076,6 +2076,65 @@ impl CompoundViewer {
             clips_children: true,
             ..Default::default()
         });
+        let is_flow = matches!(
+            self.manifest.layout.as_ref().map(|l| &l.mode),
+            Some(manifest::LayoutMode::Flow(_))
+        );
+        let is_grid = matches!(
+            self.manifest.layout.as_ref().map(|l| &l.mode),
+            Some(manifest::LayoutMode::Grid(_))
+        );
+        let primary_vertical = self
+            .manifest
+            .layout
+            .as_ref()
+            .map(|l| l.axes.first().is_none_or(|a| *a == manifest::Axis::Height))
+            .unwrap_or(true);
+        let gap = self.manifest.layout.as_ref().and_then(|l| match &l.mode {
+            manifest::LayoutMode::Flow(f) => {
+                if primary_vertical {
+                    f.gap.get(manifest::Axis::Height)
+                } else {
+                    f.gap.get(manifest::Axis::Width)
+                }
+            }
+            manifest::LayoutMode::Grid(g) => {
+                if primary_vertical {
+                    g.gap.get(manifest::Axis::Height)
+                } else {
+                    g.gap.get(manifest::Axis::Width)
+                }
+            }
+            _ => None,
+        });
+        let grid_cols = if is_grid {
+            self.manifest
+                .layout
+                .as_ref()
+                .and_then(|l| {
+                    if let manifest::LayoutMode::Grid(ref g) = l.mode {
+                        g.divisions.get(manifest::Axis::Width)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(1) as usize
+        } else {
+            0
+        };
+        let mut flow_cursor: i32 = 0;
+        let mut grid_col: usize = 0;
+        let mut grid_row_y: i32 = 0;
+        let mut grid_row_h: i32 = 0;
+        let cross_gap = self
+            .manifest
+            .layout
+            .as_ref()
+            .and_then(|l| match &l.mode {
+                manifest::LayoutMode::Grid(g) => g.gap.get(manifest::Axis::Height),
+                _ => None,
+            })
+            .unwrap_or(0);
 
         for (i, child) in self.children.iter().enumerate() {
             let child_subtree = match &child.viewer {
@@ -2098,9 +2157,41 @@ impl CompoundViewer {
             } else {
                 &LayoutBox::EMPTY
             };
-            let (off_x, off_y) = self.child_position(manifest_child, child_root_box, ctx);
-            let (w, h) = self.child_size(manifest_child, child_root_box);
+            let (off_x, off_y, w, h) = if is_flow {
+                let (w, h) = self.child_size(manifest_child, child_root_box);
+                let (x, y) = if primary_vertical {
+                    (scene::Mpt::from(0), scene::Mpt::from(flow_cursor))
+                } else {
+                    (scene::Mpt::from(flow_cursor), scene::Mpt::from(0))
+                };
+                let advance = if primary_vertical { h as i32 } else { w as i32 };
 
+                flow_cursor += advance + gap.unwrap_or(0);
+
+                (x, y, w, h)
+            } else if is_grid && grid_cols > 0 {
+                let cell_w =
+                    (root_w as i32 - gap.unwrap_or(0) * (grid_cols as i32 - 1)) / grid_cols as i32;
+                let (w, h) = (cell_w as u32, child_root_box.height.max(1));
+                let x = (grid_col as i32) * (cell_w + gap.unwrap_or(0));
+                let y = grid_row_y;
+
+                grid_row_h = grid_row_h.max(h as i32);
+                grid_col += 1;
+
+                if grid_col >= grid_cols {
+                    grid_col = 0;
+                    grid_row_y += grid_row_h + cross_gap;
+                    grid_row_h = 0;
+                }
+
+                (scene::Mpt::from(x), scene::Mpt::from(y), w, h)
+            } else {
+                let (off_x, off_y) = self.child_position(manifest_child, child_root_box, ctx);
+                let (w, h) = self.child_size(manifest_child, child_root_box);
+
+                (off_x, off_y, w, h)
+            };
             let node = tree.add(ViewNode {
                 offset_x: off_x,
                 offset_y: off_y,
